@@ -1,0 +1,231 @@
+name: Build Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      is_official_release:
+        type: boolean
+        default: false
+        description: "Official PXEOS Release ?"
+        required: false
+      official_pxeos_version:
+        type: string
+        description: "Official Release PXEOS Version"
+        required: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  input_checks:
+    runs-on: ubuntu-22.04
+    
+    steps:
+      - name: Validate Input Logic
+        run: |
+          is_official="${{ inputs.is_official_release }}"
+          pxeos_version="${{ inputs.official_pxeos_version }}"
+          if [[ "$is_official" == "true" && "$pxeos_version" == "" ]]; then
+            echo "Error: Official Release was checked, but no PXEOS version was entered!"
+            exit 1
+          fi
+          if [[ "$is_official" == "false" && "$pxeos_version" != "" ]]; then
+            echo "Error: PXEOS version was entered, but Official Release checkbox was not selected!"
+            exit 1
+          fi
+
+  build_kernel_arm64:
+    needs: input_checks
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build arm64 kernel
+        run: ./build.sh --install-dep -nka arm64
+      - name: Run sha256 checksum
+        run: |
+          cd dist
+          sha256sum -c ./*.sha256
+      - name: Save distribution files
+        uses: actions/upload-artifact@v4
+        with:
+          name: distribution-files-kernel-arm64
+          path: dist
+          retention-days: 1
+
+  build_kernel_x86:
+    needs: input_checks
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build x86 kernel
+        run: ./build.sh --install-dep -nka x86
+      - name: Run sha256 checksum
+        run: |
+          cd dist
+          sha256sum -c ./*.sha256
+      - name: Save distribution files
+        uses: actions/upload-artifact@v4
+        with:
+          name: distribution-files-kernel-x86
+          path: dist
+          retention-days: 1
+
+  build_kernel_x64:
+    needs: input_checks
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build x64 kernel
+        run: ./build.sh --install-dep -nka x64
+      - name: Run sha256 checksum
+        run: |
+          cd dist
+          sha256sum -c ./*.sha256
+      - name: Save distribution files
+        uses: actions/upload-artifact@v4
+        with:
+          name: distribution-files-kernel-x64
+          path: dist
+          retention-days: 1
+
+  build_initrd_arm64:
+    needs: input_checks
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build arm64 initrd
+        run: ./build.sh --install-dep -nfa arm64
+      - name: Run sha256 checksum
+        run: |
+          cd dist
+          sha256sum -c ./*.sha256
+      - name: Save distribution files
+        uses: actions/upload-artifact@v4
+        with:
+          name: distribution-files-initrd-arm64
+          path: dist
+          retention-days: 1
+      - name: Save log file
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Buildroot-logs-arm64
+          path: fssourcearm64/buildrootarm64.log
+          retention-days: 30
+
+  build_initrd_x86:
+    needs: input_checks
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build x86 initrd
+        run: ./build.sh --install-dep -nfa x86
+      - name: Run sha256 checksum
+        run: |
+          cd dist
+          sha256sum -c ./*.sha256
+      - name: Save distribution files
+        uses: actions/upload-artifact@v4
+        with:
+          name: distribution-files-initrd-x86
+          path: dist
+          retention-days: 1
+      - name: Save log file
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Buildroot-logs-x86
+          path: fssourcex86/buildrootx86.log
+          retention-days: 30
+
+  build_initrd_x64:
+    needs: input_checks
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build x64 initrd
+        run: ./build.sh --install-dep -nfa x64
+      - name: Run sha256 checksum
+        run: |
+          cd dist
+          sha256sum -c ./*.sha256
+      - name: Save distribution files
+        uses: actions/upload-artifact@v4
+        with:
+          name: distribution-files-initrd-x64
+          path: dist
+          retention-days: 1
+      - name: Save log file
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Buildroot-logs-x64
+          path: fssourcex64/buildrootx64.log
+          retention-days: 30
+
+  release:
+    needs:
+      [
+        build_kernel_arm64,
+        build_kernel_x86,
+        build_kernel_x64,
+        build_initrd_arm64,
+        build_initrd_x86,
+        build_initrd_x64,
+      ]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: distribution-files-*
+          merge-multiple: true
+          path: distribution-files
+
+      - name: Set default release and tag names
+        run: |
+          echo "RELEASE_NAME=Latest from $(date '+%Y-%m-%d')" >> $GITHUB_ENV
+          echo "TAG_NAME=$(date '+%Y%m%d')" >> $GITHUB_ENV
+
+      - name: Get versions from build.sh
+        run: |
+          echo "LINUX_KERNEL_VER=$(sed -n -e 's/^.*KERNEL_VERSION=//p' build.sh | cut -d\' -f 2)" >> $GITHUB_ENV
+          echo "BUILDROOT_VER=$(sed -n -e 's/^.*BUILDROOT_VERSION=//p' build.sh | cut -d\' -f 2)" >> $GITHUB_ENV
+
+      # DO NOT change the release name format. PXEOS systems rely on this naming convention.
+      - name: Override for Official PXEOS release
+        if: ${{ inputs.is_official_release == true }}
+        run: |
+          pxeos_version="${{ inputs.official_pxeos_version }}"
+          echo "RELEASE_NAME=PXEOS $pxeos_version kernels and inits" >> $GITHUB_ENV
+          echo "TAG_NAME=$pxeos_version" >> $GITHUB_ENV
+
+      - name: Run final sha256 checksum
+        run: |
+          cd distribution-files
+          sha256sum -c ./*.sha256
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ env.RELEASE_NAME }}
+          body: |
+            PXEOS System Release
+            - Linux kernel: ${{ env.LINUX_KERNEL_VER }}
+            - Buildroot: ${{ env.BUILDROOT_VER }}
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            distribution-files/arm_Image
+            distribution-files/arm_Image.sha256
+            distribution-files/arm_init.cpio.gz
+            distribution-files/arm_init.cpio.gz.sha256
+            distribution-files/bzImage
+            distribution-files/bzImage.sha256
+            distribution-files/bzImage32
+            distribution-files/bzImage32.sha256
+            distribution-files/init.xz
+            distribution-files/init.xz.sha256
+            distribution-files/init_32.xz
+            distribution-files/init_32.xz.sha256

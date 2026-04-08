@@ -1,0 +1,8 @@
+menu "Packages for PXEOS"
+    source "package/chntpw/Config.in"
+    source "package/pxeos/Config.in"
+    source "package/partclone/Config.in"
+    source "package/testdisk/Config.in"
+    source "package/cabextract/Config.in"
+    source "package/partimage/Config.in"
+endmenu
