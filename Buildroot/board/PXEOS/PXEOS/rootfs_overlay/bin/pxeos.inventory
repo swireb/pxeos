@@ -2,6 +2,7 @@
 [[ $mode == +(*capone*) ]] && return
 . /usr/share/pxeos/lib/funcs.sh
 [[ $deployed -eq 1 ]] && . /bin/pxeos.checkin
+rootpxe_api="${pxeapi:-$web}"
 getHardDisk
 doInventory
 gpu_array_length=${#graphics_vendors_array[@]}
@@ -99,7 +100,10 @@ count=0
 res=""
 while [[ -z $res ]]; do
     dots "Attempting to send inventory"
-    res=$(curl -Lks --data "$poststring" ${web}service/inventory.php 2>/dev/null)
+    res=$(curl -Lks \
+        --data "$poststring" \
+        --data-urlencode "taskid=${taskid}" \
+        "${rootpxe_api}inventory" 2>/dev/null)
     if [[ $count -ge 10 ]]; then
         echo "Failed"
         debugPause

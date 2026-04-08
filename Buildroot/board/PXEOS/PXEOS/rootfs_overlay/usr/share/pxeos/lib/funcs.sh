@@ -13,6 +13,20 @@ for var in $(cat /proc/cmdline); do
 done
 ### If USB Boot device we need a way to get the kernel args properly
 [[ $boottype == usb && -f /tmp/hinfo.txt ]] && . /tmp/hinfo.txt
+# RootPXE 任务阶段上报（无 taskid 或未设置 web/pxeapi 时静默跳过）
+rootpxe_stage() {
+    local st="$1"
+    local msg="${2:-}"
+    [[ -z ${taskid:-} ]] && return 0
+    local api="${pxeapi:-$web}"
+    [[ -z $api ]] && return 0
+    curl -Lks --max-time 20 \
+        --data-urlencode "taskid=$taskid" \
+        --data-urlencode "stage=$st" \
+        --data-urlencode "status=running" \
+        --data-urlencode "message=$msg" \
+        "${api}stage" >/dev/null 2>&1 || true
+}
 # Below Are non parameterized functions
 # These functions will run without any arguments
 #
@@ -26,8 +40,9 @@ clearScreen() {
 }
 # Displays the nice banner along with the running version
 displayBanner() {
-    # 动态获取版本号
-    version=$(curl -Lks "${web}service/getversion.php" 2>/dev/null)
+    # 动态获取版本号（RootPXE: /service/pxeos/health）
+    version=$(curl -Lks "${pxeapi:-$web}health" 2>/dev/null | sed -n 's/.*"version"[^"]*"\([^"]*\)".*/\1/p')
+    [[ -z $version ]] && version=$(curl -Lks "${pxeapi:-$web}health" 2>/dev/null)
 
     # 使用 cat << 'EOF' 确保块字符原样输出，不被 Shell 转义
     cat << 'EOF'
@@ -1722,11 +1737,13 @@ findHDDInfo() {
 completeTasking() {
     case $type in
         up)
+            rootpxe_stage upload_complete "capture write finished, notifying server"
             chmod -R 775 "$imagePath" >/dev/null 2>&1
             killStatusReporter
             . /bin/pxeos.imgcomplete
             ;;
         down)
+            rootpxe_stage restore "deploy write finished, running completion"
             killStatusReporter
             if [[ -f /images/postdownloadscripts/pxeos.postdownload ]]; then
                 postdownpath="/images/postdownloadscripts/"

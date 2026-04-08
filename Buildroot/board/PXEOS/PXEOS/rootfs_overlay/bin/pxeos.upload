@@ -5,6 +5,7 @@
 . /bin/pxeos.checkmount
 . /bin/pxeos.checkmountdrivesize
 . /bin/pxeos.checkimgvar
+rootpxe_stage init "pxeos upload started, NFS ready"
 imagePath="/images/$macWinSafe"
 parts=""
 part=""
@@ -14,7 +15,7 @@ hd=""
 echo " * Preparing to send image file to server"
 percent="$pct"
 [[ $pct -lt 5 || $pct -ge 100 ]] && percent=5
-pxeos.statusreporter "$mac" "$web" & disown
+pxeos.statusreporter "$mac" "${pxeapi:-$web}" "$taskid" & disown
 statusReporter="$!"
 prepareUploadLocation "$imagePath"
 echo " * Using Image: $img"

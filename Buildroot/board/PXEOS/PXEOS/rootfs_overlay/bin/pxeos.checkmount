@@ -1,11 +1,18 @@
 #!/bin/bash
 sysuuid=$(dmidecode -s system-uuid)
 sysuuid=${sysuuid,,}
+rootpxe_api="${pxeapi:-$web}"
 dots "Checking Mounted File System"
 if [[ ! -f /images/.mntcheck ]]; then
     count=0
     while [[ $blame != '##' ]]; do
-        blame=$(curl -Lks --data "sysuuid=${sysuuid}&mac=$mac&type=$type" ${web}service/blame.php 2>/dev/null)
+        blame=$(curl -Lks \
+            --data-urlencode "taskid=${taskid}" \
+            --data-urlencode "sysuuid=${sysuuid}" \
+            --data-urlencode "mac=$mac" \
+            --data-urlencode "type=$type" \
+            --data-urlencode "message=.mntcheck missing on /images" \
+            "${rootpxe_api}blame" 2>/dev/null)
         case $count in
             [0-8])
                 let count+=1

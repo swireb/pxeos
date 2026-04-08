@@ -4,15 +4,45 @@ sysuuid=${sysuuid,,}
 oIFS=$IFS
 IFS=$'\n'
 mac="$1"
-web="$2"
+api_base="$2"
+taskid="${3:-${taskid}}"
+[[ -z $api_base ]] && api_base="${pxeapi:-$web}"
+[[ -z $taskid ]] && exit 0
+
+prog_stage="running"
+case "${type:-}" in
+    down|[Dd][Oo][Ww][Nn]) prog_stage=restore ;;
+    up|[Uu][Pp]) prog_stage=upload_complete ;;
+esac
+
 usleep 3000000
 while :; do
     tmpfile="/tmp/status.pxeos"
     status=$(tail -n 2 $tmpfile 2>/dev/null | head -n 1 2>/dev/null)
     cat /dev/null > $tmpfile 2>/dev/null
     [[ -z $mac ]] && continue
-    status=$(echo $status | base64)
-    res=$(curl -Lks --data "sysuuid=${sysuuid}&mac=$mac&status=$status" ${web}service/progress.php 2>/dev/null)
+    pct=0
+    if [[ -n $status ]]; then
+        p=$(echo "$status" | grep -oE '[0-9]+(\.[0-9]+)?%' | head -1 | tr -d '%')
+        if [[ -z $p ]]; then
+            p=$(echo "$status" | awk -F@ 'NF >= 6 { printf "%.0f", $6 + 0 }')
+        fi
+        if [[ -n $p ]]; then
+            pct=${p%%.*}
+            pct=${pct//[^0-9]/}
+            [[ -z $pct ]] && pct=0
+            [[ $pct -gt 100 ]] && pct=100
+        fi
+    fi
+    b64=$(echo "$status" | base64)
+    curl -Lks \
+        --data-urlencode "taskid=$taskid" \
+        --data-urlencode "mac=$mac" \
+        --data-urlencode "sysuuid=$sysuuid" \
+        --data-urlencode "progress=$pct" \
+        --data-urlencode "stage=$prog_stage" \
+        --data-urlencode "message=$b64" \
+        "${api_base}progress" 2>/dev/null
     usleep 3000000
 done
 IFS=$oIFS

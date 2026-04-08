@@ -4,6 +4,7 @@
 . /bin/pxeos.mount
 . /bin/pxeos.checkmount
 . /bin/pxeos.checkimgvar
+rootpxe_stage init "pxeos download started, NFS ready"
 hd=""
 disks=""
 disk=""
@@ -16,7 +17,7 @@ mac=$(getMACAddresses | base64)
 mac="$origmac"
 origmac=""
 layPartSize="-1s"
-pxeos.statusreporter "$mac" "$web" & disown
+pxeos.statusreporter "$mac" "${pxeapi:-$web}" "$taskid" & disown
 statusReporter="$!"
 fixed_size_partitions=""
 echo " * Using Image: $img"
@@ -258,5 +259,6 @@ putDataBack() {
 }
 findHDDInfo
 [[ $nombr -eq 1 ]] && echo " * Skipping partition layout (Single Partition restore)" || preparePartitions
+[[ $nombr -ne 1 ]] && rootpxe_stage prepare_partitions "partition layout prepared"
 [[ $imgPartitionType != mbr ]] && putDataBack || echo " * Skipping partition restore (MBR Only)"
 completeTasking

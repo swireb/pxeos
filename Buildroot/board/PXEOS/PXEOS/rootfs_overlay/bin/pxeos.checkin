@@ -49,58 +49,48 @@ dots "Send method"
 echo "$method"
 blGo=0
 nfsServerName=""
-checkin() {
-    local poststring="$1"
-    local php_post="$2"
-    dots "Attempting to check in"
-    local count=0
-    local res=""
-    local waittime=0
-    while [[ $res != "##@GO" ]]; do
-        res=$(curl -Lks --data "$poststring" ${web}service/$php_post 2>/dev/null)
-        if [[ $res != "##@GO" ]]; then
-            echo "Failed"
-            debugPause
-            echo -n " * $res (In line for "
-            sec2string "$waittime"
-            echo ")"
-            let waittime+=5
-            usleep 5000000
-            dots "Attempting to check in"
-        fi
-    done
+rootpxe_api="${pxeapi:-$web}"
+
+checkin_rootpxe() {
+    dots "Check in (RootPXE)"
+    [[ -z $taskid ]] && handleError "RootPXE: kernel cmdline taskid is required ($0)\n   Args Passed: $*"
+    case $mc in
+        [Yy][Ee][Ss]|[Bb][Tt])
+            handleError "RootPXE: multicast/torrent imaging (mc) is not supported ($0)\n   Args Passed: $*"
+            ;;
+    esac
+    local sysuuid_local
+    sysuuid_local=$(dmidecode -s system-uuid)
+    sysuuid_local=${sysuuid_local,,}
+    local lmac
+    lmac=$(getMACAddresses)
+    local out
+    out=$(curl -Lks \
+        --data-urlencode "taskid=$taskid" \
+        --data-urlencode "format=sh" \
+        --data-urlencode "mac=$lmac" \
+        --data-urlencode "sysuuid=$sysuuid_local" \
+        "${rootpxe_api}checkin" 2>/dev/null)
+    local line
+    local k
+    local v
+    while IFS= read -r line || [[ -n $line ]]; do
+        [[ -z $line ]] && continue
+        case $line in
+            error=*)
+                handleError "RootPXE checkin failed: $line ($0)\n   Args Passed: $*"
+                ;;
+        esac
+        k="${line%%=*}"
+        v="${line#*=}"
+        [[ -z $k || $k == "$line" ]] && continue
+        eval "export ${k}=\"\${v}\""
+    done <<< "$out"
+    [[ -z $img ]] && [[ -n $imgpath ]] && img="$imgpath"
+    [[ -z $storageip && -n $storage ]] && storageip=$(echo "$storage" | awk -F: '{print $1}')
     echo "Done"
     debugPause
-    directive="${res:3}"
-    if [[ $directive != GO ]]; then
-        tmpStorageIp=$(echo $queueinfo|cut -d'@' -f2 2>/dev/null)
-        tmpStorage=$(echo $queueinfo|cut -d'@' -f3 2>/dev/null)
-        tmpName=$(echo $queueinfo|cut -d'@' -f4 2>/dev/null)
-        [[ -z $tmpStorage || -z $tmpStorageIp ]] && handleError "Error determining storage server! ($0)\n   Args Passed: $*"
-        storage="$tmpStorage"
-        storageip="$tmpStorageIp"
-        nfsServerName="$tmpName"
-        dots "Using Storage Node"
-        echo "$nfsServerName"
-        debugPause
-    fi
 }
-case $mc in
-    [Yy][Ee][Ss])
-        php_post="mc_checkin.php"
-        ;;
-    *)
-        php_post="Pre_Stage1.php"
-        ;;
-esac
-sysuuid=$(dmidecode -s system-uuid)
-sysuuid=${sysuuid,,}
-case $mode in
-    clamav)
-        poststring="sysuuid=${sysuuid}&mac=$mac&avmode=$avmode"
-        ;;
-    ""|*)
-        poststring="sysuuid=${sysuuid}&mac=$mac&type=$type"
-        ;;
-esac
-[[ ! $capone -eq 1 ]] && checkin "$poststring" "$php_post"
+
+[[ ! $capone -eq 1 ]] && checkin_rootpxe
+[[ ! $capone -eq 1 ]] && rootpxe_stage checkin "PXEOS checkin completed"
