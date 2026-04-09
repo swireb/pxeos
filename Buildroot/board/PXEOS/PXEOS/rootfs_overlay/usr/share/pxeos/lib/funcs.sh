@@ -374,7 +374,8 @@ expandPartition() {
                 # Retrieving the partition number of a XFS partition that has free space after it.
                 local xfsPartitionNumberThatCanBeExpanded=$(parted -s -a opt $disk "print free" | grep -i "free space" -B 1 | grep -i "xfs" | cut -d ' ' -f2)
                 local currentPartitionNumber=$(echo $part | grep -o '[0-9]*$')
-                if [[ "$xfsPartitionNumberThatCanBeExpanded" == "$currentPartitionNumber"a ]]; then
+                # 与参考 FOS 对比：原 `"$n"a` 会与字面量 "3a" 比较，几乎永不成立，导致 XFS 从不扩容
+                if [[ "$xfsPartitionNumberThatCanBeExpanded" == "$currentPartitionNumber" ]]; then
                     parted -s -a opt $disk "resizepart $xfsPartitionNumberThatCanBeExpanded 100%" >>/tmp/xfslog.txt 2>&1
                     if [[ $? -gt 0 ]]; then
                         echo "Failed"
