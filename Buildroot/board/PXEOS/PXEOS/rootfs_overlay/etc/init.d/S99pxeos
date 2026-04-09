@@ -21,21 +21,6 @@ if [[ $mdraid == true ]]; then
 fi
 [[ -n $keymap ]] && loadkeys $keymap
 
-# 调试开关：仅完成网络初始化（S40network）后停住，不执行成像主流程
-# 用法：内核参数追加 `netonly=1`
-if [[ ${netonly:-0} -eq 1 ]]; then
-    echo " * netonly=1: network-only mode, skipping PXEOS main workflow"
-    echo " * Tip: add 'isdebug=1' for interactive shell"
-    case $isdebug in
-        [Yy][Ee][Ss]|[Yy])
-            ash -i
-            ;;
-        *)
-            while true; do sleep 3600; done
-            ;;
-    esac
-fi
-
 case $isdebug in
     [Yy][Ee][Ss]|[Yy])
         pxeos.debug
