@@ -10,7 +10,8 @@ disks=""
 disk=""
 parts=""
 part=""
-imagePath="/images/$img"
+export_abs="${export_path:-${exportpath:-/images}}"
+imagePath="$(rootpxe_map_nfs_abs_to_local "/images" "$export_abs" "$export_abs")/$img"
 origmac=$mac
 mac=$(getMACAddresses | base64)
 . /bin/pxeos.inventory "true"

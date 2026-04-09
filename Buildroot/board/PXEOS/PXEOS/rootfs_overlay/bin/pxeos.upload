@@ -6,7 +6,10 @@
 . /bin/pxeos.checkmountdrivesize
 . /bin/pxeos.checkimgvar
 rootpxe_stage init "pxeos upload started, NFS ready"
-imagePath="/images/$macWinSafe"
+capture_abs="${capture_path:-${capturepath:-}}"
+export_abs="${export_path:-${exportpath:-/images}}"
+[[ -z $capture_abs ]] && capture_abs="${export_abs%/}/dev"
+imagePath="$(rootpxe_map_nfs_abs_to_local "/images" "$export_abs" "$capture_abs")/$macWinSafe"
 parts=""
 part=""
 disks=""

@@ -13,6 +13,33 @@ for var in $(cat /proc/cmdline); do
 done
 ### If USB Boot device we need a way to get the kernel args properly
 [[ $boottype == usb && -f /tmp/hinfo.txt ]] && . /tmp/hinfo.txt
+
+# 将 NFS 绝对路径（以 export_path 为根）映射到本机挂载点下的路径。
+# - mount_point: 本机挂载点（例如 /images 或 /imagesinit）
+# - export_path: NFS 的「镜像路径」（例如 /images）
+# - abs_path: NFS 上的绝对路径（例如 /images/dev 或 /images/postinitscripts）
+rootpxe_map_nfs_abs_to_local() {
+    local mount_point="$1"
+    local export_path_local="$2"
+    local abs_path="$3"
+    [[ -z $mount_point || -z $abs_path ]] && return 1
+    local exp="${export_path_local:-/images}"
+    exp="${exp%/}"
+    [[ -z $exp ]] && exp="/images"
+    local a="${abs_path%/}"
+    [[ -z $a ]] && a="$abs_path"
+    if [[ $a == "$exp" ]]; then
+        echo "${mount_point%/}"
+        return 0
+    fi
+    if [[ $a == "$exp/"* ]]; then
+        echo "${mount_point%/}${a#"$exp"}"
+        return 0
+    fi
+    # 非预期：不在 export_path 之下，直接拼接末尾段，避免脚本报错退出
+    echo "${mount_point%/}/$(basename "$a")"
+    return 0
+}
 # RootPXE 任务阶段上报（无 taskid 或未设置 web/pxeapi 时静默跳过）
 rootpxe_stage() {
     local st="$1"

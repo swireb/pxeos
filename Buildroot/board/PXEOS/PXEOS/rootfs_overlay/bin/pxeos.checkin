@@ -21,7 +21,8 @@ clearScreen
 displayBanner
 osname=""
 mbrfile=""
-macWinSafe=$(echo $mac|sed 's/://g')
+# 捕获临时目录名约定：使用服务端下发（内核参数）的任务主机 MAC，并压缩为 12 位小写 hex
+macWinSafe="$(echo -n "$mac" | tr '[:upper:]' '[:lower:]' | tr -cd '0-9a-f')"
 sockets=$(grep "physical id" /proc/cpuinfo|sort -u|wc -l)
 arch=$(uname -m)
 [[ $chkdsk -eq 1 ]] && RUN_CHKDSK="-x"
@@ -63,7 +64,8 @@ checkin_rootpxe() {
     sysuuid_local=$(dmidecode -s system-uuid)
     sysuuid_local=${sysuuid_local,,}
     local lmac
-    lmac=$(getMACAddresses)
+    # 按约定：使用服务端下发的任务主机 MAC（kernel cmdline 的 mac），不要在此处探测真实网卡
+    lmac="$mac"
     local out
     out=$(curl -Lks \
         --data-urlencode "taskid=$taskid" \

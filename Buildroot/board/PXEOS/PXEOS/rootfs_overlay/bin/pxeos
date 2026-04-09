@@ -4,10 +4,10 @@
 if [[ $boottype == usb && ! -z $web ]]; then
     sysuuid=$(dmidecode -s system-uuid)
     sysuuid=${sysuuid,,}
-    mac=$(getMACAddresses)
-    base64mac=$(echo $mac | base64)
+    usb_macs=$(getMACAddresses)
+    base64mac=$(echo $usb_macs | base64)
     token=$(curl -Lks --data "mac=$base64mac" "${web}status/hostgetkey.php")
-    curl -Lks -o /tmp/hinfo.txt --data "sysuuid=${sysuuid}&mac=$mac&hosttoken=${token}" "${web}service/hostinfo.php" -A ''
+    curl -Lks -o /tmp/hinfo.txt --data "sysuuid=${sysuuid}&mac=$usb_macs&hosttoken=${token}" "${web}service/hostinfo.php" -A ''
     [[ -f /tmp/hinfo.txt ]] && . /tmp/hinfo.txt
 fi
 dots "Running post init scripts"
@@ -16,12 +16,13 @@ umount /imagesinit >/dev/null 2>&1
 mount -o nolock,proto=tcp,rsize=32768,wsize=32768,intr,noatime "$storage" /imagesinit >/tmp/mount-output 2>&1
 if [[ $? -eq 0 ]]; then
     if [[ -f /imagesinit/.mntcheck ]]; then
-        if [[ -f /imagesinit/postinitscripts/pxeos.postinit ]]; then
-            postinitpath="/imagesinit/postinitscripts/"
-        elif [[ -f /imagesinit/dev/postinitscripts/pxeos.postinit ]]; then
-            postinitpath="/imagesinit/dev/postinitscripts/"
+        export_abs="${export_path:-${exportpath:-/images}}"
+        postinit_abs="${postinit_path:-${postinitpath:-}}"
+        [[ -z $postinit_abs ]] && postinit_abs="${export_abs%/}/postinitscripts"
+        postinit_local="$(rootpxe_map_nfs_abs_to_local "/imagesinit" "$export_abs" "$postinit_abs")"
+        if [[ -f "$postinit_local/pxeos.postinit" ]]; then
+            . "$postinit_local/pxeos.postinit"
         fi
-        . ${postinitpath}pxeos.postinit
     fi
     umount /imagesinit >/dev/null 2>&1
     echo "Done"
