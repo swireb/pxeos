@@ -143,9 +143,6 @@ beginUpload() {
             swapUUIDFileName "$imagePath" 1
             echo -n "" > "$imagePath/d1.original.fstypes"
             echo -n "" > $swapuuidfilename
-            fsuuidfilename=""
-            fsUUIDFileName "$imagePath" 1
-            echo -n "" > $fsuuidfilename
             echo "Done"
             debugPause
             echo " * Shrinking Partitions on disk"

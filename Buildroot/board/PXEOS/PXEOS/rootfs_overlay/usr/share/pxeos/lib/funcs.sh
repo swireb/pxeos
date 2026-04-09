@@ -2457,8 +2457,6 @@ savePartition() {
     getPartType "$part"
     local ebrfilename=""
     local swapuuidfilename=""
-    local fsuuidfilename=""
-    fsUUIDFileName "$imagePath" "$disk_number"
     case $fstype in
         swap)
             echo " * Saving swap partition UUID"
@@ -2466,7 +2464,6 @@ savePartition() {
             saveSwapUUID "$swapuuidfilename" "$part"
             ;;
         imager)
-            saveFsUUID "$fsuuidfilename" "$part"
             echo " * Using partclone.$fstype"
             debugPause
             imgpart="$imagePath/d${disk_number}p${part_number}.img"
@@ -2496,7 +2493,6 @@ savePartition() {
                 *)
                     echo " * Using partclone.$fstype"
                     debugPause
-                    saveFsUUID "$fsuuidfilename" "$part"
                     imgpart="$imagePath/d${disk_number}p${part_number}.img"
                     uploadFormat "$fifoname" "$imgpart"
                     partclone.$fstype -n "Storage Location $storage, Image name $img" -cs $part -O $fifoname -Nf 1 -a0
@@ -2713,9 +2709,6 @@ performRestore() {
         echo " * Resetting swap systems"
         debugPause
         makeAllSwapSystems "$disk" "$disk_number" "$imagePath" "$imgPartitionType"
-        echo " * Resetting filesystem UUIDs"
-        debugPause
-        restoreAllFsUUIDs "$disk" "$disk_number" "$imagePath" "$imgPartitionType"
         let disk_number+=1
     done
 }

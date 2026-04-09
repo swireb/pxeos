@@ -29,6 +29,7 @@ case $isdebug in
         pxeos
         rc=$?
         if [[ $rc -eq 0 ]]; then
+            sleep 5 >/dev/null 2>&1
             echo " * Rebooting system as task is complete"
             [[ $shutdown -eq 1 ]] && poweroff || reboot -f
         else
