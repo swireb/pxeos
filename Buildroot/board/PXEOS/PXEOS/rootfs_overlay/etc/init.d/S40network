@@ -45,8 +45,15 @@ for iface in $ifaces; do
     for retry in $(seq 3); do
         /sbin/udhcpc -i $iface --now
         ustat="$?"
-        curl -Ikfso /dev/null "${web}"/index.php --connect-timeout 5
-        cstat="$?"
+        # RootPXE/PXEOS 连通性统一探测 /health（不再兼容 index.php）
+        cstat=1
+        if [[ -n $pxeapi ]]; then
+            curl -Ikfso /dev/null "${pxeapi}health" --connect-timeout 5
+            cstat="$?"
+        elif [[ -n $web ]]; then
+            curl -Ikfso /dev/null "${web}health" --connect-timeout 5
+            cstat="$?"
+        fi
         # If the udhcp is okay AND we can curl our web
         # we know we have link so no need to continue on.
         # NOTE: the link to web is kind of important, just
@@ -61,14 +68,20 @@ for iface in $ifaces; do
                     ip link set dev $iface up
                     /sbin/udhcpc -i $iface --now
                     ustat="$?"
-                    curl -Ikfso /dev/null "${web}"/index.php --connect-timeout 5
-                    cstat="$?"
+                    cstat=1
+                    if [[ -n $pxeapi ]]; then
+                        curl -Ikfso /dev/null "${pxeapi}health" --connect-timeout 5
+                        cstat="$?"
+                    elif [[ -n $web ]]; then
+                        curl -Ikfso /dev/null "${web}health" --connect-timeout 5
+                        cstat="$?"
+                    fi
                     [[ $ustat -eq 0 && $cstat -eq 0 ]] && exit 0
                 fi
             fi
             [[ $ustat -eq 0 && $cstat -eq 0 ]] && exit 0
         fi
-        echo "Either DHCP failed or we were unable to access ${web}/index.php for connection testing."
+        echo "Either DHCP failed or connectivity checks to PXEOS API failed (${pxeapi:-$web}health)."
         # Geo-If we are on the 2nd loop, lets check to see if
         # spanning tree is blocking dhcp
         if [[ $seq -eq 2 ]]; then
