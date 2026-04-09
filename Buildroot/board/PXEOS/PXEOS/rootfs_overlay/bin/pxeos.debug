@@ -26,5 +26,7 @@ getHardDisk
 echo "disks=$disks"
 echo "hd=$hd"
 
-# 进入交互 shell（绑定到 tty1，确保有作业控制/可交互）
-ash -i </dev/tty1 >/dev/tty1 2>&1
+# 与参考 FOS/FOG 一致：只做信息展示并停住。
+# 交互 shell 由 busybox init 的 /etc/inittab（tty0::respawn:-/bin/bash）提供。
+debugPause
+exit 0
