@@ -42,7 +42,7 @@ while :; do
         --data-urlencode "progress=$pct" \
         --data-urlencode "stage=$prog_stage" \
         --data-urlencode "message=$b64" \
-        "${api_base}progress" 2>/dev/null
+        "${api_base}progress" >/dev/null 2>&1 || true
     usleep 3000000
 done
 IFS=$oIFS
