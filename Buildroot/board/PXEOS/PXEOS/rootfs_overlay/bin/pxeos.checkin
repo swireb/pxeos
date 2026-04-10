@@ -67,27 +67,49 @@ checkin_rootpxe() {
     # 按约定：使用服务端下发的任务主机 MAC（kernel cmdline 的 mac），不要在此处探测真实网卡
     lmac="$mac"
     local out
-    out=$(curl -Lks \
-        --data-urlencode "taskid=$taskid" \
-        --data-urlencode "format=sh" \
-        --data-urlencode "mac=$lmac" \
-        --data-urlencode "sysuuid=$sysuuid_local" \
-        "${rootpxe_api}checkin" 2>/dev/null)
     local line
     local k
     local v
-    while IFS= read -r line || [[ -n $line ]]; do
-        [[ -z $line ]] && continue
-        case $line in
-            error=*)
-                handleError "RootPXE checkin failed: $line ($0)\n   Args Passed: $*"
-                ;;
-        esac
-        k="${line%%=*}"
-        v="${line#*=}"
-        [[ -z $k || $k == "$line" ]] && continue
-        eval "export ${k}=\"\${v}\""
-    done <<< "$out"
+    local waitFlag=""
+    local waitMsg=""
+    local retryAfterSec=5
+    while true; do
+        waitFlag=""
+        waitMsg=""
+        retryAfterSec=5
+        out=$(curl -Lks \
+            --data-urlencode "taskid=$taskid" \
+            --data-urlencode "format=sh" \
+            --data-urlencode "mac=$lmac" \
+            --data-urlencode "sysuuid=$sysuuid_local" \
+            "${rootpxe_api}checkin" 2>/dev/null)
+        while IFS= read -r line || [[ -n $line ]]; do
+            [[ -z $line ]] && continue
+            case $line in
+                error=*)
+                    handleError "RootPXE checkin failed: $line ($0)\n   Args Passed: $*"
+                    ;;
+            esac
+            k="${line%%=*}"
+            v="${line#*=}"
+            [[ -z $k || $k == "$line" ]] && continue
+            case "$k" in
+                wait) waitFlag="$v" ;;
+                message) waitMsg="$v" ;;
+                retryAfterSec) retryAfterSec="$v" ;;
+            esac
+            eval "export ${k}=\"\${v}\""
+        done <<< "$out"
+        if [[ $waitFlag == "1" ]]; then
+            [[ -z $waitMsg ]] && waitMsg="No open slots on server, waiting for queue"
+            dots "$waitMsg"
+            echo "Wait ${retryAfterSec}s"
+            sleep "$retryAfterSec"
+            debugPause
+            continue
+        fi
+        break
+    done
     [[ -z $img ]] && [[ -n $imgpath ]] && img="$imgpath"
     [[ -z $storageip && -n $storage ]] && storageip=$(echo "$storage" | awk -F: '{print $1}')
     echo "Done"
