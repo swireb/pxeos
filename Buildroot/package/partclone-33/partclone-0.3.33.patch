@@ -1,8 +1,8 @@
 diff --git a/src/progress.c b/src/progress.c
-index 9858511..8b98adc 100644
+index 9858511..3b2d73f 100644
 --- a/src/progress.c
 +++ b/src/progress.c
-@@ -228,6 +228,47 @@ static void calculate_speed(struct progress_bar *prog, unsigned long long copied
+@@ -228,6 +228,46 @@ static void calculate_speed(struct progress_bar *prog, unsigned long long copied
      strncpy(prog_stat->Rformated, Rformated, sizeof(Rformated)+1);
  }
  
@@ -46,11 +46,10 @@ index 9858511..8b98adc 100644
 +    );
 +    fclose(pxeos_log);
 +}
-+
  /// update information at progress bar
  extern void progress_update(struct progress_bar *prog, unsigned long long copied, unsigned long long current, int done)
  {
-@@ -249,6 +290,7 @@ extern void progress_update(struct progress_bar *prog, unsigned long long copied
+@@ -249,6 +289,7 @@ extern void progress_update(struct progress_bar *prog, unsigned long long copied
  	    fprintf(stderr, _(", %6.2f%s/%s,"), prog_stat.speed, prog_stat.speed_unit, prog->time_unit);
  	if(prog->flag == IO)
  	    fprintf(stderr, _("\n\r%80c\rCurrent block: %10Lu, Total block: %10Lu, Complete: %6.2f%%%s\r"), clear_buf, current, prog->total, prog_stat.total_percent, "\x1b[A");
@@ -58,11 +57,11 @@ index 9858511..8b98adc 100644
      } else {
  	setlocale(LC_ALL, "");
  	bindtextdomain(PACKAGE, LOCALEDIR);
-@@ -326,6 +368,7 @@ extern void Ncurses_progress_update(struct progress_bar *prog, unsigned long lon
+@@ -326,6 +367,7 @@ extern void Ncurses_progress_update(struct progress_bar *prog, unsigned long lon
  	wrefresh(p_win);
          wrefresh(bar_win);
          wrefresh(tbar_win);
 +        pxeosLogStatusFile(prog, &prog_stat, current);
      } else {
- 	mvwprintw(p_win, 0, 0, _("Total Time: %s Remaining: %s "), prog_stat.Eformated, prog_stat.Rformated);
+         mvwprintw(p_win, 0, 0, _("Total Time: %s Remaining: %s "), prog_stat.Eformated, prog_stat.Rformated);
  	if((prog->flag == IO) || (prog->flag == NO_BLOCK_DETAIL))
