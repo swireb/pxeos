@@ -31,7 +31,12 @@ case $isdebug in
         if [[ $rc -eq 0 ]]; then
             sleep 5 >/dev/null 2>&1
             echo " * Rebooting system as task is complete"
-            [[ $shutdown -eq 1 ]] && poweroff || reboot -f
+            # 优先读取 checkin 下发并落盘的 shutdown（0/1）
+            shutdown_local="$shutdown"
+            if [[ -f /tmp/pxeos.shutdown ]]; then
+                shutdown_local="$(tr -d '\r\n\0' </tmp/pxeos.shutdown)"
+            fi
+            [[ "$shutdown_local" == "1" ]] && poweroff || reboot -f
         else
             echo " * PXEOS task exited with error (rc=$rc), keeping system for troubleshooting"
             echo " * Tip: add 'isdebug=yes' in kernel args for interactive debug mode"

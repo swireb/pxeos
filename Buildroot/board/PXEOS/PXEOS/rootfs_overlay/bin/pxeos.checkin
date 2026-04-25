@@ -110,6 +110,17 @@ checkin_rootpxe() {
         fi
         break
     done
+    # 将 checkin 下发的 shutdown（0/1）落盘，供 init 脚本在任务结束时读取。
+    # 注意：S99pxeos 与 /bin/pxeos 不在同一进程环境，直接 export 无法回传变量。
+    if [[ -n ${shutdown:-} ]]; then
+        case "${shutdown}" in
+            1) echo -n "1" > /tmp/pxeos.shutdown 2>/dev/null || true ;;
+            *) echo -n "0" > /tmp/pxeos.shutdown 2>/dev/null || true ;;
+        esac
+    else
+        # 未下发时默认重启
+        echo -n "0" > /tmp/pxeos.shutdown 2>/dev/null || true
+    fi
     [[ -z $img ]] && [[ -n $imgpath ]] && img="$imgpath"
     [[ -z $storageip && -n $storage ]] && storageip=$(echo "$storage" | awk -F: '{print $1}')
     echo "Done"
