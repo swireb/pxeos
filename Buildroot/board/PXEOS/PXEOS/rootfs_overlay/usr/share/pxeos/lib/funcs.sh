@@ -2629,16 +2629,10 @@ runFixparts() {
     runPartprobe "$disk"
 }
 killStatusReporter() {
-    dots "Stopping FOG Status Reporter"
-    kill -9 $statusReporter >/dev/null 2>&1
-    case $? in
-        0)
-            echo "Done"
-            ;;
-        *)
-            echo "Failed"
-            ;;
-    esac
+    [[ -z ${statusReporter:-} ]] && return
+    dots "Stopping ROOTPXE Status Reporter"
+    kill -9 "$statusReporter" >/dev/null 2>&1 || true
+    echo "Done"
     debugPause
 }
 prepareResizeDownloadPartitions() {
