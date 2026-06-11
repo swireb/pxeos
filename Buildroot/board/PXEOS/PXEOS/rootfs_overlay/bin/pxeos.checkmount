@@ -1,0 +1,33 @@
+#!/bin/bash
+sysuuid=$(dmidecode -s system-uuid)
+sysuuid=${sysuuid,,}
+rootpxe_api="${pxeapi:-$web}"
+dots "Checking Mounted File System"
+if [[ ! -f /images/.mntcheck ]]; then
+    count=0
+    while [[ $blame != '##' ]]; do
+        blame=$(curl -Lks \
+            --data-urlencode "taskid=${taskid}" \
+            --data-urlencode "sysuuid=${sysuuid}" \
+            --data-urlencode "mac=$mac" \
+            --data-urlencode "type=$type" \
+            --data-urlencode "message=.mntcheck missing on /images" \
+            "${rootpxe_api}blame" 2>/dev/null)
+        case $count in
+            [0-8])
+                let count+=1
+                usleep 5000000
+                ;;
+            9)
+                echo "Failed"
+                debugPause
+                handleError "Error during failure notification: $blame ($0)\n   Args Passed: $*"
+                ;;
+        esac
+    done
+    echo "Failed"
+    debugPause
+    handleError "Could not verify mount point, check if .mntcheck exists ($0)\n   Args Passed: $*"
+fi
+echo "Done"
+debugPause

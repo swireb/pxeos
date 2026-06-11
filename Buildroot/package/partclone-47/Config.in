@@ -1,0 +1,12 @@
+config BR2_PACKAGE_PARTCLONE_47
+	bool "partclone (0.3.47)"
+	depends on !BR2_PACKAGE_PARTCLONE_33
+	help
+	  Partclone 0.3.47。与上一项 partclone (0.3.33) 二选一，勿同时启用。
+	  安装布局与参考 FOS 一致（默认 /usr/sbin）。
+	  The Free and Open Source Software for Partition Imaging and Cloning
+
+	  http://partclone.org
+
+comment "partclone requires a toolchain with LARGEFILE+WCHAR support"
+	depends on !(BR2_USE_WCHAR)

@@ -1,0 +1,41 @@
+#!/bin/bash
+echo " * Task Complete"
+sysuuid=$(dmidecode -s system-uuid)
+sysuuid=${sysuuid,,}
+rootpxe_api="${pxeapi:-$web}"
+[[ -z $taskid ]] && handleError "RootPXE: taskid missing ($0)\n   Args Passed: $*"
+
+count=0
+res=""
+dots "Notifying RootPXE (finish)"
+while true; do
+    res=$(curl -Lks \
+        --data-urlencode "taskid=$taskid" \
+        --data-urlencode "mac=$mac" \
+        --data-urlencode "sysuuid=$sysuuid" \
+        --data-urlencode "result=success" \
+        --data-urlencode "message=pxeos imgcomplete type=$type" \
+        "${rootpxe_api}finish" 2>/dev/null)
+    if echo "$res" | grep -q '"success"[[:space:]]*:[[:space:]]*true'; then
+        break
+    fi
+    if [[ $count -lt 10 ]]; then
+        echo "Failed"
+        debugPause
+        printf " * Error returned: %s" "$res"
+        echo
+        debugPause
+        dots "Reattempting to update database"
+    fi
+    if [[ $count -ge 10 ]]; then
+        echo "Failed"
+        debugPause
+        printf " * Error returned: %s" "$res"
+        echo
+        debugPause
+        handleError "Could not complete tasking ($0)\n   Args Passed: $*"
+    fi
+    let count+=1
+done
+echo "Done"
+debugPause

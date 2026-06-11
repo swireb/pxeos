@@ -1,0 +1,35 @@
+#!/bin/bash
+echo " * Task Complete"
+[[ ! -z $1 ]] && mactosend="$1" || mactosend="$mac"
+rootpxe_api="${pxeapi:-$web}"
+count=0
+res=""
+sysuuid=$(dmidecode -s system-uuid)
+sysuuid=${sysuuid,,}
+dots "Updating Database"
+if [[ -z $taskid ]]; then
+    echo "Skipped (no taskid)"
+    debugPause
+    exit 0
+fi
+while true; do
+    res=$(curl -Lks \
+        --data-urlencode "taskid=${taskid}" \
+        --data-urlencode "sysuuid=${sysuuid}" \
+        --data-urlencode "mac=$mactosend" \
+        --data-urlencode "result=success" \
+        --data-urlencode "message=pxeos non-image task complete" \
+        "${rootpxe_api}finish" 2>/dev/null)
+    if echo "$res" | grep -q '"success"[[:space:]]*:[[:space:]]*true'; then
+        break
+    fi
+    if [[ $count -ge 10 ]]; then
+        echo "Failed"
+        debugPause
+        handleError "Could not complete tasking. ($0)\n   Args Passed: $*"
+    fi
+    let count+=1
+    usleep 5000000
+done
+echo "Done"
+debugPause

@@ -1,0 +1,32 @@
+#!/bin/bash
+. /usr/share/pxeos/lib/funcs.sh
+clearScreen
+displayBanner
+echo " You have entered into PXEOS debug mode."
+echo -e "\nBelow is a variable dump:"
+osname=""
+mbrfile=""
+defaultpart2start=""
+disks=""
+hd=""
+[[ -n $osid ]] && determineOS "$osid"
+[[ -n $osid ]] && echo "osid=$osid"
+echo "osname=$osname"
+echo "mbrfile=$mbrfile"
+echo "type=$type"
+echo "storage=$storage"
+echo "exportpath=${export_path:-${exportpath:-}}"
+echo "capturepath=${capture_path:-${capturepath:-}}"
+echo "postinitpath=${postinit_path:-${postinitpath:-}}"
+echo "img=$img"
+echo "imgType=$imgType"
+echo "imgFormat=$imgFormat"
+echo "imgPartitionType=$imgPartitionType"
+getHardDisk
+echo "disks=$disks"
+echo "hd=$hd"
+
+# 与参考 FOS/FOG 一致：只做信息展示并停住。
+# 交互 shell 由 busybox init 的 /etc/inittab（tty0::respawn:-/bin/bash）提供。
+debugPause
+exit 0

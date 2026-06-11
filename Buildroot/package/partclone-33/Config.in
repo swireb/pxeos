@@ -1,0 +1,11 @@
+config BR2_PACKAGE_PARTCLONE_33
+	bool "partclone"
+	depends on !BR2_PACKAGE_PARTCLONE_47
+	help
+	  Partclone
+	  The Free and Open Source Software for Partition Imaging and Cloning
+
+	  http://partclone.org
+
+comment "partclone requires a toolchain with LARGEFILE+WCHAR support"
+        depends on !(BR2_USE_WCHAR)

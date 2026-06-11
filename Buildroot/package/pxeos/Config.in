@@ -1,0 +1,5 @@
+config BR2_PACKAGE_PXEOS
+	bool "PXEOS Binaries & Scripts"
+	select BR2_PACKAGE_PARTED
+	help
+	  PXEOS specific scripts & binaries from the current release. 

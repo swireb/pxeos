@@ -1,0 +1,131 @@
+#!/bin/bash
+. /usr/share/pxeos/lib/funcs.sh
+RUN_CHKDSK=""
+HOSTNAME_EARLY=0
+OS_ID_WIN7=5
+OS_ID_WIN8=6
+for arg in $(cat /proc/cmdline | tr -d \\0); do
+    case $arg in
+        initsh)
+            ash -i
+            ;;
+        nombr)
+            nombr=1
+            ;;
+        *)
+            [[ $imgPartitionType != all && $imgPartitionType != mbr ]] && nombr=1
+            ;;
+    esac
+done
+clearScreen
+displayBanner
+osname=""
+mbrfile=""
+# 捕获临时目录名约定：使用服务端下发（内核参数）的任务主机 MAC，并压缩为 12 位小写 hex
+macWinSafe="$(echo -n "$mac" | tr '[:upper:]' '[:lower:]' | tr -cd '0-9a-f')"
+sockets=$(grep "physical id" /proc/cpuinfo|sort -u|wc -l)
+arch=$(uname -m)
+[[ $chkdsk -eq 1 ]] && RUN_CHKDSK="-x"
+[[ $hostearly -eq 1 ]] && HOSTNAME_EARLY=1
+case $mc in
+    yes)
+        method="UDPCAST"
+        ;;
+    bt)
+        method="Torrent-CAST"
+        ;;
+    *)
+        method="NFS"
+        ;;
+esac
+debugPause
+verifyNetworkConnection
+dots "Checking Operating System"
+[[ -z $deployed ]] && determineOS "$osid"
+echo "$osname"
+dots "Checking CPU Cores"
+cores=$(nproc)
+echo "$cores"
+dots "Send method"
+echo "$method"
+blGo=0
+nfsServerName=""
+rootpxe_api="${pxeapi:-$web}"
+
+checkin_rootpxe() {
+    dots "Check in (RootPXE)"
+    [[ -z $taskid ]] && handleError "RootPXE: kernel cmdline taskid is required ($0)\n   Args Passed: $*"
+    case $mc in
+        [Yy][Ee][Ss]|[Bb][Tt])
+            handleError "RootPXE: multicast/torrent imaging (mc) is not supported ($0)\n   Args Passed: $*"
+            ;;
+    esac
+    local sysuuid_local
+    sysuuid_local=$(dmidecode -s system-uuid)
+    sysuuid_local=${sysuuid_local,,}
+    local lmac
+    # 按约定：使用服务端下发的任务主机 MAC（kernel cmdline 的 mac），不要在此处探测真实网卡
+    lmac="$mac"
+    local out
+    local line
+    local k
+    local v
+    local waitFlag=""
+    local waitMsg=""
+    local retryAfterSec=5
+    while true; do
+        waitFlag=""
+        waitMsg=""
+        retryAfterSec=5
+        out=$(curl -Lks \
+            --data-urlencode "taskid=$taskid" \
+            --data-urlencode "format=sh" \
+            --data-urlencode "mac=$lmac" \
+            --data-urlencode "sysuuid=$sysuuid_local" \
+            "${rootpxe_api}checkin" 2>/dev/null)
+        while IFS= read -r line || [[ -n $line ]]; do
+            [[ -z $line ]] && continue
+            case $line in
+                error=*)
+                    handleError "RootPXE checkin failed: $line ($0)\n   Args Passed: $*"
+                    ;;
+            esac
+            k="${line%%=*}"
+            v="${line#*=}"
+            [[ -z $k || $k == "$line" ]] && continue
+            case "$k" in
+                wait) waitFlag="$v" ;;
+                message) waitMsg="$v" ;;
+                retryAfterSec) retryAfterSec="$v" ;;
+            esac
+            eval "export ${k}=\"\${v}\""
+        done <<< "$out"
+        if [[ $waitFlag == "1" ]]; then
+            [[ -z $waitMsg ]] && waitMsg="No open slots on server, waiting for queue"
+            dots "$waitMsg"
+            echo "Wait ${retryAfterSec}s"
+            sleep "$retryAfterSec"
+            debugPause
+            continue
+        fi
+        break
+    done
+    # 将 checkin 下发的 shutdown（0/1）落盘，供 init 脚本在任务结束时读取。
+    # 注意：S99pxeos 与 /bin/pxeos 不在同一进程环境，直接 export 无法回传变量。
+    if [[ -n ${shutdown:-} ]]; then
+        case "${shutdown}" in
+            1) echo -n "1" > /tmp/pxeos.shutdown 2>/dev/null || true ;;
+            *) echo -n "0" > /tmp/pxeos.shutdown 2>/dev/null || true ;;
+        esac
+    else
+        # 未下发时默认重启
+        echo -n "0" > /tmp/pxeos.shutdown 2>/dev/null || true
+    fi
+    [[ -z $img ]] && [[ -n $imgpath ]] && img="$imgpath"
+    [[ -z $storageip && -n $storage ]] && storageip=$(echo "$storage" | awk -F: '{print $1}')
+    echo "Done"
+    debugPause
+}
+
+[[ ! $capone -eq 1 ]] && checkin_rootpxe
+[[ ! $capone -eq 1 ]] && rootpxe_stage checkin "PXEOS checkin completed"

@@ -1,0 +1,6 @@
+fssource*/
+kernelsource*/
+linux-*/
+dist/
+buildroot*.tar.xz
+linux-*.tar.xz
