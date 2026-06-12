@@ -7,11 +7,11 @@ on:
 
 jobs:
   add-usb-image:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v6
 
       - name: Create USB Image
         run: |
@@ -19,6 +19,6 @@ jobs:
             sudo ./create-usb-image.sh "https://github.com/${{github.repository}}/releases/download/${{ github.event.release.tag_name }}" 
 
       - name: Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           files: /tmp/fos-usb.img

@@ -19,7 +19,7 @@ defaults:
 
 jobs:
   input_checks:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     
     steps:
       - name: Validate Input Logic
@@ -37,9 +37,9 @@ jobs:
 
   build_kernel_arm64:
     needs: input_checks
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build arm64 kernel
         run: ./build.sh --install-dep -nka arm64
       - name: Run sha256 checksum
@@ -47,7 +47,7 @@ jobs:
           cd dist
           sha256sum -c ./*.sha256
       - name: Save distribution files
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: distribution-files-kernel-arm64
           path: dist
@@ -55,9 +55,9 @@ jobs:
 
   build_kernel_x86:
     needs: input_checks
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build x86 kernel
         run: ./build.sh --install-dep -nka x86
       - name: Run sha256 checksum
@@ -65,7 +65,7 @@ jobs:
           cd dist
           sha256sum -c ./*.sha256
       - name: Save distribution files
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: distribution-files-kernel-x86
           path: dist
@@ -73,9 +73,9 @@ jobs:
 
   build_kernel_x64:
     needs: input_checks
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build x64 kernel
         run: ./build.sh --install-dep -nka x64
       - name: Run sha256 checksum
@@ -83,7 +83,7 @@ jobs:
           cd dist
           sha256sum -c ./*.sha256
       - name: Save distribution files
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: distribution-files-kernel-x64
           path: dist
@@ -91,9 +91,9 @@ jobs:
 
   build_initrd_arm64:
     needs: input_checks
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build arm64 initrd
         run: ./build.sh --install-dep -nfa arm64
       - name: Run sha256 checksum
@@ -101,14 +101,14 @@ jobs:
           cd dist
           sha256sum -c ./*.sha256
       - name: Save distribution files
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: distribution-files-initrd-arm64
           path: dist
           retention-days: 1
       - name: Save log file
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Buildroot-logs-arm64
           path: fssourcearm64/buildrootarm64.log
@@ -116,9 +116,9 @@ jobs:
 
   build_initrd_x86:
     needs: input_checks
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build x86 initrd
         run: ./build.sh --install-dep -nfa x86
       - name: Run sha256 checksum
@@ -126,14 +126,14 @@ jobs:
           cd dist
           sha256sum -c ./*.sha256
       - name: Save distribution files
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: distribution-files-initrd-x86
           path: dist
           retention-days: 1
       - name: Save log file
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Buildroot-logs-x86
           path: fssourcex86/buildrootx86.log
@@ -141,9 +141,9 @@ jobs:
 
   build_initrd_x64:
     needs: input_checks
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build x64 initrd
         run: ./build.sh --install-dep -nfa x64
       - name: Run sha256 checksum
@@ -151,14 +151,14 @@ jobs:
           cd dist
           sha256sum -c ./*.sha256
       - name: Save distribution files
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: distribution-files-initrd-x64
           path: dist
           retention-days: 1
       - name: Save log file
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Buildroot-logs-x64
           path: fssourcex64/buildrootx64.log
@@ -174,11 +174,11 @@ jobs:
         build_initrd_x86,
         build_initrd_x64,
       ]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: distribution-files-*
           merge-multiple: true
@@ -208,7 +208,7 @@ jobs:
           sha256sum -c ./*.sha256
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: ${{ env.RELEASE_NAME }}
           body: |
