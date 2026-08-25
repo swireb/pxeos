@@ -4,14 +4,14 @@
 . /bin/pxeos.mount
 . /bin/pxeos.checkmount
 . /bin/pxeos.checkimgvar
-rootpxe_run_postinit
+rootpxe_run_postinit || handleError "Post-init script failed ($0)"
 rootpxe_stage init "pxeos download started, storage mounted"
 hd=""
 disks=""
 disk=""
 parts=""
 part=""
-imagePath="/images/${img#/}"
+imagePath=$(rootpxe_storage_path "${img:-}") || handleError "Invalid image path ($0)"
 origmac=$mac
 mac=$(getMACAddresses | base64)
 . /bin/pxeos.inventory "true"

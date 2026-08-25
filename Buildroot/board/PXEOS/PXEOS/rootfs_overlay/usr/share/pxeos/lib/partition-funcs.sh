@@ -257,7 +257,7 @@ saveSwapUUID() {
 # In "mps" and "mpa" mode, savePartition is called for each partition.
 # savePartition then calles saveSwapUUID if the partition is swap.
 #
-# When uploading an image, the swapUUIDFileName (e.g. /images/foo/d1.original.swapuuids)
+# When uploading an image, the swapUUIDFileName (e.g. /storage/foo/d1.original.swapuuids)
 # is created.  For $imgPartitionType == "all", all swap partition UUIDs are saved.
 # For $imgPartitionType == "$partnum", the partition's UUID is saved, if it is a swap partition.
 # For all others, the swapUUIDFileName will not exist, or will be empty.
@@ -548,7 +548,7 @@ getPartitionTableType() {
 # Assumes GPT or MBR.  Uses first 8 bytes of second block
 # which should hold "EFI PART".  (https://en.wikipedia.org/wiki/GUID_Partition_Table#Partition_table_header_.28LBA_1.29)
 #
-# $1 : imagePath   (e.g. /images/foo)
+# $1 : imagePath   (e.g. /storage/foo)
 # $2 : disk number (e.g. 1)
 getDesiredPartitionTableType() {
     local imagePath="$1"
@@ -696,7 +696,7 @@ restoreOriginalPartitions() {
 # the partitions, using the correct routine.
 #
 # $1 : the disk device (e.g. /dev/sda)
-# $2 : imagePath   (e.g. /images/foo)
+# $2 : imagePath   (e.g. /storage/foo)
 # $3 : disk number (e.g. 1)
 fillDiskWithPartitions() {
     local disk="$1"
@@ -740,7 +740,7 @@ fillDiskWithPartitions() {
 # Check if it will be ok to call fillDiskWithPartitions
 #
 # $1 : the disk device (e.g. /dev/sda)
-# $2 : imagePath   (e.g. /images/foo)
+# $2 : imagePath   (e.g. /storage/foo)
 # $3 : disk number (e.g. 1)
 fillDiskWithPartitionsIsOK() {
     local disk="$1"

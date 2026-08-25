@@ -9,8 +9,8 @@ parts=""
 part=""
 getHardDisk "true"
 dots "Creating File System Mount point"
-[[ ! -d /images ]] && mkdir -p /images >/dev/null 2>&1
-if [[ ! -d /images ]]; then
+[[ ! -d /storage ]] && mkdir -p /storage >/dev/null 2>&1
+if [[ ! -d /storage ]]; then
     echo "Failed"
     debugPause
     handleError "Count not create image directory ($0)\n   Args Passed: $*"
@@ -18,7 +18,7 @@ fi
 echo "Done"
 debugPause
 dots "Mounting File System"
-mount -o nolock $storage /images >/tmp/mount-output 2>&1
+mount -o nolock $storage /storage >/tmp/mount-output 2>&1
 case $? in
     0)
         echo "Done"

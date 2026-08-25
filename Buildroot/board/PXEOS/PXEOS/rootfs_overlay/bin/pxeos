@@ -8,7 +8,7 @@ if [[ $boottype == usb && ! -z $web ]]; then
     base64mac=$(echo $usb_macs | base64)
     token=$(curl -Lks --data "mac=$base64mac" "${web}status/hostgetkey.php")
     curl -Lks -o /tmp/hinfo.txt --data "sysuuid=${sysuuid}&mac=$usb_macs&hosttoken=${token}" "${web}service/hostinfo.php" -A ''
-    [[ -f /tmp/hinfo.txt ]] && . /tmp/hinfo.txt
+    rootpxe_import_usb_hinfo
 fi
 if [[ -n $mode && $mode != +(*debug*) && -z $type ]]; then
     case $mode in

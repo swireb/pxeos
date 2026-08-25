@@ -3,6 +3,11 @@
 . /usr/share/pxeos/lib/funcs.sh
 [[ $deployed -eq 1 ]] && . /bin/pxeos.checkin
 rootpxe_api="${pxeapi:-$web}"
+task_mode=0
+if [[ ${taskid:-0} =~ ^[1-9][0-9]*$ ]]; then
+    task_mode=1
+    rootpxe_require_task_context || handleError "RootPXE: inventory task context is invalid ($0)"
+fi
 getHardDisk
 doInventory
 gpu_array_length=${#graphics_vendors_array[@]}
@@ -100,14 +105,18 @@ count=0
 res=""
 while [[ -z $res ]]; do
     dots "Attempting to send inventory"
-    res=$(curl -Lks \
-        --data "$poststring" \
-        --data-urlencode "taskid=${taskid}" \
+    inventory_args=(--data "$poststring")
+    if [[ $task_mode -eq 1 ]]; then
+        inventory_args+=(--data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac")
+    fi
+    res=$(curl -Lksf \
+        "${inventory_args[@]}" \
         "${rootpxe_api}inventory" 2>/dev/null)
     if [[ $count -ge 10 ]]; then
         echo "Failed"
         debugPause
-        break
+        [[ $task_mode -eq 0 ]] && break
+        handleError "Could not send task inventory ($0)"
     fi
     if [[ -z $res ]]; then
         let count+=1

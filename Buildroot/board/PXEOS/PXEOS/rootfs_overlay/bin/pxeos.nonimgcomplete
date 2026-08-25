@@ -12,9 +12,11 @@ if [[ -z $taskid ]]; then
     debugPause
     exit 0
 fi
+rootpxe_require_task_context || handleError "RootPXE: invalid task context ($0)"
 while true; do
     res=$(curl -Lks \
         --data-urlencode "taskid=${taskid}" \
+        --data-urlencode "token=$task_token" \
         --data-urlencode "sysuuid=${sysuuid}" \
         --data-urlencode "mac=$mactosend" \
         --data-urlencode "result=success" \

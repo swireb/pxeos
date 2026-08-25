@@ -5,50 +5,120 @@ REG_LOCAL_MACHINE_XP="/ntfs/WINDOWS/system32/config/system"
 REG_LOCAL_MACHINE_7="/ntfs/Windows/System32/config/SYSTEM"
 # 1 to turn on massive debugging of partition table restoration
 [[ -z $ismajordebug ]] && ismajordebug=0
-#If a sub shell gets invoked and we lose kernel vars this will reimport them
-for var in $(cat /proc/cmdline); do
-	var=$(echo "${var}" | awk -F= '{name=$1; gsub(/[+][_][+]/," ",$2); gsub(/"/,"\\\"", $2); value=$2; if (length($2) == 0 || $0 !~ /=/ || $0 ~ /nvme_core\.default_ps_max_latency_us=/) {print "";} else {printf("%s=%s", name, value)}}')
-    [[ -z $var ]] && continue;
-    eval "export ${var}" 2>/dev/null
-done
-### If USB Boot device we need a way to get the kernel args properly
-[[ $boottype == usb && -f /tmp/hinfo.txt ]] && . /tmp/hinfo.txt
+rootpxe_kernel_key_allowed() {
+    case "$1" in
+        web|pxeapi|taskid|task_token|token|mac|type|img|imgpath|osid|imgType|imgPartitionType|imgFormat|PIGZ_COMP|storage|storageip|storage_server|storage_export|storage_share|export_path|protocol|hostName|shutdown|mc|pct|capone|nombr|fdrive|mode|boottype|deployed|isdebug|ismajordebug|chkdsk|hostearly|keymap) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+rootpxe_import_kernel_args() {
+    local item key value
+    while IFS= read -r item; do
+        [[ $item == *=* ]] || continue
+        key=${item%%=*}; value=${item#*=}; value=${value//+_+/ }; value=${value//+__+/ }
+        rootpxe_kernel_key_allowed "$key" || continue
+        [[ $value != *$'\n'* && $value != *$'\r'* ]] || continue
+        printf -v "$key" '%s' "$value"
+        export "$key"
+    done < <(tr ' ' '\n' </proc/cmdline)
+    [[ -z ${task_token:-} && -n ${token:-} ]] && task_token=$token
+    export task_token
+}
+rootpxe_import_kernel_args
+rootpxe_import_usb_hinfo() {
+    local line key value
+    [[ ${boottype:-} == usb && -f /tmp/hinfo.txt ]] || return 0
+    while IFS= read -r line || [[ -n $line ]]; do
+        line=${line#export }; line=${line#declare -x }
+        [[ $line == *=* ]] || continue
+        key=${line%%=*}; value=${line#*=}
+        rootpxe_kernel_key_allowed "$key" || continue
+        if [[ $value == \"*\" || $value == \'*\' ]]; then
+            quote=${value:0:1}; [[ ${value: -1} == "$quote" ]] || continue
+            value=${value:1:${#value}-2}
+        fi
+        [[ $value != *\"* && $value != *\'* && $value != *'`'* && $value != *'$('* ]] || continue
+        [[ $value != *$'\n'* && $value != *$'\r'* ]] || continue
+        printf -v "$key" '%s' "$value"; export "$key"
+    done </tmp/hinfo.txt
+}
+rootpxe_import_usb_hinfo
 
-# SMB credentials are Base64-encoded in the RootPXE shell checkin response so
-# they never appear in the kernel command line. The temporary file is removed
-# immediately by pxeos.mount after mount.cifs consumes it.
+rootpxe_normalize_mac() {
+    local value=${1//:/}; value=${value,,}
+    [[ $value =~ ^[0-9a-f]{12}$ ]] || return 1
+    printf '%s\n' "$value"
+}
+rootpxe_require_identity() {
+    [[ ${taskid:-} =~ ^[1-9][0-9]*$ ]] || return 1
+    macWinSafe=$(rootpxe_normalize_mac "${mac:-}") || return 1
+    mac=$macWinSafe; export mac macWinSafe
+}
+rootpxe_require_task_context() {
+    rootpxe_require_identity || return 1
+    [[ ${task_token:-} =~ ^[A-Za-z0-9._~+/=-]{16,512}$ ]]
+}
+rootpxe_safe_relative_path() {
+    local value=${1#/} segment
+    [[ -n $value && $value != */ && $value != *\\* && $value != *//* ]] || return 1
+    IFS=/ read -r -a _rootpxe_parts <<< "$value"
+    for segment in "${_rootpxe_parts[@]}"; do
+        [[ -n $segment && $segment != . && $segment != .. && $segment != *$'\n'* && $segment != *$'\r'* ]] || return 1
+    done
+    printf '%s\n' "$value"
+}
+rootpxe_storage_path() {
+    local relative candidate=/storage segment
+    relative=$(rootpxe_safe_relative_path "$1") || return 1
+    IFS=/ read -r -a _rootpxe_parts <<< "$relative"
+    for segment in "${_rootpxe_parts[@]}"; do
+        candidate="$candidate/$segment"
+        [[ ! -L $candidate ]] || return 1
+    done
+    printf '%s\n' "$candidate"
+}
+rootpxe_prepare_storage_layout() {
+    local path probe
+    [[ -d /storage && ! -L /storage ]] || return 1
+    for path in /storage/dev /storage/postinitscripts /storage/postdeployscripts; do
+        [[ ! -e $path || ( -d $path && ! -L $path ) ]] || return 1
+        mkdir -p "$path" || return 1
+    done
+    probe=/storage/.rootpxe-write-probe.$$
+    : > "$probe" && rm -f "$probe"
+}
+rootpxe_clear_smb_plaintext() { unset smb_username smb_password smb_domain; }
+rootpxe_cleanup_smb_credentials() { [[ -n ${smb_credentials_file:-} ]] && rm -f -- "$smb_credentials_file"; smb_credentials_file=""; rootpxe_clear_smb_plaintext; }
+
+# SMB credentials are decoded by the fixed checkin parser and never enter the
+# kernel command line. The temporary file is removed by pxeos.mount.
 rootpxe_prepare_smb_credentials() {
     smb_credentials_file=""
-    [[ ${protocol:-nfs} == "smb" ]] || return 0
-    [[ -z ${smb_username_b64:-} && -z ${smb_password_b64:-} ]] && return 0
-    [[ -z ${smb_username_b64:-} || -z ${smb_password_b64:-} ]] && return 1
+    if [[ ${protocol:-nfs} != "smb" ]]; then rootpxe_clear_smb_plaintext; return 0; fi
+    [[ -n ${smb_username:-} && -n ${smb_password:-} ]] || { rootpxe_clear_smb_plaintext; return 1; }
     local file="/tmp/pxeos.smb.credentials.$$"
-    local username password domain
-    username=$(printf '%s' "$smb_username_b64" | base64 -d 2>/dev/null) || return 1
-    password=$(printf '%s' "$smb_password_b64" | base64 -d 2>/dev/null) || return 1
-    [[ -n $username && -n $password ]] || return 1
-    if [[ -n ${smb_domain_b64:-} ]]; then
-        domain=$(printf '%s' "$smb_domain_b64" | base64 -d 2>/dev/null) || return 1
-    fi
-    [[ $username != *$'\n'* && $username != *$'\r'* && $password != *$'\n'* && $password != *$'\r'* && $domain != *$'\n'* && $domain != *$'\r'* ]] || return 1
+    local username="$smb_username" password="$smb_password" domain="${smb_domain:-}"
+    [[ $username != *$'\n'* && $username != *$'\r'* && $password != *$'\n'* && $password != *$'\r'* && $domain != *$'\n'* && $domain != *$'\r'* ]] || { rootpxe_clear_smb_plaintext; return 1; }
     umask 077
     if ! {
         printf 'username=%s\npassword=%s\n' "$username" "$password"
         [[ -z $domain ]] || printf 'domain=%s\n' "$domain"
     } > "$file"; then
         rm -f "$file"
-        return 1
+        rootpxe_clear_smb_plaintext; return 1
     fi
-    chmod 600 "$file" || { rm -f "$file"; return 1; }
+    chmod 600 "$file" || { rm -f "$file"; rootpxe_clear_smb_plaintext; return 1; }
     smb_credentials_file="$file"
     export smb_credentials_file
+    rootpxe_clear_smb_plaintext
+    trap rootpxe_cleanup_smb_credentials EXIT INT TERM
 }
 
 rootpxe_run_postinit() {
     [[ ${rootpxe_postinit_ran:-0} == 1 ]] && return 0
-    local script=/images/postinitscripts/pxeos.postinit
+    local script=/storage/postinitscripts/pxeos.postinit
     if [[ -f "$script" ]]; then
-        . "$script"
+        . "$script" || return 1
     fi
     rootpxe_postinit_ran=1
     export rootpxe_postinit_ran
@@ -67,10 +137,11 @@ rootpxe_directory_size_bytes() {
 
 rootpxe_finalize_capture() {
     [[ ${type:-} == "up" ]] || return 0
-    local source="/images/dev/${macWinSafe:-$mac}"
-    local relative="${img#/}"
-    [[ -n $relative && $relative != *".."* && $relative != /* ]] || return 1
-    local target="/images/$relative"
+    rootpxe_require_task_context || return 1
+    local source="/storage/dev/$macWinSafe"
+    local relative target
+    relative=$(rootpxe_safe_relative_path "${img:-}") || return 1
+    target=$(rootpxe_storage_path "$relative") || return 1
     local marker="$target/.rootpxe-capture-taskid"
     [[ -n ${taskid:-} ]] || return 1
     if [[ -d $source && ! -e $target ]]; then
@@ -82,31 +153,29 @@ rootpxe_finalize_capture() {
     else
         return 1 # never merge with or overwrite an existing target
     fi
-    rm -f "$marker"
     capture_size_bytes=$(rootpxe_directory_size_bytes "$target")
-    if [[ ! $capture_size_bytes =~ ^[1-9][0-9]*$ ]]; then
-        printf '%s\n' "$taskid" > "$marker" 2>/dev/null || true
-        return 1
-    fi
-    printf '%s\n' "$taskid" > "$marker" || return 1
+    [[ $capture_size_bytes =~ ^[1-9][0-9]*$ ]] || return 1
     export capture_size_bytes
 }
 
 rootpxe_clear_capture_marker() {
     [[ ${type:-} == "up" && -n ${img:-} ]] || return 0
-    local relative="${img#/}"
-    [[ $relative != *".."* && $relative != /* ]] || return 1
-    rm -f "/images/$relative/.rootpxe-capture-taskid"
+    local relative target
+    relative=$(rootpxe_safe_relative_path "$img") || return 1
+    target=$(rootpxe_storage_path "$relative") || return 1
+    rm -f "$target/.rootpxe-capture-taskid"
 }
 # RootPXE 任务阶段上报（无 taskid 或未设置 web/pxeapi 时静默跳过）
 rootpxe_stage() {
     local st="$1"
     local msg="${2:-}"
-    [[ -z ${taskid:-} ]] && return 0
+    rootpxe_require_task_context || return 1
     local api="${pxeapi:-$web}"
     [[ -z $api ]] && return 0
     curl -Lks --max-time 20 \
         --data-urlencode "taskid=$taskid" \
+        --data-urlencode "token=$task_token" \
+        --data-urlencode "mac=$mac" \
         --data-urlencode "stage=$st" \
         --data-urlencode "status=running" \
         --data-urlencode "message=$msg" \
@@ -594,9 +663,9 @@ getPartBlockSize() {
     printf -v "$varVar" $(blockdev --getpbsz $part)
 }
 # Retrieve available space from NFS share
-# Should only be used when the share is mounted to `/images`
+# Should only be used when the share is mounted to `/storage`
 getServerDiskSpaceSvailable() {
-    local space=$(df -h | grep "/images" | sed -n '/dev/{s/  */ /gp}' | cut -d ' ' -f4)
+    local space=$(df -h | grep "/storage" | sed -n '/dev/{s/  */ /gp}' | cut -d ' ' -f4)
     [[ $space == "0" ]] && local space="0M"
     echo $space
 }
@@ -605,9 +674,13 @@ getServerDiskSpaceSvailable() {
 # $1 is the image path
 prepareUploadLocation() {
     local imagePath="$1"
-    [[ -z $imagePath ]] && handleError "No image path passed (${FUNCNAME[0]})\n   Args Passed: $*"
+    rootpxe_require_task_context || handleError "Invalid task context (${FUNCNAME[0]})"
+    [[ $imagePath == "/storage/dev/$macWinSafe" ]] || handleError "Unsafe capture path (${FUNCNAME[0]})"
+    [[ ! -L $imagePath ]] || handleError "Unsafe capture path (${FUNCNAME[0]})"
     dots "Preparing backup location"
-    if [[ ! -d $imagePath ]]; then
+    if [[ -d $imagePath ]]; then
+        find "$imagePath" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || handleError "Failed to clear capture path (${FUNCNAME[0]})"
+    else
         mkdir -p $imagePath >/dev/null 2>&1
         case $? in
             0)
@@ -999,6 +1072,7 @@ writeImage()  {
     esac
     local format=$imgLegacy
     [[ -z $format ]] && format=$imgFormat
+    set -o pipefail
     case $format in
         5|6)
             # ZSTD Compressed image.
@@ -1028,7 +1102,9 @@ writeImage()  {
             ;;
     esac
     exitcode=$?
-    [[ ! $exitcode -eq 0 ]] && handleWarning "Image failed to restore and exited with exit code $exitcode (${FUNCNAME[0]})\n   Info: $(cat /tmp/partclone.log)\n   Args Passed: $*"
+    pipe_status=("${PIPESTATUS[@]}")
+    [[ $exitcode -eq 0 ]] || handleError "Image restore pipeline failed (${FUNCNAME[0]})"
+    for exitcode in "${pipe_status[@]}"; do [[ $exitcode -eq 0 ]] || handleError "Image restore pipeline component failed (${FUNCNAME[0]})"; done
     rm -rf /tmp/pigz1 >/dev/null 2>&1
 }
 # Gets the valid restore parts. They're only
@@ -1831,9 +1907,9 @@ completeTasking() {
         down)
             rootpxe_stage restore "deploy write finished, running completion"
             killStatusReporter
-            if [[ -f /images/postdeployscripts/pxeos.postdeploy ]]; then
-                postdeploypath="/images/postdeployscripts/"
-                . ${postdeploypath}pxeos.postdeploy
+            if [[ -f /storage/postdeployscripts/pxeos.postdeploy ]]; then
+                postdeploypath="/storage/postdeployscripts/"
+                . ${postdeploypath}pxeos.postdeploy || handleError "Post-deploy script failed"
             fi
             [[ $capone -eq 1 ]] && exit 0
             if [[ $osid == +([1-2]|4|[5-7]|9|10|11) ]]; then
@@ -2051,6 +2127,8 @@ uploadFormat() {
     local cores=$(nproc)
     cores=$((cores - 1))
     [[ $cores -lt 1 ]] && cores=1
+    [[ ${writer_pids+x} ]] || writer_pids=()
+    set -o pipefail
     case $imgFormat in
         6)
             # ZSTD Split files compressed.
@@ -2077,6 +2155,12 @@ uploadFormat() {
             pigz $PIGZ_COMP < $fifo > ${file}.000 &
         ;;
     esac
+    writer_pids+=("$!")
+}
+rootpxe_wait_for_writers() {
+    [[ ${#writer_pids[@]} -gt 0 ]] || handleError "No capture writers were started (${FUNCNAME[0]})"
+    wait "${writer_pids[@]}" || handleError "Capture writer failed (${FUNCNAME[0]})"
+    writer_pids=()
 }
 # Thank you, fractal13 Code Base
 #
@@ -2527,7 +2611,7 @@ savePartition() {
             debugPause
             imgpart="$imagePath/d${disk_number}p${part_number}.img"
             uploadFormat "$fifoname" "$imgpart"
-            partclone.$fstype -n "Storage Location $storage, Image name $img" -cs $part -O $fifoname -Nf 1
+            partclone.$fstype -n "Storage Location $storage, Image name $img" -cs $part -O $fifoname -Nf 1 || handleError "Capture producer failed (${FUNCNAME[0]})"
             exitcode=$?
             case $exitcode in
                 0)
@@ -2554,7 +2638,7 @@ savePartition() {
                     debugPause
                     imgpart="$imagePath/d${disk_number}p${part_number}.img"
                     uploadFormat "$fifoname" "$imgpart"
-                    partclone.$fstype -n "Storage Location $storage, Image name $img" -cs $part -O $fifoname -Nf 1 -a0
+                    partclone.$fstype -n "Storage Location $storage, Image name $img" -cs $part -O $fifoname -Nf 1 -a0 || handleError "Capture producer failed (${FUNCNAME[0]})"
                     exitcode=$?
                     case $exitcode in
                         0)

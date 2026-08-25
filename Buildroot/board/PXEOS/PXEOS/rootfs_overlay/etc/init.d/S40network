@@ -11,11 +11,11 @@ if [[ -n $has_usb_nic ]]; then
 fi
 
 # Geo-Grabbing kernel parameters because the variables are probably not set yet
-for var in $(cat /proc/cmdline); do
-	var=$(echo "${var}" | awk -F= '{name=$1; gsub(/[+][_][+]/," ",$2); gsub(/"/,"\\\"", $2); value=$2; if (length($2) == 0 || $0 !~ /=/ || $0 ~ /nvme_core\.default_ps_max_latency_us=/) {print "";} else {printf("%s=%s", name, value)}}')
-    [[ -z $var ]] && continue;
-    eval "export ${var}" 2>/dev/null
-done
+while IFS= read -r var; do
+    [[ $var == *=* ]] || continue
+    key=${var%%=*}; value=${var#*=}; value=${value//+_+/ }; value=${value//+__+/ }
+    case "$key" in mac|web|pxeapi|setmacto|isdebug|has_usb_nic) printf -v "$key" '%s' "$value"; export "$key";; esac
+done < <(tr ' ' '\n' </proc/cmdline)
 
 # Enable loopback interface
 echo -e "auto lo\niface lo inet loopback\n\n" > /etc/network/interfaces

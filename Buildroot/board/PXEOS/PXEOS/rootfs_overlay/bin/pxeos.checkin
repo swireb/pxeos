@@ -54,7 +54,7 @@ rootpxe_api="${pxeapi:-$web}"
 
 checkin_rootpxe() {
     dots "Check in (RootPXE)"
-    [[ -z $taskid ]] && handleError "RootPXE: kernel cmdline taskid is required ($0)\n   Args Passed: $*"
+    rootpxe_require_identity || handleError "RootPXE: invalid task identity ($0)"
     case $mc in
         [Yy][Ee][Ss]|[Bb][Tt])
             handleError "RootPXE: multicast/torrent imaging (mc) is not supported ($0)\n   Args Passed: $*"
@@ -77,12 +77,16 @@ checkin_rootpxe() {
         waitFlag=""
         waitMsg=""
         retryAfterSec=5
-        out=$(curl -Lks \
+        out=$(curl -Lksf \
+            --connect-timeout 10 --max-time 30 \
             --data-urlencode "taskid=$taskid" \
+            --data-urlencode "token=$task_token" \
             --data-urlencode "format=sh" \
             --data-urlencode "mac=$lmac" \
             --data-urlencode "sysuuid=$sysuuid_local" \
             "${rootpxe_api}checkin" 2>/dev/null)
+        curl_status=$?
+        [[ $curl_status -eq 0 && -n $out ]] || handleError "RootPXE checkin HTTP request failed ($0)"
         while IFS= read -r line || [[ -n $line ]]; do
             [[ -z $line ]] && continue
             case $line in
@@ -94,11 +98,35 @@ checkin_rootpxe() {
             v="${line#*=}"
             [[ -z $k || $k == "$line" ]] && continue
             case "$k" in
-                wait) waitFlag="$v" ;;
-                message) waitMsg="$v" ;;
-                retryAfterSec) retryAfterSec="$v" ;;
+                wait) [[ $v =~ ^[01]$ ]] || handleError "Invalid checkin wait value ($0)"; waitFlag="$v" ;;
+                message_b64)
+                    waitMsg=$(printf '%s' "$v" | base64 -d 2>/dev/null) || handleError "Invalid checkin message ($0)"
+                    [[ $waitMsg != *$'\n'* && $waitMsg != *$'\r'* ]] || handleError "Invalid checkin message ($0)"
+                    ;;
+                error_b64)
+                    errorMsg=$(printf '%s' "$v" | base64 -d 2>/dev/null) || handleError "Invalid checkin error ($0)"
+                    [[ $errorMsg != *$'\n'* && $errorMsg != *$'\r'* ]] || handleError "Invalid checkin error ($0)"
+                    handleError "RootPXE checkin failed: $errorMsg ($0)"
+                    ;;
+                retry_after_sec) [[ $v =~ ^[1-9][0-9]{0,2}$ ]] || handleError "Invalid retry delay ($0)"; retryAfterSec="$v" ;;
+                type_b64|pxe_type_b64|img_b64|img_type_b64|img_partition_type_b64|storage_b64|storageip_b64|protocol_b64|export_path_b64|host_name_b64|mac_b64|execution_token_b64|finish_action_b64|smb_username_b64|smb_password_b64|smb_domain_b64)
+                    decoded=$(printf '%s' "$v" | base64 -d 2>/dev/null) || handleError "Invalid checkin encoding ($0)"
+                    [[ $decoded != *$'\n'* && $decoded != *$'\r'* ]] || handleError "Invalid checkin field ($0)"
+                    k=${k%_b64}
+                    if [[ $k == mac ]]; then
+                        reply_mac="$decoded"
+                    elif [[ $k == smb_username || $k == smb_password || $k == smb_domain ]]; then
+                        printf -v "$k" '%s' "$decoded"
+                    else
+                        printf -v "$k" '%s' "$decoded"; export "$k"
+                    fi
+                    ;;
+                taskid|osid|img_format|pigz_comp|shutdown|api_version)
+                    [[ $v =~ ^[0-9]+$ ]] || handleError "Invalid numeric checkin field ($0)"
+                    printf -v "$k" '%s' "$v"; export "$k"
+                    ;;
+                *) : ;; # 未知服务端字段绝不执行，也不进入环境
             esac
-            eval "export ${k}=\"\${v}\""
         done <<< "$out"
         if [[ $waitFlag == "1" ]]; then
             [[ -z $waitMsg ]] && waitMsg="No open slots on server, waiting for queue"
@@ -124,8 +152,27 @@ checkin_rootpxe() {
         # 未下发时默认重启
         echo -n "0" > /tmp/pxeos.shutdown 2>/dev/null || true
     fi
-    [[ -z $img ]] && [[ -n $imgpath ]] && img="$imgpath"
-    [[ -z $storageip && -n $storage ]] && storageip=$(echo "$storage" | awk -F: '{print $1}')
+    task_token=${execution_token:-${task_token:-}}; export task_token
+    rootpxe_require_task_context || handleError "RootPXE: missing execution token ($0)"
+    [[ -z ${osid:-} || $osid =~ ^[0-9]+$ ]] || handleError "Invalid OS id ($0)"
+    [[ -z ${img_format:-} || $img_format =~ ^[0-6]$ ]] || handleError "Invalid image format ($0)"
+    [[ -z ${pigz_comp:-} || $pigz_comp =~ ^-?[0-9]+$ ]] || handleError "Invalid compression value ($0)"
+    [[ -z ${reply_mac:-} || $(rootpxe_normalize_mac "$reply_mac") == "$macWinSafe" ]] || handleError "Checkin MAC mismatch ($0)"
+    taskType=${type:-}; type=${pxe_type:-}; pxeType=$type
+    [[ $type == up || $type == down ]] || handleError "Invalid PXEOS direction ($0)"
+    case $taskType in deploy|capture) ;; *) handleError "Invalid task type ($0)";; esac
+    imgType=${img_type:-${imgType:-}}; imgPartitionType=${img_partition_type:-${imgPartitionType:-}}
+    imgFormat=${img_format:-${imgFormat:-}}; PIGZ_COMP=${pigz_comp:-${PIGZ_COMP:-}}; hostName=${host_name:-${hostName:-}}
+    export taskType type pxeType imgType imgPartitionType imgFormat PIGZ_COMP hostName
+    storage_server=${storage_server:-$storageip}
+    if [[ ${protocol:-nfs} == smb ]]; then
+        storage_share=${storage_share:-$export_path}
+        [[ $storage_share =~ ^[A-Za-z0-9][A-Za-z0-9._$' '()-]{0,79}$ ]] || handleError "Invalid SMB share name ($0)"
+    else
+        storage_export=${storage_export:-$export_path}
+    fi
+    [[ ${protocol:-nfs} == nfs || ${protocol:-} == smb ]] || handleError "Invalid storage protocol ($0)"
+    rootpxe_safe_relative_path "$img" >/dev/null || handleError "Invalid image path ($0)"
     echo "Done"
     debugPause
 }

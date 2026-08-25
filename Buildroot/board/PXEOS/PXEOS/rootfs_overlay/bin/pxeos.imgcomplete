@@ -3,7 +3,7 @@ echo " * Task Complete"
 sysuuid=$(dmidecode -s system-uuid)
 sysuuid=${sysuuid,,}
 rootpxe_api="${pxeapi:-$web}"
-[[ -z $taskid ]] && handleError "RootPXE: taskid missing ($0)\n   Args Passed: $*"
+rootpxe_require_task_context || handleError "RootPXE: invalid task context ($0)"
 
 count=0
 res=""
@@ -13,6 +13,7 @@ if [[ ${type:-} == "up" ]]; then
 fi
 finish_args=(
     --data-urlencode "taskid=$taskid"
+    --data-urlencode "token=$task_token"
     --data-urlencode "mac=$mac"
     --data-urlencode "sysuuid=$sysuuid"
     --data-urlencode "result=success"
@@ -21,7 +22,7 @@ finish_args=(
 [[ -n ${capture_size_bytes:-} ]] && finish_args+=(--data-urlencode "sizeBytes=$capture_size_bytes")
 dots "Notifying RootPXE (finish)"
 while true; do
-    res=$(curl -Lks "${finish_args[@]}" "${rootpxe_api}finish" 2>/dev/null)
+    res=$(curl -Lks --connect-timeout 10 --max-time 30 "${finish_args[@]}" "${rootpxe_api}finish" 2>/dev/null)
     if echo "$res" | grep -q '"success"[[:space:]]*:[[:space:]]*true'; then
         rootpxe_clear_capture_marker
         break
@@ -43,6 +44,7 @@ while true; do
         handleError "Could not complete tasking ($0)\n   Args Passed: $*"
     fi
     let count+=1
+    usleep $((500000 * (1 << (count > 5 ? 5 : count))))
 done
 echo "Done"
 debugPause

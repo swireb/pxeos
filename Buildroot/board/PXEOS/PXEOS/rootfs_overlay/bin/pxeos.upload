@@ -5,9 +5,10 @@
 . /bin/pxeos.checkmount
 . /bin/pxeos.checkmountdrivesize
 . /bin/pxeos.checkimgvar
-rootpxe_run_postinit
+rootpxe_run_postinit || handleError "Post-init script failed ($0)"
 rootpxe_stage init "pxeos upload started, storage mounted"
-imagePath="/images/dev/$macWinSafe"
+rootpxe_require_task_context || handleError "Invalid task context ($0)"
+imagePath="/storage/dev/$macWinSafe"
 parts=""
 part=""
 disks=""
@@ -230,7 +231,7 @@ beginUpload() {
             imgpart="$imagePath/$img"
             mkfifo /tmp/pigz1 >/dev/null 2>&1
             uploadFormat "/tmp/pigz1" "$imgpart"
-            partclone.imager -c -s "$hd" -O /tmp/pigz1 -N -f 1 -a0
+            partclone.imager -c -s "$hd" -O /tmp/pigz1 -N -f 1 -a0 || handleError "Capture producer failed ($0)"
             rm /tmp/pigz1 >/dev/null 2>&1
             clearScreen
             ;;
@@ -240,4 +241,5 @@ findHDDInfo
 echo " * Now FOG will attempt to capture the image using Partclone"
 debugPause
 beginUpload
+rootpxe_wait_for_writers
 completeTasking

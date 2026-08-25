@@ -1,36 +1,40 @@
 #!/bin/bash
 umount /ntfs >/dev/null 2>&1
-umount /images >/dev/null 2>&1
+umount /storage >/dev/null 2>&1
 umount /bcdstore >/dev/null 2>&1
 dots "Mounting File System"
-if [[ ! -d /images ]]; then
-    mkdir -p /images >/dev/null 2>&1
+[[ ! -L /storage && ( ! -e /storage || -d /storage ) ]] || handleError "Storage mount point is unsafe ($0)"
+if [[ ! -d /storage ]]; then
+    mkdir -p /storage >/dev/null 2>&1
     if [[ ! $? -eq 0 ]]; then
         echo "Failed"
         debugPause
         handleError "Failed to create image storage mount point ($0)\n   Args Passed: $*"
     fi
 fi
-umount /images >/dev/null 2>&1
+umount /storage >/dev/null 2>&1
 case ${protocol:-nfs} in
     smb)
-        # Fixed SMB source: //server/images -> /images.
-        smb_options="iocharset=utf8"
-        if [[ -n ${smb_credentials_file:-} ]]; then
-            mount -t cifs "//${storageip}/images" /images -o "$smb_options,credentials=$smb_credentials_file" >/tmp/mount-output 2>&1
-            mount_status=$?
-            rm -f "$smb_credentials_file"
-            smb_credentials_file=""
+        if ! command -v mount.cifs >/dev/null 2>&1; then
+            printf '%s\n' "mount.cifs helper is unavailable" >/tmp/mount-output
+            mount_status=127
+        elif [[ -z ${smb_credentials_file:-} ]]; then
+            printf '%s\n' "SMB credentials were not supplied" >/tmp/mount-output
+            mount_status=1
         else
-            mount -t cifs "//${storageip}/images" /images -o "$smb_options,guest" >/tmp/mount-output 2>&1
+            mount.cifs "//${storage_server}/${storage_share}" /storage -o "iocharset=utf8,rw,credentials=$smb_credentials_file" >/tmp/mount-output 2>&1
             mount_status=$?
+        fi
+        if [[ -n ${smb_credentials_file:-} ]]; then
+            rootpxe_cleanup_smb_credentials
+            trap - EXIT INT TERM
         fi
         ;;
     *)
-        # Fixed NFS source: server:/images -> /images.
+        [[ -n ${storage_server:-} && ${storage_export:-} == /* && ${storage_export:-} != *'..'* ]] || handleError "Invalid NFS storage path ($0)"
         case $type in
-            up) mount -o nolock,proto=tcp,rsize=32768,wsize=32768,intr,noatime "${storageip}:/images" /images >/tmp/mount-output 2>&1 ;;
-            down) mount -o nolock,proto=tcp,rsize=32768,intr,noatime "${storageip}:/images" /images >/tmp/mount-output 2>&1 ;;
+            up) mount -o nolock,proto=tcp,rsize=32768,wsize=32768,intr,noatime "${storage_server}:${storage_export}" /storage >/tmp/mount-output 2>&1 ;;
+            down) mount -o nolock,proto=tcp,rsize=32768,intr,noatime "${storage_server}:${storage_export}" /storage >/tmp/mount-output 2>&1 ;;
         esac
         mount_status=$?
         ;;
@@ -43,6 +47,7 @@ case ${mount_status:-1} in
     *)
         echo "Failed"
         debugPause
-        handleError "Could not mount images folder ($0)\n   Args Passed: $*\n    Reason: $(cat /tmp/mount-output | tr -d \\0)"
+        handleError "Could not mount storage ($0)\n   Args Passed: $*\n    Reason: $(cat /tmp/mount-output | tr -d \\0)"
         ;;
 esac
+rootpxe_prepare_storage_layout || handleError "Storage layout is unsafe or not writable ($0)"

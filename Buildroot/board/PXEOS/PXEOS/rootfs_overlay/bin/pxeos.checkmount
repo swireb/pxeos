@@ -4,29 +4,31 @@ sysuuid=${sysuuid,,}
 rootpxe_api="${pxeapi:-$web}"
 dots "Checking Mounted File System"
 if command -v findmnt >/dev/null 2>&1; then
-    fstype=$(findmnt -n -o FSTYPE --target /images 2>/dev/null)
+    fstype=$(findmnt -n -o FSTYPE --target /storage 2>/dev/null)
 fi
 if [[ -z $fstype ]]; then
     # BusyBox-only PXEOS images may not include findmnt; /proc/mounts is the
     # kernel source of truth when findmnt is unavailable or returns no match.
-    fstype=$(awk '$2 == "/images" { print $3; exit }' /proc/mounts)
+    fstype=$(awk '$2 == "/storage" { print $3; exit }' /proc/mounts)
 fi
 case ${protocol:-nfs}:$fstype in
     nfs:nfs|nfs:nfs4|smb:cifs) ;;
     *)
         echo "Failed"
         debugPause
-        handleError "Mounted /images does not match storage protocol (${protocol:-nfs}:$fstype) ($0)\n   Args Passed: $*"
+        handleError "Mounted /storage does not match storage protocol (${protocol:-nfs}:$fstype) ($0)\n   Args Passed: $*"
         ;;
 esac
 if [[ ${type:-} == "down" ]]; then
-    image_root="/images/${img#/}"
-    [[ -e $image_root && -r $image_root ]] || {
+    image_root=$(rootpxe_storage_path "${img:-}") || handleError "Invalid image path ($0)"
+    [[ -e $image_root && ! -L $image_root && -r $image_root ]] || {
         echo "Failed"; debugPause
         handleError "Image path is not readable: $image_root ($0)\n   Args Passed: $*"
     }
 elif [[ ${type:-} == "up" ]]; then
-    capture_root="/images/dev/${macWinSafe:-$mac}"
+    rootpxe_require_task_context || handleError "Invalid task context ($0)"
+    capture_root="/storage/dev/$macWinSafe"
+    [[ ! -e $capture_root || ( -d $capture_root && ! -L $capture_root ) ]] || handleError "Capture path is unsafe ($0)"
     mkdir -p "$capture_root" || handleError "Could not create capture path: $capture_root ($0)"
     probe="$capture_root/.rootpxe-write-probe.$$"
     : > "$probe" && rm -f "$probe" || handleError "Capture path is not writable: $capture_root ($0)"

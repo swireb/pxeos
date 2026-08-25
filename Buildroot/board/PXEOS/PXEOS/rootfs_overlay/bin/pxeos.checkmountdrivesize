@@ -1,6 +1,6 @@
 #!/bin/bash
 dots "Checking Server Disk Space"
-getServerDiskSpaceUsage=$(df -h | grep "/images" | sed -n '/dev/{s/  */ /gp}')
+getServerDiskSpaceUsage=$(df -h | grep "/storage" | sed -n '/dev/{s/  */ /gp}')
 echo "Done"
 
 dots "Server Disk Size Total"
