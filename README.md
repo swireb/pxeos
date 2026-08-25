@@ -3,6 +3,12 @@
 ./build.sh -h
 ./build.sh --help
 ```
+
+#### PXEOS 默认 Root 凭据
+
+三种 filesystem 配置（x64、x86、arm64）均启用了 Root 密码登录；默认账号为 `root`，默认密码为 `pxeos`。修改配置后必须重新构建对应架构的 `init.xz` 才会生效。
+
+该密码为所有设备共享的弱默认密码，不应视为加密或安全保护。仅应在隔离的管理网络中使用；在发布或接入生产网络前，必须修改默认密码。
 #### Build Everything
 ```
 ./build.sh -n
