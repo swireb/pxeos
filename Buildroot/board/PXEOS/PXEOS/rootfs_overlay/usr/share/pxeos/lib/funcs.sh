@@ -14,31 +14,89 @@ done
 ### If USB Boot device we need a way to get the kernel args properly
 [[ $boottype == usb && -f /tmp/hinfo.txt ]] && . /tmp/hinfo.txt
 
-# 将 NFS 绝对路径（以 export_path 为根）映射到本机挂载点下的路径。
-# - mount_point: 本机挂载点（例如 /images 或 /imagesinit）
-# - export_path: NFS 的「镜像路径」（例如 /images）
-# - abs_path: NFS 上的绝对路径（例如 /images/dev 或 /images/postinitscripts）
-rootpxe_map_nfs_abs_to_local() {
-    local mount_point="$1"
-    local export_path_local="$2"
-    local abs_path="$3"
-    [[ -z $mount_point || -z $abs_path ]] && return 1
-    local exp="${export_path_local:-/images}"
-    exp="${exp%/}"
-    [[ -z $exp ]] && exp="/images"
-    local a="${abs_path%/}"
-    [[ -z $a ]] && a="$abs_path"
-    if [[ $a == "$exp" ]]; then
-        echo "${mount_point%/}"
-        return 0
+# SMB credentials are Base64-encoded in the RootPXE shell checkin response so
+# they never appear in the kernel command line. The temporary file is removed
+# immediately by pxeos.mount after mount.cifs consumes it.
+rootpxe_prepare_smb_credentials() {
+    smb_credentials_file=""
+    [[ ${protocol:-nfs} == "smb" ]] || return 0
+    [[ -z ${smb_username_b64:-} && -z ${smb_password_b64:-} ]] && return 0
+    [[ -z ${smb_username_b64:-} || -z ${smb_password_b64:-} ]] && return 1
+    local file="/tmp/pxeos.smb.credentials.$$"
+    local username password domain
+    username=$(printf '%s' "$smb_username_b64" | base64 -d 2>/dev/null) || return 1
+    password=$(printf '%s' "$smb_password_b64" | base64 -d 2>/dev/null) || return 1
+    [[ -n $username && -n $password ]] || return 1
+    if [[ -n ${smb_domain_b64:-} ]]; then
+        domain=$(printf '%s' "$smb_domain_b64" | base64 -d 2>/dev/null) || return 1
     fi
-    if [[ $a == "$exp/"* ]]; then
-        echo "${mount_point%/}${a#"$exp"}"
-        return 0
+    [[ $username != *$'\n'* && $username != *$'\r'* && $password != *$'\n'* && $password != *$'\r'* && $domain != *$'\n'* && $domain != *$'\r'* ]] || return 1
+    umask 077
+    if ! {
+        printf 'username=%s\npassword=%s\n' "$username" "$password"
+        [[ -z $domain ]] || printf 'domain=%s\n' "$domain"
+    } > "$file"; then
+        rm -f "$file"
+        return 1
     fi
-    # 非预期：不在 export_path 之下，直接拼接末尾段，避免脚本报错退出
-    echo "${mount_point%/}/$(basename "$a")"
-    return 0
+    chmod 600 "$file" || { rm -f "$file"; return 1; }
+    smb_credentials_file="$file"
+    export smb_credentials_file
+}
+
+rootpxe_run_postinit() {
+    [[ ${rootpxe_postinit_ran:-0} == 1 ]] && return 0
+    local script=/images/postinitscripts/pxeos.postinit
+    if [[ -f "$script" ]]; then
+        . "$script"
+    fi
+    rootpxe_postinit_ran=1
+    export rootpxe_postinit_ran
+}
+
+rootpxe_directory_size_bytes() {
+    local root="$1"
+    local total=0 file bytes
+    while IFS= read -r -d '' file; do
+        bytes=$(stat -c %s "$file") || return 1
+        [[ $bytes =~ ^[0-9]+$ ]] || return 1
+        total=$((total + bytes))
+    done < <(find "$root" -type f ! -name '.rootpxe-capture-taskid' -print0)
+    echo "$total"
+}
+
+rootpxe_finalize_capture() {
+    [[ ${type:-} == "up" ]] || return 0
+    local source="/images/dev/${macWinSafe:-$mac}"
+    local relative="${img#/}"
+    [[ -n $relative && $relative != *".."* && $relative != /* ]] || return 1
+    local target="/images/$relative"
+    local marker="$target/.rootpxe-capture-taskid"
+    [[ -n ${taskid:-} ]] || return 1
+    if [[ -d $source && ! -e $target ]]; then
+        [[ -f "$source/.rootpxe-capture-taskid" && $(cat "$source/.rootpxe-capture-taskid") == "$taskid" ]] || return 1
+        mkdir -p "$(dirname "$target")" || return 1
+        mv "$source" "$target" || return 1
+    elif [[ ! -d $source && -d $target ]]; then
+        [[ -f "$marker" && $(cat "$marker") == "$taskid" ]] || return 1
+    else
+        return 1 # never merge with or overwrite an existing target
+    fi
+    rm -f "$marker"
+    capture_size_bytes=$(rootpxe_directory_size_bytes "$target")
+    if [[ ! $capture_size_bytes =~ ^[1-9][0-9]*$ ]]; then
+        printf '%s\n' "$taskid" > "$marker" 2>/dev/null || true
+        return 1
+    fi
+    printf '%s\n' "$taskid" > "$marker" || return 1
+    export capture_size_bytes
+}
+
+rootpxe_clear_capture_marker() {
+    [[ ${type:-} == "up" && -n ${img:-} ]] || return 0
+    local relative="${img#/}"
+    [[ $relative != *".."* && $relative != /* ]] || return 1
+    rm -f "/images/$relative/.rootpxe-capture-taskid"
 }
 # RootPXE 任务阶段上报（无 taskid 或未设置 web/pxeapi 时静默跳过）
 rootpxe_stage() {
@@ -820,7 +878,7 @@ shrinkPartition() {
             ;;
         btrfs)
             # Based on community discussion from @mstabrin
-            # btrfs postdownload script notes
+            # btrfs deployment completion script notes
             dots "Shrinking $part partition"
             if [[ ! -d /tmp/btrfs ]]; then
                 mkdir /tmp/btrfs >>/tmp/btfrslog.txt 2>&1
@@ -1773,9 +1831,9 @@ completeTasking() {
         down)
             rootpxe_stage restore "deploy write finished, running completion"
             killStatusReporter
-            if [[ -f /images/postdownloadscripts/pxeos.postdownload ]]; then
-                postdownpath="/images/postdownloadscripts/"
-                . ${postdownpath}pxeos.postdownload
+            if [[ -f /images/postdeployscripts/pxeos.postdeploy ]]; then
+                postdeploypath="/images/postdeployscripts/"
+                . ${postdeploypath}pxeos.postdeploy
             fi
             [[ $capone -eq 1 ]] && exit 0
             if [[ $osid == +([1-2]|4|[5-7]|9|10|11) ]]; then

@@ -8,19 +8,34 @@ if [[ ! -d /images ]]; then
     if [[ ! $? -eq 0 ]]; then
         echo "Failed"
         debugPause
-        handleError "Failed to create location to mount nfs share ($0)\n   Args Passed: $*"
+        handleError "Failed to create image storage mount point ($0)\n   Args Passed: $*"
     fi
 fi
 umount /images >/dev/null 2>&1
-case $type in
-    up)
-        mount -o nolock,proto=tcp,rsize=32768,wsize=32768,intr,noatime "$storage" /images >/tmp/mount-output 2>&1
+case ${protocol:-nfs} in
+    smb)
+        # Fixed SMB source: //server/images -> /images.
+        smb_options="iocharset=utf8"
+        if [[ -n ${smb_credentials_file:-} ]]; then
+            mount -t cifs "//${storageip}/images" /images -o "$smb_options,credentials=$smb_credentials_file" >/tmp/mount-output 2>&1
+            mount_status=$?
+            rm -f "$smb_credentials_file"
+            smb_credentials_file=""
+        else
+            mount -t cifs "//${storageip}/images" /images -o "$smb_options,guest" >/tmp/mount-output 2>&1
+            mount_status=$?
+        fi
         ;;
-    down)
-        mount -o nolock,proto=tcp,rsize=32768,intr,noatime "$storage" /images >/tmp/mount-output 2>&1
+    *)
+        # Fixed NFS source: server:/images -> /images.
+        case $type in
+            up) mount -o nolock,proto=tcp,rsize=32768,wsize=32768,intr,noatime "${storageip}:/images" /images >/tmp/mount-output 2>&1 ;;
+            down) mount -o nolock,proto=tcp,rsize=32768,intr,noatime "${storageip}:/images" /images >/tmp/mount-output 2>&1 ;;
+        esac
+        mount_status=$?
         ;;
 esac
-case $? in
+case ${mount_status:-1} in
     0)
         echo "Done"
         debugPause

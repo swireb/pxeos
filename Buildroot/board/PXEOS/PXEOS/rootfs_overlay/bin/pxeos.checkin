@@ -110,6 +110,9 @@ checkin_rootpxe() {
         fi
         break
     done
+    if ! rootpxe_prepare_smb_credentials; then
+        handleError "RootPXE checkin returned invalid SMB credentials ($0)"
+    fi
     # 将 checkin 下发的 shutdown（0/1）落盘，供 init 脚本在任务结束时读取。
     # 注意：S99pxeos 与 /bin/pxeos 不在同一进程环境，直接 export 无法回传变量。
     if [[ -n ${shutdown:-} ]]; then

@@ -7,16 +7,23 @@ rootpxe_api="${pxeapi:-$web}"
 
 count=0
 res=""
+if [[ ${type:-} == "up" ]]; then
+    rootpxe_stage finalizing "moving captured image into final path"
+    rootpxe_finalize_capture || handleError "Could not finalize captured image safely ($0)"
+fi
+finish_args=(
+    --data-urlencode "taskid=$taskid"
+    --data-urlencode "mac=$mac"
+    --data-urlencode "sysuuid=$sysuuid"
+    --data-urlencode "result=success"
+    --data-urlencode "message=pxeos imgcomplete type=$type"
+)
+[[ -n ${capture_size_bytes:-} ]] && finish_args+=(--data-urlencode "sizeBytes=$capture_size_bytes")
 dots "Notifying RootPXE (finish)"
 while true; do
-    res=$(curl -Lks \
-        --data-urlencode "taskid=$taskid" \
-        --data-urlencode "mac=$mac" \
-        --data-urlencode "sysuuid=$sysuuid" \
-        --data-urlencode "result=success" \
-        --data-urlencode "message=pxeos imgcomplete type=$type" \
-        "${rootpxe_api}finish" 2>/dev/null)
+    res=$(curl -Lks "${finish_args[@]}" "${rootpxe_api}finish" 2>/dev/null)
     if echo "$res" | grep -q '"success"[[:space:]]*:[[:space:]]*true'; then
+        rootpxe_clear_capture_marker
         break
     fi
     if [[ $count -lt 10 ]]; then

@@ -5,11 +5,9 @@
 . /bin/pxeos.checkmount
 . /bin/pxeos.checkmountdrivesize
 . /bin/pxeos.checkimgvar
-rootpxe_stage init "pxeos upload started, NFS ready"
-capture_abs="${capture_path:-${capturepath:-}}"
-export_abs="${export_path:-${exportpath:-/images}}"
-[[ -z $capture_abs ]] && capture_abs="${export_abs%/}/dev"
-imagePath="$(rootpxe_map_nfs_abs_to_local "/images" "$export_abs" "$capture_abs")/$macWinSafe"
+rootpxe_run_postinit
+rootpxe_stage init "pxeos upload started, storage mounted"
+imagePath="/images/dev/$macWinSafe"
 parts=""
 part=""
 disks=""
@@ -21,6 +19,7 @@ percent="$pct"
 pxeos.statusreporter "$mac" "${pxeapi:-$web}" "$taskid" & disown
 statusReporter="$!"
 prepareUploadLocation "$imagePath"
+printf '%s\n' "$taskid" > "$imagePath/.rootpxe-capture-taskid" || handleError "Could not initialize capture task marker ($0)"
 echo " * Using Image: $img"
 # resizable image type
 #  discover windows partitions
