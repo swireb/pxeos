@@ -32,6 +32,11 @@ must_have "$overlay/bin/pxeos.checkin" 'message_b64'
 must_have "$overlay/bin/pxeos.checkin" 'error_b64'
 must_have "$overlay/bin/pxeos.checkin" 'retry_after_sec'
 must_have "$overlay/bin/pxeos.inventory" 'token=$task_token'
+must_have "$overlay/bin/pxeos.checkin" 'taskid|osid|img_format|shutdown|api_version)'
+must_have "$overlay/bin/pxeos.checkin" 'pigz_comp)'
+must_have "$overlay/bin/pxeos.checkin" 'Invalid numeric checkin field: pigz_comp'
+for value in -6 0 6; do [[ $value =~ ^-?[0-9]+$ ]] || fail "合法 pigz_comp 被拒绝: $value"; done
+for value in --6 +6 6.0 abc ''; do [[ ! $value =~ ^-?[0-9]+$ ]] || fail "非法 pigz_comp 被接受: $value"; done
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_clear_smb_plaintext'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'unset smb_username smb_password smb_domain'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_clear_capture_marker'

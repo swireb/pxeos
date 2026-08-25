@@ -121,8 +121,12 @@ checkin_rootpxe() {
                         printf -v "$k" '%s' "$decoded"; export "$k"
                     fi
                     ;;
-                taskid|osid|img_format|pigz_comp|shutdown|api_version)
-                    [[ $v =~ ^[0-9]+$ ]] || handleError "Invalid numeric checkin field ($0)"
+                taskid|osid|img_format|shutdown|api_version)
+                    [[ $v =~ ^[0-9]+$ ]] || handleError "Invalid numeric checkin field: $k ($0)"
+                    printf -v "$k" '%s' "$v"; export "$k"
+                    ;;
+                pigz_comp)
+                    [[ $v =~ ^-?[0-9]+$ ]] || handleError "Invalid numeric checkin field: pigz_comp ($0)"
                     printf -v "$k" '%s' "$v"; export "$k"
                     ;;
                 *) : ;; # 未知服务端字段绝不执行，也不进入环境
