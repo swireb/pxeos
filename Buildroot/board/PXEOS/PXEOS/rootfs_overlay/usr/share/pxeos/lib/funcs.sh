@@ -116,7 +116,7 @@ rootpxe_prepare_smb_credentials() {
 
 rootpxe_run_postinit() {
     [[ ${rootpxe_postinit_ran:-0} == 1 ]] && return 0
-    local script=/storage/postinitscripts/pxeos.postinit
+    local script=/storage/postinitscripts/hook.sh
     if [[ -f "$script" ]]; then
         . "$script" || return 1
     fi
@@ -1907,9 +1907,8 @@ completeTasking() {
         down)
             rootpxe_stage restore "deploy write finished, running completion"
             killStatusReporter
-            if [[ -f /storage/postdeployscripts/pxeos.postdeploy ]]; then
-                postdeploypath="/storage/postdeployscripts/"
-                . ${postdeploypath}pxeos.postdeploy || handleError "Post-deploy script failed"
+            if [[ -f /storage/postdeployscripts/hook.sh ]]; then
+                . /storage/postdeployscripts/hook.sh || handleError "Post-deploy script failed"
             fi
             [[ $capone -eq 1 ]] && exit 0
             if [[ $osid == +([1-2]|4|[5-7]|9|10|11) ]]; then
