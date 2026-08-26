@@ -10,6 +10,9 @@ res=""
 if [[ ${type:-} == "up" ]]; then
     rootpxe_stage finalizing "moving captured image into final path"
     rootpxe_finalize_capture || handleError "Could not finalize captured image safely ($0)"
+    if [[ ${imgType:-} == [Nn] ]]; then
+        rootpxe_build_original_schema "$hd" "$rootpxe_final_capture_path" || handleError "PXEOS_STAGE=capture_schema CODE=ORIGINAL_SCHEMA_INVALID REASON=capture_facts_or_artifacts_unavailable"
+    fi
 fi
 finish_args=(
     --data-urlencode "taskid=$taskid"
@@ -20,11 +23,13 @@ finish_args=(
     --data-urlencode "message=pxeos imgcomplete type=$type"
 )
 [[ -n ${capture_size_bytes:-} ]] && finish_args+=(--data-urlencode "sizeBytes=$capture_size_bytes")
+[[ -n ${rootpxe_original_schema_file:-} ]] && finish_args+=(--data-urlencode "originalSchema=$(cat "$rootpxe_original_schema_file")")
 dots "Notifying RootPXE (finish)"
 while true; do
     res=$(curl -Lks --connect-timeout 10 --max-time 30 "${finish_args[@]}" "${rootpxe_api}finish" 2>/dev/null)
     if echo "$res" | grep -q '"success"[[:space:]]*:[[:space:]]*true'; then
         rootpxe_clear_capture_marker
+        rootpxe_cleanup_task_json
         break
     fi
     if [[ $count -lt 10 ]]; then

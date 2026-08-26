@@ -1,7 +1,6 @@
 #!/bin/bash
 . /usr/share/pxeos/lib/funcs.sh
 RUN_CHKDSK=""
-HOSTNAME_EARLY=0
 OS_ID_WIN7=5
 OS_ID_WIN8=6
 for arg in $(cat /proc/cmdline | tr -d \\0); do
@@ -26,7 +25,6 @@ macWinSafe="$(echo -n "$mac" | tr '[:upper:]' '[:lower:]' | tr -cd '0-9a-f')"
 sockets=$(grep "physical id" /proc/cpuinfo|sort -u|wc -l)
 arch=$(uname -m)
 [[ $chkdsk -eq 1 ]] && RUN_CHKDSK="-x"
-[[ $hostearly -eq 1 ]] && HOSTNAME_EARLY=1
 case $mc in
     yes)
         method="UDPCAST"
@@ -51,6 +49,92 @@ echo "$method"
 blGo=0
 nfsServerName=""
 rootpxe_api="${pxeapi:-$web}"
+
+rootpxe_json_get_string() {
+    local document="$1" query="$2"
+    jq -er "$query // empty" <<<"$document" 2>/dev/null
+}
+
+# RootPXE JSON exposes a human-level positive compressionLevel (for example
+# 6).  PXEOS historically passes PIGZ_COMP directly to pigz/zstd, whose
+# command-line form is negative.  Keep legacy negative values valid, but do
+# not accept an unbounded value from an untrusted checkin response.
+rootpxe_normalize_compression_level() {
+    local value="$1" level
+    [[ $value =~ ^-?[0-9]+$ ]] || return 1
+    level=${value#-}
+    [[ $level =~ ^[1-9][0-9]*$ ]] && ((level <= 22)) || return 1
+    printf '%s\n' "-$level"
+}
+
+rootpxe_validate_pigz_compression() {
+    local value="$1" format="$2" level
+    [[ $value =~ ^-[1-9][0-9]*$ ]] || return 1
+    level=${value#-}
+    ((level <= 22)) || return 1
+    # gzip/pigz only supports levels 1..9; zstd formats retain 1..22.
+    case "$format" in
+        0|2) ((level <= 9)) || return 1 ;;
+    esac
+}
+
+# JSON checkin uses an explicit whitelist.  Never eval/source response content.
+rootpxe_apply_json_checkin() {
+    local document="$1" value
+    command -v jq >/dev/null 2>&1 || return 1
+    jq -e 'type == "object"' >/dev/null 2>&1 <<<"$document" || return 1
+    waitFlag=$(rootpxe_json_get_string "$document" '.wait')
+    [[ -z $waitFlag || $waitFlag == true || $waitFlag == false ]] || return 1
+    [[ $waitFlag == true ]] && waitFlag=1
+    [[ $waitFlag == false ]] && waitFlag=0
+    waitMsg=$(rootpxe_json_get_string "$document" '.message')
+    retryAfterSec=$(rootpxe_json_get_string "$document" '.retryAfterSec // .retry_after_sec')
+    [[ -z $retryAfterSec || $retryAfterSec =~ ^[1-9][0-9]{0,2}$ ]] || return 1
+    retryAfterSec=${retryAfterSec:-5}
+    errorMsg=$(rootpxe_json_get_string "$document" '.error')
+    [[ -z $errorMsg ]] || handleError "RootPXE checkin failed: $errorMsg ($0)"
+    taskid=$(rootpxe_json_get_string "$document" '.taskId // .taskid')
+    execution_token=$(rootpxe_json_get_string "$document" '.executionToken // .execution_token')
+    taskType=$(rootpxe_json_get_string "$document" '.type')
+    pxe_type=$(rootpxe_json_get_string "$document" '.pxeType // .pxe_type')
+    reply_mac=$(rootpxe_json_get_string "$document" '.mac')
+    img=$(rootpxe_json_get_string "$document" '.img // .imagePath')
+    img_type=$(rootpxe_json_get_string "$document" '.imgType // .img_type')
+    img_partition_type=$(rootpxe_json_get_string "$document" '.imgPartitionType // .img_partition_type')
+    osid=$(rootpxe_json_get_string "$document" '.osid')
+    img_format=$(rootpxe_json_get_string "$document" '.imgFormat // .img_format')
+    # JSON now uses a positive compressionLevel.  Older JSON emitters may
+    # still provide the legacy negative pigzComp/pigz_comp form.
+    pigz_comp=$(rootpxe_json_get_string "$document" '.compressionLevel // .pigzComp // .pigz_comp')
+    [[ -z $pigz_comp ]] || pigz_comp=$(rootpxe_normalize_compression_level "$pigz_comp") || return 1
+    shutdown=$(rootpxe_json_get_string "$document" '.shutdown')
+    protocol=$(rootpxe_json_get_string "$document" '.storage.protocol // .protocol')
+    storage_server=$(rootpxe_json_get_string "$document" '.storage.server // .storageServer // .storage_server // .storageip')
+    storage_export=$(rootpxe_json_get_string "$document" '.storage.export // .storageExport // .storage_export // .exportPath')
+    storage_share=$(rootpxe_json_get_string "$document" '.storage.share // .storageShare // .storage_share // .exportPath')
+    smb_username=$(rootpxe_json_get_string "$document" '.storage.smb.username // .smb.username // .smbUsername')
+    smb_password=$(rootpxe_json_get_string "$document" '.storage.smb.password // .smb.password // .smbPassword')
+    smb_domain=$(rootpxe_json_get_string "$document" '.storage.smb.domain // .smb.domain // .smbDomain')
+    hostName=$(rootpxe_json_get_string "$document" '.hostName // .host_name')
+    changeHostname=$(rootpxe_json_get_string "$document" '.changeHostname // .change_hostname')
+    resumeStage=$(rootpxe_json_get_string "$document" '.resumeStage // .resume_stage')
+    schemaRevision=$(rootpxe_json_get_string "$document" '.schemaRevision // .schema_revision')
+    schemaHash=$(rootpxe_json_get_string "$document" '.schemaHash // .schema_hash')
+    # Layout/schema are untrusted JSON data. Store canonical form in 0600 files;
+    # they are never printed or made kernel arguments.
+    umask 077
+    if jq -e '.deploymentLayout != null' >/dev/null 2>&1 <<<"$document"; then
+        deploymentLayoutFile=$(mktemp /tmp/rootpxe-layout.XXXXXX) || return 1
+        jq -cS '.deploymentLayout' <<<"$document" >"$deploymentLayoutFile" || return 1
+        chmod 600 "$deploymentLayoutFile"
+    fi
+    if jq -e '.originalSchema != null' >/dev/null 2>&1 <<<"$document"; then
+        originalSchemaFile=$(mktemp /tmp/rootpxe-schema.XXXXXX) || return 1
+        jq -cS '.originalSchema' <<<"$document" >"$originalSchemaFile" || return 1
+        chmod 600 "$originalSchemaFile"
+    fi
+    export taskid execution_token taskType pxe_type img img_type img_partition_type osid img_format pigz_comp shutdown protocol storage_server storage_export storage_share smb_username smb_password smb_domain hostName changeHostname resumeStage schemaRevision schemaHash deploymentLayoutFile originalSchemaFile
+}
 
 checkin_rootpxe() {
     dots "Check in (RootPXE)"
@@ -85,7 +169,7 @@ checkin_rootpxe() {
             --connect-timeout 10 --max-time 30 \
             --data-urlencode "taskid=$taskid" \
             --data-urlencode "token=$task_token" \
-            --data-urlencode "format=sh" \
+            --data-urlencode "format=json" \
             --data-urlencode "mac=$lmac" \
             --data-urlencode "sysuuid=$sysuuid_local" \
             -w $'\n%{http_code}' "${rootpxe_api}checkin" 2>/dev/null)
@@ -112,7 +196,11 @@ checkin_rootpxe() {
             continue
         fi
         out=$body
-        while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $out == \{* ]]; then
+            rootpxe_apply_json_checkin "$out" || handleError "RootPXE checkin returned invalid JSON ($0)"
+        else
+            # Only a non-JSON response enters the legacy compatibility parser.
+            while IFS= read -r line || [[ -n $line ]]; do
             [[ -z $line ]] && continue
             case $line in
                 error=*)
@@ -156,7 +244,8 @@ checkin_rootpxe() {
                     ;;
                 *) : ;; # 未知服务端字段绝不执行，也不进入环境
             esac
-        done <<< "$out"
+            done <<< "$out"
+        fi
         if [[ $waitFlag == "1" ]]; then
             [[ -z $waitMsg ]] && waitMsg="No open slots on server, waiting for queue"
             dots "$waitMsg"
@@ -170,6 +259,7 @@ checkin_rootpxe() {
     if ! rootpxe_prepare_smb_credentials; then
         handleError "RootPXE checkin returned invalid SMB credentials ($0)"
     fi
+    trap rootpxe_cleanup_session EXIT INT TERM
     # 将 checkin 下发的 shutdown（0/1）落盘，供 init 脚本在任务结束时读取。
     # 注意：S99pxeos 与 /bin/pxeos 不在同一进程环境，直接 export 无法回传变量。
     if [[ -n ${shutdown:-} ]]; then
@@ -185,14 +275,15 @@ checkin_rootpxe() {
     rootpxe_require_task_context || handleError "RootPXE: missing execution token ($0)"
     [[ -z ${osid:-} || $osid =~ ^[0-9]+$ ]] || handleError "Invalid OS id ($0)"
     [[ -z ${img_format:-} || $img_format =~ ^[0-6]$ ]] || handleError "Invalid image format ($0)"
-    [[ -z ${pigz_comp:-} || $pigz_comp =~ ^-?[0-9]+$ ]] || handleError "Invalid compression value ($0)"
+    [[ -z ${pigz_comp:-} ]] || rootpxe_validate_pigz_compression "$pigz_comp" "${img_format:-${imgFormat:-}}" || handleError "Invalid compression value ($0)"
     [[ -z ${reply_mac:-} || $(rootpxe_normalize_mac "$reply_mac") == "$macWinSafe" ]] || handleError "Checkin MAC mismatch ($0)"
-    taskType=${type:-}; type=${pxe_type:-}; pxeType=$type
+    taskType=${taskType:-${type:-}}; type=${pxe_type:-${type:-}}; pxeType=$type
     [[ $type == up || $type == down ]] || handleError "Invalid PXEOS direction ($0)"
     case $taskType in deploy|capture) ;; *) handleError "Invalid task type ($0)";; esac
     imgType=${img_type:-${imgType:-}}; imgPartitionType=${img_partition_type:-${imgPartitionType:-}}
-    imgFormat=${img_format:-${imgFormat:-}}; PIGZ_COMP=${pigz_comp:-${PIGZ_COMP:-}}; hostName=${host_name:-${hostName:-}}
-    export taskType type pxeType imgType imgPartitionType imgFormat PIGZ_COMP hostName
+    imgFormat=${img_format:-${imgFormat:-}}; PIGZ_COMP=${pigz_comp:-${PIGZ_COMP:-}}; hostName=${hostName:-${host_name:-}}
+    [[ -z ${changeHostname:-} || ${changeHostname:-} == true || ${changeHostname:-} == false ]] || handleError "Invalid changeHostname ($0)"
+    export taskType type pxeType imgType imgPartitionType imgFormat PIGZ_COMP hostName changeHostname resumeStage schemaRevision schemaHash
     storage_server=${storage_server:-$storageip}
     if [[ ${protocol:-nfs} == smb ]]; then
         storage_share=${storage_share:-$export_path}

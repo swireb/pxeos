@@ -6,7 +6,8 @@
 # It is assumed that at most 1 extended partition will exist,
 # with any number of logical partitions.
 # Requires the sfdisk tool.
-# Assumes that sfdisk's "unit: sectors" means 512 byte sectors.
+# sfdisk offsets are expressed in the disk's logical-sector unit.  Never
+# assume 512-byte sectors: 512e/4Kn devices need explicit conversion below.
 #
 # $1 is the name of the disk drive
 # $2 is name of file to save to.
@@ -15,8 +16,7 @@ saveSfdiskPartitions() {
     local file="$2"
     [[ -z $disk ]] && handleError "No disk passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $file ]] && handleError "No file to save to (${FUNCNAME[0]})\n   Args Passed: $*"
-    flock $disk sfdisk -d $disk 2>/dev/null > $file
-    [[ ! $? -eq 0 ]] && majorDebugEcho "sfdisk failed in (${FUNCNAME[0]})"
+    flock "$disk" sfdisk -d "$disk" > "$file" 2>/dev/null || handleError "Failed to dump partition table (${FUNCNAME[0]})"
 }
 # $1 is the name of the disk drive
 # $2 is name of file to restore from
@@ -51,8 +51,9 @@ restoreUUIDInformation() {
         partitionIsSwap "$part"
         getPartitionNumber "$part"
         [[ $is_swap -gt 0 ]] && continue
-        partuuid=$(awk -F[,\ ] "match(\$0, /${part_number} : start=.*uuid=([A-Za-z0-9-]+)[,]?.*$/, type){printf(\"%s:%s\", $part_number, tolower(type[1]))}" $file)
-        parttype=$(awk -F[,\ ] "match(\$0, /${part_number} : start=.*type=([A-Za-z0-9-]+)[,]?.*$/, type){printf(\"%s:%s\", $part_number, tolower(type[1]))}" $file)
+        # Do not let partition 1 match the prefix of partition 10, 11, ... .
+        partuuid=$(awk -F[,\ ] "match(\$0, /[^0-9]${part_number} : start=.*uuid=([A-Za-z0-9-]+)[,]?.*$/, type){printf(\"%s:%s\", $part_number, tolower(type[1]))}" "$file")
+        parttype=$(awk -F[,\ ] "match(\$0, /[^0-9]${part_number} : start=.*type=([A-Za-z0-9-]+)[,]?.*$/, type){printf(\"%s:%s\", $part_number, tolower(type[1]))}" "$file")
         dots "Partition type being set to"
         echo $parttype
         debugPause
@@ -80,8 +81,7 @@ applySfdiskPartitions() {
     local file="$2"
     [[ -z $disk ]] && handleError "No disk passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $file ]] && handleError "No file to receive from passed (${FUNCNAME[0]})\n   Args Passed: $*"
-    flock $disk sfdisk $disk < $file >/dev/null 2>&1
-    [[ ! $? -eq 0 ]] && majorDebugEcho "sfdisk failed in (${FUNCNAME[0]})"
+    flock "$disk" sfdisk "$disk" < "$file" >/dev/null 2>&1 || handleError "Failed to apply partition table (${FUNCNAME[0]})"
 }
 # $1 is the name of the disk drive
 # $2 is name of file to load from.
@@ -91,8 +91,7 @@ restoreSfdiskPartitions() {
     [[ -z $disk ]] && handleError "No disk passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $file ]] && handleError "No file to receive from passed (${FUNCNAME[0]})\n   Args Passed: $*"
     applySfdiskPartitions "$disk" "$file"
-    flock $disk fdisk $disk < /usr/share/pxeos/lib/EOFRESTOREPART >/dev/null 2>&1
-    [[ ! $? -eq 0 ]] && majorDebugEcho "fdisk failed in (${FUNCNAME[0]})"
+    flock "$disk" fdisk "$disk" < /usr/share/pxeos/lib/EOFRESTOREPART >/dev/null 2>&1 || handleError "Failed to restore partition table (${FUNCNAME[0]})"
 }
 # $1 is the name of the disk drive
 hasExtendedPartition() {
@@ -355,7 +354,7 @@ makeSwapSystem() {
     debugPause
 }
 # $1 is the partition device (e.g. /dev/sda1)
-# $2 is the new desired size in 1024 (1k) blocks
+# $2 is the new desired size in bytes.  sfdisk always consumes logical sectors.
 # $3 is the image path (e.g. /net/dev/foo)
 resizeSfdiskPartition() {
     local part="$1"
@@ -370,7 +369,7 @@ resizeSfdiskPartition() {
     local tmp_file2="/tmp/sfdisk2.$$"
     rm -rf /tmp/sfdisk{,2}.*
     saveSfdiskPartitions "$disk" "$tmp_file"
-    processSfdisk "$tmp_file" resize "$part" "$size" > "$tmp_file2"
+    processSfdisk "$tmp_file" resize "$part" "$size" > "$tmp_file2" || handleError "PXEOS_STAGE=partition_resize CODE=PROCESS_SFDISK_FAILED REASON=unable_to_generate_partition_table"
     if [[ $ismajordebug -gt 0 ]]; then
         echo "Debug"
         majorDebugEcho "Trying to fill the disk with these partitions:"
@@ -394,7 +393,9 @@ fillSfdiskWithPartitions() {
     [[ -z $disk ]] && handleError "No disk passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $file ]] && handleError "No file to use passed (${FUNCNAME[0]})\n   Args Passed: $*"
     rm -rf /tmp/sfdisk{1,2}.*
-    local disk_size=$(blockdev --getsz $disk)
+    # blockdev --getsz is always measured in 512-byte units; processSfdisk
+    # converts it to the target device's logical-sector units.
+    local disk_size=$(blockdev --getsz "$disk")
     #local tmp_file1="/tmp/sfdisk1.$$"
     local tmp_file2="/tmp/sfdisk2.$$"
     #processSfdisk "$minf" move "$disk" "$disk_size" "$fixed" > "$tmp_file1"
@@ -414,7 +415,8 @@ fillSfdiskWithPartitions() {
         cat $tmp_file2
         majorDebugPause
     fi
-    [[ $status -eq 0 ]] && applySfdiskPartitions "$disk" "$tmp_file2"
+    [[ $status -eq 0 ]] || handleError "PXEOS_STAGE=partition_layout CODE=FILL_ENGINE_FAILED REASON=invalid_or_unsafe_partition_layout"
+    applySfdiskPartitions "$disk" "$tmp_file2"
     runPartprobe "$disk"
     rm -f $tmp_file2
     majorDebugEcho "Applied the preceding table."
@@ -437,7 +439,7 @@ fillSfdiskWithPartitions() {
 #	foo.sfdisk = sfdisk -d output
 #	resize = action
 #	/dev/sda1 = partition to modify
-#	100000 = 1024 byte blocks size to make it
+#	100000 = requested size in bytes
 #	output: new sfdisk -d like output
 #
 # processSfdisk foo.sfdisk move /dev/sda1 100000
@@ -470,12 +472,22 @@ processSfdisk() {
     local size="$4"
     local fixed="$5"
     local orig="$6"
-    local sectorsize=512
+    local logical_sector_size=512
     [[ -z $data ]] && handleError "No data passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $action ]] && handleError "No action passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $target ]] && handleError "Device (disk or partition) not passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $size ]] && handleError "No desired size passed (${FUNCNAME[0]})\n   Args Passed: $*"
-    local disk_size=$(blockdev --getsz ${disk})
+    local disk=""
+    if [[ $action == resize || $action == move ]]; then
+        getDiskFromPartition "$target"
+    else
+        disk="$target"
+    fi
+    [[ -z $disk ]] && handleError "Unable to determine disk for sfdisk processing (${FUNCNAME[0]})"
+    logical_sector_size=$(blockdev --getss "$disk") || handleError "PXEOS_STAGE=partition_layout CODE=LOGICAL_SECTOR_QUERY_FAILED REASON=unable_to_read_logical_sector_size"
+    [[ $logical_sector_size =~ ^[0-9]+$ && $logical_sector_size -gt 0 ]] || handleError "PXEOS_STAGE=partition_layout CODE=INVALID_LOGICAL_SECTOR_SIZE REASON=$logical_sector_size"
+    # --getsz is fixed at 512-byte units.  Convert before passing it to sfdisk/AWK.
+    local disk_size=$(( $(blockdev --getsz "$disk") * 512 / logical_sector_size ))
     local minstart=$(awk -F'[ ,]+' '/start/{if ($4) print $4}' $data | sort -n | head -1)
     local chunksize=""
     getPartBlockSize "$disk" "chunksize"
@@ -483,18 +495,22 @@ processSfdisk() {
         [1-2])
             [[ -z $minstart ]] && {
                 minstart=63
-                chunksize=$sectorsize
+                chunksize=$((512 * 512 / logical_sector_size))
             }
             ;;
     esac
-    local awkArgs="-v SECTOR_SIZE=$sectorsize -v CHUNK_SIZE=$chunksize -v MIN_START=$minstart"
+    # Keep 256 KiB alignment independent of the target logical-sector size.
+    local sectorsize=$((512 * 512 / logical_sector_size))
+    [[ $sectorsize -gt 0 ]] || sectorsize=1
+    [[ -z $chunksize ]] && chunksize=$logical_sector_size
+    local awkArgs="-v SECTOR_SIZE=$sectorsize -v LOGICAL_SECTOR_SIZE=$logical_sector_size -v CHUNK_SIZE=$chunksize -v MIN_START=$minstart"
     #local awkArgs="-v SECTOR_SIZE=$chunksize -v CHUNK_SIZE=$chunksize -v MIN_START=$minstart"
     awkArgs="$awkArgs -v action=$action -v target=$target -v sizePos=$size"
     awkArgs="$awkArgs -v diskSize=$disk_size"
     [[ -n $fixed ]] && awkArgs="$awkArgs -v fixedList=$fixed"
     # process with external awk script
     if [[ -r $data ]]; then
-        /usr/share/pxeos/lib/procsfdisk.awk $awkArgs $data $orig 
+        /usr/share/pxeos/lib/procsfdisk.awk $awkArgs "$data" $orig
     else 
         /usr/share/pxeos/lib/procsfdisk.awk $awkArgs $orig
     fi

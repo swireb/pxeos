@@ -7,7 +7,7 @@ REG_LOCAL_MACHINE_7="/ntfs/Windows/System32/config/SYSTEM"
 [[ -z $ismajordebug ]] && ismajordebug=0
 rootpxe_kernel_key_allowed() {
     case "$1" in
-        web|pxeapi|taskid|task_token|token|mac|type|img|imgpath|osid|imgType|imgPartitionType|imgFormat|PIGZ_COMP|storage|storageip|storage_server|storage_export|storage_share|export_path|protocol|hostName|shutdown|mc|pct|capone|nombr|fdrive|mode|boottype|deployed|isdebug|ismajordebug|chkdsk|hostearly|keymap) return 0 ;;
+        web|pxeapi|taskid|task_token|token|mac|type|img|imgpath|osid|imgType|imgPartitionType|imgFormat|PIGZ_COMP|storage|storageip|storage_server|storage_export|storage_share|export_path|protocol|hostName|changeHostname|shutdown|mc|pct|capone|nombr|fdrive|mode|boottype|deployed|isdebug|ismajordebug|chkdsk|keymap) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -87,6 +87,210 @@ rootpxe_prepare_storage_layout() {
     probe=/storage/.rootpxe-write-probe.$$
     : > "$probe" && rm -f "$probe"
 }
+
+# Captured n-type images carry a compact, canonical partition fact record.
+# It is generated only after all image writers and finalization succeeded.
+rootpxe_build_original_schema() {
+    local disk="$1" capture_path="$2" original minimum
+    original="$capture_path/d1.partitions"
+    minimum="$capture_path/d1.minimum.partitions"
+    local logical physical disk_bytes parts_file min_file facts_file schema_table
+    [[ -r $original ]] || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    logical=$(blockdev --getss "$disk" 2>/dev/null) || return 1
+    physical=$(blockdev --getpbsz "$disk" 2>/dev/null || printf '%s' "$logical")
+    disk_bytes=$(blockdev --getsize64 "$disk" 2>/dev/null) || return 1
+    [[ $logical =~ ^[0-9]+$ && $physical =~ ^[0-9]+$ && $disk_bytes =~ ^[0-9]+$ ]] || return 1
+    schema_table=$(awk '/^label:/{print tolower($2); exit}' "$original")
+    [[ $schema_table == dos ]] && schema_table=mbr
+    # First-generation deploymentLayout cannot safely rebuild an EBR chain.
+    # A logical DOS partition would otherwise look like ordinary data after
+    # the extended container is omitted.  Fail capture before success/finish
+    # so no ambiguous n-type Schema is persisted.
+    if [[ $schema_table == mbr ]] && awk '
+        /start=/ {
+          dev=$1; n=dev; sub(/^.*[^0-9]/,"",n)
+          split($0,a,","); type=a[3]; sub(/.*(type|Id)=[[:space:]]*/,"",type)
+          lower=tolower(type)
+          if ((n + 0) >= 5 || lower=="5" || lower=="f" || lower=="0x5" || lower=="0xf") found=1
+        }
+        END { exit(found ? 0 : 1) }' "$original"; then
+        return 1
+    fi
+    parts_file=$(mktemp /tmp/rootpxe-schema-parts.XXXXXX) || return 1
+    min_file=$(mktemp /tmp/rootpxe-schema-min.XXXXXX) || { rm -f "$parts_file"; return 1; }
+    facts_file=$(mktemp /tmp/rootpxe-schema-facts.XXXXXX) || { rm -f "$parts_file" "$min_file"; return 1; }
+    chmod 600 "$parts_file" "$min_file" "$facts_file"
+    awk -v image="$capture_path" -v disk="$disk" '
+        /^label:/{label=$2} /^sector-size:/{sector=$2}
+        /start=/ {
+          dev=$1; n=dev; sub(/^.*[^0-9]/,"",n)
+          split($0,a,","); start=a[1]; sub(/.*start=[[:space:]]*/,"",start)
+          size=a[2]; sub(/.*size=[[:space:]]*/,"",size)
+          type=a[3]; sub(/.*(type|Id)=[[:space:]]*/,"",type)
+          lower=tolower(type)
+          # DOS extended entries are EBR containers, not image payloads. Do
+          # not turn them into a deployable partition fact.
+          if (lower=="5" || lower=="f" || lower=="0x5" || lower=="0xf") next
+          flags=(index($0,"bootable") ? "boot" : "")
+          artifact=image "/d1p" n ".img"
+          printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", n,start,size,type,label,artifact,flags
+        }' "$original" >"$parts_file" || { rm -f "$parts_file" "$min_file"; return 1; }
+    while IFS=$'\t' read -r part_number part_start part_size part_type part_label artifact flags; do
+        local part_path fs uuid partuuid
+        if [[ $disk == *[0-9] ]]; then part_path="${disk}p${part_number}"; else part_path="${disk}${part_number}"; fi
+        fs=$(blkid -s TYPE -o value "$part_path" 2>/dev/null | tr -d '\r\n')
+        uuid=$(blkid -s UUID -o value "$part_path" 2>/dev/null | tr -d '\r\n')
+        partuuid=$(blkid -s PARTUUID -o value "$part_path" 2>/dev/null | tr -d '\r\n')
+        [[ $fs != *$'\t'* && $uuid != *$'\t'* && $partuuid != *$'\t'* ]] || { rm -f "$parts_file" "$min_file" "$facts_file"; return 1; }
+        # FOG/PXEOS preserves swap UUID data separately in d1.original.swapuuids
+        # and does not create d1pN.img. It is a protected fact, not a missing
+        # payload error.
+        [[ $fs == swap || -f $artifact || -f "${artifact}.000" ]] || { rm -f "$parts_file" "$min_file" "$facts_file"; return 1; }
+        printf '%s\t%s\t%s\t%s\t%s\n' "$part_number" "$fs" "$uuid" "$partuuid" "$flags" >>"$facts_file"
+    done <"$parts_file"
+    if [[ -r $minimum ]]; then
+        awk '/start=/ { dev=$1; n=dev; sub(/^.*[^0-9]/,"",n); split($0,a,","); size=a[2]; sub(/.*size=[[:space:]]*/,"",size); print n "\t" size }' "$minimum" >"$min_file"
+    fi
+    rootpxe_original_schema_file=$(mktemp /tmp/rootpxe-original-schema.XXXXXX) || { rm -f "$parts_file" "$min_file" "$facts_file"; return 1; }
+    chmod 600 "$rootpxe_original_schema_file"
+    jq -n --arg table "$schema_table" \
+        --argjson disk "$disk_bytes" --argjson logical "$logical" --argjson physical "$physical" \
+        --rawfile rows "$parts_file" --rawfile mins "$min_file" --rawfile facts "$facts_file" '
+          def minmap: ($mins | split("\n") | map(select(length>0)|split("\t")|{key:.[0],value:(.[1]|tonumber)}) | from_entries);
+          def factmap: ($facts | split("\n") | map(select(length>0)|split("\t")|{key:.[0],value:{fs:.[1],uuid:.[2],partuuid:.[3],flags:(.[4]|split(",")|map(select(length>0)))}}) | from_entries);
+          def role($type;$flags;$fs): if $fs == "swap" then "swap"
+             elif (($type|ascii_downcase) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" or ($type|ascii_downcase) == "ef" or ($type|ascii_downcase) == "0xef") then "efi"
+             elif ($type|ascii_downcase) == "e3c9e316-0b5c-4db8-817d-f92df00215ae" then "msr"
+             elif (($type|ascii_downcase) == "de94bba4-06d1-4d40-a16a-bfd50179d6ac" or ($type|ascii_downcase) == "27" or ($type|ascii_downcase) == "0x27") then "recovery"
+             elif ($type|ascii_downcase) == "21686148-6449-6e6f-744e-656564454649" or ($flags|index("boot")) then "boot"
+             elif (($type|ascii_downcase) == "e6d6d379-f507-44c2-a23c-238f2a3df928" or ($type|ascii_downcase) == "8e" or ($type|ascii_downcase) == "0x8e") then "lvm_pv"
+             else "data" end;
+          (minmap) as $min | (factmap) as $facts |
+          ($rows|split("\n")|map(select(length>0)|split("\t")|
+            . as $row | ($facts[$row[0]] // {fs:"",uuid:"",partuuid:"",flags:[]}) as $fact |
+            (role($row[3];$fact.flags;$fact.fs)) as $role |
+            {number:($row[0]|tonumber),startSectors:($row[1]|tonumber),originalSectors:($row[2]|tonumber),minSectors:($min[$row[0]] // ($row[2]|tonumber)),typeGuid:$row[3],flags:$fact.flags,role:$role,resizable:($role == "data" and ($fact.fs|length) > 0),fs:$fact.fs,uuid:$fact.uuid,partuuid:$fact.partuuid,artifact:(if $role == "swap" then "" else ($row[5]|split("/")|last) end)})) as $parts |
+          {version:1,partitionTable:$table,originalDiskBytes:$disk,logicalSectorBytes:$logical,physicalSectorBytes:$physical,minDeployBytes:([$parts[]|(.startSectors + .minSectors)*$logical]|max),partitions:$parts}' >"$rootpxe_original_schema_file" || { rm -f "$parts_file" "$min_file" "$facts_file" "$rootpxe_original_schema_file"; return 1; }
+    rm -f "$parts_file" "$min_file" "$facts_file"
+    jq -e '
+      .version == 1 and (.partitionTable == "gpt" or .partitionTable == "dos" or .partitionTable == "mbr") and
+      (.logicalSectorBytes|type == "number" and . > 0) and
+      (.partitions|type == "array" and length > 0) and
+      ([.partitions[].number] as $numbers | ($numbers | unique | length) == ($numbers | length)) and
+      ([.partitions[] | select(.startSectors < 0 or .originalSectors <= 0 or .minSectors <= 0 or (.startSectors + .originalSectors) * .logicalSectorBytes > .originalDiskBytes)] | length == 0)' "$rootpxe_original_schema_file" >/dev/null || { rm -f "$rootpxe_original_schema_file"; return 1; }
+    export rootpxe_original_schema_file
+}
+
+rootpxe_cleanup_task_json() {
+    rm -f -- "${deploymentLayoutFile:-}" "${originalSchemaFile:-}" "${rootpxe_original_schema_file:-}"
+    unset deploymentLayoutFile originalSchemaFile rootpxe_original_schema_file
+}
+
+rootpxe_cleanup_session() {
+    rootpxe_cleanup_smb_credentials
+    rootpxe_cleanup_task_json
+}
+
+# Resolve a task snapshot only; editing an image default can never alter this
+# file. Percentage and remaining space use the deployable data area after
+# front/end reservations; remaining is rounded down to 256 KiB so it cannot
+# grow beyond the verified target boundary.
+rootpxe_validate_deployment_layout() {
+    local disk="$1" schema_file="$2" layout_file="$3" schema_logical target_bytes target_sectors source_hash layout_hash
+    [[ -r $schema_file && -r $layout_file ]] || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    # MBR extended containers require EBR-chain reconstruction.  Do not turn
+    # them into ordinary resizable partitions until a dedicated layout engine
+    # exists; legacy no-snapshot deployment remains available.
+    jq -e '([.partitions[] | select(.role == "other")] | length) == 0' "$schema_file" >/dev/null 2>&1 || return 1
+    # Schema sectors are expressed in the source image's logical sector unit.
+    # Target 4Kn/512e geometry must therefore be converted through bytes, not
+    # by incorrectly substituting target --getss into source-sector fields.
+    schema_logical=$(jq -er '.logicalSectorBytes' "$schema_file" 2>/dev/null) || return 1
+    target_bytes=$(blockdev --getsize64 "$disk" 2>/dev/null) || return 1
+    [[ $schema_logical =~ ^[1-9][0-9]*$ && $target_bytes =~ ^[1-9][0-9]*$ ]] || return 1
+    (( target_bytes % schema_logical == 0 )) || return 1
+    target_sectors=$(( target_bytes / schema_logical ))
+    source_hash=$(jq -cS . "$schema_file" | sha256sum | awk '{print $1}') || return 1
+    [[ -z ${schemaHash:-} || $schemaHash == "$source_hash" ]] || return 1
+    [[ ${schemaRevision:-} =~ ^[1-9][0-9]*$ ]] || return 1
+    layout_hash=$(jq -er '.schemaHash // empty' "$layout_file" 2>/dev/null) || return 1
+    [[ $layout_hash == "$schemaHash" ]] || return 1
+    rootpxe_resolved_layout_file=$(mktemp /tmp/rootpxe-resolved-layout.XXXXXX) || return 1
+    chmod 600 "$rootpxe_resolved_layout_file"
+    jq -n --slurpfile schema "$schema_file" --slurpfile layout "$layout_file" \
+        --argjson target "$target_sectors" --argjson logical "$schema_logical" '
+          def align_up($n;$a): ((($n + $a - 1) / $a)|floor) * $a;
+          def align_down($n;$a): (($n / $a)|floor) * $a;
+          ($schema[0]) as $s | ($layout[0]) as $l |
+          ($s.partitions|sort_by(.number)) as $sp |
+          ($l.partitions // $l) as $lp |
+          if ($lp|type) != "array" then error("layout partitions missing") else . end |
+          if ([ $lp[].number ]|unique|length) != ($lp|length) then error("duplicate layout number") else . end |
+          if ([ $sp[].number ]|sort) != ([ $lp[].number ]|sort) then error("layout identity mismatch") else . end |
+          ($sp|map(.startSectors)|min) as $front |
+          (if $s.partitionTable == "gpt" then $front else 0 end) as $back |
+          ($target - $front - $back) as $available |
+          (262144 / $logical | floor | if . < 1 then 1 else . end) as $alignment |
+          if $available <= 0 then error("target too small") else . end |
+          [ $sp[] as $p | ($lp[]|select(.number == $p.number)) as $o |
+            ($o.mode // "original") as $mode |
+            if (($mode|type) != "string" or ($mode|IN("original","fixed","percentage","remaining")|not)) then error("unknown mode") else . end |
+            if $mode == "fixed" and ((($o.fixedBytes // null)|type) != "number" or ($o.fixedBytes <= 0) or ($o|has("percentage"))) then error("invalid fixed mode") else . end |
+            if $mode == "percentage" and ((($o.percentage // null)|type) != "number" or ($o|has("fixedBytes"))) then error("invalid percentage mode") else . end |
+            if ($mode == "original" or $mode == "remaining") and (($o|has("fixedBytes")) or ($o|has("percentage"))) then error("unexpected mode field") else . end |
+            if (($p.role|IN("efi","msr","boot","recovery")) or $p.resizable != true) and $mode != "original" then error("protected partition changed") else . end |
+            {p:$p,o:$o,mode:$mode} ] as $items |
+          ([ $items[]|select(.mode == "remaining") ]|length) as $remainingCount |
+          if $remainingCount > 1 then error("multiple remaining") else . end |
+          ([ $items[] | select(.mode == "percentage") | (.o.percentage // -1) ] | all(. >= 0 and . <= 100)) as $validPct |
+          if $validPct|not then error("invalid percentage") else . end |
+          ([ $items[] | select(.mode == "percentage") | .o.percentage] | add // 0) as $pctSum |
+          if $pctSum > 100 then error("percentage exceeds 100") else . end |
+          ($items | map(if .mode == "original" then .p.originalSectors elif .mode == "fixed" then align_up(((.o.fixedBytes // 0) / $logical|ceil);$alignment) elif .mode == "percentage" then align_down(($available * .o.percentage / 100|floor);$alignment) else 0 end)) as $pre |
+          ($pre|add) as $used |
+          if $used > $available then error("target too small") else . end |
+          (if $remainingCount == 1 then align_down(($available-$used);$alignment) else 0 end) as $remaining |
+          reduce range(0;($items|length)) as $i ({cursor:$front,out:[]};
+            ($items[$i]) as $item | ($pre[$i]) as $base |
+            (if $item.mode == "remaining" then $remaining else $base end) as $size |
+            if $size < $item.p.minSectors then error("minimum size violated") else . end |
+            .cursor = align_up(.cursor;$alignment) |
+            .out += [$item.p + {startSectors:.cursor,resolvedSectors:$size}] |
+            .cursor += $size) |
+          if .cursor > ($target-$back) then error("layout exceeds target") else .out end' >"$rootpxe_resolved_layout_file" || { rm -f "$rootpxe_resolved_layout_file"; return 1; }
+    export rootpxe_resolved_layout_file
+}
+
+rootpxe_apply_deployment_layout() {
+    local disk="$1" template="$2" map output verify expected_numbers actual_numbers
+    [[ -r $rootpxe_resolved_layout_file && -r $template ]] || return 1
+    map=$(mktemp /tmp/rootpxe-layout-map.XXXXXX) || return 1
+    output=$(mktemp /tmp/rootpxe-layout-sfdisk.XXXXXX) || { rm -f "$map"; return 1; }
+    chmod 600 "$map" "$output"
+    jq -r '.[] | [.number,.startSectors,.resolvedSectors] | @tsv' "$rootpxe_resolved_layout_file" >"$map" || { rm -f "$map" "$output"; return 1; }
+    expected_numbers=$(awk -F'\t' '{print $1}' "$map" | sort -n | tr '\n' ' ')
+    actual_numbers=$(awk '/start=/ {n=$1; sub(/^.*[^0-9]/,"",n); print n}' "$template" | sort -n | tr '\n' ' ')
+    [[ $expected_numbers == "$actual_numbers" ]] || { rm -f "$map" "$output"; return 1; }
+    awk -v map="$map" '
+      BEGIN { while ((getline < map) > 0) { split($0,a,"\t"); starts[a[1]]=a[2]; sizes[a[1]]=a[3] } close(map) }
+      /start=/ { line=$0; dev=$1; n=dev; sub(/^.*[^0-9]/,"",n); if (!(n in starts)) exit 20;
+        sub(/start=[[:space:]]*[0-9]+/, "start=" sprintf("%12d", starts[n]), line);
+        sub(/size=[[:space:]]*[0-9]+/, "size=" sprintf("%12d", sizes[n]), line); print line; next }
+      { print }' "$template" >"$output" || { rm -f "$map" "$output"; return 1; }
+    applySfdiskPartitions "$disk" "$output"
+    runPartprobe "$disk"
+    verify=$(mktemp /tmp/rootpxe-layout-verify.XXXXXX) || { rm -f "$map" "$output"; return 1; }
+    saveSfdiskPartitions "$disk" "$verify"
+    actual_numbers=$(awk '/start=/ {n=$1; sub(/^.*[^0-9]/,"",n); print n}' "$verify" | sort -n | tr '\n' ' ')
+    [[ $expected_numbers == "$actual_numbers" ]] || { rm -f "$map" "$output" "$verify"; return 1; }
+    awk -v map="$map" '
+      BEGIN { ok=1; while ((getline < map) > 0) { split($0,a,"\t"); starts[a[1]]=a[2]; sizes[a[1]]=a[3] } close(map) }
+      /start=/ { dev=$1; n=dev; sub(/^.*[^0-9]/,"",n); split($0,a,","); st=a[1]; sub(/.*start=[[:space:]]*/,"",st); sz=a[2]; sub(/.*size=[[:space:]]*/,"",sz); if ((n in starts) && (st != starts[n] || sz != sizes[n])) ok=0 }
+      END { exit(ok ? 0 : 1) }' "$verify" || { rm -f "$map" "$output" "$verify"; return 1; }
+    rm -f "$map" "$output" "$verify"
+}
 rootpxe_clear_smb_plaintext() { unset smb_username smb_password smb_domain; }
 rootpxe_cleanup_smb_credentials() { [[ -n ${smb_credentials_file:-} ]] && rm -f -- "$smb_credentials_file"; smb_credentials_file=""; rootpxe_clear_smb_plaintext; }
 
@@ -127,27 +331,46 @@ rootpxe_run_postinit() {
 # The server owns the cancellation fence.  This must run before any hook or
 # imaging action because a custom hook may itself write a local disk.
 rootpxe_request_disk_permit() {
+    rootpxe_request_disk_permit_for_target "${1:-}" "${2:-capture_read_write}"
+}
+
+# Permit is bound to a stable target disk identity and the planned destructive
+# operation.  A successful HTTP response alone is never sufficient.
+rootpxe_request_disk_permit_for_target() {
+    local target_id="$1" operation="$2"
     # Return values are intentionally distinct:
     #   0 granted; 10 task deleted/rejected; 11 transport/server uncertainty.
     # A rejection is an administrator action, not an execution failure, so it
     # must never enter handleError and create a new PXEOS error report.
     rootpxe_require_task_context || return 10
-    local api="${pxeapi:-$web}" response body http_code
+    local api="${pxeapi:-$web}" response body http_code granted echoed_target echoed_operation
     [[ -n $api ]] || return 10
     response=$(curl -Lks --connect-timeout 10 --max-time 30 \
         --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
-        --data-urlencode "mac=$mac" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
+        --data-urlencode "mac=$mac" --data-urlencode "targetId=$target_id" \
+        --data-urlencode "operation=$operation" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
     http_code=${response##*$'\n'}
     body=${response%$'\n'*}
-    [[ $http_code =~ ^2[0-9][0-9]$ && $body == *'"granted":true'* ]] && return 0
+    if [[ $http_code =~ ^2[0-9][0-9]$ ]] && command -v jq >/dev/null 2>&1; then
+        granted=$(jq -er '.granted // false' <<<"$body" 2>/dev/null) || return 11
+        echoed_target=$(jq -er '.targetId // empty' <<<"$body" 2>/dev/null) || return 11
+        echoed_operation=$(jq -er '.operation // empty' <<<"$body" 2>/dev/null) || return 11
+        if [[ $granted == true && $echoed_target == "$target_id" && $echoed_operation == "$operation" ]]; then
+            rootpxe_disk_permit_granted=yes
+            rootpxe_disk_permit_target_id="$echoed_target"
+            rootpxe_disk_permit_operation="$echoed_operation"
+            export rootpxe_disk_permit_granted rootpxe_disk_permit_target_id rootpxe_disk_permit_operation
+            return 0
+        fi
+    fi
     [[ $http_code =~ ^4[0-9][0-9]$ || $body == *'"granted":false'* ]] && return 10
     return 11
 }
 
 rootpxe_wait_for_disk_permit() {
-    local result
+    local target_id="${1:-}" operation="${2:-capture_read_write}" result
     while :; do
-        rootpxe_request_disk_permit
+        rootpxe_request_disk_permit_for_target "$target_id" "$operation"
         result=$?
         case $result in
             0) return 0 ;;
@@ -232,7 +455,8 @@ rootpxe_finalize_capture() {
     fi
     capture_size_bytes=$(rootpxe_directory_size_bytes "$target")
     [[ $capture_size_bytes =~ ^[1-9][0-9]*$ ]] || return 1
-    export capture_size_bytes
+    rootpxe_final_capture_path="$target"
+    export capture_size_bytes rootpxe_final_capture_path
 }
 
 rootpxe_clear_capture_marker() {
@@ -257,6 +481,135 @@ rootpxe_stage() {
         --data-urlencode "status=running" \
         --data-urlencode "message=$msg" \
         "${api}stage" >/dev/null 2>&1 || true
+}
+
+# NVMe sector-size alignment is deliberately fail-closed.  The server must
+# inject these values only after its disk-permit decision; they must never be
+# logged or accepted from an unauthenticated source:
+#   rootpxe_disk_permit_granted=yes
+#   rootpxe_disk_permit_target_id=<ID_WWN or ID_SERIAL>
+#   rootpxe_disk_permit_operation=nvme_format+deploy_write
+rootpxe_disk_stable_identity() {
+    local disk="$1" property
+    property=$(udevadm info --query=property --name="$disk" 2>/dev/null) || return 1
+    property=$(printf '%s\n' "$property" | awk -F= '/^ID_WWN=/{print $2; exit} /^ID_SERIAL=/{print $2; exit}')
+    [[ -n $property ]] || return 1
+    printf '%s\n' "$property"
+}
+
+rootpxe_nvme_permit_matches() {
+    local stable_id="$1"
+    [[ ${rootpxe_disk_permit_granted:-} == yes ]] || return 1
+    [[ ${rootpxe_disk_permit_target_id:-} == "$stable_id" ]] || return 1
+    [[ ${rootpxe_disk_permit_operation:-} == nvme_format+deploy_write ]] || return 1
+}
+
+rootpxe_nvme_find_metadata_free_lbaf() {
+    local disk="$1" wanted_sector_size="$2"
+    nvme id-ns "$disk" 2>/dev/null | awk -v wanted="$wanted_sector_size" '
+        match($0, /lbaf[[:space:]]+([0-9]+)[[:space:]]*:[[:space:]]*ms:([0-9]+)[[:space:]]+lbads:([0-9]+)/, fields) {
+            bytes = 1
+            for (i = 0; i < fields[3]; i++) bytes *= 2
+            if (fields[2] == 0 && bytes == wanted) { print fields[1]; exit }
+        }'
+}
+
+rootpxe_nvme_wait_for_cancel() {
+    local seconds="${PXEOS_NVME_FORMAT_COUNTDOWN_SEC:-60}" reply="" remaining
+    [[ $seconds =~ ^[0-9]+$ && $seconds -le 60 ]] || seconds=60
+    echo "WARNING: NVMe logical-sector alignment will erase the whole namespace in ${seconds}s; press c to cancel."
+    for ((remaining=seconds; remaining>0; remaining--)); do
+        if read -r -t 1 -n 1 reply; then
+            case $reply in
+                [Cc]) rootpxe_stage nvme_format_cancelled 'code=NVME_FORMAT_CANCELLED reason=operator_cancelled' || true ; return 1 ;;
+            esac
+        fi
+    done
+    return 0
+}
+
+rootpxe_nvme_wait_for_reenumeration() {
+    local expected_id="$1" wanted_sector_size="$2" disk candidate actual_id actual_sector
+    local timeout="${PXEOS_NVME_REENUM_TIMEOUT_SEC:-30}" elapsed=0
+    [[ $timeout =~ ^[0-9]+$ && $timeout -le 120 ]] || timeout=30
+    udevadm settle --timeout="$timeout" >/dev/null 2>&1 || true
+    while (( elapsed <= timeout )); do
+        for candidate in ${PXEOS_NVME_REENUM_DEVICE:-/dev/nvme*n*}; do
+            [[ -b $candidate || -n ${PXEOS_NVME_REENUM_DEVICE:-} ]] || continue
+            actual_id=$(rootpxe_disk_stable_identity "$candidate") || continue
+            [[ $actual_id == "$expected_id" ]] || continue
+            actual_sector=$(blockdev --getss "$candidate" 2>/dev/null) || continue
+            [[ $actual_sector == "$wanted_sector_size" ]] || return 2
+            rootpxe_nvme_reformatted_disk="$candidate"
+            return 0
+        done
+        if (( elapsed == timeout )); then
+            break
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
+
+rootpxe_nvme_reformat_to_sector_size() {
+    local disk="$1" wanted_sector_size="$2" expected_id="$3" stable_id lbaf wait_result source_sector
+    [[ $(basename "$disk") =~ ^nvme[0-9]+n[0-9]+$ ]] || return 1
+    [[ $wanted_sector_size =~ ^[0-9]+$ && $wanted_sector_size -gt 0 ]] || return 1
+    stable_id=$(rootpxe_disk_stable_identity "$disk") || return 1
+    [[ $stable_id == "$expected_id" ]] || return 1
+    rootpxe_nvme_permit_matches "$stable_id" || return 1
+    lbaf=$(rootpxe_nvme_find_metadata_free_lbaf "$disk" "$wanted_sector_size")
+    [[ $lbaf =~ ^[0-9]+$ ]] || return 1
+    rootpxe_nvme_wait_for_cancel || return 1
+    source_sector=$(blockdev --getss "$disk" 2>/dev/null) || return 1
+    rootpxe_stage nvme_formatting "code=NVME_FORMAT_STARTED source_sector=$source_sector target_sector=$wanted_sector_size target_id=$stable_id lbaf=$lbaf" || true
+    # From this command onward a disk operation has started and safe abort is no longer possible.
+    nvme format "$disk" --lbaf="$lbaf" --force >/dev/null 2>&1 || {
+        rootpxe_stage nvme_format_failed "code=NVME_FORMAT_FAILED reason=format_command_failed source_sector=$source_sector target_sector=$wanted_sector_size target_id=$stable_id lbaf=$lbaf" || true
+        return 1
+    }
+    rootpxe_nvme_wait_for_reenumeration "$stable_id" "$wanted_sector_size"
+    wait_result=$?
+    case $wait_result in
+        0) rootpxe_stage nvme_format_complete "code=NVME_FORMAT_COMPLETE source_sector=$source_sector target_sector=$wanted_sector_size target_id=$stable_id lbaf=$lbaf" || true ; return 0 ;;
+        2) rootpxe_stage nvme_format_failed "code=NVME_FORMAT_VERIFY_FAILED reason=logical_sector_mismatch source_sector=$source_sector target_sector=$wanted_sector_size target_id=$stable_id lbaf=$lbaf" || true ; return 1 ;;
+        *) rootpxe_stage nvme_format_failed "code=NVME_FORMAT_REENUM_FAILED reason=device_not_reidentified source_sector=$source_sector target_sector=$wanted_sector_size target_id=$stable_id lbaf=$lbaf" || true ; return 1 ;;
+    esac
+}
+
+rootpxe_plan_deploy_disk_operation() {
+    local disk="$1" partition_file="$2" image_sector target_sector target_id candidate_lbaf
+    target_id=$(rootpxe_disk_stable_identity "$disk") || return 1
+    rootpxe_planned_disk_operation=deploy_write
+    if [[ -r $partition_file ]]; then
+        image_sector=$(awk '/^sector-size:/{print $2; exit}' "$partition_file")
+        target_sector=$(blockdev --getss "$disk" 2>/dev/null) || return 1
+        if [[ -n $image_sector && $image_sector != "$target_sector" ]]; then
+            # Never wait for permit while a sector mismatch is already known
+            # to be impossible to resolve.  NVMe must expose a matching
+            # metadata-free LBAF before its destructive permit is requested.
+            [[ $(basename "$disk") =~ ^nvme[0-9]+n[0-9]+$ ]] || return 1
+            candidate_lbaf=$(rootpxe_nvme_find_metadata_free_lbaf "$disk" "$image_sector")
+            [[ $candidate_lbaf =~ ^[0-9]+$ ]] || return 1
+            rootpxe_planned_disk_operation=nvme_format+deploy_write
+        fi
+    fi
+    rootpxe_planned_target_id="$target_id"
+    export rootpxe_planned_disk_operation rootpxe_planned_target_id
+}
+
+# Validate before clearPartitionTables or any other write.  On a matching NVMe
+# LBA format, the externally authorised reformat path may make the disk safe.
+validateImageSectorSize() {
+    local disk="$1" partition_file="$2" image_sector target_sector
+    [[ -r $partition_file ]] || return 0
+    image_sector=$(awk '/^sector-size:/{print $2; exit}' "$partition_file")
+    [[ -z $image_sector ]] && return 0
+    target_sector=$(blockdev --getss "$disk" 2>/dev/null) || handleError "PXEOS_STAGE=sector_validation CODE=TARGET_SECTOR_QUERY_FAILED REASON=unable_to_read_target_sector"
+    [[ $image_sector == "$target_sector" ]] && return 0
+    rootpxe_nvme_reformat_to_sector_size "$disk" "$image_sector" "${rootpxe_disk_permit_target_id:-}" && return 0
+    handleError "PXEOS_STAGE=sector_validation CODE=LOGICAL_SECTOR_MISMATCH REASON=image_${image_sector}_target_${target_sector}"
 }
 # Below Are non parameterized functions
 # These functions will run without any arguments
@@ -1272,13 +1625,351 @@ makeAllSwapSystems() {
     done
     runPartprobe "$disk"
 }
-# Changes the hostname on windows systems
-#
-# $1 = Partition
-changeHostname() {
+# Find the one deployed Windows system volume before making any hostname
+# change.  Recovery partitions can also be NTFS, so filesystem type alone is
+# unsafe.  The fixed SYSTEM hive is proof of a Windows installation; this does
+# not search for arbitrary unattend files.  Return 10 for no candidate and 11
+# for ambiguity so callers report a stable attention reason.
+rootpxe_find_windows_system_partition() {
+    local disk="$1" part candidate="" candidate_count=0
+    [[ -n $disk ]] || return 10
+    mkdir -p /ntfs || return 10
+    getPartitions "$disk"
+    for part in $parts; do
+        fsTypeSetting "$part"
+        [[ $fstype == ntfs ]] || continue
+        umount /ntfs >/dev/null 2>&1 || true
+        ntfs-3g -o ro "$part" /ntfs >/tmp/ntfs-probe-output 2>&1 || continue
+        if [[ -f /ntfs/Windows/System32/config/SYSTEM ]]; then
+            candidate="$part"
+            ((candidate_count++))
+        fi
+        umount /ntfs >/dev/null 2>&1 || true
+    done
+    case $candidate_count in
+        1) printf '%s\n' "$candidate"; return 0 ;;
+        0) return 10 ;;
+        *) return 11 ;;
+    esac
+}
+
+# Returns whether a filesystem type can safely be probed as a Linux root.
+# Probe only known local Linux filesystem types; never fall back to mount -t
+# auto, which could make an arbitrary target partition look like a root.
+rootpxe_linux_root_fstype_supported() {
+    case $1 in
+        ext2|ext3|ext4|xfs|btrfs|f2fs) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+rootpxe_linux_mount_options() {
+    local mode="$1" fstype="$2"
+    case $fstype in
+        xfs) printf '%s,nouuid' "$mode" ;;
+        *) printf '%s' "$mode" ;;
+    esac
+}
+
+# An image may contain symlinks.  Do not let a regular read of os-release
+# follow an absolute or escaping link outside the mounted target root.  Relative
+# /etc/os-release -> ../usr/lib/os-release remains valid when it resolves
+# inside that target root.
+rootpxe_linux_has_safe_os_release() {
+    local mountpoint="$1" path resolved target
+    for path in "$mountpoint/etc/os-release" "$mountpoint/usr/lib/os-release"; do
+        [[ -e $path || -L $path ]] || continue
+        if [[ -L $path ]]; then
+            target=$(readlink "$path" 2>/dev/null) || continue
+            [[ $target != /* ]] || continue
+            resolved=$(readlink -f "$path" 2>/dev/null) || continue
+            case $resolved in
+                "$mountpoint"/*) [[ -f $resolved ]] && return 0 ;;
+            esac
+        elif [[ -f $path ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+rootpxe_linux_paths_safe_for_write() {
+    local mountpoint="$1" path
+    [[ -d "$mountpoint/etc" && ! -L "$mountpoint/etc" ]] || return 1
+    for path in "$mountpoint/etc/hostname" "$mountpoint/etc/hosts"; do
+        [[ ! -L $path ]] || return 1
+        [[ ! -e $path || -f $path ]] || return 1
+    done
+    return 0
+}
+
+rootpxe_linux_probe_root_candidate() {
+    local device="$1" fstype="$2" vg_name="${3:-}" vg_uuid="${4:-}" mountpoint=/linuxroot options candidate=""
+    rootpxe_linux_root_fstype_supported "$fstype" || return 1
+    mkdir -p "$mountpoint" || return 1
+    umount "$mountpoint" >/dev/null 2>&1 || true
+    options=$(rootpxe_linux_mount_options ro "$fstype")
+    mount -t "$fstype" -o "$options" "$device" "$mountpoint" >/tmp/rootpxe-linux-probe-output 2>&1 || return 1
+    if [[ -d "$mountpoint/etc" && ! -L "$mountpoint/etc" ]] && rootpxe_linux_has_safe_os_release "$mountpoint"; then
+        candidate="$device|$fstype|$vg_name|$vg_uuid"
+    fi
+    umount "$mountpoint" >/dev/null 2>&1 || true
+    [[ -n $candidate ]] || return 1
+    printf '%s\n' "$candidate"
+}
+
+rootpxe_linux_validate_vg_target_pvs() {
+    local disk="$1" vg_uuid="$2" pv
+    local target_parts="" all_pvs
+    getPartitions "$disk"
+    [[ -n ${parts:-} ]] || return 1
+    for pv in $parts; do target_parts="$target_parts $pv"; done
+    all_pvs=$(pvs --noheadings -o pv_name,vg_uuid 2>/dev/null | awk -v uuid="$vg_uuid" '$2 == uuid {print $1}')
+    [[ -n $all_pvs ]] || return 1
+    for pv in $all_pvs; do
+        case " $target_parts " in *" $pv "*) ;; *) return 1 ;; esac
+    done
+    return 0
+}
+
+# Emits yes only when this function activated the UUID-selected VG.  An
+# unknown or mixed LV activation state is rejected instead of guessing whether
+# it is safe to deactivate later.
+rootpxe_linux_activate_vg_if_needed() {
+    local disk="$1" vg_name="$2" vg_uuid="$3" active
+    rootpxe_linux_validate_vg_target_pvs "$disk" "$vg_uuid" || return 2
+    active=$(lvs --noheadings -o lv_active --select "vg_uuid=$vg_uuid" "$vg_name" 2>/dev/null | awk 'NF { if (!seen[$1]++) values = values (values ? " " : "") $1 } END { print values }')
+    case $active in
+        inactive|n|no)
+            vgchange -ay --select "vg_uuid=$vg_uuid" "$vg_name" >/tmp/rootpxe-linux-vgchange-output 2>&1 || return 1
+            printf '%s\n' yes
+            ;;
+        active|y|yes) printf '%s\n' no ;;
+        *) return 1 ;;
+    esac
+}
+
+rootpxe_linux_cleanup_selected_vg() {
+    local vg_name="$1" vg_uuid="$2" activated="$3"
+    [[ $activated == yes && -n $vg_name && -n $vg_uuid ]] || return 0
+    vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true
+}
+
+# Finds exactly one Linux root filesystem belonging to the target disk.  For
+# LVM, all PVs of a VG must be target-disk partitions and the VG UUID is used
+# for selection, so a same-name or cross-disk VG cannot be activated blindly.
+# Return 20=no root, 21=ambiguous root, 22=only cross-disk LVM candidates,
+# 23=LVM activation/state failure.  Do not report an activation failure as a
+# cross-disk topology violation.
+rootpxe_find_linux_root_filesystem() {
+    local disk="$1" part fs candidate pv vg_name vg_uuid activation lvs_output lv
+    local target_parts="" seen_vgs="" activated_vgs="" candidates="" cross_disk_lvm=0 lvm_activation_failed=0 rc=20
+    [[ -n $disk ]] || return 20
+    getPartitions "$disk"
+    [[ -n ${parts:-} ]] || return 20
+    for part in $parts; do
+        target_parts="$target_parts $part"
+        fsTypeSetting "$part"
+        fs=${fstype:-}
+        candidate=$(rootpxe_linux_probe_root_candidate "$part" "$fs") || continue
+        candidates="$candidates $candidate"
+    done
+    for part in $parts; do
+        while read -r pv vg_name vg_uuid; do
+            [[ -n $pv && -n $vg_name && -n $vg_uuid ]] || continue
+            [[ $pv == "$part" ]] || continue
+            case " $seen_vgs " in *" $vg_uuid "*) continue ;; esac
+            seen_vgs="$seen_vgs $vg_uuid"
+            activation=$(rootpxe_linux_activate_vg_if_needed "$disk" "$vg_name" "$vg_uuid")
+            case $? in
+                0) ;;
+                2) cross_disk_lvm=1; continue ;;
+                *) lvm_activation_failed=1; continue ;;
+            esac
+            [[ $activation == yes ]] && activated_vgs="$activated_vgs $vg_name|$vg_uuid"
+            lvs_output=$(lvs --noheadings -o lv_path --select "vg_uuid=$vg_uuid" "$vg_name" 2>/dev/null)
+            for lv in $lvs_output; do
+                fs=$(blkid -o value -s TYPE "$lv" 2>/dev/null)
+                candidate=$(rootpxe_linux_probe_root_candidate "$lv" "$fs" "$vg_name" "$vg_uuid") || continue
+                candidates="$candidates $candidate"
+            done
+        done < <(pvs --noheadings -o pv_name,vg_name,vg_uuid "$part" 2>/dev/null)
+    done
+    local candidate_count=0 final_candidate="" activation
+    for candidate in $candidates; do
+        candidate_count=$((candidate_count + 1))
+        final_candidate="$candidate"
+    done
+    case $candidate_count in
+        1) rc=0 ;;
+        0)
+            if [[ $cross_disk_lvm -eq 1 ]]; then rc=22
+            elif [[ $lvm_activation_failed -eq 1 ]]; then rc=23
+            else rc=20
+            fi
+            ;;
+        *) rc=21 ;;
+    esac
+    for activation in $activated_vgs; do
+        vg_name=${activation%%|*}
+        vg_uuid=${activation#*|}
+        vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true
+    done
+    [[ $rc -eq 0 ]] && printf '%s\n' "$final_candidate"
+    return $rc
+}
+
+rootpxe_validate_linux_hostname() {
+    local name="$1"
+    [[ $name =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]
+}
+
+rootpxe_apply_linux_hostname_for_disk() {
+    local disk="$1" root_spec root_device root_fs root_lvm_name root_lvm_uuid root_lvm_activated=no rc mountpoint=/linuxroot options
+    local hostname_path hosts_path old_hostname actual_hostname hosts_tmp expected_hash actual_hash hostname_exists=0
+    [[ ${changeHostname:-false} == true ]] || return 0
+    rootpxe_validate_linux_hostname "${hostName:-}" || handleError "PXEOS_STAGE=customizing_hostname CODE=INVALID_LINUX_HOSTNAME REASON=linux_name_policy"
+    root_spec=$(rootpxe_find_linux_root_filesystem "$disk")
+    rc=$?
+    case $rc in
+        0) ;;
+        20) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_NOT_FOUND" ;;
+        21) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_AMBIGUOUS" ;;
+        22) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_CROSS_DISK_LVM" ;;
+        23) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_LVM_ACTIVATION_FAILED" ;;
+        *) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED" ;;
+    esac
+    root_device=${root_spec%%|*}
+    root_spec=${root_spec#*|}
+    root_fs=${root_spec%%|*}
+    root_spec=${root_spec#*|}
+    root_lvm_name=${root_spec%%|*}
+    root_lvm_uuid=${root_spec#*|}
+    [[ -n $root_device && -n $root_fs && $root_spec == *"|"* ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"
+    if [[ -n $root_lvm_name || -n $root_lvm_uuid ]]; then
+        [[ -n $root_lvm_name && -n $root_lvm_uuid ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"
+        root_lvm_activated=$(rootpxe_linux_activate_vg_if_needed "$disk" "$root_lvm_name" "$root_lvm_uuid")
+        case $? in
+            0) ;;
+            2) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_CROSS_DISK_LVM" ;;
+            *) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_LVM_ACTIVATION_FAILED" ;;
+        esac
+    fi
+    rootpxe_stage customizing_hostname "code=HOSTNAME_STARTED method=linux"
+    mkdir -p "$mountpoint" || handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_MOUNTPOINT_FAILED"
+    umount "$mountpoint" >/dev/null 2>&1 || true
+    options=$(rootpxe_linux_mount_options rw "$root_fs")
+    mount -t "$root_fs" -o "$options" "$root_device" "$mountpoint" >/tmp/rootpxe-linux-mount-output 2>&1 || { rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_MOUNT_FAILED"; }
+    rootpxe_linux_paths_safe_for_write "$mountpoint" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_PATH_UNSAFE"; }
+    hostname_path="$mountpoint/etc/hostname"
+    hosts_path="$mountpoint/etc/hosts"
+    old_hostname=""
+    if [[ -f $hostname_path ]]; then
+        hostname_exists=1
+        old_hostname=$(head -n 1 "$hostname_path" 2>/dev/null | tr -d '\r\n')
+    fi
+    printf '%s\n' "$hostName" >"$hostname_path" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTNAME_WRITE_FAILED"; }
+    if [[ $hostname_exists -eq 0 ]]; then
+        chmod 0644 "$hostname_path" && chown root:root "$hostname_path" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTNAME_MODE_FAILED"; }
+    fi
+    actual_hostname=$(cat "$hostname_path" 2>/dev/null | tr -d '\r\n')
+    [[ $actual_hostname == "$hostName" ]] || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTNAME_READBACK_FAILED"; }
+    if [[ -n $old_hostname && -f $hosts_path ]]; then
+        hosts_tmp=$(mktemp "$mountpoint/etc/.hosts.rootpxe.XXXXXX") || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTS_TEMP_FAILED"; }
+        awk -v old="$old_hostname" -v new="$hostName" '
+            function replace_tokens(prefix, out, token, ch, in_token, i) {
+                out=""; token=""; in_token=0
+                for (i=1; i<=length(prefix); i++) {
+                    ch=substr(prefix, i, 1)
+                    if (ch ~ /[[:space:]]/) {
+                        if (in_token) { out=out ((token == old) ? new : token); token=""; in_token=0 }
+                        out=out ch
+                    } else { token=token ch; in_token=1 }
+                }
+                if (in_token) out=out ((token == old) ? new : token)
+                return out
+            }
+            /^[[:space:]]*#/ { print; next }
+            {
+                hash=index($0, "#")
+                if (hash > 0) { prefix=substr($0, 1, hash - 1); comment=substr($0, hash) }
+                else { prefix=$0; comment="" }
+                print replace_tokens(prefix) comment
+            }
+        ' "$hosts_path" >"$hosts_tmp" || { rm -f "$hosts_tmp"; umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTS_RENDER_FAILED"; }
+        expected_hash=$(sha256sum "$hosts_tmp" | awk '{print $1}')
+        cat "$hosts_tmp" >"$hosts_path" || { rm -f "$hosts_tmp"; umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTS_WRITE_FAILED"; }
+        actual_hash=$(sha256sum "$hosts_path" | awk '{print $1}')
+        rm -f "$hosts_tmp"
+        [[ -n $expected_hash && $expected_hash == "$actual_hash" ]] || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTS_READBACK_FAILED"; }
+    fi
+    umount "$mountpoint" >/dev/null 2>&1 || true
+    rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"
+    rootpxe_stage customizing_hostname "code=HOSTNAME_COMPLETE method=linux"
+}
+
+# Common deploy-time hostname dispatcher.  The task always supplies the latest
+# hostName/changeHostname on each checkin, including a hostname-only retry.
+rootpxe_apply_hostname_for_disk() {
+    case ${osid:-} in
+        50) rootpxe_apply_linux_hostname_for_disk "$1" ;;
+        [1-2]|4|[5-7]|9|10|11) rootpxe_apply_windows_hostname_for_disk "$1" ;;
+        *) return 0 ;;
+    esac
+}
+
+rootpxe_apply_windows_hostname_for_disk() {
+    local disk="$1" system_part rc
+    system_part=$(rootpxe_find_windows_system_partition "$disk")
+    rc=$?
+    case $rc in
+        0) rootpxe_apply_windows_hostname "$system_part" ;;
+        10) handleError "PXEOS_STAGE=customizing_hostname CODE=WINDOWS_SYSTEM_PARTITION_NOT_FOUND" ;;
+        11) handleError "PXEOS_STAGE=customizing_hostname CODE=WINDOWS_SYSTEM_PARTITION_AMBIGUOUS" ;;
+        *) handleError "PXEOS_STAGE=customizing_hostname CODE=WINDOWS_SYSTEM_PARTITION_PROBE_FAILED" ;;
+    esac
+}
+
+# Changes Windows hostname after restore and before postdeploy hook.  The fixed
+# Sysprep path is authoritative; registry fallback is allowed only if it does
+# not exist, never after malformed/ambiguous XML.
+rootpxe_apply_windows_hostname() {
+    local part="$1" unattend count component_count xml_path
+    [[ ${changeHostname:-false} == true ]] || return 0
+    [[ -n ${hostName:-} && $hostName =~ ^[A-Za-z0-9-]{1,15}$ && ! $hostName =~ ^[0-9]+$ ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=INVALID_HOSTNAME REASON=windows_name_policy"
+    rootpxe_stage customizing_hostname "code=HOSTNAME_STARTED"
+    mkdir -p /ntfs || handleError "PXEOS_STAGE=customizing_hostname CODE=NTFS_MOUNTPOINT_FAILED"
+    umount /ntfs >/dev/null 2>&1 || true
+    ntfs-3g -o remove_hiberfile,rw "$part" /ntfs >/tmp/ntfs-mount-output 2>&1 || handleError "PXEOS_STAGE=customizing_hostname CODE=NTFS_MOUNT_FAILED REASON=unable_to_mount_windows"
+    # Fixed logical Windows path only.  Do not search arbitrary unattend files.
+    xml_path=/ntfs/Windows/System32/Sysprep/unattend.xml
+    [[ -f $xml_path ]] || xml_path=""
+    if [[ -z $xml_path ]]; then
+        umount /ntfs >/dev/null 2>&1 || true
+        rootpxe_change_hostname_registry "$part" || handleError "PXEOS_STAGE=customizing_hostname CODE=REGISTRY_WRITE_FAILED"
+        rootpxe_stage customizing_hostname "code=HOSTNAME_COMPLETE method=registry"
+        return 0
+    fi
+    command -v xmlstarlet >/dev/null 2>&1 || handleError "PXEOS_STAGE=customizing_hostname CODE=XMLSTARLET_UNAVAILABLE"
+    count=$(xmlstarlet sel -t -v "count(/*[local-name()='unattend']/*[local-name()='settings'][@pass='specialize']/*[local-name()='component'][@name='Microsoft-Windows-Shell-Setup']/*[local-name()='ComputerName'])" "$xml_path" 2>/dev/null) || handleError "PXEOS_STAGE=customizing_hostname CODE=UNATTEND_XML_INVALID"
+    component_count=$(xmlstarlet sel -t -v "count(/*[local-name()='unattend']/*[local-name()='settings'][@pass='specialize']/*[local-name()='component'][@name='Microsoft-Windows-Shell-Setup'])" "$xml_path" 2>/dev/null) || handleError "PXEOS_STAGE=customizing_hostname CODE=UNATTEND_XML_INVALID"
+    [[ $count =~ ^[0-9]+$ && $component_count =~ ^[0-9]+$ && $component_count -eq 1 && $count -le 1 ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=UNATTEND_COMPONENT_AMBIGUOUS"
+    if [[ $count -eq 1 ]]; then
+        xmlstarlet ed -L -u "/*[local-name()='unattend']/*[local-name()='settings'][@pass='specialize']/*[local-name()='component'][@name='Microsoft-Windows-Shell-Setup']/*[local-name()='ComputerName']" -v "$hostName" "$xml_path" >/dev/null 2>&1 || handleError "PXEOS_STAGE=customizing_hostname CODE=UNATTEND_WRITE_FAILED"
+    else
+        xmlstarlet ed -L -N u='urn:schemas-microsoft-com:unattend' -s "/*[local-name()='unattend']/*[local-name()='settings'][@pass='specialize']/*[local-name()='component'][@name='Microsoft-Windows-Shell-Setup']" -t elem -n u:ComputerName -v "$hostName" "$xml_path" >/dev/null 2>&1 || handleError "PXEOS_STAGE=customizing_hostname CODE=UNATTEND_WRITE_FAILED"
+    fi
+    [[ $(xmlstarlet sel -t -v "string(/*[local-name()='unattend']/*[local-name()='settings'][@pass='specialize']/*[local-name()='component'][@name='Microsoft-Windows-Shell-Setup']/*[local-name()='ComputerName'])" "$xml_path" 2>/dev/null) == "$hostName" ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=UNATTEND_READBACK_FAILED"
+    umount /ntfs >/dev/null 2>&1 || true
+    rootpxe_stage customizing_hostname "code=HOSTNAME_COMPLETE method=unattend"
+}
+
+# Registry fallback used only when the fixed Sysprep unattend file is absent.
+rootpxe_change_hostname_registry() {
     local part="$1"
     [[ -z $part ]] && handleError "No partition passed (${FUNCNAME[0]})\n   Args Passed: $*"
-    [[ -z $hostname || $hostearly -eq 0 ]] && return
+    [[ ${changeHostname:-false} != true || -z ${hostName:-} ]] && return
+    local hostname="$hostName"
     REG_HOSTNAME_KEY1="\ControlSet001\Services\Tcpip\Parameters\NV Hostname"
     REG_HOSTNAME_KEY2="\ControlSet001\Services\Tcpip\Parameters\Hostname"
     REG_HOSTNAME_KEY3="\ControlSet001\Services\Tcpip\Parameters\NV HostName"
@@ -1984,18 +2675,10 @@ completeTasking() {
         down)
             rootpxe_stage restore "deploy write finished, running completion"
             killStatusReporter
+            [[ $capone -eq 1 ]] && exit 0
+            [[ ${changeHostname:-false} == true ]] && rootpxe_apply_hostname_for_disk "$hd"
             if [[ -f /storage/postdeployscripts/hook.sh ]]; then
                 . /storage/postdeployscripts/hook.sh || handleError "Post-deploy script failed"
-            fi
-            [[ $capone -eq 1 ]] && exit 0
-            if [[ $osid == +([1-2]|4|[5-7]|9|10|11) ]]; then
-                for disk in $disks; do
-                    getPartitions "$disk"
-                    for part in $parts; do
-                        fsTypeSetting "$part"
-                        [[ $fstype == ntfs ]] && changeHostname "$part"
-                    done
-                done
             fi
             . /bin/pxeos.imgcomplete
             ;;
@@ -2580,6 +3263,13 @@ restorePartitionTablesAndBootLoaders() {
         debugPause
         return
     fi
+    # Sector validation has to happen before the first destructive operation.
+    # The sfdisk capture metadata is present for both MBR and GPT resizable
+    # images; absent legacy metadata keeps its established compatibility path.
+    local sector_partition_file=""
+    sfdiskPartitionFileName "$imagePath" "$disk_number"
+    sector_partition_file="$sfdiskoriginalpartitionfilename"
+    validateImageSectorSize "$disk" "$sector_partition_file"
     clearPartitionTables "$disk"
     majorDebugEcho "Partition table should be empty now."
     majorDebugShowCurrentPartitionTable "$disk" "$disk_number"
@@ -2628,26 +3318,12 @@ restorePartitionTablesAndBootLoaders() {
         sfdiskLegacyOriginalPartitionFileName "$imagePath" "$disk_number"
         if [[ -r $sfdiskoriginalpartitionfilename ]]; then
             dots "Inserting Extended partitions (Original)"
-            flock $disk sfdisk $disk < $sfdiskoriginalpartitionfilename >/dev/null 2>&1
-            case $? in
-                0)
-                    echo "Done"
-                    ;;
-                *)
-                    echo "Failed"
-                    ;;
-            esac
+            applySfdiskPartitions "$disk" "$sfdiskoriginalpartitionfilename"
+            echo "Done"
         elif [[ -e $sfdisklegacyoriginalpartitionfilename ]]; then
             dots "Inserting Extended partitions (Legacy)"
-            flock $disk sfdisk $disk < $sfdisklegacyoriginalpartitionfilename >/dev/null 2>&1
-            case $? in
-                0)
-                    echo "Done"
-                    ;;
-                *)
-                    echo "Failed"
-                    ;;
-            esac
+            applySfdiskPartitions "$disk" "$sfdisklegacyoriginalpartitionfilename"
+            echo "Done"
         else
             echo " * No extended partitions"
         fi
@@ -2681,6 +3357,17 @@ savePartition() {
     getPartType "$part"
     local ebrfilename=""
     local swapuuidfilename=""
+    # An extended partition is an EBR container, never an image payload.
+    case $parttype in
+        0x5|0xf)
+            echo " * Not capturing content of extended partition"
+            debugPause
+            EBRFileName "$imagePath" "$disk_number" "$part_number"
+            touch "$ebrfilename"
+            rm -rf "$fifoname" >/dev/null 2>&1
+            return
+            ;;
+    esac
     case $fstype in
         swap)
             echo " * Saving swap partition UUID"
@@ -2759,12 +3446,21 @@ restorePartition() {
     local ebrfilename=""
     local disk=""
     local part_number=0
+    local parttype=""
     local israw=0
     if [[ $imgType == "dd" ]]; then
         israw=1
     fi
     getDiskFromPartition "$part" "$israw"
     getPartitionNumber "$part"
+    getPartType "$part"
+    case $parttype in
+        0x5|0xf)
+            echo " * Not deploying content of extended partition"
+            runPartprobe "$disk"
+            return
+            ;;
+    esac
     echo " * Processing Partition: $part ($part_number)"
     debugPause
     case $imgType in

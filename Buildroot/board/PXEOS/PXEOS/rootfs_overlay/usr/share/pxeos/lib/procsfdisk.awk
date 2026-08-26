@@ -187,7 +187,13 @@ function check_overlap(partition_names, partitions, new_part_name, new_start, ne
 # label the device label
 # labelid the device label id
 # device the device itself
-function display_output(partition_names, partitions, pName, p_device, p_start, p_size, p_type, p_flag, p_uuid, p_name, p_attrs, typelabel) {
+function by_partition_number(i1, v1, i2, v2, n1, n2) {
+    n1 = int(partitions[i1, "number"]);
+    n2 = int(partitions[i2, "number"]);
+    return (n1 == n2 ? (i1 < i2 ? -1 : 1) : n1 - n2);
+}
+
+function display_output(partition_names, partitions, pName, p_device, p_start, p_size, p_type, p_flag, p_uuid, p_name, p_attrs, typelabel, sorted_names, i) {
     # If unit is not set, or has no value, set to sectors.
     if (!unit) {
         unit = "sectors";
@@ -217,7 +223,9 @@ function display_output(partition_names, partitions, pName, p_device, p_start, p
     }
     printf("\n");
     # Iterate our partition names.
-    for (pName in partition_names) {
+    asorti(partition_names, sorted_names, "by_partition_number");
+    for (i = 1; i <= length(sorted_names); i++) {
+        pName = sorted_names[i];
         # Set our p_device variable.
         p_device = partitions[pName, "device"];
         # Set our p_start variable.
@@ -293,7 +301,9 @@ function resize_partition(partition_names, partitions, args, pName, new_start, n
         # Set our p_start position to the current start.
         new_start = int(partitions[pName, "start"]);
         # Ensure start postition is aligned properly.
-        new_size = int(sizePos) / int(SECTOR_SIZE);
+        # sizePos is bytes; sfdisk needs logical sectors.  Ceil prevents a
+        # small valid partition from becoming zero on 4Kn media.
+        new_size = int((int(sizePos) + int(LOGICAL_SECTOR_SIZE) - 1) / int(LOGICAL_SECTOR_SIZE));
         # Check the overlap.
         overlap = check_overlap(partition_names, partitions, target, new_start, new_size);
         # If there was an issue in checking overlap, skip.
@@ -314,9 +324,6 @@ function resize_partition(partition_names, partitions, args, pName, new_start, n
         # size is safe.
         partitions[target, "start"] = new_start;
         partitions[target, "size"] = new_size;
-    }
-    if (lastlba) {
-        lastlba = int(diskSize) - int(firstlba);
     }
     return 0;
 }
@@ -391,7 +398,9 @@ function move_partition(partition_names, partitions, args, pName, new_start, new
 # ordered_starts is locally scoped
 # old_sorted_in is locally scoped
 # curr_start is locally scoped
-function fill_disk(partition_names, partitions, args, n, fixed_partitions, original_variable, original_fixed, new_variable, extended_margin, pName, p_type, p_number, p_size, p_minsize, i, partition_starts, ordered_starts, old_sorted_in, curr_start) {
+function fill_disk(partition_names, partitions, args, n, fixed_partitions, original_variable, original_fixed, new_variable, extended_margin, pName, p_type, p_number, p_size, p_minsize, i, partition_starts, ordered_starts, old_sorted_in, curr_start, disk_end, ext_name, logical_count, logical_end) {
+    # Never normalise a corrupt source table into something that looks safe.
+    if (check_all_partitions(partition_names, partitions) != 0) return 1;
     # Used for extended volumes (logical disks)
     extended_margin = 2;
     # Ensure we start at 0 for original sizes.
@@ -403,6 +412,12 @@ function fill_disk(partition_names, partitions, args, n, fixed_partitions, origi
     # Tell if we have extended.
     # Trim any beginning or trailling colons
     gsub(/^[:]+|[:]+$/, "", fixedList);
+    disk_end = int(diskSize);
+    # GPT stores backup entry array/header at the end.  firstlba is also the
+    # reserved front geometry amount, so the usable end is diskSize-firstlba.
+    if (firstlba) {
+        disk_end = int(diskSize) - int(firstlba);
+    }
     if (firstlba && lastlba) {
         original_fixed += firstlba;
         full_size = int(lastlba);
@@ -421,7 +436,7 @@ function fill_disk(partition_names, partitions, args, n, fixed_partitions, origi
         # Set p_size variable.
         p_size = int(partitions[pName, "size"]);
         # Regex setter.
-        regex = "/^([:]+)?"p_number"([:]+)?$|([:]+)?"p_number"([:]+)?|([:]+)?"p_number"$/"
+        regex = "(^|[:])" p_number "([:]|$)"
         # If we're dos label do stuff.
         if (label != "gpt") {
             # If this is an extended partition
@@ -491,6 +506,7 @@ function fill_disk(partition_names, partitions, args, n, fixed_partitions, origi
         }
         # Rescan to get the next partition to find the start.
         # This will figure out the original size.
+        PROCINFO["sorted_in"] = "by_partition_number";
         for (p_name in partition_names) {
             if (p_name == pName) {
                 found = 1;
@@ -530,7 +546,7 @@ function fill_disk(partition_names, partitions, args, n, fixed_partitions, origi
         # Reset our p_orig_size variable.
         p_orig_size = int(partitions[pName, "orig_size"]);
         # Regex setter.
-        regex = "/^([:]+)?"p_number"([:]+)?$|([:]+)?"p_number"([:]+)?|([:]+)?"p_number"$/"
+        regex = "(^|[:])" p_number "([:]|$)"
         # If a fixed partition, go to next.
         if (match(fixedList, regex)) {
             continue;
@@ -543,11 +559,9 @@ function fill_disk(partition_names, partitions, args, n, fixed_partitions, origi
         }
         # Ensure we're aligned.
         p_size -= (p_size % int(SECTOR_SIZE));
-        if (label != "gpt") {
-            if (p_type == 5 || p_type == "f") {
-                p_size += extended_margin;
-            }
-        }
+        # Extended partitions are containers.  Their final extent is derived
+        # from the logical partitions after starts have been allocated.
+        if (label != "gpt" && (p_type == 5 || p_type == "f")) continue;
         # Ensure the partition size is setup.
         partitions[pName, "size"] = p_size;
     }
@@ -572,7 +586,7 @@ function fill_disk(partition_names, partitions, args, n, fixed_partitions, origi
         # Set p_start.
         p_start = int(partitions[pName, "start"]);
         # Regex setter.
-        regex = "/^([:]+)?"p_number"([:]+)?$|([:]+)?"p_number"([:]+)?|([:]+)?"p_number"$/"
+        regex = "(^|[:])" p_number "([:]|$)"
         # Skip empty sized partitions.
         if (p_size == 0) {
             continue;
@@ -587,9 +601,13 @@ function fill_disk(partition_names, partitions, args, n, fixed_partitions, origi
             if (p_type == "5" || p_type == "f") {
                 curr_start += int(MIN_START) - extended_margin;
                 partitions[pName, "start"] = curr_start;
+                ext_name = pName;
+                logical_count = 0;
                 curr_start += extended_margin;
                 continue;
             }
+            if (p_number > 4 && logical_count > 0) curr_start += int(MIN_START);
+            if (p_number > 4) logical_count++;
         }
         p_start = curr_start;
         if (prior_size > 0 && p_start < (prior_size + prior_start)) {
@@ -602,17 +620,30 @@ function fill_disk(partition_names, partitions, args, n, fixed_partitions, origi
         # Set the partitions start to our adjusted start.
         partitions[pName, "start"] = p_start;
         # Set the last boundary properly
-        if (p_start + p_size > int(diskSize)) {
-            p_size -= (p_start + p_size - int(diskSize));
+        if (p_start + p_size > disk_end) {
+            p_size -= (p_start + p_size - disk_end);
             p_size -= (p_size % int(SECTOR_SIZE));
             partitions[pName, "size"] = p_size;
+            if (p_size <= 0) {
+                printf("ERROR: partition %s has no usable size after geometry clamp.\n", pName) > "/dev/stderr";
+                return 1;
+            }
         }
         prior_size = p_size;
         prior_start = p_start;
     }
     # Set our lastlba
+    if (ext_name != "") {
+        logical_end = 0;
+        for (pName in partition_names) {
+            if (int(partitions[pName, "number"]) > 4) {
+                logical_end = int(partitions[pName, "start"]) + int(partitions[pName, "size"]);
+                if (logical_end > int(partitions[ext_name, "start"])) partitions[ext_name, "size"] = logical_end - int(partitions[ext_name, "start"]);
+            }
+        }
+    }
     if (firstlba) {
-        lastlba = int(diskSize) - firstlba;
+        lastlba = disk_end;
     }
     # Check for any overlaps.
     return check_all_partitions(partition_names, partitions);
@@ -736,20 +767,22 @@ BEGIN {
     # If the action value is move run the move_partition function.
     # If the action value is filldisk run the fill_disk function.
     # If the action value is neither of the above fail out.
+    rc = 0;
     switch (action) {
         case "resize":
-            resize_partition(partition_names, partitions, args);
+            rc = resize_partition(partition_names, partitions, args);
             break;
         case "move":
-            move_partition(partition_names, partitions, args);
+            rc = move_partition(partition_names, partitions, args);
             break;
         case "filldisk":
-            fill_disk(partition_names, partitions, args);
+            rc = fill_disk(partition_names, partitions, args);
             break;
         default:
             printf("Please enter a proper action.\n");
             exit(1);
     }
-    # Display output.
+    if (rc != 0) exit(1);
+    # Display output only after the requested action has passed every safety check.
     display_output(partition_names, partitions);
 }
