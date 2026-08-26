@@ -70,7 +70,7 @@ device: /dev/sda
 unit: sectors
 
 /dev/sda1 : start=        2048, size=        4096, Id=83
-/dev/sda2 : start=        6144, size=       70000, Id=5
+/dev/sda2 : start=        6144, size=       70000, Id=0x85
 /dev/sda5 : start=        6146, size=       20000, Id=83
 /dev/sda6 : start=       28146, size=       20000, Id=82
 EOF
@@ -85,6 +85,111 @@ p6_line=$(grep -n '/dev/sda6 : ' "$tmp/mbr-output" | cut -d: -f1)
 p2_start=$(awk -F'[,= ]+' '/\/dev\/sda2 :/{for(i=1;i<=NF;i++)if($i=="start")print $(i+1)}' "$tmp/mbr-output")
 p5_start=$(awk -F'[,= ]+' '/\/dev\/sda5 :/{for(i=1;i<=NF;i++)if($i=="start")print $(i+1)}' "$tmp/mbr-output")
 [[ $p5_start -gt $p2_start ]] || fail '逻辑分区没有位于扩展容器内'
+
+# MBR extended/EBR golden: sfdisk consumes the table line-by-line, so the
+# container must precede all logical partitions even when p10/p11 are present.
+cat >"$tmp/mbr-extended-10.sfdisk" <<'EOF'
+label: dos
+device: /dev/sda
+unit: sectors
+
+/dev/sda1 : start=        2048, size=        4096, Id=83
+/dev/sda2 : start=        6144, size=      180000, Id=5
+/dev/sda5 : start=        6146, size=       16000, Id=83
+/dev/sda6 : start=       24146, size=       16000, Id=83
+/dev/sda10 : start=      42146, size=       16000, Id=83
+/dev/sda11 : start=      60146, size=       16000, Id=82
+EOF
+gawk -v action=filldisk -v target=/dev/sda -v sizePos=220000 -v diskSize=220000 \
+    -v SECTOR_SIZE=512 -v LOGICAL_SECTOR_SIZE=512 -v CHUNK_SIZE=512 -v MIN_START=2048 \
+    -v fixedList=1 -f "$processor" "$tmp/mbr-extended-10.sfdisk" >"$tmp/mbr-extended-10-output" 2>"$tmp/mbr-extended-10-error" || {
+        cat "$tmp/mbr-extended-10-output" >&2
+        cat "$tmp/mbr-extended-10-error" >&2
+        fail 'MBR p10/p11 golden 生成失败'
+    }
+for number in 1 2 5 6 10 11; do
+    grep -Fq "/dev/sda${number} :" "$tmp/mbr-extended-10-output" || fail "MBR 逻辑分区 p${number} 丢失"
+done
+p2_line=$(grep -n '/dev/sda2 : ' "$tmp/mbr-extended-10-output" | cut -d: -f1)
+p5_line=$(grep -n '/dev/sda5 : ' "$tmp/mbr-extended-10-output" | cut -d: -f1)
+p10_line=$(grep -n '/dev/sda10 : ' "$tmp/mbr-extended-10-output" | cut -d: -f1)
+p11_line=$(grep -n '/dev/sda11 : ' "$tmp/mbr-extended-10-output" | cut -d: -f1)
+[[ $p2_line -lt $p5_line && $p5_line -lt $p10_line && $p10_line -lt $p11_line ]] || fail 'MBR 扩展容器/逻辑分区未按数字顺序输出'
+p2_start=$(awk -F'[,= ]+' '/\/dev\/sda2 :/{for(i=1;i<=NF;i++)if($i=="start")print $(i+1)}' "$tmp/mbr-extended-10-output")
+p2_size=$(awk -F'[,= ]+' '/\/dev\/sda2 :/{for(i=1;i<=NF;i++)if($i=="size")print $(i+1)}' "$tmp/mbr-extended-10-output")
+for number in 5 6 10 11; do
+    logical_start=$(awk -F'[,= ]+' -v n="$number" '$0 ~ ("/dev/sda" n " :"){for(i=1;i<=NF;i++)if($i=="start")print $(i+1)}' "$tmp/mbr-extended-10-output")
+    logical_size=$(awk -F'[,= ]+' -v n="$number" '$0 ~ ("/dev/sda" n " :"){for(i=1;i<=NF;i++)if($i=="size")print $(i+1)}' "$tmp/mbr-extended-10-output")
+    [[ $logical_start -ge $((p2_start + 2)) && $((logical_start + logical_size)) -le $((p2_start + p2_size)) ]] || fail "逻辑分区 p${number} 未保留 EBR 间隔或越出容器"
+done
+
+# fixedList is an exact partition-number list: fixed 1 must never make p10
+# fixed just because its decimal representation contains "1".
+p10_original=16000
+p10_resolved=$(awk -F'[,= ]+' '/\/dev\/sda10 :/{for(i=1;i<=NF;i++)if($i=="size")print $(i+1)}' "$tmp/mbr-extended-10-output")
+[[ $p10_resolved -ne $p10_original ]] || fail 'fixedList=1 错误匹配了 p10'
+
+# Reject malformed EBR graphs before a generated table can reach sfdisk.
+for fixture in mbr-two-extended mbr-primary-overlaps-extended mbr-logical-without-parent mbr-logical-outside mbr-logical-overlap mbr-logical-no-ebr-gap; do
+    case $fixture in
+        mbr-two-extended) cat >"$tmp/$fixture.sfdisk" <<'EOF'
+label: dos
+device: /dev/sda
+unit: sectors
+/dev/sda1 : start=2048, size=1000, Id=5
+/dev/sda2 : start=5000, size=1000, Id=f
+/dev/sda5 : start=2050, size=500, Id=83
+EOF
+            ;;
+        mbr-logical-without-parent) cat >"$tmp/$fixture.sfdisk" <<'EOF'
+label: dos
+device: /dev/sda
+unit: sectors
+/dev/sda1 : start=2048, size=1000, Id=83
+/dev/sda5 : start=5000, size=500, Id=83
+EOF
+            ;;
+        mbr-primary-overlaps-extended) cat >"$tmp/$fixture.sfdisk" <<'EOF'
+label: dos
+device: /dev/sda
+unit: sectors
+/dev/sda1 : start=2048, size=5000, Id=5
+/dev/sda2 : start=3000, size=1000, Id=83
+/dev/sda5 : start=2050, size=500, Id=83
+EOF
+            ;;
+        mbr-logical-outside) cat >"$tmp/$fixture.sfdisk" <<'EOF'
+label: dos
+device: /dev/sda
+unit: sectors
+/dev/sda1 : start=2048, size=1000, Id=5
+/dev/sda5 : start=4000, size=500, Id=83
+EOF
+            ;;
+        mbr-logical-overlap) cat >"$tmp/$fixture.sfdisk" <<'EOF'
+label: dos
+device: /dev/sda
+unit: sectors
+/dev/sda1 : start=2048, size=5000, Id=5
+/dev/sda5 : start=2050, size=2000, Id=83
+/dev/sda6 : start=3000, size=2000, Id=83
+EOF
+            ;;
+        mbr-logical-no-ebr-gap) cat >"$tmp/$fixture.sfdisk" <<'EOF'
+label: dos
+device: /dev/sda
+unit: sectors
+/dev/sda1 : start=2048, size=5000, Id=5
+/dev/sda5 : start=2048, size=2000, Id=83
+EOF
+            ;;
+    esac
+    if gawk -v action=filldisk -v target=/dev/sda -v sizePos=20000 -v diskSize=20000 \
+        -v SECTOR_SIZE=512 -v LOGICAL_SECTOR_SIZE=512 -v CHUNK_SIZE=512 -v MIN_START=2048 \
+        -f "$processor" "$tmp/$fixture.sfdisk" >/dev/null 2>&1; then
+        fail "不安全 MBR/EBR fixture 未被拒绝：$fixture"
+    fi
+done
 
 mkdir -p "$tmp/mock"
 cat >"$tmp/mock/nvme" <<'EOF'

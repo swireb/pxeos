@@ -17,6 +17,40 @@ while IFS= read -r var; do
     case "$key" in mac|web|pxeapi|setmacto|isdebug|has_usb_nic) printf -v "$key" '%s' "$value"; export "$key";; esac
 done < <(tr ' ' '\n' </proc/cmdline)
 
+# This is intentionally invoked only after every interface failed DHCP/API
+# reachability.  Keep it read-only and never print kernel arguments, API URLs
+# or credentials: these diagnostics are commonly photographed or copied from
+# an unattended PXE console.
+pxeos_network_init_version() {
+    local version
+    version=$(sed -n 's/^export initversion=\([0-9][0-9]*\)$/\1/p' /usr/share/pxeos/lib/funcs.sh 2>/dev/null | head -n 1)
+    printf '%s' "${version:-unavailable}"
+}
+
+pxeos_network_diagnostics() {
+    local kernel iface
+    echo
+    echo "=== PXEOS network diagnostics ==="
+    kernel=$(uname -r 2>/dev/null) || kernel=unavailable
+    printf 'Kernel: %s\n' "$kernel"
+    printf 'PXEOS init version: %s\n' "$(pxeos_network_init_version)"
+    echo "Ethernet/Network PCI devices:"
+    if command -v lspci >/dev/null 2>&1; then
+        lspci -nnk 2>/dev/null | grep -Ei 'ethernet|network' || echo '  none reported'
+    else
+        echo '  unavailable (lspci not installed)'
+    fi
+    echo "Interfaces:"
+    if /sbin/ip -br link 2>/dev/null; then
+        /sbin/ip -br addr 2>/dev/null || true
+    else
+        for iface in /sys/class/net/*; do
+            [[ -e $iface ]] || continue
+            printf '  %s\n' "${iface##*/}"
+        done
+    fi
+}
+
 # Enable loopback interface
 echo -e "auto lo\niface lo inet loopback\n\n" > /etc/network/interfaces
 /sbin/ip addr add 127.0.0.1/8 dev lo
@@ -81,7 +115,7 @@ for iface in $ifaces; do
             fi
             [[ $ustat -eq 0 && $cstat -eq 0 ]] && exit 0
         fi
-        echo "Either DHCP failed or connectivity checks to PXEOS API failed (${pxeapi:-$web}health)."
+        echo "Either DHCP failed or connectivity checks to PXEOS API failed."
         # Geo-If we are on the 2nd loop, lets check to see if
         # spanning tree is blocking dhcp
         if [[ $seq -eq 2 ]]; then
@@ -100,6 +134,7 @@ if [[ -z "$(echo $ifaces | tr -d ' ')" ]]; then  # because ifaces is constructed
 else
     echo "Failed to get an IP via DHCP! Tried on interface(s): $ifaces"
 fi
+pxeos_network_diagnostics
 echo "Please check your network setup and try again!"
 [[ -z $isdebug ]] && sleep 60 && reboot
 echo "Press enter to continue"

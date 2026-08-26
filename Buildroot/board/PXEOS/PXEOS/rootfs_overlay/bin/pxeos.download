@@ -313,5 +313,16 @@ if [[ ${imgType:-} == [Nn] && -n ${deploymentLayoutFile:-} && -n ${originalSchem
     rootpxe_apply_deployment_layout "$hd" "$sector_metadata" || handleError "PXEOS_STAGE=layout_apply CODE=LAYOUT_READBACK_FAILED REASON=sfdisk_layout_mismatch"
 fi
 [[ $nombr -ne 1 ]] && rootpxe_stage prepare_partitions "partition layout prepared"
-[[ $imgPartitionType != mbr ]] && putDataBack || echo " * Skipping partition restore (MBR Only)"
+if [[ $imgPartitionType != mbr ]]; then
+    # LVM PVs have no raw dNpN payload.  Restore ordinary image partitions
+    # first when present, then reconstruct the permitted LVM metadata/LVs.
+    if [[ -z ${rootpxe_resolved_lvm_layout_file:-} ]] || jq -e '.partitions[] | select(.role != "lvm_pv" and .artifact != "")' "$originalSchemaFile" >/dev/null 2>&1; then
+        putDataBack
+    fi
+    if [[ -n ${rootpxe_resolved_lvm_layout_file:-} ]]; then
+        rootpxe_restore_lvm_volumes "$imagePath" "$hd" || handleError "PXEOS_STAGE=restore_lvm CODE=LVM_RESTORE_FAILED REASON=metadata_or_lv_restore_failed"
+    fi
+else
+    echo " * Skipping partition restore (MBR Only)"
+fi
 completeTasking

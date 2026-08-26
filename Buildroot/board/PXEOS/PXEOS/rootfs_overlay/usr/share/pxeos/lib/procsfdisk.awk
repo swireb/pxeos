@@ -29,6 +29,79 @@
 # $data is the filename of the output of sfdisk -d
 # cat $data | awk -F, '\
 
+# A DOS extended partition is a metadata-only container.  Accept both sfdisk
+# spellings (5/f and 0x5/0xf) because capture and restore do not necessarily
+# use the same dump format.
+function is_extended_type(value, normalized) {
+    normalized = tolower(value);
+    sub(/^0x/, "", normalized);
+    return (normalized == "5" || normalized == "f" || normalized == "85");
+}
+
+# Reject malformed EBR graphs before a resize/fill can turn them into a table
+# that looks plausible but cannot be accepted by sfdisk.  One MBR disk can
+# contain at most one extended container; every logical partition belongs to
+# it and needs a small EBR reservation before its data extent.
+function validate_mbr_ebr_layout(partition_names, partitions, pName, p_number, p_type, p_start, p_size, ext_name, ext_count, ext_start, ext_end, starts, ordered, i, prev_end, current_start) {
+    if (label == "gpt") return 0;
+    ext_count = 0;
+    for (pName in partition_names) {
+        p_number = int(partitions[pName, "number"]);
+        p_type = partitions[pName, "type"];
+        if (is_extended_type(p_type)) {
+            ext_count++;
+            ext_name = pName;
+            if (p_number < 1 || p_number > 4) {
+                printf("ERROR: extended partition must use a primary number.\n") > "/dev/stderr";
+                return 1;
+            }
+        }
+    }
+    if (ext_count > 1) {
+        printf("ERROR: MBR permits only one extended partition.\n") > "/dev/stderr";
+        return 1;
+    }
+    for (pName in partition_names) {
+        p_number = int(partitions[pName, "number"]);
+        if (p_number <= 4) {
+            if (ext_count == 1 && pName != ext_name) {
+                p_start = int(partitions[pName, "start"]);
+                p_size = int(partitions[pName, "size"]);
+                if (p_start < ext_end && p_start + p_size > ext_start) {
+                    printf("ERROR: primary partition overlaps the extended container.\n") > "/dev/stderr";
+                    return 1;
+                }
+            }
+            continue;
+        }
+        if (ext_count != 1) {
+            printf("ERROR: logical partition has no extended parent.\n") > "/dev/stderr";
+            return 1;
+        }
+        p_start = int(partitions[pName, "start"]);
+        p_size = int(partitions[pName, "size"]);
+        ext_start = int(partitions[ext_name, "start"]);
+        ext_end = ext_start + int(partitions[ext_name, "size"]);
+        if (p_size <= 0 || p_start < ext_start + 2 || p_start + p_size > ext_end) {
+            printf("ERROR: logical partition is outside its extended container or lacks EBR reservation.\n") > "/dev/stderr";
+            return 1;
+        }
+        starts[p_start] = pName;
+    }
+    asorti(starts, ordered, "@ind_num_asc");
+    prev_end = 0;
+    for (i = 1; i <= length(ordered); i++) {
+        pName = ordered[i];
+        current_start = int(partitions[pName, "start"]);
+        if (prev_end > 0 && current_start < prev_end + 2) {
+            printf("ERROR: logical partitions overlap or lack EBR reservation.\n") > "/dev/stderr";
+            return 1;
+        }
+        prev_end = current_start + int(partitions[pName, "size"]);
+    }
+    return 0;
+}
+
 # Checks all partitions for any overlap possibilities.
 # Requires partition_names and partitions.
 # partition_names is an array of all the partition names.
@@ -136,8 +209,12 @@ function check_overlap(partition_names, partitions, new_part_name, new_start, ne
             return 1;
         }
         # Overlap checks.
-        if (p_type == 5 || p_type == "f") {
-            if (p_number > 4) {
+        if (is_extended_type(p_type)) {
+            if (is_extended_type(new_type)) {
+                printf("ERROR: more than one extended partition is not safe.\n");
+                return 1;
+            }
+            if (new_part_number > 4) {
                 if (new_start < p_start + extended_margin) {
                     printf("ERROR: new_start < p_start + extended_margin value at (%s).\n", pName);
                     return 1;
@@ -154,6 +231,13 @@ function check_overlap(partition_names, partitions, new_part_name, new_start, ne
                     printf("ERROR: new_start + new_size > p_start + p_size value at (%s).\n", pName);
                     return 1;
                 }
+            }
+        } else if (is_extended_type(new_type) && p_number > 4) {
+            # The same containment check when the candidate is the extended
+            # container and the already-known entry is logical.
+            if (p_start < new_start + extended_margin || p_start + p_size > new_start + new_size) {
+                printf("ERROR: logical partition is outside the extended container at (%s).\n", pName);
+                return 1;
             }
         } else if (new_start >= p_start) {
             if (new_start < p_start + p_size) {
@@ -400,6 +484,7 @@ function move_partition(partition_names, partitions, args, pName, new_start, new
 # curr_start is locally scoped
 function fill_disk(partition_names, partitions, args, n, fixed_partitions, original_variable, original_fixed, new_variable, extended_margin, pName, p_type, p_number, p_size, p_minsize, i, partition_starts, ordered_starts, old_sorted_in, curr_start, disk_end, ext_name, logical_count, logical_end) {
     # Never normalise a corrupt source table into something that looks safe.
+    if (validate_mbr_ebr_layout(partition_names, partitions) != 0) return 1;
     if (check_all_partitions(partition_names, partitions) != 0) return 1;
     # Used for extended volumes (logical disks)
     extended_margin = 2;
@@ -441,7 +526,7 @@ function fill_disk(partition_names, partitions, args, n, fixed_partitions, origi
         if (label != "gpt") {
             # If this is an extended partition
             # The full size is set by the extended start + extended size.
-            if (p_type == 5 || p_type == "f") {
+            if (is_extended_type(p_type)) {
                 # Only set full size if needed.
                 if (full_size == 0) {
                     # Get our full size.
@@ -498,7 +583,7 @@ function fill_disk(partition_names, partitions, args, n, fixed_partitions, origi
             continue;
         }
         if (label != "gpt") {
-            if (p_type == 5 || p_type == "f") {
+            if (is_extended_type(p_type)) {
                 p_next_start = full_size - p_start;
                 partitions[pName, "orig_size"] = p_next_start;
                 continue;
@@ -561,7 +646,7 @@ function fill_disk(partition_names, partitions, args, n, fixed_partitions, origi
         p_size -= (p_size % int(SECTOR_SIZE));
         # Extended partitions are containers.  Their final extent is derived
         # from the logical partitions after starts have been allocated.
-        if (label != "gpt" && (p_type == 5 || p_type == "f")) continue;
+        if (label != "gpt" && is_extended_type(p_type)) continue;
         # Ensure the partition size is setup.
         partitions[pName, "size"] = p_size;
     }
@@ -598,7 +683,7 @@ function fill_disk(partition_names, partitions, args, n, fixed_partitions, origi
             # The start position for the extended/logical partitions
             # needs to be increased by the chunk size.
             # Otherwise increase it by the p_size.
-            if (p_type == "5" || p_type == "f") {
+            if (is_extended_type(p_type)) {
                 curr_start += int(MIN_START) - extended_margin;
                 partitions[pName, "start"] = curr_start;
                 ext_name = pName;

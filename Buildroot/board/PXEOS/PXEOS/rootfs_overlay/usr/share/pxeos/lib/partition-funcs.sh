@@ -112,7 +112,7 @@ partitionHasEBR() {
     getPartType "$part"
     hasEBR=0
     [[ $part_number -ge 5 ]] && hasEBR=1
-    [[ $parttype == +(0x5|0xf) ]] && hasEBR=1
+    [[ ${parttype,,} == +(5|f|85|0x5|0xf|0x85) ]] && hasEBR=1
 }
 # $1 is the name of the partition device (e.g. /dev/sda3)
 # $2 is the name of the file to save to (e.g. /net/dev/foo/d1p4.ebr)

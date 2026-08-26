@@ -25,7 +25,9 @@ case "$*" in
     cat "$last"
     exit 0 ;;
   *'--rawfile rows'*)
-    if [[ $BLKTYPE == swap ]]; then echo '{"version":1,"partitionTable":"mbr","originalDiskBytes":102400000,"logicalSectorBytes":512,"physicalSectorBytes":512,"minDeployBytes":1572864,"partitions":[{"number":2,"startSectors":2048,"originalSectors":1024,"minSectors":1024,"typeGuid":"82","flags":[],"role":"swap","resizable":false,"fs":"swap","uuid":"swap-uuid","partuuid":"swap-partuuid","artifact":""}]}' ; else echo '{}' ; fi
+    if [[ ${SCHEMA_KIND:-} == mbr-v2 ]]; then
+      echo '{"version":2,"partitionTable":"mbr","originalDiskBytes":102400000,"logicalSectorBytes":512,"physicalSectorBytes":512,"minDeployBytes":3145728,"partitions":[{"number":1,"startSectors":2048,"originalSectors":8192,"minSectors":3976,"typeGuid":"0x5","flags":[],"role":"extended_container","resizable":false,"fs":"","uuid":"","partuuid":"","artifact":"","kind":"extended","logicalNumbers":[5,6],"ebrReservedSectors":2},{"number":5,"startSectors":2050,"originalSectors":2048,"minSectors":2048,"typeGuid":"0x83","flags":[],"role":"data","resizable":true,"fs":"ntfs","uuid":"swap-uuid","partuuid":"swap-partuuid","artifact":"d1p5.img","kind":"logical","parentNumber":1},{"number":6,"startSectors":5000,"originalSectors":1024,"minSectors":1024,"typeGuid":"0x82","flags":[],"role":"swap","resizable":false,"fs":"swap","uuid":"swap-uuid","partuuid":"swap-partuuid","artifact":"","kind":"logical","parentNumber":1}]}'
+    elif [[ $BLKTYPE == swap ]]; then echo '{"version":1,"partitionTable":"mbr","originalDiskBytes":102400000,"logicalSectorBytes":512,"physicalSectorBytes":512,"minDeployBytes":1572864,"partitions":[{"number":2,"startSectors":2048,"originalSectors":1024,"minSectors":1024,"typeGuid":"82","flags":[],"role":"swap","resizable":false,"fs":"swap","uuid":"swap-uuid","partuuid":"swap-partuuid","artifact":""}]}' ; else echo '{}' ; fi
     exit 0 ;;
   *'-n '*) echo "$*" >>$JQ_ARGS_LOG; echo '[]'; exit 0 ;;
   *'type == "object"'*) exit 0 ;;
@@ -205,9 +207,15 @@ MOUNT_TRACE=$tmp/mount-trace; export MOUNT_TRACE
 HOSTMODE_TRACE=$tmp/hostmode-trace; export HOSTMODE_TRACE
 export PATH=$tmp/mock:$PATH
 ismajordebug=0
+isdebug=0
 . $tmp/funcs.sh
 rootpxe_require_task_context() { return 0; }
 rootpxe_require_identity() { return 0; }
+# The backend hashes the exact bytes of jq -cS output without its terminal
+# newline. Pin a known canonical JSON value so an accidental printf newline
+# changes this test's hash rather than silently drifting the task contract.
+printf '{"a":1,"b":2}\n' >$tmp/canonical-schema.json
+[[ $(rootpxe_canonical_json_hash $tmp/canonical-schema.json) == 43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777 ]] || fail canonical-schema-hash
 awk '/^rootpxe_json_get_string\(/{on=1} /^checkin_rootpxe\(/{on=0} on' $checkin >$tmp/json.sh
 . $tmp/json.sh
 COMP=6; export COMP
@@ -387,12 +395,57 @@ set -e
 [[ $linux_activation_rc -eq 97 ]] || fail linux-lvm-activation-attention-result
 grep -Fqx 'PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_LVM_ACTIVATION_FAILED' $tmp/linux-lvm-attention || fail linux-lvm-activation-attention
 
-# DOS logical partitions fail before Schema persistence. A primary swap has no
-# d1pN.img by design, but still produces a protected non-resizable fact.
-logical=$tmp/logical; mkdir -p $logical; : >$logical/d1p5.img
-printf 'label: dos\n/dev/mock1 : start=2048, size=2048, type=5\n/dev/mock5 : start=4096, size=1024, type=83\n' >$logical/d1.partitions
-BLKTYPE=ntfs; export BLKTYPE
-rootpxe_build_original_schema /dev/mock $logical && fail mbr-logical-schema
+# DOS extended/logical layouts generate Schema v2: the EBR container is a
+# derived metadata record with no artifact, while logical image payloads keep
+# their parent link.  A primary swap has no d1pN.img by design, but still
+# produces a protected non-resizable fact.
+logical=$tmp/logical; mkdir -p $logical; : >$logical/d1p5.img; : >$logical/d1p6.img
+printf 'label: dos\n/dev/mock1 : start=2048, size=8192, type=5\n/dev/mock5 : start=2050, size=2048, type=83\n/dev/mock6 : start=5000, size=1024, type=82\n' >$logical/d1.partitions
+BLKTYPE=ntfs; SCHEMA_KIND=mbr-v2; export BLKTYPE SCHEMA_KIND
+rootpxe_build_original_schema /dev/mock $logical || fail mbr-logical-schema-v2
+grep -Fq '"version":2' $rootpxe_original_schema_file || fail mbr-logical-schema-version
+grep -Fq '"role":"extended_container"' $rootpxe_original_schema_file || fail mbr-container-role
+grep -Fq '"kind":"logical"' $rootpxe_original_schema_file || fail mbr-logical-kind
+grep -Fq '"parentNumber":1' $rootpxe_original_schema_file || fail mbr-logical-parent
+grep -Fq '"ebrReservedSectors":2' $rootpxe_original_schema_file || fail mbr-ebr-reservation
+grep -Fq '"typeGuid":"0x5"' $rootpxe_original_schema_file || fail mbr-type-normalization
+grep -Fq '"typeGuid":"0x83"' $rootpxe_original_schema_file || fail mbr-logical-type-normalization
+grep -Fq '"artifact":""' $rootpxe_original_schema_file || fail mbr-container-artifact
+grep -Fq '"minSectors":3976' $rootpxe_original_schema_file || fail mbr-container-minimum
+node -e 'const e=2048,l=[{s:2050,m:2048},{s:5000,m:1024}];if(Math.max(...l.map(p=>p.s+p.m-e))!==3976)process.exit(1)' || fail mbr-container-minimum-oracle
+grep -Fq '(.startSectors + .minSectors - $part.startSectors)' $funcs || fail mbr-container-minimum-builder
+grep -Fq '"lvm"' $rootpxe_original_schema_file && fail mbr-v2-empty-lvm-must-be-omitted
+node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1]));const e=s.partitions.find(p=>p.kind==="extended"),l=s.partitions.find(p=>p.kind==="logical");if(!e||!l||"parentNumber" in e||!("ebrReservedSectors" in e)||"ebrReservedSectors" in l||"logicalNumbers" in l)process.exit(1)' "$rootpxe_original_schema_file" || fail mbr-v2-field-boundaries
+grep -Fq 'extended container must be derived' $funcs || fail mbr-derived-layout-guard
+grep -Fq 'derived extended geometry invalid' $funcs || fail mbr-derived-layout-geometry
+
+badlogical=$tmp/badlogical; mkdir -p $badlogical; : >$badlogical/d1p5.img
+printf 'label: dos\n/dev/mock5 : start=4096, size=1024, type=83\n' >$badlogical/d1.partitions
+rootpxe_build_original_schema /dev/mock $badlogical && fail mbr-logical-without-parent-schema
+unset SCHEMA_KIND
+
+# An extended partition is EBR metadata only.  Even if a stale d1p1.img was
+# left in storage, capture must not enqueue a writer and restore must not feed
+# it to writeImage.  The EBR marker itself remains available to the legacy
+# EBR restore path.
+container=$tmp/container; mkdir -p $container; : >$container/d1p1.img
+CONTAINER_TRACE=$tmp/container-trace; : >$CONTAINER_TRACE; export CONTAINER_TRACE
+getPartitionNumber() { part_number=1; }
+getPartType() { parttype=0x85; }
+fsTypeSetting() { fstype=ntfs; }
+EBRFileName() { ebrfilename="$1/d${2}p${3}.ebr"; }
+uploadFormat() { printf 'capture-writer\n' >>$CONTAINER_TRACE; return 1; }
+getDiskFromPartition() { disk=/dev/mock; }
+runPartprobe() { printf 'partprobe\n' >>$CONTAINER_TRACE; }
+writeImage() { printf 'restore-payload\n' >>$CONTAINER_TRACE; return 1; }
+imgPartitionType=all; imgType=n; imgFormat=5; osid=50
+savePartition /dev/mock1 1 $container all
+[[ -f $container/d1p1.ebr ]] || fail extended-capture-ebr-marker
+grep -Fq capture-writer $CONTAINER_TRACE && fail extended-capture-stale-payload
+restorePartition /dev/mock1 1 $container 0
+grep -Fq restore-payload $CONTAINER_TRACE && fail extended-restore-stale-payload
+grep -Fq partprobe $CONTAINER_TRACE || fail extended-restore-ebr-path
+
 swapdir=$tmp/swap; mkdir -p $swapdir
 printf 'label: dos\n/dev/mock2 : start=2048, size=1024, type=82\n' >$swapdir/d1.partitions
 BLKTYPE=swap; export BLKTYPE
@@ -414,13 +467,28 @@ node -e 'const a=512,r=Math.floor((7000-3500)/a)*a;if(r!==3072||r%a)process.exit
 schema=$tmp/schema; layoutfile=$tmp/layout
 printf '{"logicalSectorBytes":512}\n' >$schema; printf '{}\n' >$layoutfile
 SCHEMA_SECTOR=512
-SCHEMAHASH=$(sha256sum $schema | awk '{print $1}')
+SCHEMAHASH=$(rootpxe_canonical_json_hash $schema)
 TEST_SECTOR=4096
 export SCHEMA_SECTOR SCHEMAHASH TEST_SECTOR
 : >$tmp/jq-args
 schemaRevision=1; schemaHash=$SCHEMAHASH
 rootpxe_validate_deployment_layout /dev/mock $schema $layoutfile || fail target-byte-conversion
 grep -Fq -- '--argjson target 200000' $tmp/jq-args || fail target-byte-sector-count
+
+# The runtime jq resolver receives v2 MBR layout snapshots before permit.  In
+# this host-only suite jq is mocked, so inspect the actual resolver program
+# passed to jq and independently pin the EBR-derived extent arithmetic.
+mbr_schema=$tmp/mbr-layout-schema
+mbr_layout=$tmp/mbr-layout
+printf '{"version":2,"partitionTable":"mbr","logicalSectorBytes":512,"partitions":[{"number":1,"kind":"extended","startSectors":2048,"originalSectors":8192,"ebrReservedSectors":2},{"number":5,"kind":"logical","parentNumber":1,"startSectors":2050,"originalSectors":2048,"minSectors":1024,"resizable":true,"role":"data"}]}' >$mbr_schema
+SCHEMAHASH=$(rootpxe_canonical_json_hash $mbr_schema)
+printf '{"schemaHash":"%s","partitions":[{"number":1,"mode":"derived"},{"number":5,"mode":"original"}]}' "$SCHEMAHASH" >$mbr_layout
+schemaHash=$SCHEMAHASH; schemaRevision=1; SCHEMA_SECTOR=512; TEST_SECTOR=512
+: >$tmp/jq-args
+rootpxe_validate_deployment_layout /dev/mock $mbr_schema $mbr_layout || fail mbr-derived-layout-prepermit
+grep -Fq 'extended container must be derived' $tmp/jq-args || fail mbr-derived-layout-jq-program
+node -e 'const logical=[{start:4098,size:2048},{start:8192,size:1024}],ebr=2,start=Math.min(...logical.map(p=>p.start))-ebr,end=Math.max(...logical.map(p=>p.start+p.size));if(start!==4096||end-start!==5120)process.exit(1)' || fail mbr-derived-layout-oracle
+TEST_SECTOR=4096; export TEST_SECTOR
 
 # Sector mismatch is rejected before disk permit unless NVMe read-only LBAF
 # discovery succeeds.  This never runs nvme format.

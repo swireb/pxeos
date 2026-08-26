@@ -26,7 +26,12 @@ finish_args=(
 [[ -n ${rootpxe_original_schema_file:-} ]] && finish_args+=(--data-urlencode "originalSchema=$(cat "$rootpxe_original_schema_file")")
 dots "Notifying RootPXE (finish)"
 while true; do
-    res=$(curl -Lks --connect-timeout 10 --max-time 30 "${finish_args[@]}" "${rootpxe_api}finish" 2>/dev/null)
+    # 在 bash -e 环境中，临时网络错误不能让命令替换提前终止重试循环。
+    if res=$(curl -Lks --connect-timeout 10 --max-time 30 "${finish_args[@]}" "${rootpxe_api}finish" 2>/dev/null); then
+        :
+    else
+        res=""
+    fi
     if echo "$res" | grep -q '"success"[[:space:]]*:[[:space:]]*true'; then
         rootpxe_clear_capture_marker
         rootpxe_cleanup_task_json
@@ -46,7 +51,7 @@ while true; do
         printf " * Error returned: %s" "$res"
         echo
         debugPause
-        handleError "Could not complete tasking ($0)\n   Args Passed: $*"
+        handleError "PXEOS_STAGE=finish_notify CODE=FINISH_RETRY_EXHAUSTED REASON=rootpxe_finish_callback_failed"
     fi
     let count+=1
     usleep $((500000 * (1 << (count > 5 ? 5 : count))))

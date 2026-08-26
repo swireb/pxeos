@@ -88,66 +88,276 @@ rootpxe_prepare_storage_layout() {
     : > "$probe" && rm -f "$probe"
 }
 
+# LVM v2 is deliberately narrow.  It is not a fallback for arbitrary device
+# mapper stacks: only one target-disk PV, one VG and linear LVs can be made
+# reproducible from a per-LV image.  Keep the facts in root-only temporary
+# files so an unsupported topology fails before the caller asks for a write
+# permit or starts capture.
+rootpxe_lvm_trim() { sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$1"; }
+rootpxe_lvm_safe_identifier() { [[ $1 =~ ^[A-Za-z0-9._:+-]{1,160}$ ]]; }
+rootpxe_lvm_partition_path() {
+    local disk="$1" number="$2"
+    [[ $number =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ $disk == *[0-9] ]] && printf '%sp%s\n' "$disk" "$number" || printf '%s%s\n' "$disk" "$number"
+}
+rootpxe_lvm_is_pv_partition() {
+    local part="$1" number
+    [[ ${rootpxe_lvm_active:-no} == yes ]] || return 1
+    getPartitionNumber "$part"; number=$part_number
+    [[ $number == "${rootpxe_lvm_pv_number:-}" ]]
+}
+rootpxe_lvm_restore_source_lv() {
+    local lv_path="$1" original_bytes="$2" current rc
+    current=$(blockdev --getsize64 "$lv_path" 2>/dev/null) || return 1
+    [[ $current =~ ^[1-9][0-9]*$ && $original_bytes =~ ^[1-9][0-9]*$ ]] || return 1
+    if [[ $current -lt $original_bytes ]]; then
+        lvextend -y -f -L "${original_bytes}B" "$lv_path" >/dev/null 2>&1 || return 1
+    fi
+    e2fsck -pf "$lv_path" >/dev/null 2>&1; rc=$?
+    [[ $rc -eq 0 || $rc -eq 1 ]] || return 1
+    resize2fs "$lv_path" >/dev/null 2>&1 || return 1
+    current=$(blockdev --getsize64 "$lv_path" 2>/dev/null) || return 1
+    [[ $current == "$original_bytes" ]]
+}
+rootpxe_lvm_reset_capture_facts() {
+    rm -f -- "${rootpxe_lvm_facts_file:-}" "${rootpxe_lvm_lv_facts_file:-}"
+    unset rootpxe_lvm_active rootpxe_lvm_facts_file rootpxe_lvm_lv_facts_file rootpxe_lvm_pv_path rootpxe_lvm_pv_number rootpxe_lvm_pv_uuid rootpxe_lvm_vg_name rootpxe_lvm_vg_uuid rootpxe_lvm_pv_bytes rootpxe_lvm_pe_start_bytes rootpxe_lvm_vg_extent_bytes rootpxe_lvm_vg_free_bytes
+}
+rootpxe_lvm_remove_probe_files() { rm -f -- "$@"; }
+# Return 0 for no LVM or for the only supported topology; return non-zero for
+# any LVM that cannot be captured safely.  The caller distinguishes this from
+# ordinary non-LVM images via rootpxe_lvm_active.
+rootpxe_lvm_capture_preflight() {
+    local disk="$1" image_path="$2" target_parts="" row pv_path pv_uuid vg_name vg_uuid pv_size pe_start count=0 all_count=0 pvs_rows all_pvs_rows vgs_rows lvs_rows
+    rootpxe_lvm_reset_capture_facts
+    command -v pvs >/dev/null 2>&1 || return 1
+    command -v vgs >/dev/null 2>&1 || return 1
+    command -v lvs >/dev/null 2>&1 || return 1
+    getPartitions "$disk"
+    for pv_path in $parts; do
+        case "$(blkid -s TYPE -o value "$pv_path" 2>/dev/null | tr -d '\r\n')" in crypto_LUKS|linux_raid_member) rootpxe_lvm_reset_capture_facts; return 1;; esac
+        target_parts+="|$pv_path|"
+    done
+    [[ -n $target_parts ]] || return 1
+    rootpxe_lvm_facts_file=$(mktemp /tmp/rootpxe-lvm-pv.XXXXXX) || return 1
+    rootpxe_lvm_lv_facts_file=$(mktemp /tmp/rootpxe-lvm-lv.XXXXXX) || { rm -f "$rootpxe_lvm_facts_file"; return 1; }
+    pvs_rows=$(mktemp /tmp/rootpxe-lvm-pvs.XXXXXX) || { rootpxe_lvm_reset_capture_facts; return 1; }
+    all_pvs_rows=$(mktemp /tmp/rootpxe-lvm-all-pvs.XXXXXX) || { rootpxe_lvm_remove_probe_files "$pvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+    vgs_rows=$(mktemp /tmp/rootpxe-lvm-vgs.XXXXXX) || { rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+    lvs_rows=$(mktemp /tmp/rootpxe-lvm-lvs.XXXXXX) || { rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+    chmod 600 "$rootpxe_lvm_facts_file" "$rootpxe_lvm_lv_facts_file" "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows" || { rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+    if ! pvs --noheadings --separator '|' --units b --nosuffix -o pv_name,pv_uuid,vg_name,vg_uuid,pv_size,pe_start >"$pvs_rows" 2>/dev/null || [[ ! -s $pvs_rows ]]; then
+        rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1
+    fi
+    while IFS='|' read -r pv_path pv_uuid vg_name vg_uuid pv_size pe_start; do
+        pv_path=$(rootpxe_lvm_trim "$pv_path"); pv_uuid=$(rootpxe_lvm_trim "$pv_uuid"); vg_name=$(rootpxe_lvm_trim "$vg_name"); vg_uuid=$(rootpxe_lvm_trim "$vg_uuid"); pv_size=$(rootpxe_lvm_trim "$pv_size"); pe_start=$(rootpxe_lvm_trim "$pe_start")
+        [[ -n $pv_path && -n $vg_name ]] || continue
+        if [[ $target_parts == *"|$pv_path|"* ]]; then
+            count=$((count + 1)); printf '%s|%s|%s|%s|%s|%s\n' "$pv_path" "$pv_uuid" "$vg_name" "$vg_uuid" "$pv_size" "$pe_start" >>"$rootpxe_lvm_facts_file"
+        fi
+    done <"$pvs_rows"
+    # No target PV is a normal image.  Do not create an empty LVM extension.
+    if [[ $count -eq 0 ]]; then rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; rootpxe_lvm_active=no; export rootpxe_lvm_active; return 0; fi
+    [[ $count -eq 1 ]] || { rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+    IFS='|' read -r rootpxe_lvm_pv_path rootpxe_lvm_pv_uuid rootpxe_lvm_vg_name rootpxe_lvm_vg_uuid pv_size pe_start <"$rootpxe_lvm_facts_file"
+    rootpxe_lvm_pv_path=$(rootpxe_lvm_trim "$rootpxe_lvm_pv_path"); rootpxe_lvm_pv_uuid=$(rootpxe_lvm_trim "$rootpxe_lvm_pv_uuid"); rootpxe_lvm_vg_name=$(rootpxe_lvm_trim "$rootpxe_lvm_vg_name"); rootpxe_lvm_vg_uuid=$(rootpxe_lvm_trim "$rootpxe_lvm_vg_uuid"); pe_start=$(rootpxe_lvm_trim "$pe_start")
+    rootpxe_lvm_safe_identifier "$rootpxe_lvm_pv_uuid" && rootpxe_lvm_safe_identifier "$rootpxe_lvm_vg_name" && rootpxe_lvm_safe_identifier "$rootpxe_lvm_vg_uuid" || { rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+    getPartitionNumber "$rootpxe_lvm_pv_path"; rootpxe_lvm_pv_number=$part_number
+    rootpxe_lvm_pv_bytes=$(blockdev --getsize64 "$rootpxe_lvm_pv_path" 2>/dev/null) || { rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+    [[ $rootpxe_lvm_pv_bytes =~ ^[1-9][0-9]*$ && $pe_start =~ ^[0-9]+$ ]] || { rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+    rootpxe_lvm_pe_start_bytes=$pe_start
+    if ! pvs --noheadings --separator '|' -o pv_name,vg_uuid >"$all_pvs_rows" 2>/dev/null || [[ ! -s $all_pvs_rows ]]; then
+        rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1
+    fi
+    while IFS='|' read -r pv_path vg_uuid; do
+        pv_path=$(rootpxe_lvm_trim "$pv_path"); vg_uuid=$(rootpxe_lvm_trim "$vg_uuid")
+        [[ $vg_uuid == "$rootpxe_lvm_vg_uuid" ]] && all_count=$((all_count + 1))
+    done <"$all_pvs_rows"
+    [[ $all_count -eq 1 ]] || { rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+    local vg_row="" vg_count=0
+    if ! vgs --noheadings --separator '|' --units b --nosuffix -o vg_name,vg_uuid,vg_extent_size,vg_free >"$vgs_rows" 2>/dev/null || [[ ! -s $vgs_rows ]]; then
+        rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1
+    fi
+    while IFS='|' read -r vg_name vg_uuid extent free; do
+        vg_name=$(rootpxe_lvm_trim "$vg_name"); vg_uuid=$(rootpxe_lvm_trim "$vg_uuid"); extent=$(rootpxe_lvm_trim "$extent"); free=$(rootpxe_lvm_trim "$free")
+        [[ $vg_uuid == "$rootpxe_lvm_vg_uuid" ]] || continue
+        vg_count=$((vg_count + 1)); vg_row="$vg_name|$vg_uuid|$extent|$free"
+    done <"$vgs_rows"
+    [[ $vg_count -eq 1 ]] || { rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+    IFS='|' read -r vg_name vg_uuid rootpxe_lvm_vg_extent_bytes rootpxe_lvm_vg_free_bytes <<<"$vg_row"
+    [[ $rootpxe_lvm_vg_extent_bytes =~ ^[1-9][0-9]*$ && $rootpxe_lvm_vg_free_bytes =~ ^[0-9]+$ && $((rootpxe_lvm_pe_start_bytes)) -lt $((rootpxe_lvm_pv_bytes)) ]] || { rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+    local lv_name lv_uuid lv_path lv_size lv_attr segtype origin pool data metadata
+    if ! lvs --noheadings --separator '|' --units b --nosuffix -S "vg_uuid=$rootpxe_lvm_vg_uuid" -o lv_name,lv_uuid,lv_path,lv_size,lv_attr,segtype,origin,pool_lv,data_lv,metadata_lv >"$lvs_rows" 2>/dev/null || [[ ! -s $lvs_rows ]]; then
+        rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1
+    fi
+    while IFS='|' read -r lv_name lv_uuid lv_path lv_size lv_attr segtype origin pool data metadata; do
+        lv_name=$(rootpxe_lvm_trim "$lv_name"); lv_uuid=$(rootpxe_lvm_trim "$lv_uuid"); lv_path=$(rootpxe_lvm_trim "$lv_path"); lv_size=$(rootpxe_lvm_trim "$lv_size"); segtype=$(rootpxe_lvm_trim "$segtype"); origin=$(rootpxe_lvm_trim "$origin"); pool=$(rootpxe_lvm_trim "$pool"); data=$(rootpxe_lvm_trim "$data"); metadata=$(rootpxe_lvm_trim "$metadata")
+        [[ -n $lv_name ]] || continue
+        rootpxe_lvm_safe_identifier "$lv_name" && rootpxe_lvm_safe_identifier "$lv_uuid" && [[ $lv_path == /dev/* && $lv_size =~ ^[1-9][0-9]*$ && $segtype == linear && -z $origin && -z $pool && -z $data && -z $metadata ]] || { rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+        printf '%s|%s|%s|%s\n' "$lv_name" "$lv_uuid" "$lv_path" "$lv_size" >>"$rootpxe_lvm_lv_facts_file"
+    done <"$lvs_rows"
+    [[ -s $rootpxe_lvm_lv_facts_file ]] || { rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+    rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"
+    rootpxe_lvm_active=yes
+    export rootpxe_lvm_active rootpxe_lvm_facts_file rootpxe_lvm_lv_facts_file rootpxe_lvm_pv_path rootpxe_lvm_pv_number rootpxe_lvm_pv_uuid rootpxe_lvm_vg_name rootpxe_lvm_vg_uuid rootpxe_lvm_pv_bytes rootpxe_lvm_pe_start_bytes rootpxe_lvm_vg_extent_bytes rootpxe_lvm_vg_free_bytes
+}
+rootpxe_capture_lvm_volumes() {
+    local image_path="$1" pv_artifact vg_artifact lv_name lv_uuid lv_path lv_size fs swap_uuid artifact fifo=/tmp/pigz1 producer writer min_bytes min_blocks block_bytes shrunk=no pv_min_bytes
+    [[ ${rootpxe_lvm_active:-no} == yes ]] || return 0
+    pv_artifact="d1.pv.${rootpxe_lvm_pv_uuid}.meta"; vg_artifact="d1.vg.${rootpxe_lvm_vg_uuid}.cfg"
+    rootpxe_safe_relative_path "$pv_artifact" >/dev/null && rootpxe_safe_relative_path "$vg_artifact" >/dev/null || return 1
+    pvdisplay -m --units b --nosuffix "$rootpxe_lvm_pv_path" >"$image_path/$pv_artifact" 2>/dev/null || return 1
+    vgcfgbackup -f "$image_path/$vg_artifact" "$rootpxe_lvm_vg_name" >/dev/null 2>&1 || return 1
+    : >"$image_path/d1.lvm.capture.tsv" || return 1
+    while IFS='|' read -r lv_name lv_uuid lv_path lv_size; do
+        artifact=""; swap_uuid=""; shrunk=no
+        fs=$(blkid -s TYPE -o value "$lv_path" 2>/dev/null | tr -d '\r\n'); swap_uuid=$(blkid -s UUID -o value "$lv_path" 2>/dev/null | tr -d '\r\n')
+        case $fs in ext2|ext3|ext4|xfs|swap) ;; *) return 1;; esac
+        min_bytes="$lv_size"; producer=0; writer=0
+        if [[ $fs == ext2 || $fs == ext3 || $fs == ext4 ]]; then
+            # resize2fs -P and dumpe2fs are read-only.  The estimate receives
+            # at least 5% (or one extent) slack before extent rounding so the
+            # subsequent source shrink/capture/expand cycle is conservative.
+            local min_blocks block_bytes
+            min_blocks=$(resize2fs -P "$lv_path" 2>/dev/null | sed -n 's/.*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | tail -n1)
+            block_bytes=$(dumpe2fs -h "$lv_path" 2>/dev/null | awk -F: '/Block size:/{gsub(/[[:space:]]/,"",$2);print $2;exit}')
+            if [[ $min_blocks =~ ^[1-9][0-9]*$ && $block_bytes =~ ^[1-9][0-9]*$ ]]; then
+                min_bytes=$((min_blocks * block_bytes))
+                local slack=$((min_bytes * 5 / 100))
+                [[ $slack -lt $rootpxe_lvm_vg_extent_bytes ]] && slack=$rootpxe_lvm_vg_extent_bytes
+                min_bytes=$(( (min_bytes + slack + rootpxe_lvm_vg_extent_bytes - 1) / rootpxe_lvm_vg_extent_bytes * rootpxe_lvm_vg_extent_bytes ))
+                [[ $min_bytes -gt 0 && $min_bytes -le $lv_size ]] || min_bytes="$lv_size"
+            fi
+        fi
+        if [[ $fs != swap ]]; then
+            artifact="d1.lv.${lv_uuid}.img"; rootpxe_safe_relative_path "$artifact" >/dev/null || return 1
+            # Per-LV ext capture follows the FOS safe ordering: filesystem
+            # check -> shrink filesystem -> shrink LV -> capture -> restore LV
+            # -> expand filesystem.  XFS/swap never enter this branch.
+            if [[ $fs == ext2 || $fs == ext3 || $fs == ext4 ]] && [[ $min_bytes -lt $lv_size ]]; then
+                min_blocks=$((min_bytes / block_bytes))
+                e2fsck -pf "$lv_path"; producer=$?
+                [[ $producer -eq 0 || $producer -eq 1 ]] || return 1
+                resize2fs "$lv_path" "$min_blocks" || { rootpxe_lvm_restore_source_lv "$lv_path" "$lv_size"; return 1; }
+                lvreduce -y -f -L "${min_bytes}B" "$lv_path" || { rootpxe_lvm_restore_source_lv "$lv_path" "$lv_size"; return 1; }
+                shrunk=yes
+            fi
+            rm -f "$fifo" || { [[ $shrunk == yes ]] && rootpxe_lvm_restore_source_lv "$lv_path" "$lv_size"; return 1; }
+            uploadFormat "$fifo" "$image_path/$artifact" || { [[ $shrunk == yes ]] && rootpxe_lvm_restore_source_lv "$lv_path" "$lv_size"; return 1; }
+            if [[ $fs == xfs ]]; then partclone.xfs -cs "$lv_path" -O "$fifo" -Nf 1 -a0; else partclone.extfs -cs "$lv_path" -O "$fifo" -Nf 1 -a0; fi
+            producer=$?; rootpxe_wait_for_writer "$rootpxe_last_writer_pid"; writer=$?
+            if [[ $shrunk == yes ]]; then
+                rootpxe_lvm_restore_source_lv "$lv_path" "$lv_size" || { rm -f "$fifo"; return 1; }
+                shrunk=no
+            fi
+            [[ $producer -eq 0 && $writer -eq 0 ]] || { rm -f "$fifo"; return 1; }
+            mv "$image_path/$artifact.000" "$image_path/$artifact" >/dev/null 2>&1 || return 1
+        fi
+        printf '%s|%s|%s|%s|%s|%s|%s\n' "$lv_name" "$lv_uuid" "$lv_size" "$min_bytes" "$fs" "$artifact" "$swap_uuid" >>"$image_path/d1.lvm.capture.tsv" || return 1
+    done <"$rootpxe_lvm_lv_facts_file"
+    # PV minimum is its metadata start, every LV minimum rounded to a VG
+    # extent, plus one spare extent for LVM metadata/allocation safety.
+    pv_min_bytes=$(awk -F'|' -v pe="$rootpxe_lvm_pe_start_bytes" -v extent="$rootpxe_lvm_vg_extent_bytes" 'BEGIN {sum=pe+extent} {m=$4+0; sum += int((m+extent-1)/extent)*extent} END {print sum}' "$image_path/d1.lvm.capture.tsv")
+    [[ $pv_min_bytes =~ ^[1-9][0-9]*$ && $pv_min_bytes -le $rootpxe_lvm_pv_bytes ]] || return 1
+    jq -n --arg pv_uuid "$rootpxe_lvm_pv_uuid" --arg vg_uuid "$rootpxe_lvm_vg_uuid" --arg vg_name "$rootpxe_lvm_vg_name" --arg pv_artifact "$pv_artifact" --arg vg_artifact "$vg_artifact" --argjson part "$rootpxe_lvm_pv_number" --argjson pv_bytes "$rootpxe_lvm_pv_bytes" --argjson pv_min "$pv_min_bytes" --argjson pe_start "$rootpxe_lvm_pe_start_bytes" --argjson extent "$rootpxe_lvm_vg_extent_bytes" --argjson free "$rootpxe_lvm_vg_free_bytes" --rawfile lvs "$image_path/d1.lvm.capture.tsv" '
+      {version:2,pvs:[{partitionNumber:$part,uuid:$pv_uuid,vgUuid:$vg_uuid,originalBytes:$pv_bytes,minBytes:$pv_min,peStartBytes:$pe_start,artifact:$pv_artifact,vgConfigArtifact:$vg_artifact}],vgs:[{name:$vg_name,uuid:$vg_uuid,extentBytes:$extent,pvPartitionNumbers:[$part],originalFreeBytes:$free,lvs:($lvs|split("\n")|map(select(length>0)|split("|")|{name:.[0],uuid:.[1],layout:"linear",originalBytes:(.[2]|tonumber),minBytes:(.[3]|tonumber),fs:.[4],role:(if .[4]=="swap" then "swap" else "data" end),resizable:(.[4] != "xfs" and .[4] != "swap"),artifact:.[5],swapUuid:(if .[4]=="swap" then .[6] else "" end)})}]} ' >"$image_path/d1.lvm.schema.json" || return 1
+    jq -e '.version == 2 and (.pvs|length) == 1 and (.vgs|length) == 1' "$image_path/d1.lvm.schema.json" >/dev/null || return 1
+}
+
 # Captured n-type images carry a compact, canonical partition fact record.
 # It is generated only after all image writers and finalization succeeded.
 rootpxe_build_original_schema() {
-    local disk="$1" capture_path="$2" original minimum
+    local disk="$1" capture_path="$2" original minimum lvm_fragment=""
     original="$capture_path/d1.partitions"
     minimum="$capture_path/d1.minimum.partitions"
     local logical physical disk_bytes parts_file min_file facts_file schema_table
+    local -a lvm_jq_args=()
     [[ -r $original ]] || return 1
     command -v jq >/dev/null 2>&1 || return 1
+    [[ -r "$capture_path/d1.lvm.schema.json" ]] && lvm_fragment="$capture_path/d1.lvm.schema.json"
+    [[ -n $lvm_fragment ]] && lvm_jq_args=(--rawfile lvm "$lvm_fragment")
     logical=$(blockdev --getss "$disk" 2>/dev/null) || return 1
     physical=$(blockdev --getpbsz "$disk" 2>/dev/null || printf '%s' "$logical")
     disk_bytes=$(blockdev --getsize64 "$disk" 2>/dev/null) || return 1
     [[ $logical =~ ^[0-9]+$ && $physical =~ ^[0-9]+$ && $disk_bytes =~ ^[0-9]+$ ]] || return 1
     schema_table=$(awk '/^label:/{print tolower($2); exit}' "$original")
     [[ $schema_table == dos ]] && schema_table=mbr
-    # First-generation deploymentLayout cannot safely rebuild an EBR chain.
-    # A logical DOS partition would otherwise look like ordinary data after
-    # the extended container is omitted.  Fail capture before success/finish
-    # so no ambiguous n-type Schema is persisted.
-    if [[ $schema_table == mbr ]] && awk '
-        /start=/ {
-          dev=$1; n=dev; sub(/^.*[^0-9]/,"",n)
-          split($0,a,","); type=a[3]; sub(/.*(type|Id)=[[:space:]]*/,"",type)
-          lower=tolower(type)
-          if ((n + 0) >= 5 || lower=="5" || lower=="f" || lower=="0x5" || lower=="0xf") found=1
-        }
-        END { exit(found ? 0 : 1) }' "$original"; then
-        return 1
-    fi
     parts_file=$(mktemp /tmp/rootpxe-schema-parts.XXXXXX) || return 1
     min_file=$(mktemp /tmp/rootpxe-schema-min.XXXXXX) || { rm -f "$parts_file"; return 1; }
     facts_file=$(mktemp /tmp/rootpxe-schema-facts.XXXXXX) || { rm -f "$parts_file" "$min_file"; return 1; }
     chmod 600 "$parts_file" "$min_file" "$facts_file"
     awk -v image="$capture_path" -v disk="$disk" '
+        function is_extended(value, normalized) {
+          normalized=tolower(value); sub(/^0x/,"",normalized)
+          return normalized=="5" || normalized=="f" || normalized=="85"
+        }
         /^label:/{label=$2} /^sector-size:/{sector=$2}
         /start=/ {
           dev=$1; n=dev; sub(/^.*[^0-9]/,"",n)
           split($0,a,","); start=a[1]; sub(/.*start=[[:space:]]*/,"",start)
           size=a[2]; sub(/.*size=[[:space:]]*/,"",size)
           type=a[3]; sub(/.*(type|Id)=[[:space:]]*/,"",type)
-          lower=tolower(type)
-          # DOS extended entries are EBR containers, not image payloads. Do
-          # not turn them into a deployable partition fact.
-          if (lower=="5" || lower=="f" || lower=="0x5" || lower=="0xf") next
-          flags=(index($0,"bootable") ? "boot" : "")
-          artifact=image "/d1p" n ".img"
-          printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", n,start,size,type,label,artifact,flags
+          numbers[n]=1; starts[n]=start; sizes[n]=size; types[n]=type
+          flags[n]=(index($0,"bootable") ? "boot" : "-")
+          if (tolower(label)=="dos" && is_extended(type)) { extended_count++; extended_number=n }
+        }
+        END {
+          if (tolower(label)=="dos") {
+            if (extended_count > 1) exit 40
+            if (extended_count == 1) {
+              ext_start=starts[extended_number]; ext_end=ext_start+sizes[extended_number]
+            }
+            for (n in numbers) if ((n+0) >= 5) {
+              if (extended_count != 1) exit 41
+              if (starts[n] < ext_start+2 || starts[n]+sizes[n] > ext_end) exit 42
+              for (m in numbers) if ((m+0) >= 5 && (m+0)!=(n+0) && starts[m] < starts[n]) {
+                if (starts[n] < starts[m]+sizes[m]+2) exit 43
+              }
+            }
+          }
+          for (n in numbers) {
+            kind="primary"; parent="-"; artifact=image "/d1p" n ".img"
+            if (tolower(label)=="dos" && is_extended(types[n])) { kind="extended"; artifact="-" }
+            else if (tolower(label)=="dos" && (n+0) >= 5) { kind="logical"; parent=extended_number }
+            printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", n,starts[n],sizes[n],types[n],label,artifact,flags[n],kind,parent
+          }
         }' "$original" >"$parts_file" || { rm -f "$parts_file" "$min_file"; return 1; }
-    while IFS=$'\t' read -r part_number part_start part_size part_type part_label artifact flags; do
+    local schema_version=1 sorted_parts=""
+    if [[ $schema_table == mbr ]] && awk -F'\t' '$8 == "extended" || $8 == "logical" { found=1 } END { exit(found ? 0 : 1) }' "$parts_file"; then
+        # v2 explicitly promises numeric order because sfdisk must see an
+        # extended container before p5+; leave v1 row order/hash untouched.
+        sorted_parts=$(mktemp /tmp/rootpxe-schema-parts-sorted.XXXXXX) || { rm -f "$parts_file" "$min_file" "$facts_file"; return 1; }
+        sort -n -k1,1 "$parts_file" >"$sorted_parts" || { rm -f "$parts_file" "$min_file" "$facts_file" "$sorted_parts"; return 1; }
+        mv "$sorted_parts" "$parts_file" || { rm -f "$parts_file" "$min_file" "$facts_file" "$sorted_parts"; return 1; }
+        schema_version=2
+    fi
+    # LVM layout metadata is a Schema v2 extension even on GPT/ordinary MBR.
+    # The v1 decoder intentionally treats extensions as opaque, so emitting
+    # it as v1 would lose the LVM contract at task snapshot creation.
+    [[ -n $lvm_fragment ]] && schema_version=2
+    while IFS=$'\t' read -r part_number part_start part_size part_type part_label artifact flags part_kind parent_number; do
         local part_path fs uuid partuuid
+        [[ $artifact == - ]] && artifact=""
+        [[ $flags == - ]] && flags=""
+        [[ $parent_number == - ]] && parent_number=""
+        if [[ $part_kind == extended ]]; then
+            printf '%s\t\t\t\t%s\t%s\t%s\n' "$part_number" "$flags" "$part_kind" "$parent_number" >>"$facts_file"
+            continue
+        fi
         if [[ $disk == *[0-9] ]]; then part_path="${disk}p${part_number}"; else part_path="${disk}${part_number}"; fi
         fs=$(blkid -s TYPE -o value "$part_path" 2>/dev/null | tr -d '\r\n')
         uuid=$(blkid -s UUID -o value "$part_path" 2>/dev/null | tr -d '\r\n')
         partuuid=$(blkid -s PARTUUID -o value "$part_path" 2>/dev/null | tr -d '\r\n')
         [[ $fs != *$'\t'* && $uuid != *$'\t'* && $partuuid != *$'\t'* ]] || { rm -f "$parts_file" "$min_file" "$facts_file"; return 1; }
+        local is_lvm_pv=no
+        if [[ -n $lvm_fragment ]] && jq -e --argjson number "$part_number" '.pvs[]? | select(.partitionNumber == $number)' "$lvm_fragment" >/dev/null 2>&1; then
+            is_lvm_pv=yes
+        fi
         # FOG/PXEOS preserves swap UUID data separately in d1.original.swapuuids
         # and does not create d1pN.img. It is a protected fact, not a missing
         # payload error.
-        [[ $fs == swap || -f $artifact || -f "${artifact}.000" ]] || { rm -f "$parts_file" "$min_file" "$facts_file"; return 1; }
-        printf '%s\t%s\t%s\t%s\t%s\n' "$part_number" "$fs" "$uuid" "$partuuid" "$flags" >>"$facts_file"
+        [[ $is_lvm_pv == yes || $fs == swap || -f $artifact || -f "${artifact}.000" ]] || { rm -f "$parts_file" "$min_file" "$facts_file"; return 1; }
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$part_number" "$fs" "$uuid" "$partuuid" "$flags" "$part_kind" "$parent_number" >>"$facts_file"
     done <"$parts_file"
     if [[ -r $minimum ]]; then
         awk '/start=/ { dev=$1; n=dev; sub(/^.*[^0-9]/,"",n); split($0,a,","); size=a[2]; sub(/.*size=[[:space:]]*/,"",size); print n "\t" size }' "$minimum" >"$min_file"
@@ -155,10 +365,11 @@ rootpxe_build_original_schema() {
     rootpxe_original_schema_file=$(mktemp /tmp/rootpxe-original-schema.XXXXXX) || { rm -f "$parts_file" "$min_file" "$facts_file"; return 1; }
     chmod 600 "$rootpxe_original_schema_file"
     jq -n --arg table "$schema_table" \
-        --argjson disk "$disk_bytes" --argjson logical "$logical" --argjson physical "$physical" \
-        --rawfile rows "$parts_file" --rawfile mins "$min_file" --rawfile facts "$facts_file" '
+        --argjson version "$schema_version" --argjson disk "$disk_bytes" --argjson logical "$logical" --argjson physical "$physical" \
+        --rawfile rows "$parts_file" --rawfile mins "$min_file" --rawfile facts "$facts_file" "${lvm_jq_args[@]}" '
           def minmap: ($mins | split("\n") | map(select(length>0)|split("\t")|{key:.[0],value:(.[1]|tonumber)}) | from_entries);
           def factmap: ($facts | split("\n") | map(select(length>0)|split("\t")|{key:.[0],value:{fs:.[1],uuid:.[2],partuuid:.[3],flags:(.[4]|split(",")|map(select(length>0)))}}) | from_entries);
+          def mbrtype($type): ($type|ascii_downcase|sub("^0x";"") | "0x" + .);
           def role($type;$flags;$fs): if $fs == "swap" then "swap"
              elif (($type|ascii_downcase) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" or ($type|ascii_downcase) == "ef" or ($type|ascii_downcase) == "0xef") then "efi"
              elif ($type|ascii_downcase) == "e3c9e316-0b5c-4db8-817d-f92df00215ae" then "msr"
@@ -166,19 +377,34 @@ rootpxe_build_original_schema() {
              elif ($type|ascii_downcase) == "21686148-6449-6e6f-744e-656564454649" or ($flags|index("boot")) then "boot"
              elif (($type|ascii_downcase) == "e6d6d379-f507-44c2-a23c-238f2a3df928" or ($type|ascii_downcase) == "8e" or ($type|ascii_downcase) == "0x8e") then "lvm_pv"
              else "data" end;
+          (if ($lvm // "")|length > 0 then ($lvm|fromjson) else null end) as $lvmdata |
           (minmap) as $min | (factmap) as $facts |
           ($rows|split("\n")|map(select(length>0)|split("\t")|
             . as $row | ($facts[$row[0]] // {fs:"",uuid:"",partuuid:"",flags:[]}) as $fact |
-            (role($row[3];$fact.flags;$fact.fs)) as $role |
-            {number:($row[0]|tonumber),startSectors:($row[1]|tonumber),originalSectors:($row[2]|tonumber),minSectors:($min[$row[0]] // ($row[2]|tonumber)),typeGuid:$row[3],flags:$fact.flags,role:$role,resizable:($role == "data" and ($fact.fs|length) > 0),fs:$fact.fs,uuid:$fact.uuid,partuuid:$fact.partuuid,artifact:(if $role == "swap" then "" else ($row[5]|split("/")|last) end)})) as $parts |
-          {version:1,partitionTable:$table,originalDiskBytes:$disk,logicalSectorBytes:$logical,physicalSectorBytes:$physical,minDeployBytes:([$parts[]|(.startSectors + .minSectors)*$logical]|max),partitions:$parts}' >"$rootpxe_original_schema_file" || { rm -f "$parts_file" "$min_file" "$facts_file" "$rootpxe_original_schema_file"; return 1; }
+            (($row[0]|tonumber)) as $number |
+            (if $row[7] == "extended" then "extended_container" elif ($lvmdata != null and [$lvmdata.pvs[]|select(.partitionNumber == $number)]|length == 1) then "lvm_pv" else role($row[3];$fact.flags;$fact.fs) end) as $role |
+            {number:$number,startSectors:($row[1]|tonumber),originalSectors:($row[2]|tonumber),minSectors:(if $row[7] == "extended" then 2 elif ($lvmdata != null and [$lvmdata.pvs[]|select(.partitionNumber == $number)]|length == 1) then (([$lvmdata.pvs[]|select(.partitionNumber == $number)][0].minBytes / $logical)|floor) else ($min[$row[0]] // ($row[2]|tonumber)) end),typeGuid:(if $version == 2 and $table == "mbr" then mbrtype($row[3]) else $row[3] end),flags:$fact.flags,role:$role,resizable:(($role == "data" and ($fact.fs|length) > 0) or $role == "lvm_pv"),fs:$fact.fs,uuid:$fact.uuid,partuuid:$fact.partuuid,artifact:(if $role == "swap" or $role == "lvm_pv" or $row[7] == "extended" then "" else ($row[5]|split("/")|last) end),_kind:(if $version == 2 and $row[7] == "" then "primary" else $row[7] end),_parent:($row[8] // "")})) as $base |
+          (if $version == 2 then
+            $base as $all | $base | map(. as $part | . + {
+              kind:$part._kind
+            } + (if $part._kind == "logical" then {parentNumber:($part._parent|tonumber)}
+                 elif $part._kind == "extended" then
+                   {logicalNumbers:[$all[] | select(._kind == "logical" and ._parent == ($part.number|tostring)) | .number],ebrReservedSectors:2,
+                    minSectors:([$all[] | select(._kind == "logical" and ._parent == ($part.number|tostring)) | (.startSectors + .minSectors - $part.startSectors)] | max)}
+                 else {} end) | del(._kind,._parent))
+          else $base | map(del(._kind,._parent)) end) as $parts |
+          ({version:$version,partitionTable:$table,originalDiskBytes:$disk,logicalSectorBytes:$logical,physicalSectorBytes:$physical,minDeployBytes:([$parts[]|(.startSectors + .minSectors)*$logical]|max),partitions:$parts} + (if $lvmdata == null then {} else {lvm:$lvmdata} end))' >"$rootpxe_original_schema_file" || { rm -f "$parts_file" "$min_file" "$facts_file" "$rootpxe_original_schema_file"; return 1; }
     rm -f "$parts_file" "$min_file" "$facts_file"
     jq -e '
-      .version == 1 and (.partitionTable == "gpt" or .partitionTable == "dos" or .partitionTable == "mbr") and
-      (.logicalSectorBytes|type == "number" and . > 0) and
-      (.partitions|type == "array" and length > 0) and
-      ([.partitions[].number] as $numbers | ($numbers | unique | length) == ($numbers | length)) and
-      ([.partitions[] | select(.startSectors < 0 or .originalSectors <= 0 or .minSectors <= 0 or (.startSectors + .originalSectors) * .logicalSectorBytes > .originalDiskBytes)] | length == 0)' "$rootpxe_original_schema_file" >/dev/null || { rm -f "$rootpxe_original_schema_file"; return 1; }
+      def base: (.logicalSectorBytes|type == "number" and . > 0) and
+        (.partitions|type == "array" and length > 0) and
+        ([.partitions[].number] as $numbers | ($numbers | unique | length) == ($numbers | length)) and
+        ([.partitions[] | select(.startSectors < 0 or .originalSectors <= 0 or .minSectors <= 0 or .minSectors > .originalSectors or (.startSectors + .originalSectors) * .logicalSectorBytes > .originalDiskBytes)] | length == 0);
+      if .version == 1 then
+        (.partitionTable == "gpt" or .partitionTable == "dos" or .partitionTable == "mbr") and base
+      elif .version == 2 then
+        base and ((.partitionTable == "gpt" and ([.partitions[]|select(.kind != "primary")]|length)==0) or (.partitionTable == "mbr" and (([.partitions[] | select(.kind == "extended")] | length == 0) or (([.partitions[] | select(.kind == "extended")] | length == 1) and ([.partitions[] | select(.kind == "extended" and (.number < 1 or .number > 4 or .role != "extended_container" or .artifact != "" or .resizable != false or .ebrReservedSectors != 2 or has("parentNumber")))] | length == 0) and ([.partitions[] | select(.kind == "logical" and (.number < 5 or (.parentNumber|type) != "number" or has("ebrReservedSectors") or has("logicalNumbers")))] | length == 0)))) and (if has("lvm") then (.lvm.version == 2 and (.lvm.pvs|length)==1 and (.lvm.vgs|length)==1) else true end)
+      else false end' "$rootpxe_original_schema_file" >/dev/null || { rm -f "$rootpxe_original_schema_file"; return 1; }
     export rootpxe_original_schema_file
 }
 
@@ -196,6 +422,16 @@ rootpxe_cleanup_session() {
 # file. Percentage and remaining space use the deployable data area after
 # front/end reservations; remaining is rounded down to 256 KiB so it cannot
 # grow beyond the verified target boundary.
+rootpxe_canonical_json_hash() {
+    local json_file="$1" canonical
+    [[ -r $json_file ]] || return 1
+    # Go canonicalJSON hashes exactly jq's compact sorted JSON bytes, without
+    # jq's presentation newline. Command substitution removes that newline;
+    # printf deliberately does not add one back.
+    canonical=$(jq -cS . "$json_file") || return 1
+    printf '%s' "$canonical" | sha256sum | awk '{print $1}'
+}
+
 rootpxe_validate_deployment_layout() {
     local disk="$1" schema_file="$2" layout_file="$3" schema_logical target_bytes target_sectors source_hash layout_hash
     [[ -r $schema_file && -r $layout_file ]] || return 1
@@ -212,7 +448,7 @@ rootpxe_validate_deployment_layout() {
     [[ $schema_logical =~ ^[1-9][0-9]*$ && $target_bytes =~ ^[1-9][0-9]*$ ]] || return 1
     (( target_bytes % schema_logical == 0 )) || return 1
     target_sectors=$(( target_bytes / schema_logical ))
-    source_hash=$(jq -cS . "$schema_file" | sha256sum | awk '{print $1}') || return 1
+    source_hash=$(rootpxe_canonical_json_hash "$schema_file") || return 1
     [[ -z ${schemaHash:-} || $schemaHash == "$source_hash" ]] || return 1
     [[ ${schemaRevision:-} =~ ^[1-9][0-9]*$ ]] || return 1
     layout_hash=$(jq -er '.schemaHash // empty' "$layout_file" 2>/dev/null) || return 1
@@ -229,12 +465,25 @@ rootpxe_validate_deployment_layout() {
           if ($lp|type) != "array" then error("layout partitions missing") else . end |
           if ([ $lp[].number ]|unique|length) != ($lp|length) then error("duplicate layout number") else . end |
           if ([ $sp[].number ]|sort) != ([ $lp[].number ]|sort) then error("layout identity mismatch") else . end |
-          ($sp|map(.startSectors)|min) as $front |
+          ($s.version == 2 and $s.partitionTable == "mbr") as $mbrExtended |
+          (if $mbrExtended then
+             ([$sp[] | select(.kind == "extended")]) as $extendeds |
+             if ($extendeds|length) != 1 then error("invalid extended container") else . end |
+             ($extendeds[0]) as $extended |
+             ([$lp[] | select(.number == $extended.number)]) as $extendedLayout |
+             if ($extendedLayout|length) != 1 or $extendedLayout[0].mode != "derived" or ($extendedLayout[0]|has("fixedBytes") or has("percentage")) then error("extended container must be derived") else . end |
+             ([$sp[] | select(.kind == "logical")]) as $logicals |
+             if ($logicals|length) == 0 or ([ $logicals[] | select(.parentNumber != $extended.number)]|length) != 0 then error("invalid logical parent") else . end |
+             ([$sp[] | select(.kind == "primary") | (.startSectors + .originalSectors)]) as $primaryEnds |
+             if (($primaryEnds | max // 0) > $extended.startSectors) then error("primary after extended is not supported safely") else . end |
+             $sp | map(select(.kind != "extended"))
+           else $sp end) as $worksp |
+          ($worksp|map(.startSectors)|min) as $front |
           (if $s.partitionTable == "gpt" then $front else 0 end) as $back |
           ($target - $front - $back) as $available |
           (262144 / $logical | floor | if . < 1 then 1 else . end) as $alignment |
           if $available <= 0 then error("target too small") else . end |
-          [ $sp[] as $p | ($lp[]|select(.number == $p.number)) as $o |
+          [ $worksp[] as $p | ($lp[]|select(.number == $p.number)) as $o |
             ($o.mode // "original") as $mode |
             if (($mode|type) != "string" or ($mode|IN("original","fixed","percentage","remaining")|not)) then error("unknown mode") else . end |
             if $mode == "fixed" and ((($o.fixedBytes // null)|type) != "number" or ($o.fixedBytes <= 0) or ($o|has("percentage"))) then error("invalid fixed mode") else . end |
@@ -252,15 +501,143 @@ rootpxe_validate_deployment_layout() {
           ($pre|add) as $used |
           if $used > $available then error("target too small") else . end |
           (if $remainingCount == 1 then align_down(($available-$used);$alignment) else 0 end) as $remaining |
-          reduce range(0;($items|length)) as $i ({cursor:$front,out:[]};
+          (reduce range(0;($items|length)) as $i ({cursor:$front,out:[]};
             ($items[$i]) as $item | ($pre[$i]) as $base |
             (if $item.mode == "remaining" then $remaining else $base end) as $size |
             if $size < $item.p.minSectors then error("minimum size violated") else . end |
             .cursor = align_up(.cursor;$alignment) |
             .out += [$item.p + {startSectors:.cursor,resolvedSectors:$size}] |
             .cursor += $size) |
-          if .cursor > ($target-$back) then error("layout exceeds target") else .out end' >"$rootpxe_resolved_layout_file" || { rm -f "$rootpxe_resolved_layout_file"; return 1; }
+          if .cursor > ($target-$back) then error("layout exceeds target") else .out end) as $resolved |
+          if $mbrExtended then
+            ([$sp[] | select(.kind == "extended")][0]) as $extended |
+            ($resolved | map(select(.kind == "logical"))) as $logicals |
+            ($logicals | map(.startSectors) | min - $extended.ebrReservedSectors) as $extendedStart |
+            ($logicals | map(.startSectors + .resolvedSectors) | max) as $extendedEnd |
+            if $extendedStart < 0 or $extendedEnd <= $extendedStart then error("derived extended geometry invalid") else . end |
+            ([$resolved[], $extended + {startSectors:$extendedStart,resolvedSectors:($extendedEnd-$extendedStart)}] | sort_by(.number))
+          else $resolved end' >"$rootpxe_resolved_layout_file" || { rm -f "$rootpxe_resolved_layout_file"; return 1; }
     export rootpxe_resolved_layout_file
+    rootpxe_validate_lvm_deployment_layout "$schema_file" "$layout_file" "$rootpxe_resolved_layout_file"
+}
+
+# Resolve only the LVM extension after the physical partition layout has been
+# resolved.  The result is a root-only plan; it intentionally contains no
+# command text and is safe to validate before a disk permit is requested.
+rootpxe_validate_lvm_deployment_layout() {
+    local schema_file="$1" layout_file="$2" partition_plan="$3"
+    rm -f -- "${rootpxe_resolved_lvm_layout_file:-}"; unset rootpxe_resolved_lvm_layout_file
+    command -v jq >/dev/null 2>&1 || return 1
+    jq -e 'if has("lvm") then (.version == 2 and .lvm.version == 2) else true end' "$schema_file" >/dev/null 2>&1 || return 1
+    if ! jq -e 'has("lvm")' "$schema_file" >/dev/null 2>&1; then
+        jq -e '((.lvm // [])|length) == 0' "$layout_file" >/dev/null 2>&1
+        return
+    fi
+    rootpxe_resolved_lvm_layout_file=$(mktemp /tmp/rootpxe-resolved-lvm.XXXXXX) || return 1
+    chmod 600 "$rootpxe_resolved_lvm_layout_file"
+    jq -n --slurpfile schema "$schema_file" --slurpfile layout "$layout_file" --slurpfile partitions "$partition_plan" '
+      def bynum($n): (.[] | select(.number == $n));
+      def modebytes($v;$capacity;$extent):
+        if $v.mode == "original" then $v.originalBytes
+        elif $v.mode == "fixed" then $v.fixedBytes
+        elif $v.mode == "percentage" then ((($capacity * $v.percentage / 100)|floor / $extent|floor) * $extent)
+        else 0 end;
+      ($schema[0]) as $s | ($layout[0]) as $l | ($partitions[0]) as $resolved |
+      ($s.lvm) as $ls | ($l.lvm // []) as $ll |
+      if ($ls.version != 2 or ($ls.pvs|length)!=1 or ($ls.vgs|length)!=1 or ($ll|length)!=1) then error("invalid lvm topology") else . end |
+      ($ls.pvs[0]) as $pv | ($ls.vgs[0]) as $vg | ($ll[0]) as $plan |
+      if ($pv.vgUuid != $vg.uuid or $pv.partitionNumber != $vg.pvPartitionNumbers[0] or $plan.pvPartitionNumber != $pv.partitionNumber or ($plan.freeSpacePolicy|IN("preserveOriginal","allocateToRemaining")|not) or ($plan.volumes|length) != ($vg.lvs|length) then error("lvm identity mismatch") else . end |
+      ([$resolved[] | select(.number == $pv.partitionNumber)]|if length==1 then .[0] else error("resolved pv missing") end) as $resolvedPV |
+      ($resolvedPV.resolvedSectors * $s.logicalSectorBytes) as $pvBytes |
+      if ($pvBytes < $pv.minBytes or $pv.peStartBytes < 0 or $pv.peStartBytes >= $pvBytes then error("invalid pv capacity") else . end |
+      (((($pvBytes - $pv.peStartBytes - (if $plan.freeSpacePolicy == "preserveOriginal" then $vg.originalFreeBytes else 0 end)) / $vg.extentBytes)|floor) * $vg.extentBytes) as $capacity |
+      if $capacity < 0 then error("pv capacity exhausted") else . end |
+      [range(0;($vg.lvs|length)) as $i | ($vg.lvs[$i]) as $lv | ($plan.volumes[$i]) as $v |
+        if ($v.uuid != $lv.uuid or ($v.mode|IN("original","fixed","percentage","remaining")|not)) then error("lvm volume identity") else . end |
+        if ($lv.resizable|not or $lv.role == "swap" or $lv.fs == "xfs") and $v.mode != "original" then error("protected lvm volume") else . end |
+        if $v.mode == "fixed" and (($v.fixedBytes|type)!="number" or $v.fixedBytes < $lv.minBytes or ($v.fixedBytes % $vg.extentBytes)!=0 or $v|has("percentage")) then error("invalid fixed lvm volume") else . end |
+        if $v.mode == "percentage" and (($v.percentage|type)!="number" or $v.percentage < 1 or $v.percentage > 100 or $v|has("fixedBytes")) then error("invalid percentage lvm volume") else . end |
+        if ($v.mode == "original" or $v.mode == "remaining") and ($v|has("fixedBytes") or has("percentage")) then error("unexpected lvm fields") else . end |
+        {schema:$lv,layout:$v}] as $items |
+      if ([$items[].layout|select(.mode=="remaining")]|length)>1 or ([$items[].layout|select(.mode=="percentage")|.percentage]|add//0)>100 then error("lvm mode totals") else . end |
+      ($items|map(. + {bytes:modebytes((.schema + .layout);$capacity;$vg.extentBytes)})) as $pre |
+      ($pre|map(.bytes)|add) as $used |
+      if $used > $capacity then error("lvm capacity exceeded") else . end |
+      (reduce $pre[] as $item ({out:[]}; ($item.schema + {resolvedBytes:(if $item.layout.mode == "remaining" then ((($capacity-$used)/$vg.extentBytes|floor)*$vg.extentBytes) else $item.bytes end)}) as $entry | if $entry.resolvedBytes < $entry.minBytes then error("lvm minimum") else .out += [$entry] end)) as $volumes |
+      if ([$volumes[]|.resolvedBytes]|add) > $capacity then error("lvm resolved capacity") else {pv:$pv,vg:$vg,pvBytes:$pvBytes,freeSpacePolicy:$plan.freeSpacePolicy,volumes:$volumes} end' >"$rootpxe_resolved_lvm_layout_file" || { rm -f "$rootpxe_resolved_lvm_layout_file"; unset rootpxe_resolved_lvm_layout_file; return 1; }
+    export rootpxe_resolved_lvm_layout_file
+}
+
+# Restore metadata and per-LV payloads only after a matching deploy permit.
+# The PV never has a raw payload: doing so would overwrite the layout just
+# resolved from the immutable task snapshot.
+rootpxe_restore_lvm_volumes() {
+    local image_path="$1" target_disk="$2" plan="${rootpxe_resolved_lvm_layout_file:-}" pv vg pv_path pv_meta vg_cfg lv_name lv_uuid lv_fs lv_artifact lv_bytes target_id actual_uuid actual_size pv_original vg_uuid extent rebuild=no lv_list expected_lvs field_count restored_lvs=0
+    [[ ${rootpxe_disk_permit_granted:-no} == yes && -r $plan ]] || return 1
+    target_id=$(rootpxe_disk_stable_identity "$target_disk") || return 1
+    [[ ${rootpxe_disk_permit_target_id:-} == "$target_id" && ${rootpxe_disk_permit_operation:-} =~ ^(deploy_write|nvme_format\+deploy_write)$ ]] || return 1
+    pv=$(jq -er '.pv.uuid' "$plan") || return 1; vg=$(jq -er '.vg.name' "$plan") || return 1
+    pv_original=$(jq -er '.pv.originalBytes' "$plan") || return 1; vg_uuid=$(jq -er '.vg.uuid' "$plan") || return 1; extent=$(jq -er '.vg.extentBytes' "$plan") || return 1
+    pv_path=$(rootpxe_lvm_partition_path "$target_disk" "$(jq -er '.pv.partitionNumber' "$plan")") || return 1
+    pv_meta=$(jq -er '.pv.artifact' "$plan") || return 1; vg_cfg=$(jq -er '.pv.vgConfigArtifact' "$plan") || return 1
+    rootpxe_safe_relative_path "$pv_meta" >/dev/null && rootpxe_safe_relative_path "$vg_cfg" >/dev/null || return 1
+    [[ -r "$image_path/$pv_meta" && -r "$image_path/$vg_cfg" ]] || return 1
+    # The PV sidecar is not a decorative artifact: it binds the restore file
+    # to the captured PV UUID before any destructive LVM command is issued.
+    grep -F -- "$pv" "$image_path/$pv_meta" >/dev/null 2>&1 || return 1
+    [[ $pv_original =~ ^[1-9][0-9]*$ && $extent =~ ^[1-9][0-9]*$ ]] || return 1
+    # Process substitution would hide jq's exit status from the while loop.
+    # Materialise and validate the whole NUL-framed LV list before *any* LVM
+    # metadata command: malformed/empty plans must fail loud without writes.
+    lv_list=$(mktemp /tmp/rootpxe-lvm-restore.XXXXXX) || return 1
+    chmod 600 "$lv_list" || { rm -f "$lv_list"; return 1; }
+    if ! jq -jr '.volumes[]|.name,"\u0000",.uuid,"\u0000",.fs,"\u0000",.artifact,"\u0000",(.resolvedBytes|tostring),"\u0000"' "$plan" >"$lv_list"; then
+        rm -f "$lv_list"; return 1
+    fi
+    expected_lvs=$(jq -er '.volumes|length' "$plan") || { rm -f "$lv_list"; return 1; }
+    [[ $expected_lvs =~ ^[1-9][0-9]*$ ]] || { rm -f "$lv_list"; return 1; }
+    field_count=$(tr -cd '\000' <"$lv_list" | wc -c | tr -d '[:space:]') || { rm -f "$lv_list"; return 1; }
+    [[ $field_count =~ ^[0-9]+$ && $field_count -eq $((expected_lvs * 5)) ]] || { rm -f "$lv_list"; return 1; }
+    if [[ $(jq -er '.pvBytes' "$plan") -lt $pv_original ]]; then
+        # A smaller but >=minimum PV cannot replay the original VG allocation
+        # map. Rebuild the single-PV linear VG from its immutable snapshot;
+        # LV identities are capture facts, while bootability still relies on
+        # VG/LV names and filesystem UUIDs after the per-LV restore.
+        rebuild=yes
+        pvcreate -ff -y --norestorefile --uuid "$pv" "$pv_path" || { rm -f "$lv_list"; return 1; }
+        # This branch intentionally creates fresh VG/LV UUIDs.  The target
+        # cannot replay the old allocation map on a smaller PV; boot identity
+        # is retained through the captured VG/LV names and filesystem UUIDs.
+        vgcreate -y -s "${extent}B" "$vg" "$pv_path" || { rm -f "$lv_list"; return 1; }
+    else
+        pvcreate --uuid "$pv" --restorefile "$image_path/$vg_cfg" -ff -y "$pv_path" || { rm -f "$lv_list"; return 1; }
+        vgcfgrestore -f "$image_path/$vg_cfg" "$vg" || { rm -f "$lv_list"; return 1; }
+        pvresize --setphysicalvolumesize "$(jq -er '.pvBytes' "$plan")B" "$pv_path" || { rm -f "$lv_list"; return 1; }
+    fi
+    vgchange -ay "$vg" || { rm -f "$lv_list"; return 1; }
+    actual_uuid=$(pvs --noheadings -o pv_uuid "$pv_path" 2>/dev/null | tr -d '[:space:]') || { rm -f "$lv_list"; return 1; }
+    [[ $actual_uuid == "$pv" ]] || { rm -f "$lv_list"; return 1; }
+    # The artifact is a safe relative path but may legally contain a pipe, so
+    # neither tab (empty-field collapse) nor pipe delimiters are unambiguous.
+    # jq emits five NUL-delimited scalar fields; Bash read -d preserves an
+    # empty swap artifact without treating it as the following size.
+    while IFS= read -r -d '' lv_name && IFS= read -r -d '' lv_uuid && IFS= read -r -d '' lv_fs && IFS= read -r -d '' lv_artifact && IFS= read -r -d '' lv_bytes; do
+        rootpxe_lvm_safe_identifier "$lv_name" && rootpxe_lvm_safe_identifier "$lv_uuid" && [[ $lv_bytes =~ ^[1-9][0-9]*$ ]] || { rm -f "$lv_list"; return 1; }
+        if [[ $rebuild == yes ]]; then lvcreate -y -L "${lv_bytes}B" -n "$lv_name" "$vg" || { rm -f "$lv_list"; return 1; }; else lvresize -y -f -L "${lv_bytes}B" "/dev/$vg/$lv_name" || { rm -f "$lv_list"; return 1; }; fi
+        if [[ $lv_fs == swap ]]; then mkswap -U "$(jq -er --arg u "$lv_uuid" '.volumes[]|select(.uuid==$u)|.swapUuid' "$plan")" "/dev/$vg/$lv_name" || { rm -f "$lv_list"; return 1; }; restored_lvs=$((restored_lvs + 1)); continue; fi
+        rootpxe_safe_relative_path "$lv_artifact" >/dev/null && [[ -r "$image_path/$lv_artifact" ]] || { rm -f "$lv_list"; return 1; }
+        writeImage "$image_path/$lv_artifact" "/dev/$vg/$lv_name" no || { rm -f "$lv_list"; return 1; }
+        if [[ $lv_fs != xfs ]]; then
+            e2fsck -pf "/dev/$vg/$lv_name"; actual_size=$?
+            [[ $actual_size -eq 0 || $actual_size -eq 1 ]] || { rm -f "$lv_list"; return 1; }
+            resize2fs "/dev/$vg/$lv_name" || { rm -f "$lv_list"; return 1; }
+        fi
+        actual_size=$(blockdev --getsize64 "/dev/$vg/$lv_name" 2>/dev/null) || { rm -f "$lv_list"; return 1; }
+        [[ $actual_size == "$lv_bytes" ]] || { rm -f "$lv_list"; return 1; }
+        restored_lvs=$((restored_lvs + 1))
+    done <"$lv_list"
+    rm -f "$lv_list"
+    [[ $restored_lvs -eq $expected_lvs ]]
 }
 
 rootpxe_apply_deployment_layout() {
@@ -1076,7 +1453,7 @@ partitionIsDosExtended() {
             local parttype=""
             getPartType "$part"
             debugEcho "parttype = $parttype" 1>&2
-            [[ $parttype == +(0x5|0xf) ]] && echo "yes" || echo "no"
+            [[ ${parttype,,} == +(5|f|85|0x5|0xf|0x85) ]] && echo "yes" || echo "no"
             ;;
     esac
     debugPause
@@ -1485,34 +1862,55 @@ writeImage()  {
     local file="$1"
     local target="$2"
     local mc="$3"
+    local source_pid=""
+    local source_exitcode=0
+    local source_file=""
+    local source_files=()
     [[ -z $target ]] && handleError "No target to place image passed (${FUNCNAME[0]})\n   Args Passed: $*"
-    mkfifo /tmp/pigz1
+    mkfifo /tmp/pigz1 || handleError "PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_SETUP_FAILED REASON=unable_to_create_restore_fifo"
     case $mc in
         yes)
             if [[ -z $mcastrdv ]]; then
-                udp-receiver --nokbd --portbase $port --ttl 32 --mcast-rdv-address $storageip 2>/dev/null >/tmp/pigz1 &
+                udp-receiver --nokbd --portbase "$port" --ttl 32 --mcast-rdv-address "$storageip" 2>/dev/null >/tmp/pigz1 &
             else
-                udp-receiver --nokbd --portbase $port --ttl 32 --mcast-rdv-address $mcastrdv 2>/dev/null >/tmp/pigz1 &
+                udp-receiver --nokbd --portbase "$port" --ttl 32 --mcast-rdv-address "$mcastrdv" 2>/dev/null >/tmp/pigz1 &
             fi
+            source_pid="$!"
             ;;
         *)
             [[ -z $file ]] && handleError "No source file passed (${FUNCNAME[0]})\n   Args Passed: $*"
-            cat $file >/tmp/pigz1 &
+            # Restore callers use img* for split images.  Expand it without eval,
+            # preserve Bash glob ordering, and never accept directories or a miss.
+            mapfile -t source_files < <(compgen -G "$file")
+            [[ ${#source_files[@]} -gt 0 ]] || handleError "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_UNAVAILABLE REASON=image_source_glob_has_no_regular_files"
+            for source_file in "${source_files[@]}"; do
+                [[ -f $source_file && -r $source_file ]] || handleError "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_UNAVAILABLE REASON=image_source_is_not_readable"
+            done
+            cat -- "${source_files[@]}" >/tmp/pigz1 &
+            source_pid="$!"
             ;;
     esac
     local format=$imgLegacy
     [[ -z $format ]] && format=$imgFormat
-    set -o pipefail
+    local exitcode=0
     case $format in
         5|6)
             # ZSTD Compressed image.
             echo " * Imaging using Partclone (zstd)"
-            zstdmt -dc </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" --ignore_crc -O ${target} -Nf 1
+            if ( set -o pipefail; zstdmt -dc </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" --ignore_crc -O "${target}" -Nf 1 ); then
+                exitcode=0
+            else
+                exitcode=$?
+            fi
             ;;
         3|4)
             # Uncompressed partclone
             echo " * Imaging using Partclone (uncompressed)"
-            cat </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" --ignore_crc -O ${target} -Nf 1
+            if ( set -o pipefail; cat </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" --ignore_crc -O "${target}" -Nf 1 ); then
+                exitcode=0
+            else
+                exitcode=$?
+            fi
             # If this fails, try from compressed form.
             #[[ ! $? -eq 0 ]] && zstdmt -dc </tmp/pigz1 | partclone.restore --ignore_crc -O ${target} -N -f 1 || true
             ;;
@@ -1520,21 +1918,38 @@ writeImage()  {
             # Partimage
             echo " * Imaging using Partimage (gzip)"
             #zstdmt -dc </tmp/pigz1 | partimage restore ${target} stdin -f3 -b 2>/tmp/status.pxeos
-            pigz -dc </tmp/pigz1 | partimage restore ${target} stdin -f3 -b 2>/tmp/status.pxeos
+            if ( set -o pipefail; pigz -dc </tmp/pigz1 | partimage restore "${target}" stdin -f3 -b 2>/tmp/status.pxeos ); then
+                exitcode=0
+            else
+                exitcode=$?
+            fi
             ;;
         0|2)
             # GZIP Compressed partclone
             echo " * Imaging using Partclone (gzip)"
             #zstdmt -dc </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" --ignore_crc -O ${target} -N -f 1
-            pigz -dc </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" --ignore_crc -O ${target} -N -f 1
+            if ( set -o pipefail; pigz -dc </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" --ignore_crc -O "${target}" -N -f 1 ); then
+                exitcode=0
+            else
+                exitcode=$?
+            fi
             # If this fails, try uncompressed form.
             #[[ ! $? -eq 0 ]] && cat </tmp/pigz1 | partclone.restore -O ${target} --ignore_crc -N -f 1 || true
             ;;
     esac
-    exitcode=$?
-    pipe_status=("${PIPESTATUS[@]}")
-    [[ $exitcode -eq 0 ]] || handleError "Image restore pipeline failed (${FUNCNAME[0]})"
-    for exitcode in "${pipe_status[@]}"; do [[ $exitcode -eq 0 ]] || handleError "Image restore pipeline component failed (${FUNCNAME[0]})"; done
+    if wait "$source_pid"; then
+        source_exitcode=0
+    else
+        source_exitcode=$?
+    fi
+    if [[ $exitcode -ne 0 ]]; then
+        rm -rf /tmp/pigz1 >/dev/null 2>&1
+        handleError "PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_FAILED REASON=image_decoder_or_writer_failed"
+    fi
+    if [[ $source_exitcode -ne 0 ]]; then
+        rm -rf /tmp/pigz1 >/dev/null 2>&1
+        handleError "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_FAILED REASON=image_transport_or_storage_reader_failed"
+    fi
     rm -rf /tmp/pigz1 >/dev/null 2>&1
 }
 # Gets the valid restore parts. They're only
@@ -2668,7 +3083,7 @@ completeTasking() {
     case $type in
         up)
             rootpxe_stage upload_complete "capture write finished, notifying server"
-            chmod -R 775 "$imagePath" >/dev/null 2>&1
+            chmod -R 775 "$imagePath" >/dev/null 2>&1 || handleError "PXEOS_STAGE=capture_finalize CODE=CAPTURE_ARTIFACT_PERMISSION_FAILED REASON=unable_to_finalize_storage_artifacts"
             killStatusReporter
             . /bin/pxeos.imgcomplete
             ;;
@@ -2887,44 +3302,73 @@ uploadFormat() {
     local file="$2"
     [[ -z $fifo ]] && handleError "Missing file in file out (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $file ]] && handleError "Missing file name to store (${FUNCNAME[0]})\n   Args Passed: $*"
-    [[ ! -e $fifo ]] && mkfifo $fifo >/dev/null 2>&1
+    if [[ ! -e $fifo ]]; then
+        mkfifo "$fifo" >/dev/null 2>&1 || handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_SETUP_FAILED REASON=unable_to_create_capture_fifo"
+    fi
     local cores=$(nproc)
     cores=$((cores - 1))
     [[ $cores -lt 1 ]] && cores=1
     [[ ${writer_pids+x} ]] || writer_pids=()
-    set -o pipefail
     case $imgFormat in
         6)
             # ZSTD Split files compressed.
-            zstdmt --rsyncable --ultra $PIGZ_COMP < $fifo | split -a 3 -d -b 200m - ${file}. &
+            ( set -o pipefail; zstdmt --rsyncable --ultra "$PIGZ_COMP" < "$fifo" | split -a 3 -d -b 200m - "${file}." ) &
             ;;
         5)
             # ZSTD compressed.
-            zstdmt --rsyncable --ultra $PIGZ_COMP < $fifo > ${file}.000 &
+            zstdmt --rsyncable --ultra "$PIGZ_COMP" < "$fifo" > "${file}.000" &
             ;;
         4)
             # Split files uncompressed.
-            cat $fifo | split -a 3 -d -b 200m - ${file}. &
+            ( set -o pipefail; cat "$fifo" | split -a 3 -d -b 200m - "${file}." ) &
             ;;
         3)
             # Uncompressed.
-            cat $fifo > ${file}.000 &
+            cat "$fifo" > "${file}.000" &
             ;;
         2)
             # GZip/piGZ Split file compressed.
-            pigz $PIGZ_COMP < $fifo | split -a 3 -d -b 200m - ${file}. &
+            ( set -o pipefail; pigz "$PIGZ_COMP" < "$fifo" | split -a 3 -d -b 200m - "${file}." ) &
             ;;
         *)
             # GZip/piGZ Compressed.
-            pigz $PIGZ_COMP < $fifo > ${file}.000 &
+            pigz "$PIGZ_COMP" < "$fifo" > "${file}.000" &
         ;;
     esac
-    writer_pids+=("$!")
+    rootpxe_last_writer_pid="$!"
+    writer_pids+=("$rootpxe_last_writer_pid")
+}
+
+# 等待指定 capture writer 并从待等待集合移除。调用方必须在宣告分区
+# 捕获成功或移动分片前调用它，避免后端存储失败被延迟或掩盖。
+rootpxe_wait_for_writer() {
+    local pid="$1"
+    local writer_pid status=0
+    local remaining=()
+    [[ $pid =~ ^[0-9]+$ ]] || return 1
+    if wait "$pid"; then
+        status=0
+    else
+        status=$?
+    fi
+    for writer_pid in "${writer_pids[@]:-}"; do
+        [[ $writer_pid == "$pid" ]] || remaining+=("$writer_pid")
+    done
+    writer_pids=("${remaining[@]}")
+    return "$status"
 }
 rootpxe_wait_for_writers() {
-    [[ ${#writer_pids[@]} -gt 0 ]] || handleError "No capture writers were started (${FUNCNAME[0]})"
-    wait "${writer_pids[@]}" || handleError "Capture writer failed (${FUNCNAME[0]})"
+    [[ ${#writer_pids[@]} -gt 0 ]] || return 0
+    local pid writer_status=0
+    for pid in "${writer_pids[@]}"; do
+        if rootpxe_wait_for_writer "$pid"; then
+            :
+        else
+            writer_status=$?
+        fi
+    done
     writer_pids=()
+    [[ $writer_status -eq 0 ]] || handleError "PXEOS_STAGE=capture_write CODE=CAPTURE_WRITER_FAILED REASON=storage_writer_or_compressor_failed"
 }
 # Thank you, fractal13 Code Base
 #
@@ -3341,6 +3785,8 @@ savePartition() {
     [[ -z $disk_number ]] && handleError "No drive number passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $imagePath ]] && handleError "No image path passed (${FUNCNAME[0]})\n   Args Passed: $*"
     local part_number=0
+    local exitcode=0
+    local writer_exitcode=0
     getPartitionNumber "$part"
     local fstype=""
     local parttype=""
@@ -3359,7 +3805,7 @@ savePartition() {
     local swapuuidfilename=""
     # An extended partition is an EBR container, never an image payload.
     case $parttype in
-        0x5|0xf)
+        5|f|85|0x5|0xf|0x85)
             echo " * Not capturing content of extended partition"
             debugPause
             EBRFileName "$imagePath" "$disk_number" "$part_number"
@@ -3379,23 +3825,31 @@ savePartition() {
             debugPause
             imgpart="$imagePath/d${disk_number}p${part_number}.img"
             uploadFormat "$fifoname" "$imgpart"
-            partclone.$fstype -n "Storage Location $storage, Image name $img" -cs $part -O $fifoname -Nf 1 || handleError "Capture producer failed (${FUNCNAME[0]})"
-            exitcode=$?
-            case $exitcode in
-                0)
-                    mv ${imgpart}.000 $imgpart >/dev/null 2>&1
-                    echo " * Image Captured"
-                    debugPause
-                    ;;
-                *)
-                    local spaceAvailable=$(getServerDiskSpaceSvailable)
-                    handleError "Failed to complete capture (${FUNCNAME[0]})\n    Args Passed: $*\n    CMD: partclone.$fstype -n \"Storage Location $storage, Image name $img\" -s -O $fifoname -Nf 1\n    Exit code: $exitcode\n    Server Disk Space Available: $spaceAvailable"
-                    ;;
-            esac
+            if partclone.$fstype -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -Nf 1; then
+                exitcode=0
+            else
+                exitcode=$?
+            fi
+            if rootpxe_wait_for_writer "$rootpxe_last_writer_pid"; then
+                writer_exitcode=0
+            else
+                writer_exitcode=$?
+            fi
+            if [[ $exitcode -ne 0 ]]; then
+                rm -f "$fifoname" >/dev/null 2>&1 || true
+                handleError "PXEOS_STAGE=capture CODE=CAPTURE_PRODUCER_FAILED REASON=partclone_capture_failed"
+            fi
+            if [[ $writer_exitcode -ne 0 ]]; then
+                rm -f "$fifoname" >/dev/null 2>&1 || true
+                handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_FAILED REASON=storage_writer_or_compressor_failed"
+            fi
+            mv "${imgpart}.000" "$imgpart" >/dev/null 2>&1 || handleError "PXEOS_STAGE=capture CODE=CAPTURE_ARTIFACT_FINALIZE_FAILED REASON=unable_to_finalize_image_artifact"
+            echo " * Image Captured"
+            debugPause
             ;;
         *)
             case $parttype in
-                0x5|0xf)
+                5|f|85|0x5|0xf|0x85)
                     echo " * Not capturing content of extended partition"
                     debugPause
                     EBRFileName "$imagePath" "$disk_number" "$part_number"
@@ -3406,19 +3860,27 @@ savePartition() {
                     debugPause
                     imgpart="$imagePath/d${disk_number}p${part_number}.img"
                     uploadFormat "$fifoname" "$imgpart"
-                    partclone.$fstype -n "Storage Location $storage, Image name $img" -cs $part -O $fifoname -Nf 1 -a0 || handleError "Capture producer failed (${FUNCNAME[0]})"
-                    exitcode=$?
-                    case $exitcode in
-                        0)
-                            mv ${imgpart}.000 $imgpart >/dev/null 2>&1
-                            echo " * Image Captured"
-                            debugPause
-                            ;;
-                        *)
-                            local spaceAvailable=$(getServerDiskSpaceSvailable)
-                            handleError "Failed to complete capture (${FUNCNAME[0]})\n    Args Passed: $*\n    CMD: partclone.$fstype -n \"Storage Location $storage, Image name $img\" -cs -O $fifoname -Nf 1 -a0\n    Exit code: $exitcode\n    Server Disk Space Available: $spaceAvailable"
-                            ;;
-                    esac
+                    if partclone.$fstype -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -Nf 1 -a0; then
+                        exitcode=0
+                    else
+                        exitcode=$?
+                    fi
+                    if rootpxe_wait_for_writer "$rootpxe_last_writer_pid"; then
+                        writer_exitcode=0
+                    else
+                        writer_exitcode=$?
+                    fi
+                    if [[ $exitcode -ne 0 ]]; then
+                        rm -f "$fifoname" >/dev/null 2>&1 || true
+                        handleError "PXEOS_STAGE=capture CODE=CAPTURE_PRODUCER_FAILED REASON=partclone_capture_failed"
+                    fi
+                    if [[ $writer_exitcode -ne 0 ]]; then
+                        rm -f "$fifoname" >/dev/null 2>&1 || true
+                        handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_FAILED REASON=storage_writer_or_compressor_failed"
+                    fi
+                    mv "${imgpart}.000" "$imgpart" >/dev/null 2>&1 || handleError "PXEOS_STAGE=capture CODE=CAPTURE_ARTIFACT_FINALIZE_FAILED REASON=unable_to_finalize_image_artifact"
+                    echo " * Image Captured"
+                    debugPause
                     ;;
             esac
             ;;
@@ -3455,7 +3917,7 @@ restorePartition() {
     getPartitionNumber "$part"
     getPartType "$part"
     case $parttype in
-        0x5|0xf)
+        5|f|85|0x5|0xf|0x85)
             echo " * Not deploying content of extended partition"
             runPartprobe "$disk"
             return
