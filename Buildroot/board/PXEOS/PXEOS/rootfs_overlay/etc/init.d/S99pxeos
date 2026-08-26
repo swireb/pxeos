@@ -44,8 +44,14 @@ case $isdebug in
             fi
         else
             echo " * PXEOS task exited with error (rc=$rc), keeping system for troubleshooting"
-            echo " * Tip: add 'isdebug=yes' in kernel args for interactive debug mode"
-            sleep 300
+            failure_action="reboot"
+            [[ -f /tmp/pxeos.failure_action ]] && failure_action="$(tr -d '\r\n\0' </tmp/pxeos.failure_action)"
+            echo " * SSH 服务保持可用；任务异常已上报后将按系统设置执行：$failure_action"
+            if [[ "$failure_action" == "shutdown" ]]; then
+                poweroff >/dev/null 2>&1
+            else
+                reboot -f >/dev/null 2>&1
+            fi
         fi
         ;;
 esac

@@ -67,6 +67,8 @@ checkin_rootpxe() {
     # 按约定：使用服务端下发的任务主机 MAC（kernel cmdline 的 mac），不要在此处探测真实网卡
     lmac="$mac"
     local out
+    local body
+    local http_code
     local line
     local k
     local v
@@ -77,16 +79,39 @@ checkin_rootpxe() {
         waitFlag=""
         waitMsg=""
         retryAfterSec=5
-        out=$(curl -Lksf \
+        # Do not use curl -f here. A 4xx means the administrator withdrew the
+        # task before checkin completed; it is a safe reboot, not a PXEOS error.
+        out=$(curl -Lks \
             --connect-timeout 10 --max-time 30 \
             --data-urlencode "taskid=$taskid" \
             --data-urlencode "token=$task_token" \
             --data-urlencode "format=sh" \
             --data-urlencode "mac=$lmac" \
             --data-urlencode "sysuuid=$sysuuid_local" \
-            "${rootpxe_api}checkin" 2>/dev/null)
+            -w $'\n%{http_code}' "${rootpxe_api}checkin" 2>/dev/null)
         curl_status=$?
-        [[ $curl_status -eq 0 && -n $out ]] || handleError "RootPXE checkin HTTP request failed ($0)"
+        if [[ $curl_status -ne 0 ]]; then
+            echo " * 无法确认 RootPXE checkin，保留 SSH 并将在 5 秒后重试"
+            sleep 5
+            continue
+        fi
+        http_code=${out##*$'\n'}
+        body=${out%$'\n'*}
+        if [[ $http_code =~ ^4[0-9][0-9]$ ]]; then
+            # The task may have been aborted after the kernel started but
+            # before checkin.  No task callback is allowed after this point.
+            echo " * 任务已被管理员中止或撤回，停止 PXEOS"
+            printf '%s\n' reboot > /tmp/pxeos.failure_action
+            return 2
+        fi
+        # A 5xx, malformed status, or empty 2xx response is uncertain. Keep
+        # SSH available and retry checkin; never mount storage or start imaging.
+        if [[ ! $http_code =~ ^2[0-9][0-9]$ || -z $body ]]; then
+            echo " * 无法确认 RootPXE checkin，保留 SSH 并将在 5 秒后重试"
+            sleep 5
+            continue
+        fi
+        out=$body
         while IFS= read -r line || [[ -n $line ]]; do
             [[ -z $line ]] && continue
             case $line in
@@ -181,5 +206,11 @@ checkin_rootpxe() {
     debugPause
 }
 
-[[ ! $capone -eq 1 ]] && checkin_rootpxe
-[[ ! $capone -eq 1 ]] && rootpxe_stage checkin "PXEOS checkin completed"
+if [[ ! $capone -eq 1 ]]; then
+    checkin_rootpxe
+    checkin_rc=$?
+    # This script is sourced by upload/download. A nonzero checkin result must
+    # terminate that parent task so S99pxeos can perform the fixed safe reboot.
+    [[ $checkin_rc -eq 0 ]] || exit "$checkin_rc"
+    rootpxe_stage checkin "PXEOS checkin completed"
+fi

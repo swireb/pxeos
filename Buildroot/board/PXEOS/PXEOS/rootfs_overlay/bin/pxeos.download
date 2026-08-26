@@ -4,6 +4,20 @@
 . /bin/pxeos.mount
 . /bin/pxeos.checkmount
 . /bin/pxeos.checkimgvar
+rootpxe_wait_for_disk_permit
+case $? in
+    0) ;;
+    10)
+        echo " * 任务已被管理员中止或删除，停止 PXEOS"
+        printf '%s\n' reboot > /tmp/pxeos.failure_action
+        exit 2
+        ;;
+    *)
+        # rootpxe_wait_for_disk_permit only returns after a definite result.
+        printf '%s\n' reboot > /tmp/pxeos.failure_action
+        exit 2
+        ;;
+esac
 rootpxe_run_postinit || handleError "Post-init script failed ($0)"
 rootpxe_stage init "pxeos download started, storage mounted"
 hd=""

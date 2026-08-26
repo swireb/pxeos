@@ -124,6 +124,83 @@ rootpxe_run_postinit() {
     export rootpxe_postinit_ran
 }
 
+# The server owns the cancellation fence.  This must run before any hook or
+# imaging action because a custom hook may itself write a local disk.
+rootpxe_request_disk_permit() {
+    # Return values are intentionally distinct:
+    #   0 granted; 10 task deleted/rejected; 11 transport/server uncertainty.
+    # A rejection is an administrator action, not an execution failure, so it
+    # must never enter handleError and create a new PXEOS error report.
+    rootpxe_require_task_context || return 10
+    local api="${pxeapi:-$web}" response body http_code
+    [[ -n $api ]] || return 10
+    response=$(curl -Lks --connect-timeout 10 --max-time 30 \
+        --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
+        --data-urlencode "mac=$mac" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
+    http_code=${response##*$'\n'}
+    body=${response%$'\n'*}
+    [[ $http_code =~ ^2[0-9][0-9]$ && $body == *'"granted":true'* ]] && return 0
+    [[ $http_code =~ ^4[0-9][0-9]$ || $body == *'"granted":false'* ]] && return 10
+    return 11
+}
+
+rootpxe_wait_for_disk_permit() {
+    local result
+    while :; do
+        rootpxe_request_disk_permit
+        result=$?
+        case $result in
+            0) return 0 ;;
+            10) return 10 ;;
+            *)
+                echo " * 无法确认磁盘操作许可，保留 SSH 并将在 5 秒后重试"
+                sleep 5
+                ;;
+        esac
+    done
+}
+
+rootpxe_error_wait_for_retry() {
+    local message="$1" code="${2:-PXEOS_ERROR}" api="${pxeapi:-$web}" response wait action deadline now status
+    rootpxe_require_task_context || return 1
+    [[ -n $api ]] || return 1
+    # Do not arm the local timeout until the service confirms persistence.
+    while :; do
+        response=$(curl -Lks --connect-timeout 10 --max-time 30 \
+            --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
+            --data-urlencode "mac=$mac" --data-urlencode "errorCode=$code" \
+            --data-urlencode "message=$message" "${api}error" 2>/dev/null) || { echo " * 无法上报错误，保留 SSH 并将在 5 秒后重试"; sleep 5; continue; }
+        [[ $response == *'"accepted":true'* ]] && break
+        echo " * 服务端未确认错误上报，保留 SSH 并将在 5 秒后重试"; sleep 5
+    done
+    wait=$(printf '%s' "$response" | sed -n 's/.*"waitSec":\([0-9][0-9]*\).*/\1/p')
+    action=$(printf '%s' "$response" | sed -n 's/.*"failureAction":"\([a-z]*\)".*/\1/p')
+    [[ $wait =~ ^[0-9]+$ && $wait -ge 60 && $wait -le 3600 ]] || wait=600
+    [[ $action == shutdown ]] || action=reboot
+    printf '%s\n' "$action" > /tmp/pxeos.failure_action
+    deadline=$(( $(date +%s) + wait ))
+    echo " * 错误已上报，任务进入待处理。可通过 SSH 排障；管理员点击“重试”后将立即继续。"
+    while :; do
+        now=$(date +%s)
+        if [[ $now -ge $deadline ]]; then
+            echo " * 等待超时，将按系统设置执行：$action"
+            return 2
+        fi
+        status=$(curl -Lks --connect-timeout 10 --max-time 20 \
+            --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
+            --data-urlencode "mac=$mac" "${api}task-status" 2>/dev/null)
+        if [[ $status == *'"status":"queued"'* ]]; then
+            echo " * 管理员已请求重试，重新进入原任务"
+            exec /bin/pxeos
+        fi
+        if [[ $status == *'"status":"deleted"'* || $status == *'"status":"cancelled"'* || $status == *'"status":"superseded"'* ]]; then
+            echo " * 任务已被删除或中止，停止 PXEOS"
+            return 2
+        fi
+        sleep 5
+    done
+}
+
 rootpxe_directory_size_bytes() {
     local root="$1"
     local total=0 file bytes
@@ -2047,6 +2124,11 @@ handleError() {
                 fi
                 ;;
         esac
+    fi
+    if rootpxe_require_task_context; then
+        rootpxe_error_wait_for_retry "$str" "PXEOS_ERROR"
+        return_code=$?
+        exit "$return_code"
     fi
     if [[ -z $isdebug ]]; then
         echo "##############################################################################"
