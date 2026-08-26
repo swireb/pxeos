@@ -94,7 +94,7 @@
 | P2 | [49bf078](https://github.com/FOGProject/fos/commit/49bf078)、[5805397](https://github.com/FOGProject/fos/commit/5805397)、[7eec50f](https://github.com/FOGProject/fos/commit/7eec50f) | ARM64 gzip 启动、平台配置和 QEMU 验证。 | **按真实 ARM64 需求安排。** 需要 ARM64 PXE/QEMU 或实体设备验证后才引入。 |
 | P2 | [574ca45](https://github.com/FOGProject/fos/commit/574ca45)、[bc9ee24](https://github.com/FOGProject/fos/commit/bc9ee24)、[07c8487](https://github.com/FOGProject/fos/commit/07c8487) | 内核 6.18.38、Realtek r8169、PCIe ASPM。 | **独立硬件栈升级。** 需网络、存储、PXE、休眠/唤醒等硬件回归，不能随功能改动升级。 |
 | P3 | [408f27c](https://github.com/FOGProject/fos/commit/408f27c) | 删除未使用 NBD 内核配置。 | **低优先级可选清理。** 不影响当前 RootPXE 成像流程。 |
-| 排除 | [4519e63](https://github.com/FOGProject/fos/commit/4519e63) | 自动重格式化 NVMe。 | **默认排除。** 具有破坏性，只有单独明确授权、可见告警和专门测试后才可考虑。 |
+| P1 | [4519e63](https://github.com/FOGProject/fos/commit/4519e63) | NVMe LBA 格式对齐、fill-engine 4Kn 换算、GPT clamp、fail-loud 与测试。 | **安全对齐候选。** 仅在镜像/目标逻辑扇区不匹配、目标为已稳定识别的 NVMe namespace 且存在 metadata-free 匹配 LBAF 时，经 60 秒可取消警告和绑定目标盘的 disk permit 后人工适配 `nvme format`；不得覆盖 RootPXE 协议或脚本。 |
 | 排除 | [5aed809](https://github.com/FOGProject/fos/commit/5aed809) | multicast 成像。 | **排除。** RootPXE 当前无 multicast 服务与任务契约。 |
 | 排除 | [a89dec1](https://github.com/FOGProject/fos/commit/a89dec1) | FOG 错误上报 endpoint。 | **不直接同步。** RootPXE 已有 token + MAC + attention 协议，仅借鉴失败路径测试思路。 |
 | 暂缓 | 上游 Secure Boot、UKI、USB、wipe 等大组 | 范围大且与当前主机名/成像正确性无直接耦合。 | **当前需求外。** 另立需求、方案与硬件验收后再评估。 |
