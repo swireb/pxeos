@@ -870,11 +870,12 @@ rootpxe_request_disk_permit_for_target() {
 # kernel command line, which can carry task credentials in legacy boots.
 rootpxe_report_disk_permit_denial() {
     local result report_message status="${rootpxe_disk_permit_http_status:-unknown}"
-    printf '\n[ERROR] Disk permission denied (HTTP %s).\n' "$status"
-    [[ -z ${rootpxe_disk_permit_code:-} ]] || printf '[INFO]  Server code: %s.\n' "$rootpxe_disk_permit_code"
-    printf '[INFO]  Reason: %s\n' "${rootpxe_disk_permit_console_reason:-Disk permit response is invalid.}"
+    printf '\n'
+    rootpxe_console_message ERROR "Disk permission denied (HTTP $status)."
+    [[ -z ${rootpxe_disk_permit_code:-} ]] || rootpxe_console_message INFO "Server code: $rootpxe_disk_permit_code."
+    rootpxe_console_message INFO "Reason: ${rootpxe_disk_permit_console_reason:-Disk permit response is invalid.}"
     if ! rootpxe_require_task_context || [[ -z ${pxeapi:-${web:-}} ]]; then
-        printf '%s\n' '[WARN]  Cannot report disk permit failure. Retrying in 5s.'
+        rootpxe_console_message WARN 'Cannot report disk permit failure. Retrying in 5s.'
         sleep 5
         return 1
     fi
@@ -887,7 +888,7 @@ rootpxe_report_disk_permit_denial() {
         result=$?
     fi
     [[ $result -eq 2 ]] && return 20
-    printf '%s\n' '[WARN]  Disk permit failure reporting did not complete. Retrying in 5s.'
+    rootpxe_console_message WARN 'Disk permit failure reporting did not complete. Retrying in 5s.'
     sleep 5
     return 1
 }
@@ -1041,11 +1042,29 @@ rootpxe_stage() {
 #   rootpxe_disk_permit_target_id=<ID_WWN or ID_SERIAL>
 #   rootpxe_disk_permit_operation=nvme_format+deploy_write
 rootpxe_disk_stable_identity() {
-    local disk="$1" property
+    local LC_ALL=C
+    local disk="$1" properties line="" property hash
     property=$(udevadm info --query=property --name="$disk" 2>/dev/null) || return 1
-    property=$(printf '%s\n' "$property" | awk -F= '/^ID_WWN=/{print $2; exit} /^ID_SERIAL=/{print $2; exit}')
+    properties="$property"
+    property=""
+    while IFS= read -r line || [[ -n $line ]]; do
+        case $line in
+            ID_WWN=*|ID_SERIAL=*)
+                property="${line#*=}"
+                [[ $property == *[^[:space:]]* ]] && break
+                property=""
+                ;;
+        esac
+    done <<<"$properties"
     [[ -n $property ]] || return 1
-    printf '%s\n' "$property"
+    if [[ $property =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ && $property != sha256:* ]]; then
+        printf '%s\n' "$property"
+        return 0
+    fi
+    hash=$(printf '%s' "$property" | sha256sum 2>/dev/null) || return 1
+    hash=${hash%%[[:space:]]*}
+    [[ $hash =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf 'sha256:%s\n' "$hash"
 }
 
 rootpxe_nvme_permit_matches() {
@@ -1315,15 +1334,40 @@ getSAMLoc() {
         sam="$path" && break
     done
 }
-# Appends dots to the end of string up to 50 characters.
-# Makes the output more aligned and organized.
+# Prints a completed task-console line with a fixed level/body boundary.
+# Messages are wrapped before 80 columns.  Only callers decide which values
+# are safe to render.
+rootpxe_console_message() {
+    local level="$1" message="${2-}" line chunk
+    case $level in
+        INFO|WARN|ERROR) ;;
+        *) return 1 ;;
+    esac
+    while IFS= read -r line || [[ -n $line ]]; do
+        while (( ${#line} > 72 )); do
+            chunk=${line:0:72}
+            printf '%-7s %s\n' "[$level]" "$chunk"
+            line=${line:72}
+        done
+        printf '%-7s %s\n' "[$level]" "$line"
+    done <<<"$message"
+}
+
+# Appends dots to a progress message while preserving its caller's inline
+# result contract (for example, `dots ...; echo Done`).  The last segment uses
+# a shorter fixed body width so the usual result text remains within 80 columns.
 #
-# $1 String to append dots to
+# $1 Progress message
 dots() {
-    local str="$*"
+    local str="$*" chunk pad body_width=64
     [[ -z $str ]] && handleError "No string passed (${FUNCNAME[0]})\n   Args Passed: $*"
-    local pad=$(printf "%0.1s" "."{1..50})
-    printf " * %s%*.*s" "$str" 0 $((50-${#str})) "$pad"
+    while (( ${#str} > body_width )); do
+        chunk=${str:0:body_width}
+        printf '%-7s %s\n' '[INFO]' "$chunk"
+        str=${str:body_width}
+    done
+    pad=$(printf '%0.1s' "."{1..64})
+    printf '%-7s %s%*.*s' '[INFO]' "$str" 0 "$((body_width-${#str}))" "$pad"
 }
 # Enables write caching on the disk passed
 # If the disk does not support write caching this does nothing
@@ -3206,7 +3250,7 @@ findHDDInfo() {
                 down)
                     diskSize=$(lsblk --bytes -dplno SIZE -I 3,8,9,179,259 $hd)
                     [[ $diskSize -gt 2199023255552 ]] && layPartSize="2tB"
-                    echo " * Using Disk: $hd"
+                    rootpxe_console_message INFO "Using Disk: $hd"
                     [[ $imgType == +([nN]) ]] && validResizeOS
                     enableWriteCache "$hd"
                     ;;
@@ -3227,7 +3271,7 @@ findHDDInfo() {
                     debugPause
                     ;;
             esac
-            echo " * Using Hard Disk: $hd"
+            rootpxe_console_message INFO "Using Hard Disk: $hd"
             ;;
         mpa)
             case $type in
@@ -3238,7 +3282,7 @@ findHDDInfo() {
                         if [[ -z $parts ]]; then
                             echo "Failed"
                             debugPause
-                            echo " * No partitions for disk $disk"
+                            rootpxe_console_message WARN "No partitions for disk $disk"
                             debugPause
                             continue
                         fi
@@ -3247,7 +3291,7 @@ findHDDInfo() {
                     done
                     ;;
             esac
-            echo " * Using Hard Disks: $disks"
+            rootpxe_console_message INFO "Using Hard Disks: $disks"
             ;;
     esac
 }

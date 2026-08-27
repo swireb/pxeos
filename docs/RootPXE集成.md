@@ -27,6 +27,8 @@
 
 普通部署在写盘前绑定 `taskId`、token、MAC、目标盘稳定标识和计划操作的 disk permit；NVMe 扇区不匹配时仅在匹配 namespace、metadata-free LBAF、许可和倒计时确认后允许格式化。格式化开始即视为磁盘操作已开始；失败、重枚举异常或扇区回读不一致均应进入 attention。
 
+稳定标识保留已符合服务端 `targetId` 规则的 1–128 位原值；空白值、缺失属性或哈希失败会拒绝继续。含空格、斜杠、额外等号、非 ASCII 或超长的原值使用 `sha256:<64 位小写 hex>`，并完整参与散列；原值即使看似已在 `sha256:` 命名空间内也会再次散列，避免冒充编码标识。
+
 disk permit 的 HTTP `4xx`、`granted:false`、非 JSON 响应以及 targetId/operation 回显不匹配均不等同于任务取消。对于 HTTP `4xx` 或布尔 `granted:false` 的明确拒绝，PXEOS 会以同一 task 上下文查询 `task-status`，仅接受 `2xx` JSON 的 `cancelled`、`superseded`、`deleted`，或 `404` JSON 的 `deleted` 作为取消终态；HTML 404、401、状态查询失败和其他状态都会保留许可围栏，不执行 hook 或磁盘操作。非 JSON、字段类型错误和 targetId/operation 回显不匹配按协议错误直接上报，不查询取消状态。服务端 `5xx` 与传输失败安全重试；明确拒绝或协议错误会上报 `PXEOS_DISK_PERMIT_DENIED` 并进入既有 attention/Retry 等待，上报被确认后才开始超时计时。控制台只显示 HTTP 状态和已知 permit code，任务 token、目标盘标识及原始响应正文不会回显。
 
 上述运行时与三个 filesystem 配置均有改动。发布或真机验证时必须重新构建并替换同一批次的三架构产物；准确产物名称和硬件联调清单见[硬件兼容性](硬件兼容性.md#构建与回退边界)。capture/restore 失败传播与 `finish` 回调见[故障处理](故障处理.md)。

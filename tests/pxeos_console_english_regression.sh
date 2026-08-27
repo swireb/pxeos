@@ -43,13 +43,15 @@ case "$scan_status" in
     *) fail "console output scanner failed (exit $scan_status)" ;;
 esac
 
-# Extract only the three display helpers.  The mocks below prove that a
-# no-newline dots() progress row is terminated before both handlers render;
+# Extract only the display helpers.  The mocks below prove that completed
+# messages have a level/body column and that inline progress remains aligned;
 # no PXEOS top-level code, disk command, network request, or real wait runs.
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+awk '/^rootpxe_console_message\(\)/ { copy = 1 } /^# Appends dots/ { exit } copy' "$funcs" >"$tmp/console.sh"
 awk '/^dots\(\)/ { copy = 1 } /^# Enables write caching/ { exit } copy' "$funcs" >"$tmp/dots.sh"
 awk '/^handleError\(\)/ { copy = 1 } /^# Re-reads the partition table/ { exit } copy' "$funcs" >"$tmp/handlers.sh"
+[[ -s $tmp/console.sh ]] || fail 'console formatter was not extracted'
 
 set +e
 (
@@ -60,6 +62,7 @@ set +e
     rootpxe_error_wait_for_retry() { printf 'unexpected retry callback\n' >&2; return 99; }
     usleep() { printf 'usleep:%s\n' "$1"; }
     debugPause() { printf 'debug-pause\n'; }
+    . "$tmp/console.sh"
     . "$tmp/dots.sh"
     . "$tmp/handlers.sh"
     dots 'Mounting File System'
@@ -98,6 +101,7 @@ set +e
     rootpxe_error_wait_for_retry() { printf 'retry-callback:%s:%s\n' "$1" "$2"; return 2; }
     usleep() { printf 'unexpected-usleep:%s\n' "$1"; }
     debugPause() { printf 'unexpected-debug-pause\n'; }
+    . "$tmp/console.sh"
     . "$tmp/dots.sh"
     . "$tmp/handlers.sh"
     handleError 'Mock task failure' ''
@@ -111,6 +115,7 @@ grep -Fqx 'retry-callback:Mock task failure:PXEOS_ERROR' "$tmp/task-context.out"
 (
     usleep() { printf 'usleep:%s\n' "$1"; }
     debugPause() { printf 'debug-pause\n'; }
+    . "$tmp/console.sh"
     . "$tmp/dots.sh"
     . "$tmp/handlers.sh"
     dots 'Mounting File System'
@@ -124,16 +129,63 @@ grep -Fqx 'usleep:60000000' "$tmp/warning.out" || fail 'handleWarning wait chang
 grep -Fqx 'debug-pause' "$tmp/warning.out" || fail 'handleWarning debug pause changed'
 ! grep -Fq '###' "$tmp/warning.out" || fail 'handleWarning must not render hash decoration'
 
+long_message=$(printf 'x%.0s' {1..145})
+(
+    . "$tmp/console.sh"
+    . "$tmp/dots.sh"
+    dots 'Mounting File System'
+    printf 'Done\n'
+    rootpxe_console_message INFO 'Next task message'
+) >"$tmp/progress.out"
+progress_line=$(sed -n '1p' "$tmp/progress.out")
+[[ $progress_line == '[INFO]  Mounting File System'*Done ]] || fail 'dots progress and Done no longer share one line'
+must_fit "$progress_line"
+[[ $(sed -n '2p' "$tmp/progress.out") == '[INFO]  Next task message' ]] || fail 'next log message did not start on its own levelled line'
+
+(
+    . "$tmp/console.sh"
+    . "$tmp/dots.sh"
+    dots "$long_message"
+    printf '\n'
+    rootpxe_console_message ERROR 'Progress failed safely'
+) >"$tmp/long-dots-error.out"
+while IFS= read -r line; do
+    must_fit "$line"
+done <"$tmp/long-dots-error.out"
+[[ $(tail -n 1 "$tmp/long-dots-error.out") == '[ERROR] Progress failed safely' ]] || fail 'error did not start after unfinished long progress line'
+
+(
+    . "$tmp/console.sh"
+    rootpxe_console_message INFO "$long_message"
+) >"$tmp/long.out"
+[[ $(wc -l <"$tmp/long.out") -eq 3 ]] || fail 'long message was not safely wrapped'
+while IFS= read -r line; do
+    [[ $line == '[INFO]  '* ]] || fail "long message lost INFO/body column: $line"
+    must_fit "$line"
+done <"$tmp/long.out"
+
 must_have "$overlay/bin/pxeos.checkin" '[WARN]  Check-in not confirmed. Retrying in 5s.'
 must_have "$overlay/bin/pxeos.checkin" '[INFO]  SSH is available for troubleshooting.'
 must_have "$overlay/bin/pxeos.checkin" '[INFO]  Task aborted or withdrawn. Stopping PXEOS.'
 must_have "$overlay/bin/pxeos.checkin" '[INFO]  Checking in with RootPXE.'
-must_have "$overlay/bin/pxeos.checkin" "printf '[INFO]  %s\\n' \"\$waitMsg\""
-must_have "$overlay/bin/pxeos.checkin" "printf '[INFO]  Retrying in %ss.\\n' \"\$retryAfterSec\""
+must_have "$overlay/bin/pxeos.checkin" 'rootpxe_console_message INFO "$waitMsg"'
+must_have "$overlay/bin/pxeos.checkin" 'rootpxe_console_message INFO "Retrying in ${retryAfterSec}s."'
+must_have "$overlay/bin/pxeos.checkin" 'rootpxe_console_message INFO "Storage protocol: ${protocol^^}"'
 must_have "$overlay/bin/pxeos.checkin" '[INFO]  Check-in completed.'
 must_not_have "$overlay/bin/pxeos.checkin" 'dots "Check in (RootPXE)"'
 must_not_have "$overlay/bin/pxeos.checkin" 'dots "$waitMsg"'
 must_not_have "$overlay/bin/pxeos.checkin" 'echo "Done"'
+must_have "$overlay/bin/pxeos.upload" "rootpxe_console_message INFO 'Preparing to send image file to server'"
+must_have "$overlay/bin/pxeos.upload" 'rootpxe_console_message INFO "Using Image: $img"'
+must_have "$overlay/bin/pxeos.upload" "rootpxe_console_message INFO 'Capturing image with Partclone.'"
+must_not_have "$overlay/bin/pxeos.upload" 'echo " * Preparing to send image file to server"'
+must_have "$overlay/bin/pxeos.download" 'rootpxe_console_message INFO "Using Image: $img"'
+must_have "$overlay/bin/pxeos.download" "rootpxe_console_message INFO 'Preparing Partition layout'"
+must_not_have "$overlay/bin/pxeos.download" 'echo " * Preparing Partition layout"'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message INFO "Using Disk: $hd"'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message INFO "Using Hard Disk: $hd"'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message WARN "No partitions for disk $disk"'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message INFO "Using Hard Disks: $disks"'
 must_have "$overlay/bin/pxeos.download" '[INFO]  Task aborted or deleted. Stopping PXEOS.'
 must_have "$overlay/etc/init.d/S99pxeos" '[INFO]  Task completed. Powering off.'
 must_have "$overlay/etc/init.d/S99pxeos" '[INFO]  Task completed. Rebooting.'

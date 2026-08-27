@@ -19,9 +19,9 @@ layPartSize="-1s"
 pxeos.statusreporter "$mac" "${pxeapi:-$web}" "$taskid" & disown
 statusReporter="$!"
 fixed_size_partitions=""
-echo " * Using Image: $img"
+rootpxe_console_message INFO "Using Image: $img"
 preparePartitions() {
-    echo " * Preparing Partition layout"
+    rootpxe_console_message INFO 'Preparing Partition layout'
     case $imgType in
         [Nn])
             case $osid in

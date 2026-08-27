@@ -338,7 +338,13 @@ rm -f "$tmp/nvme-format.log"
 
 MOCK_SECTOR_AFTER=4096
 export MOCK_SECTOR_AFTER
-read() { reply=c; return 0; }
+read() {
+    if [[ $* == '-r -t 1 -n 1 reply' ]]; then
+        reply=c
+        return 0
+    fi
+    builtin read "$@"
+}
 PXEOS_NVME_FORMAT_COUNTDOWN_SEC=1
 export PXEOS_NVME_FORMAT_COUNTDOWN_SEC
 if rootpxe_nvme_reformat_to_sector_size /dev/nvme0n1 4096 nvme-test-wwn; then fail '取消格式化被错误接受'; fi

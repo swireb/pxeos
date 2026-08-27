@@ -12,14 +12,14 @@ part=""
 disks=""
 disk=""
 hd=""
-echo " * Preparing to send image file to server"
+rootpxe_console_message INFO 'Preparing to send image file to server'
 percent="$pct"
 [[ $pct -lt 5 || $pct -ge 100 ]] && percent=5
 pxeos.statusreporter "$mac" "${pxeapi:-$web}" "$taskid" & disown
 statusReporter="$!"
 prepareUploadLocation "$imagePath"
 printf '%s\n' "$taskid" > "$imagePath/.rootpxe-capture-taskid" || handleError "Could not initialize capture task marker ($0)"
-echo " * Using Image: $img"
+rootpxe_console_message INFO "Using Image: $img"
 # resizable image type
 #  discover windows partitions
 #  remove pagefile and hibernate file
@@ -283,7 +283,7 @@ while :; do
 done
 rootpxe_run_postinit || handleError "Post-init script failed ($0)"
 rootpxe_stage init "pxeos upload started, storage mounted"
-echo " * Now FOG will attempt to capture the image using Partclone"
+rootpxe_console_message INFO 'Capturing image with Partclone.'
 debugPause
 beginUpload
 rootpxe_wait_for_writers

@@ -21,6 +21,8 @@ expect_status() {
 
 # Keep the harness isolated from the rest of funcs.sh, whose top-level state
 # and hardware helpers are deliberately not suitable for host execution.
+awk '/^rootpxe_console_message\(\)/ { copy = 1 } /^# Appends dots/ { exit } copy' "$funcs" >"$tmp/console.sh"
+awk '/^dots\(\)/ { copy = 1 } /^# Enables write caching/ { exit } copy' "$funcs" >"$tmp/dots.sh"
 awk '/^rootpxe_request_disk_permit\(\)/ { copy = 1 } /^rootpxe_error_wait_for_retry\(\)/ { exit } copy' "$funcs" >"$tmp/permit.sh"
 
 # PXEOS carries jq, while the host Git Bash used by this offline harness does
@@ -73,20 +75,22 @@ if jq -r 'if (.granted | type) == "boolean" then .granted else error("invalid") 
 fi
 
 run_request() {
-    local permit_response="$1" status_response="$2"
+    local permit_response="$1" status_response="$2" target_id="${3:-disk-serial-1}"
+    local request_log="$tmp/request.log"
     taskid=7 task_token='test-token-0123456789' mac='00:0c:29:ae:cc:4f'
     pxeapi='https://rootpxe.invalid/api/'
     curl() {
         case " $* " in
-            *disk-permit*) [[ $permit_response == __CURL_TRANSPORT_FAILURE__ ]] && return 7; printf '%s' "$permit_response" ;;
+            *disk-permit*) printf '%s\n' "$*" >>"$request_log"; [[ $permit_response == __CURL_TRANSPORT_FAILURE__ ]] && return 7; printf '%s' "$permit_response" ;;
             *task-status*) [[ $status_response == __CURL_TRANSPORT_FAILURE__ ]] && return 7; printf '%s' "$status_response" ;;
             *) return 1 ;;
         esac
     }
     sleep() { :; }
     rootpxe_require_task_context() { return 0; }
+    . "$tmp/console.sh"
     . "$tmp/permit.sh"
-    rootpxe_request_disk_permit_for_target 'disk-serial-1' 'deploy_write'
+    rootpxe_request_disk_permit_for_target "$target_id" 'deploy_write'
 }
 
 success=$'{"granted":true,"targetId":"disk-serial-1","operation":"deploy_write"}\n200'
@@ -111,6 +115,10 @@ unknown_code=$'{"error":"do-not-show","code":"DISK_PERMIT_UNRECOGNIZED"}\n403'
 
 # Red/green behavioral matrix: only task-status JSON confirmation may return 10.
 expect_status 0 run_request "$success" "$running"
+hashed_target='sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+hashed_success=$'{"granted":true,"targetId":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","operation":"deploy_write"}\n200'
+expect_status 0 run_request "$hashed_success" "$running" "$hashed_target"
+grep -Fq -- "targetId=$hashed_target" "$tmp/request.log" || fail 'hashed target ID was not sent in the permit request'
 expect_status 12 run_request "$false_200" "$running"
 expect_status 10 run_request "$false_200" "$cancelled"
 expect_status 12 run_request "$string_true" "$running"
@@ -184,7 +192,10 @@ set +e
     rootpxe_require_task_context() { return 0; }
     rootpxe_error_wait_for_retry() { printf 'report:%s:%s\n' "$1" "$2"; return 2; }
     sleep() { printf 'sleep:%s\n' "$1"; }
+    . "$tmp/console.sh"
+    . "$tmp/dots.sh"
     . "$tmp/permit.sh"
+    dots 'Waiting for disk permit'
     if rootpxe_wait_for_disk_permit 'disk-serial-1' deploy_write; then
         exit 90
     else
@@ -197,6 +208,7 @@ set -e
 [[ $attention_status -eq 0 ]] || fail 'permit denial did not reach error wait terminal path'
 grep -Fqx 'report:任务或磁盘绑定校验被拒绝，请确认任务状态。（HTTP 403，DISK_PERMIT_TASK_REJECTED）:PXEOS_DISK_PERMIT_DENIED' "$tmp/attention.out" || fail 'permit denial report contract changed'
 grep -Fq '[ERROR] Disk permission denied (HTTP 403).' "$tmp/attention.out" || fail 'HTTP diagnosis missing'
+! grep -Eq '\[INFO\].*\[ERROR\]' "$tmp/attention.out" || fail 'unfinished disk-permit progress was not terminated before ERROR'
 grep -Fqx '[INFO]  Server code: DISK_PERMIT_TASK_REJECTED.' "$tmp/attention.out" || fail 'known permit code diagnosis missing'
 ! grep -Fq 'test-token-0123456789' "$tmp/attention.out" || fail 'task token leaked to console'
 ! grep -Fq '"error":"forbidden"' "$tmp/attention.out" || fail 'raw response body leaked to console'

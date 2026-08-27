@@ -310,8 +310,8 @@ checkin_rootpxe() {
         fi
         if [[ $waitFlag == "1" ]]; then
             [[ -z $waitMsg ]] && waitMsg="No open slots on server, waiting for queue"
-            printf '[INFO]  %s\n' "$waitMsg"
-            printf '[INFO]  Retrying in %ss.\n' "$retryAfterSec"
+            rootpxe_console_message INFO "$waitMsg"
+            rootpxe_console_message INFO "Retrying in ${retryAfterSec}s."
             sleep "$retryAfterSec"
             debugPause
             continue
@@ -357,7 +357,7 @@ checkin_rootpxe() {
     if ! rootpxe_prepare_smb_credentials; then
         handleError "RootPXE checkin returned invalid SMB credentials ($0)"
     fi
-    printf '[INFO]  Storage protocol: %s\n' "${protocol^^}"
+    rootpxe_console_message INFO "Storage protocol: ${protocol^^}"
     rootpxe_safe_relative_path "$img" >/dev/null || handleError "Invalid image path ($0)"
     echo "[INFO]  Check-in completed."
     debugPause
