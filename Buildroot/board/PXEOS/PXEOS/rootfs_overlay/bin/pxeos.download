@@ -264,19 +264,26 @@ if [[ ${resumeStage:-} == customizing_hostname ]]; then
     # It must not plan NVMe formatting, validate/apply a new layout, or rerun
     # postinit before the safe resume point.
     resume_target_id=$(rootpxe_disk_stable_identity "$hd") || handleError "PXEOS_STAGE=customizing_hostname CODE=RESUME_TARGET_IDENTITY_UNAVAILABLE"
-    rootpxe_wait_for_disk_permit "$resume_target_id" deploy_write
-    case $? in
-        0) ;;
-        10)
-            echo "[INFO]  Task aborted or deleted. Stopping PXEOS."
-            printf '%s\n' reboot > /tmp/pxeos.failure_action
-            exit 2
-            ;;
-        *)
-            printf '%s\n' reboot > /tmp/pxeos.failure_action
-            exit 2
-            ;;
-    esac
+    while :; do
+        if rootpxe_wait_for_disk_permit "$resume_target_id" deploy_write; then
+            permit_result=0
+        else
+            permit_result=$?
+        fi
+        case $permit_result in
+            0) break ;;
+            10)
+                echo "[INFO]  Task aborted or deleted. Stopping PXEOS."
+                printf '%s\n' reboot > /tmp/pxeos.failure_action
+                exit 2
+                ;;
+            20) exit 2 ;;
+            *)
+                printf '%s\n' '[WARN]  Disk permit wait was interrupted. Retrying in 5s.'
+                sleep 5
+                ;;
+        esac
+    done
     [[ ${changeHostname:-false} == true ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=RESUME_CONTRACT_INVALID REASON=hostname_change_not_enabled"
     rootpxe_stage customizing_hostname "resume permit confirmed"
     rootpxe_apply_hostname_for_disk "$hd"
@@ -290,19 +297,26 @@ if [[ ${imgType:-} == [Nn] && -n ${deploymentLayoutFile:-} && -n ${originalSchem
     rootpxe_validate_deployment_layout "$hd" "$originalSchemaFile" "$deploymentLayoutFile" || handleError "PXEOS_STAGE=layout_validation CODE=INVALID_DEPLOYMENT_LAYOUT REASON=pre_permit_validation_failed"
 fi
 rootpxe_plan_deploy_disk_operation "$hd" "$sector_metadata" || handleError "PXEOS_STAGE=permit CODE=TARGET_IDENTITY_UNAVAILABLE REASON=unable_to_bind_target_disk"
-rootpxe_wait_for_disk_permit "$rootpxe_planned_target_id" "$rootpxe_planned_disk_operation"
-case $? in
-    0) ;;
-    10)
-        echo "[INFO]  Task aborted or deleted. Stopping PXEOS."
-        printf '%s\n' reboot > /tmp/pxeos.failure_action
-        exit 2
-        ;;
-    *)
-        printf '%s\n' reboot > /tmp/pxeos.failure_action
-        exit 2
-        ;;
-esac
+while :; do
+    if rootpxe_wait_for_disk_permit "$rootpxe_planned_target_id" "$rootpxe_planned_disk_operation"; then
+        permit_result=0
+    else
+        permit_result=$?
+    fi
+    case $permit_result in
+        0) break ;;
+        10)
+            echo "[INFO]  Task aborted or deleted. Stopping PXEOS."
+            printf '%s\n' reboot > /tmp/pxeos.failure_action
+            exit 2
+            ;;
+        20) exit 2 ;;
+        *)
+            printf '%s\n' '[WARN]  Disk permit wait was interrupted. Retrying in 5s.'
+            sleep 5
+            ;;
+    esac
+done
 rootpxe_run_postinit || handleError "Post-init script failed ($0)"
 rootpxe_stage init "pxeos download started, storage mounted"
 [[ $nombr -eq 1 ]] && echo " * Skipping partition layout (Single Partition restore)" || preparePartitions

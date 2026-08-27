@@ -724,51 +724,197 @@ rootpxe_request_disk_permit() {
     rootpxe_request_disk_permit_for_target "${1:-}" "${2:-capture_read_write}"
 }
 
+rootpxe_clear_disk_permit() {
+    unset rootpxe_disk_permit_granted rootpxe_disk_permit_target_id rootpxe_disk_permit_operation
+    rootpxe_disk_permit_http_status=""
+    rootpxe_disk_permit_code=""
+    rootpxe_disk_permit_console_reason=""
+    rootpxe_disk_permit_report_message=""
+}
+
+# Only recognized server codes are rendered.  Unknown codes and response
+# bodies remain private because either can contain unsafe remote text.
+rootpxe_set_disk_permit_reason() {
+    local body="$1" http_code="$2" code=""
+    rootpxe_disk_permit_http_status="$http_code"
+    if command -v jq >/dev/null 2>&1; then
+        code=$(jq -er '.code | strings' <<<"$body" 2>/dev/null || :)
+    fi
+    rootpxe_disk_permit_console_reason="Disk permission was denied."
+    rootpxe_disk_permit_report_message="磁盘操作许可被拒绝，请确认任务、目标磁盘和操作绑定。"
+    case "$code" in
+        DISK_PERMIT_INVALID_REQUEST)
+            rootpxe_disk_permit_code="$code"
+            rootpxe_disk_permit_console_reason="Disk permit request is invalid."
+            rootpxe_disk_permit_report_message="磁盘操作许可请求无效，请检查任务上下文和操作。"
+            ;;
+        DISK_PERMIT_UNSUPPORTED_OPERATION)
+            rootpxe_disk_permit_code="$code"
+            rootpxe_disk_permit_console_reason="Disk operation is not supported."
+            rootpxe_disk_permit_report_message="请求的磁盘操作不受支持，请检查任务类型。"
+            ;;
+        DISK_PERMIT_INVALID_TARGET)
+            rootpxe_disk_permit_code="$code"
+            rootpxe_disk_permit_console_reason="Disk target identifier is invalid."
+            rootpxe_disk_permit_report_message="目标磁盘标识无效，请检查稳定磁盘标识。"
+            ;;
+        DISK_PERMIT_TASK_TYPE_MISMATCH)
+            rootpxe_disk_permit_code="$code"
+            rootpxe_disk_permit_console_reason="Task type does not allow this disk operation."
+            rootpxe_disk_permit_report_message="任务类型不允许当前磁盘操作，请检查任务配置。"
+            ;;
+        DISK_PERMIT_BINDING_CONFLICT)
+            rootpxe_disk_permit_code="$code"
+            rootpxe_disk_permit_console_reason="Disk permit binding does not match the task."
+            rootpxe_disk_permit_report_message="磁盘许可绑定与任务不一致，请确认目标磁盘和操作。"
+            ;;
+        DISK_PERMIT_TASK_NOT_FOUND)
+            rootpxe_disk_permit_code="$code"
+            rootpxe_disk_permit_console_reason="Task is not available for disk permission."
+            rootpxe_disk_permit_report_message="任务不存在或已失效，请确认任务状态。"
+            ;;
+        DISK_PERMIT_TASK_REJECTED)
+            rootpxe_disk_permit_code="$code"
+            rootpxe_disk_permit_console_reason="Task or disk binding was rejected."
+            rootpxe_disk_permit_report_message="任务或磁盘绑定校验被拒绝，请确认任务状态。"
+            ;;
+        DISK_PERMIT_TASK_NOT_RUNNING)
+            rootpxe_disk_permit_code="$code"
+            rootpxe_disk_permit_console_reason="Task is not running for disk permission."
+            rootpxe_disk_permit_report_message="任务当前未处于可执行状态，请确认任务状态。"
+            ;;
+    esac
+}
+
+rootpxe_set_disk_permit_protocol_error() {
+    rootpxe_disk_permit_http_status="$1"
+    rootpxe_disk_permit_code=""
+    rootpxe_disk_permit_console_reason="Disk permit response is invalid."
+    rootpxe_disk_permit_report_message="磁盘操作许可响应无效，请检查服务端协议和任务绑定。"
+}
+
+# A permit denial alone never proves that a task was cancelled.  Ask the
+# status endpoint and accept only explicit JSON terminal states.
+rootpxe_task_status_confirms_disk_permit_cancellation() {
+    local api="${pxeapi:-${web:-}}" response body http_code status
+    [[ -n $api ]] || return 1
+    response=$(curl -Lks --connect-timeout 10 --max-time 30 \
+        --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
+        --data-urlencode "mac=$mac" -w $'\n%{http_code}' "${api}task-status" 2>/dev/null) || return 1
+    http_code=${response##*$'\n'}
+    body=${response%$'\n'*}
+    command -v jq >/dev/null 2>&1 || return 1
+    status=$(jq -er '.status | strings' <<<"$body" 2>/dev/null) || return 1
+    case "$http_code:$status" in
+        2[0-9][0-9]:cancelled|2[0-9][0-9]:superseded|2[0-9][0-9]:deleted|404:deleted) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Permit is bound to a stable target disk identity and the planned destructive
 # operation.  A successful HTTP response alone is never sufficient.
 rootpxe_request_disk_permit_for_target() {
-    local target_id="$1" operation="$2"
-    # Return values are intentionally distinct:
-    #   0 granted; 10 task deleted/rejected; 11 transport/server uncertainty.
-    # A rejection is an administrator action, not an execution failure, so it
-    # must never enter handleError and create a new PXEOS error report.
-    rootpxe_require_task_context || return 10
-    local api="${pxeapi:-$web}" response body http_code granted echoed_target echoed_operation
-    [[ -n $api ]] || return 10
+    local target_id="$1" operation="$2" api response body http_code granted echoed_target echoed_operation
+    # Return values: 0 granted; 10 confirmed cancellation; 11 retry; 12 deny/protocol.
+    rootpxe_clear_disk_permit
+    rootpxe_require_task_context || return 11
+    api="${pxeapi:-${web:-}}"
+    [[ -n $api ]] || return 11
     response=$(curl -Lks --connect-timeout 10 --max-time 30 \
         --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
         --data-urlencode "mac=$mac" --data-urlencode "targetId=$target_id" \
         --data-urlencode "operation=$operation" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
     http_code=${response##*$'\n'}
     body=${response%$'\n'*}
-    if [[ $http_code =~ ^2[0-9][0-9]$ ]] && command -v jq >/dev/null 2>&1; then
-        granted=$(jq -er '.granted // false' <<<"$body" 2>/dev/null) || return 11
-        echoed_target=$(jq -er '.targetId // empty' <<<"$body" 2>/dev/null) || return 11
-        echoed_operation=$(jq -er '.operation // empty' <<<"$body" 2>/dev/null) || return 11
-        if [[ $granted == true && $echoed_target == "$target_id" && $echoed_operation == "$operation" ]]; then
-            rootpxe_disk_permit_granted=yes
-            rootpxe_disk_permit_target_id="$echoed_target"
-            rootpxe_disk_permit_operation="$echoed_operation"
-            export rootpxe_disk_permit_granted rootpxe_disk_permit_target_id rootpxe_disk_permit_operation
-            return 0
+    [[ $http_code =~ ^[0-9]{3}$ ]] || { rootpxe_set_disk_permit_protocol_error unknown; return 12; }
+    [[ $http_code =~ ^5[0-9][0-9]$ ]] && return 11
+
+    if [[ $http_code =~ ^2[0-9][0-9]$ ]]; then
+        command -v jq >/dev/null 2>&1 || { rootpxe_set_disk_permit_protocol_error "$http_code"; return 12; }
+        granted=$(jq -r 'if (.granted | type) == "boolean" then .granted else error("granted must be boolean") end' <<<"$body" 2>/dev/null) || {
+            rootpxe_set_disk_permit_protocol_error "$http_code"; return 12
+        }
+        if [[ $granted == true ]]; then
+            echoed_target=$(jq -er '.targetId | strings' <<<"$body" 2>/dev/null) || {
+                rootpxe_set_disk_permit_protocol_error "$http_code"; return 12
+            }
+            echoed_operation=$(jq -er '.operation | strings' <<<"$body" 2>/dev/null) || {
+                rootpxe_set_disk_permit_protocol_error "$http_code"; return 12
+            }
+            if [[ $echoed_target == "$target_id" && $echoed_operation == "$operation" ]]; then
+                rootpxe_disk_permit_granted=yes
+                rootpxe_disk_permit_target_id="$echoed_target"
+                rootpxe_disk_permit_operation="$echoed_operation"
+                export rootpxe_disk_permit_granted rootpxe_disk_permit_target_id rootpxe_disk_permit_operation
+                return 0
+            fi
+            rootpxe_set_disk_permit_protocol_error "$http_code"
+            return 12
         fi
+        rootpxe_set_disk_permit_reason "$body" "$http_code"
+        rootpxe_task_status_confirms_disk_permit_cancellation && return 10
+        return 12
     fi
-    [[ $http_code =~ ^4[0-9][0-9]$ || $body == *'"granted":false'* ]] && return 10
-    return 11
+
+    if [[ $http_code =~ ^4[0-9][0-9]$ ]]; then
+        rootpxe_set_disk_permit_reason "$body" "$http_code"
+        rootpxe_task_status_confirms_disk_permit_cancellation && return 10
+        return 12
+    fi
+
+    rootpxe_set_disk_permit_protocol_error "$http_code"
+    return 12
+}
+
+# This path intentionally avoids handleError: its diagnostics include the
+# kernel command line, which can carry task credentials in legacy boots.
+rootpxe_report_disk_permit_denial() {
+    local result report_message status="${rootpxe_disk_permit_http_status:-unknown}"
+    printf '\n[ERROR] Disk permission denied (HTTP %s).\n' "$status"
+    [[ -z ${rootpxe_disk_permit_code:-} ]] || printf '[INFO]  Server code: %s.\n' "$rootpxe_disk_permit_code"
+    printf '[INFO]  Reason: %s\n' "${rootpxe_disk_permit_console_reason:-Disk permit response is invalid.}"
+    if ! rootpxe_require_task_context || [[ -z ${pxeapi:-${web:-}} ]]; then
+        printf '%s\n' '[WARN]  Cannot report disk permit failure. Retrying in 5s.'
+        sleep 5
+        return 1
+    fi
+    report_message="${rootpxe_disk_permit_report_message:-磁盘操作许可响应无效，请检查服务端协议和任务绑定。}（HTTP ${status}"
+    [[ -z ${rootpxe_disk_permit_code:-} ]] || report_message+="，${rootpxe_disk_permit_code}"
+    report_message+='）'
+    if rootpxe_error_wait_for_retry "$report_message" PXEOS_DISK_PERMIT_DENIED; then
+        result=0
+    else
+        result=$?
+    fi
+    [[ $result -eq 2 ]] && return 20
+    printf '%s\n' '[WARN]  Disk permit failure reporting did not complete. Retrying in 5s.'
+    sleep 5
+    return 1
 }
 
 rootpxe_wait_for_disk_permit() {
     local target_id="${1:-}" operation="${2:-capture_read_write}" result
     while :; do
-        rootpxe_request_disk_permit_for_target "$target_id" "$operation"
-        result=$?
+        if rootpxe_request_disk_permit_for_target "$target_id" "$operation"; then
+            result=0
+        else
+            result=$?
+        fi
         case $result in
             0) return 0 ;;
             10) return 10 ;;
+            12)
+                if rootpxe_report_disk_permit_denial; then
+                    result=0
+                else
+                    result=$?
+                fi
+                [[ $result -eq 20 ]] && return 20
+                ;;
             *)
                 printf '%s\n' \
-                    "[WARN]  Disk permission not confirmed. Retrying in 5s." \
-                    "[INFO]  SSH is available for troubleshooting."
+                    '[WARN]  Disk permission not confirmed. Retrying in 5s.' \
+                    '[INFO]  SSH is available for troubleshooting.'
                 sleep 5
                 ;;
         esac

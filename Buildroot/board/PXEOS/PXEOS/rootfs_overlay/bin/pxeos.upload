@@ -265,12 +265,22 @@ if [[ ${imgType:-} == [Nn] ]]; then
     rootpxe_lvm_capture_preflight "$hd" "$imagePath" || handleError "PXEOS_STAGE=capture CODE=LVM_TOPOLOGY_UNSUPPORTED REASON=single_pv_single_vg_linear_lvs_required"
 fi
 capture_target_id=$(rootpxe_disk_stable_identity "$hd") || handleError "PXEOS_STAGE=permit CODE=TARGET_IDENTITY_UNAVAILABLE REASON=unable_to_bind_capture_disk"
-rootpxe_wait_for_disk_permit "$capture_target_id" capture_read_write
-case $? in
-    0) ;;
-    10) printf '%s\n' reboot > /tmp/pxeos.failure_action; exit 2 ;;
-    *) printf '%s\n' reboot > /tmp/pxeos.failure_action; exit 2 ;;
-esac
+while :; do
+    if rootpxe_wait_for_disk_permit "$capture_target_id" capture_read_write; then
+        permit_result=0
+    else
+        permit_result=$?
+    fi
+    case $permit_result in
+        0) break ;;
+        10) printf '%s\n' reboot > /tmp/pxeos.failure_action; exit 2 ;;
+        20) exit 2 ;;
+        *)
+            printf '%s\n' '[WARN]  Disk permit wait was interrupted. Retrying in 5s.'
+            sleep 5
+            ;;
+    esac
+done
 rootpxe_run_postinit || handleError "Post-init script failed ($0)"
 rootpxe_stage init "pxeos upload started, storage mounted"
 echo " * Now FOG will attempt to capture the image using Partclone"
