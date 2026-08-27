@@ -36,17 +36,17 @@ case $isdebug in
                 shutdown_local="$(tr -d '\r\n\0' </tmp/pxeos.shutdown)"
             fi
             if [[ "$shutdown_local" == "1" ]]; then
-                echo " * PXEOS task complete, powering off system"
+                echo "[INFO]  Task completed. Powering off."
                 poweroff >/dev/null 2>&1
             else
-                echo " * PXEOS task complete, rebooting system"
+                echo "[INFO]  Task completed. Rebooting."
                 reboot -f >/dev/null 2>&1
             fi
         else
-            echo " * PXEOS task exited with error (rc=$rc), keeping system for troubleshooting"
+            echo "[WARN]  Task exited with code: $rc."
             failure_action="reboot"
             [[ -f /tmp/pxeos.failure_action ]] && failure_action="$(tr -d '\r\n\0' </tmp/pxeos.failure_action)"
-            echo " * SSH is available; running configured failure action: $failure_action"
+            echo "[INFO]  Running configured failure action: $failure_action."
             if [[ "$failure_action" == "shutdown" ]]; then
                 poweroff >/dev/null 2>&1
             else

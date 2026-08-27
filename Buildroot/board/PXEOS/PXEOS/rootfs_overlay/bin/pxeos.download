@@ -268,7 +268,7 @@ if [[ ${resumeStage:-} == customizing_hostname ]]; then
     case $? in
         0) ;;
         10)
-            echo " * Task aborted or deleted; stopping PXEOS."
+            echo "[INFO]  Task aborted or deleted. Stopping PXEOS."
             printf '%s\n' reboot > /tmp/pxeos.failure_action
             exit 2
             ;;
@@ -294,7 +294,7 @@ rootpxe_wait_for_disk_permit "$rootpxe_planned_target_id" "$rootpxe_planned_disk
 case $? in
     0) ;;
     10)
-        echo " * Task aborted or deleted; stopping PXEOS."
+        echo "[INFO]  Task aborted or deleted. Stopping PXEOS."
         printf '%s\n' reboot > /tmp/pxeos.failure_action
         exit 2
         ;;

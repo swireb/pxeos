@@ -753,7 +753,9 @@ rootpxe_wait_for_disk_permit() {
             0) return 0 ;;
             10) return 10 ;;
             *)
-                echo " * Disk permission not confirmed; SSH is available. Retrying in 5 seconds."
+                printf '%s\n' \
+                    "[WARN]  Disk permission not confirmed. Retrying in 5s." \
+                    "[INFO]  SSH is available for troubleshooting."
                 sleep 5
                 ;;
         esac
@@ -769,9 +771,18 @@ rootpxe_error_wait_for_retry() {
         response=$(curl -Lks --connect-timeout 10 --max-time 30 \
             --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
             --data-urlencode "mac=$mac" --data-urlencode "errorCode=$code" \
-            --data-urlencode "message=$message" "${api}error" 2>/dev/null) || { echo " * Error report failed; SSH is available. Retrying in 5 seconds."; sleep 5; continue; }
+            --data-urlencode "message=$message" "${api}error" 2>/dev/null) || {
+                printf '%s\n' \
+                    "[WARN]  Error report failed. Retrying in 5s." \
+                    "[INFO]  SSH is available for troubleshooting."
+                sleep 5
+                continue
+            }
         [[ $response == *'"accepted":true'* ]] && break
-        echo " * Error report not confirmed; SSH is available. Retrying in 5 seconds."; sleep 5
+        printf '%s\n' \
+            "[WARN]  Error report not confirmed. Retrying in 5s." \
+            "[INFO]  SSH is available for troubleshooting."
+        sleep 5
     done
     wait=$(printf '%s' "$response" | sed -n 's/.*"waitSec":\([0-9][0-9]*\).*/\1/p')
     action=$(printf '%s' "$response" | sed -n 's/.*"failureAction":"\([a-z]*\)".*/\1/p')
@@ -779,22 +790,26 @@ rootpxe_error_wait_for_retry() {
     [[ $action == shutdown ]] || action=reboot
     printf '%s\n' "$action" > /tmp/pxeos.failure_action
     deadline=$(( $(date +%s) + wait ))
-    echo " * Error reported; task needs attention. SSH is available. Select Retry in the UI to resume."
+    printf '%s\n' \
+        "[ERROR] Task paused. Error reported to RootPXE." \
+        "[INFO]  SSH is available for troubleshooting." \
+        "[INFO]  Select Retry in the web UI to resume." \
+        "[INFO]  Timeout: ${wait}s. Timeout action: $action."
     while :; do
         now=$(date +%s)
         if [[ $now -ge $deadline ]]; then
-            echo " * Wait timed out; running configured action: $action"
+            echo "[WARN]  Wait timed out. Timeout action: $action."
             return 2
         fi
         status=$(curl -Lks --connect-timeout 10 --max-time 20 \
             --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
             --data-urlencode "mac=$mac" "${api}task-status" 2>/dev/null)
         if [[ $status == *'"status":"queued"'* ]]; then
-            echo " * Retry requested; resuming original task."
+            echo "[INFO]  Retry requested. Resuming task."
             exec /bin/pxeos
         fi
         if [[ $status == *'"status":"deleted"'* || $status == *'"status":"cancelled"'* || $status == *'"status":"superseded"'* ]]; then
-            echo " * Task deleted or aborted; stopping PXEOS."
+            echo "[INFO]  Task deleted or aborted. Stopping PXEOS."
             return 2
         fi
         sleep 5
@@ -3196,15 +3211,13 @@ handleError() {
     local str="$1"
     local parts=""
     local part=""
-    echo "##############################################################################"
-    echo "#                                                                            #"
-    echo "#                         An error has been detected!                        #"
-    echo "#                                                                            #"
-    echo "##############################################################################"
-    echo "Init Version: $initversion"
-    echo -e "$str\n"
-    echo "Kernel variables and settings:"
-    cat /proc/cmdline | sed 's/ad.*=.* //g'
+    printf '\n[ERROR] Operation failed.\n'
+    printf '[INFO]  Init version: %s\n' "$initversion"
+    printf '\n[INFO]  Error details:\n'
+    printf '%b\n' "$str" | sed 's/^/        /'
+    printf '\n[INFO]  Kernel variables and settings:\n'
+    cat /proc/cmdline | sed 's/ad.*=.* //g' | sed 's/^/        /'
+    printf '\n'
     #
     # expand the file systems in the restored partitions
     #
@@ -3229,11 +3242,7 @@ handleError() {
         exit "$return_code"
     fi
     if [[ -z $isdebug ]]; then
-        echo "##############################################################################"
-        echo "#                                                                            #"
-        echo "#                      Computer will reboot in 1 minute                      #"
-        echo "#                                                                            #"
-        echo "##############################################################################"
+        printf '[WARN]  System will reboot in 60s.\n'
         usleep 60000000
     else
         debugPause
@@ -3245,17 +3254,10 @@ handleError() {
 # $1 The string to inform the user what the problem is
 handleWarning() {
     local str="$1"
-    echo "##############################################################################"
-    echo "#                                                                            #"
-    echo "#                        A warning has been detected!                        #"
-    echo "#                                                                            #"
-    echo "##############################################################################"
-    echo -e "$str"
-    echo "##############################################################################"
-    echo "#                                                                            #"
-    echo "#                          Will continue in 1 minute                         #"
-    echo "#                                                                            #"
-    echo "##############################################################################"
+    printf '\n[WARN]  Operation warning.\n'
+    printf '[INFO]  Warning details:\n'
+    printf '%b\n' "$str" | sed 's/^/        /'
+    printf '\n[INFO]  Continuing in 60s.\n'
     usleep 60000000
     debugPause
 }

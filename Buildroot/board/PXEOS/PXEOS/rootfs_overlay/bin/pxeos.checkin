@@ -137,7 +137,7 @@ rootpxe_apply_json_checkin() {
 }
 
 checkin_rootpxe() {
-    dots "Check in (RootPXE)"
+    printf '%s\n' '[INFO]  Checking in with RootPXE.'
     rootpxe_require_identity || handleError "RootPXE: invalid task identity ($0)"
     case $mc in
         [Yy][Ee][Ss]|[Bb][Tt])
@@ -175,7 +175,9 @@ checkin_rootpxe() {
             -w $'\n%{http_code}' "${rootpxe_api}checkin" 2>/dev/null)
         curl_status=$?
         if [[ $curl_status -ne 0 ]]; then
-            echo " * Check-in not confirmed; SSH is available. Retrying in 5 seconds."
+            printf '%s\n' \
+                "[WARN]  Check-in not confirmed. Retrying in 5s." \
+                "[INFO]  SSH is available for troubleshooting."
             sleep 5
             continue
         fi
@@ -184,14 +186,16 @@ checkin_rootpxe() {
         if [[ $http_code =~ ^4[0-9][0-9]$ ]]; then
             # The task may have been aborted after the kernel started but
             # before checkin.  No task callback is allowed after this point.
-            echo " * Task aborted or withdrawn; stopping PXEOS."
+            echo "[INFO]  Task aborted or withdrawn. Stopping PXEOS."
             printf '%s\n' reboot > /tmp/pxeos.failure_action
             return 2
         fi
         # A 5xx, malformed status, or empty 2xx response is uncertain. Keep
         # SSH available and retry checkin; never mount storage or start imaging.
         if [[ ! $http_code =~ ^2[0-9][0-9]$ || -z $body ]]; then
-            echo " * Check-in not confirmed; SSH is available. Retrying in 5 seconds."
+            printf '%s\n' \
+                "[WARN]  Check-in not confirmed. Retrying in 5s." \
+                "[INFO]  SSH is available for troubleshooting."
             sleep 5
             continue
         fi
@@ -248,8 +252,8 @@ checkin_rootpxe() {
         fi
         if [[ $waitFlag == "1" ]]; then
             [[ -z $waitMsg ]] && waitMsg="No open slots on server, waiting for queue"
-            dots "$waitMsg"
-            echo "Wait ${retryAfterSec}s"
+            printf '[INFO]  %s\n' "$waitMsg"
+            printf '[INFO]  Retrying in %ss.\n' "$retryAfterSec"
             sleep "$retryAfterSec"
             debugPause
             continue
@@ -293,7 +297,7 @@ checkin_rootpxe() {
     fi
     [[ ${protocol:-nfs} == nfs || ${protocol:-} == smb ]] || handleError "Invalid storage protocol ($0)"
     rootpxe_safe_relative_path "$img" >/dev/null || handleError "Invalid image path ($0)"
-    echo "Done"
+    echo "[INFO]  Check-in completed."
     debugPause
 }
 
