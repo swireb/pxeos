@@ -175,7 +175,7 @@ checkin_rootpxe() {
             -w $'\n%{http_code}' "${rootpxe_api}checkin" 2>/dev/null)
         curl_status=$?
         if [[ $curl_status -ne 0 ]]; then
-            echo " * 无法确认 RootPXE checkin，保留 SSH 并将在 5 秒后重试"
+            echo " * Check-in not confirmed; SSH is available. Retrying in 5 seconds."
             sleep 5
             continue
         fi
@@ -184,14 +184,14 @@ checkin_rootpxe() {
         if [[ $http_code =~ ^4[0-9][0-9]$ ]]; then
             # The task may have been aborted after the kernel started but
             # before checkin.  No task callback is allowed after this point.
-            echo " * 任务已被管理员中止或撤回，停止 PXEOS"
+            echo " * Task aborted or withdrawn; stopping PXEOS."
             printf '%s\n' reboot > /tmp/pxeos.failure_action
             return 2
         fi
         # A 5xx, malformed status, or empty 2xx response is uncertain. Keep
         # SSH available and retry checkin; never mount storage or start imaging.
         if [[ ! $http_code =~ ^2[0-9][0-9]$ || -z $body ]]; then
-            echo " * 无法确认 RootPXE checkin，保留 SSH 并将在 5 秒后重试"
+            echo " * Check-in not confirmed; SSH is available. Retrying in 5 seconds."
             sleep 5
             continue
         fi

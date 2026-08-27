@@ -753,7 +753,7 @@ rootpxe_wait_for_disk_permit() {
             0) return 0 ;;
             10) return 10 ;;
             *)
-                echo " * 无法确认磁盘操作许可，保留 SSH 并将在 5 秒后重试"
+                echo " * Disk permission not confirmed; SSH is available. Retrying in 5 seconds."
                 sleep 5
                 ;;
         esac
@@ -769,9 +769,9 @@ rootpxe_error_wait_for_retry() {
         response=$(curl -Lks --connect-timeout 10 --max-time 30 \
             --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
             --data-urlencode "mac=$mac" --data-urlencode "errorCode=$code" \
-            --data-urlencode "message=$message" "${api}error" 2>/dev/null) || { echo " * 无法上报错误，保留 SSH 并将在 5 秒后重试"; sleep 5; continue; }
+            --data-urlencode "message=$message" "${api}error" 2>/dev/null) || { echo " * Error report failed; SSH is available. Retrying in 5 seconds."; sleep 5; continue; }
         [[ $response == *'"accepted":true'* ]] && break
-        echo " * 服务端未确认错误上报，保留 SSH 并将在 5 秒后重试"; sleep 5
+        echo " * Error report not confirmed; SSH is available. Retrying in 5 seconds."; sleep 5
     done
     wait=$(printf '%s' "$response" | sed -n 's/.*"waitSec":\([0-9][0-9]*\).*/\1/p')
     action=$(printf '%s' "$response" | sed -n 's/.*"failureAction":"\([a-z]*\)".*/\1/p')
@@ -779,22 +779,22 @@ rootpxe_error_wait_for_retry() {
     [[ $action == shutdown ]] || action=reboot
     printf '%s\n' "$action" > /tmp/pxeos.failure_action
     deadline=$(( $(date +%s) + wait ))
-    echo " * 错误已上报，任务进入待处理。可通过 SSH 排障；管理员点击“重试”后将立即继续。"
+    echo " * Error reported; task needs attention. SSH is available. Select Retry in the UI to resume."
     while :; do
         now=$(date +%s)
         if [[ $now -ge $deadline ]]; then
-            echo " * 等待超时，将按系统设置执行：$action"
+            echo " * Wait timed out; running configured action: $action"
             return 2
         fi
         status=$(curl -Lks --connect-timeout 10 --max-time 20 \
             --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
             --data-urlencode "mac=$mac" "${api}task-status" 2>/dev/null)
         if [[ $status == *'"status":"queued"'* ]]; then
-            echo " * 管理员已请求重试，重新进入原任务"
+            echo " * Retry requested; resuming original task."
             exec /bin/pxeos
         fi
         if [[ $status == *'"status":"deleted"'* || $status == *'"status":"cancelled"'* || $status == *'"status":"superseded"'* ]]; then
-            echo " * 任务已被删除或中止，停止 PXEOS"
+            echo " * Task deleted or aborted; stopping PXEOS."
             return 2
         fi
         sleep 5
