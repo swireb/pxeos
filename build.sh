@@ -1,7 +1,5 @@
 #!/bin/bash
 
-source ./dependencies.sh
-
 [[ -z $KERNEL_VERSION ]] && KERNEL_VERSION='6.18.38'
 [[ -z $BUILDROOT_VERSION ]] && BUILDROOT_VERSION='2026.02.1'
 
@@ -9,6 +7,9 @@ declare -ar ARCHITECTURES=("x64" "x86" "arm64")
 PIPE_JOINED_ARCHITECTURES=$(IFS="|"; echo "${ARCHITECTURES[@]}"; unset IFS)
 
 PROJECT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+source "$PROJECT_DIRECTORY/dependencies.sh"
+source "$PROJECT_DIRECTORY/download_helpers.sh"
 
 Usage() {
     echo -e "Usage: $0 [-knfvh?] [-a x64]"
@@ -95,28 +96,32 @@ done
 [[ -z $verbose ]] && verbose="n"
 [[ -z $fsDownloadOnly ]] && fsDownloadOnly="n"
 
-checkDependencies
-installDependencies "$installDep"
+if ! checkDependencies; then
+    exit 1
+fi
+if ! installDependencies "$installDep"; then
+    exit 1
+fi
 
 cd "$buildPath" || exit 1
 
 
 function buildFilesystem() {
     local arch="$1"
-    brURL="https://buildroot.org/downloads/buildroot-$BUILDROOT_VERSION.tar.xz"
+    local brURL="https://buildroot.org/downloads/buildroot-$BUILDROOT_VERSION.tar.xz"
+    local archive="buildroot-$BUILDROOT_VERSION.tar.xz"
     echo "Preparing buildroot $BUILDROOT_VERSION on $arch build:"
     if [[ ! -d fssource$arch ]]; then
-        if [[ ! -f buildroot-$BUILDROOT_VERSION.tar.xz ]]; then
+        if ! archive_is_valid_tar_xz "$archive"; then
             dots "Downloading buildroot source package"
-            wget -q "$brURL" && echo "Done"
-            if [[ $? -ne 0 ]]; then
-                echo "Failed"
-                exit 1
-            fi
+            echo
+            download_tar_xz "$archive" "$brURL" || return 1
         fi
         dots "Extracting buildroot sources"
-        tar xJf "buildroot-$BUILDROOT_VERSION.tar.xz"
-        mv "buildroot-$BUILDROOT_VERSION" "fssource$arch"
+        if ! tar xJf "$archive" || ! mv "buildroot-$BUILDROOT_VERSION" "fssource$arch"; then
+            echo "Failed"
+            return 1
+        fi
         echo "Done"
     fi
     cd "fssource$arch" || { echo "Couldn't change directory to fssource$arch"; exit 1; }
@@ -275,20 +280,21 @@ function buildFilesystem() {
 
 function buildKernel() {
     local arch="$1"
-    kernelURL="https://www.kernel.org/pub/linux/kernel/v${KERNEL_VERSION:0:1}.x/linux-$KERNEL_VERSION.tar.xz"
+    local kernelCDNURL="https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_VERSION:0:1}.x/linux-$KERNEL_VERSION.tar.xz"
+    local kernelFallbackURL="https://www.kernel.org/pub/linux/kernel/v${KERNEL_VERSION:0:1}.x/linux-$KERNEL_VERSION.tar.xz"
+    local archive="linux-$KERNEL_VERSION.tar.xz"
     echo "Preparing kernel $KERNEL_VERSION on $arch build:"
-    [[ -d kernelsource$arch ]] && rm -rf "kernelsource$arch"
-    if [[ ! -f linux-$KERNEL_VERSION.tar.xz ]]; then
+    if ! archive_is_valid_tar_xz "$archive"; then
         dots "Downloading kernel source"
-        wget -q "$kernelURL" && echo "Done"
-        if [[ $? -ne 0 ]]; then
-            echo "Failed"
-            exit 1
-        fi
+        echo
+        download_tar_xz "$archive" "$kernelCDNURL" "$kernelFallbackURL" || return 1
     fi
+    [[ -d kernelsource$arch ]] && rm -rf "kernelsource$arch"
     dots "Extracting kernel source"
-    tar xJf "linux-$KERNEL_VERSION.tar.xz"
-    mv "linux-$KERNEL_VERSION" "kernelsource$arch"
+    if ! tar xJf "$archive" || ! mv "linux-$KERNEL_VERSION" "kernelsource$arch"; then
+        echo "Failed"
+        return 1
+    fi
     echo "Done"
 
     dots "Adding kernel packages"
@@ -468,9 +474,9 @@ function addKernelPackages() {
 for buildArch in $arch
 do
     if [[ -z $buildKernelOnly ]]; then
-        buildFilesystem "$buildArch"
+        buildFilesystem "$buildArch" || exit $?
     fi
     if [[ -z $buildFSOnly ]]; then
-        buildKernel "$buildArch"
+        buildKernel "$buildArch" || exit $?
     fi
 done
