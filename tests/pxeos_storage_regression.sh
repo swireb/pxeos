@@ -3,6 +3,8 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
+tmp="$(mktemp)"
+trap 'rm -f "$tmp" "$tmp.smb-validation.sh"' EXIT
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 must_have() { grep -Fq -- "$2" "$1" || fail "$1 缺少 $2"; }
 must_not_have() { ! grep -RInE -- "$2" "$1" >/dev/null || fail "$1 包含禁止模式 $2"; }
@@ -12,8 +14,13 @@ must_not_have "$overlay" '/images'
 must_not_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'eval[[:space:]]'
 must_not_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'source[[:space:]]+/tmp/hinfo'
 must_not_have "$overlay" 'vers=|sec='
-must_have "$overlay/bin/pxeos.mount" 'mount.cifs "//${storage_server}/${storage_share}" /storage'
-must_have "$overlay/bin/pxeos.checkin" 'Invalid SMB share name'
+must_have "$overlay/bin/pxeos.mount" 'mount.cifs "//${storage_server}/${storage_export}" /storage'
+must_have "$overlay/bin/pxeos.checkin" 'Invalid SMB export path'
+must_have "$overlay/bin/pxeos.checkin" 'SMB requires a JSON checkin response'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_validate_smb_export'
+must_not_have_literal "$overlay/bin/pxeos.checkin" 'smb_username_b64'
+must_not_have_literal "$overlay/bin/pxeos.checkin" 'smb_password_b64'
+must_not_have_literal "$overlay/bin/pxeos.checkin" 'smb_domain_b64'
 must_not_have_literal "$overlay/bin/pxeos.checkin" 'curl -Lksf'
 must_have "$overlay/bin/pxeos.checkin" "-w \$'\\n%{http_code}'"
 must_have "$overlay/bin/pxeos.checkin" '[[ $http_code =~ ^4[0-9][0-9]$ ]]'
@@ -21,9 +28,17 @@ must_have "$overlay/bin/pxeos.checkin" '[INFO]  Task aborted or withdrawn. Stopp
 must_have "$overlay/bin/pxeos.checkin" '[WARN]  Check-in not confirmed. Retrying in 5s.'
 must_have "$overlay/bin/pxeos.checkin" 'exit "$checkin_rc"'
 must_have "$overlay/bin/pxeos.mount" '${storage_export}" /storage'
-share_pattern='^[A-Za-z0-9][A-Za-z0-9._$ ()-]{0,79}$'
-[[ storage =~ $share_pattern ]] || fail '裸 SMB share 必须通过'
-[[ ! /storage =~ $share_pattern && ! storage/sub =~ $share_pattern ]] || fail 'SMB 不得接受路径或嵌套 share'
+awk '/^rootpxe_validate_smb_export\(\)/ { on=1 } /^rootpxe_storage_path\(\)/ { on=0 } on { print }' \
+    "$overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp.smb-validation.sh"
+# shellcheck source=/dev/null
+. "$tmp.smb-validation.sh"
+rm -f "$tmp.smb-validation.sh"
+for export_path in _share share-name share/images; do
+    [[ $(rootpxe_validate_smb_export "$export_path") == "$export_path" ]] || fail "合法 SMB export 被拒绝: $export_path"
+done
+for export_path in '' /share share/ share//images share/../images //server/share . .. 'share name' 'share$bad' 'share?' 'share\\images' 'share:images'; do
+    rootpxe_validate_smb_export "$export_path" >/dev/null && fail "非法 SMB export 被接受: $export_path"
+done
 [[ /storage == /* ]] || fail 'NFS export path 必须接受绝对路径'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_prepare_storage_layout'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '/storage/postinitscripts/hook.sh'

@@ -99,7 +99,13 @@ fi
 case "$args" in *'.volumes|length'*) echo 2;; *'.pv.uuid'*) echo pv-1;; *'.vg.name'*) echo vg0;; *'.pv.originalBytes'*) echo 268435456;; *'.vg.uuid'*) echo vg-1;; *'.vg.extentBytes'*) echo 4194304;; *'.pv.partitionNumber'*) echo 1;; *'.pv.artifact'*) echo d1.pv.pv-1.meta;; *'.pv.vgConfigArtifact'*) echo d1.vg.vg-1.cfg;; *'.pvBytes'*) [[ ${LVM_SMALL:-0} == 1 ]] && echo 134217728 || echo 268435456;; *'swapUuid'*) echo swap-uuid;; *) exit 1;; esac
 EOF
 chmod +x "$tmp/bin"/*
-sed "s|/usr/share/pxeos|$overlay/usr/share/pxeos|g" "$overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/funcs.sh"
+# funcs.sh imports kernel arguments at source time.  Redirect that read to an
+# empty fixture so this mock-only suite never depends on the Windows host's
+# missing /proc filesystem.
+: >"$tmp/proc-cmdline"
+sed -e "s|/usr/share/pxeos|$overlay/usr/share/pxeos|g" \
+    -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" \
+    "$overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/funcs.sh"
 # shellcheck disable=SC1090
 ismajordebug=0
 . "$tmp/funcs.sh"

@@ -13,16 +13,19 @@ if [[ ! -d /storage ]]; then
     fi
 fi
 umount /storage >/dev/null 2>&1
-case ${protocol:-nfs} in
+case ${protocol:-} in
     smb)
-        if ! command -v mount.cifs >/dev/null 2>&1; then
+        if [[ -z ${storage_server:-} || $storage_server == *$'\n'* || $storage_server == *$'\r'* ]] || ! storage_export=$(rootpxe_validate_smb_export "${storage_export:-}"); then
+            printf '%s\n' "Invalid SMB export path" >/tmp/mount-output
+            mount_status=1
+        elif ! command -v mount.cifs >/dev/null 2>&1; then
             printf '%s\n' "mount.cifs helper is unavailable" >/tmp/mount-output
             mount_status=127
         elif [[ -z ${smb_credentials_file:-} ]]; then
             printf '%s\n' "SMB credentials were not supplied" >/tmp/mount-output
             mount_status=1
         else
-            mount.cifs "//${storage_server}/${storage_share}" /storage -o "iocharset=utf8,rw,credentials=$smb_credentials_file" >/tmp/mount-output 2>&1
+            mount.cifs "//${storage_server}/${storage_export}" /storage -o "iocharset=utf8,rw,credentials=$smb_credentials_file" >/tmp/mount-output 2>&1
             mount_status=$?
         fi
         if [[ -n ${smb_credentials_file:-} ]]; then
@@ -30,13 +33,21 @@ case ${protocol:-nfs} in
             trap - EXIT INT TERM
         fi
         ;;
-    *)
+    nfs|"")
+        # Only the isolated legacy Capone flow skips the RootPXE checkin
+        # response.  Keep its historic NFS default without trying to infer a
+        # server/path from its opaque `storage` value.  Managed tasks must
+        # receive an explicit protocol before they can mount.
+        [[ -n ${protocol:-} || ${capone:-0} -eq 1 ]] || handleError "Missing storage protocol ($0)"
         [[ -n ${storage_server:-} && ${storage_export:-} == /* && ${storage_export:-} != *'..'* ]] || handleError "Invalid NFS storage path ($0)"
         case $type in
             up) mount -o nolock,proto=tcp,rsize=32768,wsize=32768,intr,noatime "${storage_server}:${storage_export}" /storage >/tmp/mount-output 2>&1 ;;
             down) mount -o nolock,proto=tcp,rsize=32768,intr,noatime "${storage_server}:${storage_export}" /storage >/tmp/mount-output 2>&1 ;;
         esac
         mount_status=$?
+        ;;
+    *)
+        handleError "Invalid storage protocol ($0)"
         ;;
 esac
 case ${mount_status:-1} in

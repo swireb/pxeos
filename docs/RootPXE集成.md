@@ -2,6 +2,12 @@
 
 以下为当前 PXEOS 运行时已实现的协议适配；服务端 Schema、任务快照、disk permit 以及管理端入口必须与此保持一致。它不代表已经完成真实磁盘环境验收。默认凭据和敏感信息边界见[安全配置](安全配置.md)，硬件构建边界见[硬件兼容性](硬件兼容性.md)。
 
+## 存储协议
+
+- 本次修复的根因是 JSON 中的 `storage` 字符串曾被按对象索引，导致 jq 报错后其返回码被吞掉，`protocol` 变为空并默认走 NFS，使 RootPXE 明确下发的 SMB 任务仍可能进入 NFS 挂载。SMB 仅接受当前 flat JSON 的顶层 `protocol`、`storageip`、`exportPath` 与 `smb*` 字段；顶层 `protocol` 优先，缺失时才保留 NFS 的嵌套兼容。普通 RootPXE 任务缺少或未知协议会拒绝，不根据 `storage` 字符串猜测协议；非 JSON legacy checkin 不接受 SMB。仅显式 `capone=1` 且缺少协议时保留既有 NFS 分支，仍要求 `storage_server` 与绝对 `storage_export`；不据此声明 USB 兼容性，Capone/USB 均未做真机验证。
+- NFS export 使用绝对路径（例如 `/data/images`）。SMB `exportPath` 使用完整相对 `share[/subdir...]`（例如 `rootpxe/images`），并保持该值直到最终调用 `mount.cifs //server/share/subdir`；远程配置的 share/subdir 根必须已存在，PXEOS 不会在服务端回退挂载共享根。SMB 拒绝前导或尾随斜杠、空段、`.`/`..`、UNC、反斜杠、冒号、控制字符、空白和危险字符。SMB 仅使用凭据文件，checkin 明确协议并完成字段校验后才创建，明文不导出到子进程环境。
+- SMB 不固定 `vers` 或 `sec`，由客户端和服务端自动协商。发布此运行时修改需要重新构建并替换相应 initramfs（如 `init.xz`）及同批次 PXEOS 产物；本次不修改或证明 `bzImage`/内核二进制已经重建。
+
 ## Schema、布局与 LVM
 
 - `image_type=n` 捕获完成、镜像写入与最终目录移动成功后，PXEOS 从最终镜像目录的 `d1.partitions` 生成 `originalSchema`，并在同一次 `finish` 回调中提交 `sizeBytes` 与 Schema。v1 GPT/普通 MBR 行为不变；带 DOS extended/逻辑分区的 MBR 使用 v2：分区按数字排序，容器为 `kind=extended`、`role=extended_container`、`artifact=""`，携带 `logicalNumbers`、`ebrReservedSectors=2`，并以每个逻辑分区的 `startSectors + minSectors` 推导容器 `minSectors`；逻辑分区为 `kind=logical`，只携带唯一 `parentNumber`。v2 MBR `typeGuid` 统一为小写 `0x...`。任务 Schema hash 使用 `jq -cS` 的紧凑排序 JSON 字节，明确不包含其输出末尾换行，以匹配服务端 canonical JSON。无 LVM 拓扑时省略 `lvm`，不伪造空 PV/VG/LV；容器和 swap 均不要求镜像 payload。

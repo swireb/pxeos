@@ -7,7 +7,7 @@ REG_LOCAL_MACHINE_7="/ntfs/Windows/System32/config/SYSTEM"
 [[ -z $ismajordebug ]] && ismajordebug=0
 rootpxe_kernel_key_allowed() {
     case "$1" in
-        web|pxeapi|taskid|task_token|token|mac|type|img|imgpath|osid|imgType|imgPartitionType|imgFormat|PIGZ_COMP|storage|storageip|storage_server|storage_export|storage_share|export_path|protocol|hostName|changeHostname|shutdown|mc|pct|capone|nombr|fdrive|mode|boottype|deployed|isdebug|ismajordebug|chkdsk|keymap) return 0 ;;
+        web|pxeapi|taskid|task_token|token|mac|type|img|imgpath|osid|imgType|imgPartitionType|imgFormat|PIGZ_COMP|storage|storageip|storage_server|storage_export|export_path|protocol|hostName|changeHostname|shutdown|mc|pct|capone|nombr|fdrive|mode|boottype|deployed|isdebug|ismajordebug|chkdsk|keymap) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -66,6 +66,19 @@ rootpxe_safe_relative_path() {
         [[ -n $segment && $segment != . && $segment != .. && $segment != *$'\n'* && $segment != *$'\r'* ]] || return 1
     done
     printf '%s\n' "$value"
+}
+rootpxe_validate_smb_export() {
+    local export_path="$1" segment
+    # SMB exportPath is a relative share[/subdir...] path. Keep it intact so
+    # mount.cifs can append the intended subdirectory directly to the UNC.
+    [[ -n $export_path && $export_path != /* && $export_path != */ && $export_path != *//* ]] || return 1
+    [[ $export_path != *[[:space:]]* && $export_path != *[[:cntrl:]]* ]] || return 1
+    [[ $export_path != *\\* && $export_path != *:* && $export_path != *'"'* && $export_path != *"'"* && $export_path != *'`'* && $export_path != *'$'* && $export_path != *';'* && $export_path != *'&'* && $export_path != *'|'* && $export_path != *'<'* && $export_path != *'>'* && $export_path != *'('* && $export_path != *')'* && $export_path != *'{'* && $export_path != *'}'* && $export_path != *'['* && $export_path != *']'* && $export_path != *'*'* && $export_path != *'?'* && $export_path != *'!'* ]] || return 1
+    IFS=/ read -r -a _rootpxe_smb_segments <<< "$export_path"
+    for segment in "${_rootpxe_smb_segments[@]}"; do
+        [[ -n $segment && $segment != . && $segment != .. ]] || return 1
+    done
+    printf '%s\n' "$export_path"
 }
 rootpxe_storage_path() {
     local relative candidate=/storage segment
