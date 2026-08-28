@@ -1,5 +1,4 @@
 #!/bin/bash
-echo " * Task Complete"
 sysuuid=$(dmidecode -s system-uuid)
 sysuuid=${sysuuid,,}
 rootpxe_api="${pxeapi:-$web}"
@@ -9,7 +8,7 @@ count=0
 res=""
 if [[ ${type:-} == "up" ]]; then
     rootpxe_stage finalizing "moving captured image into final path"
-    rootpxe_finalize_capture || handleError "Could not finalize captured image safely ($0)"
+    rootpxe_finalize_capture || handleError "PXEOS_STAGE=capture_finalize CODE=${rootpxe_finalize_capture_error_code:-CAPTURE_FINALIZE_FAILED} REASON=${rootpxe_finalize_capture_error_reason:-unsafe_finalize_state}"
     if [[ ${imgType:-} == [Nn] ]]; then
         rootpxe_build_original_schema "$hd" "$rootpxe_final_capture_path" || handleError "PXEOS_STAGE=capture_schema CODE=ORIGINAL_SCHEMA_INVALID REASON=capture_facts_or_artifacts_unavailable"
     fi
@@ -33,7 +32,11 @@ while true; do
         res=""
     fi
     if echo "$res" | grep -q '"success"[[:space:]]*:[[:space:]]*true'; then
-        rootpxe_clear_capture_marker
+        echo "Done"
+        if ! rootpxe_clear_capture_marker; then
+            rootpxe_console_message WARN "PXEOS_STAGE=finish_notify CODE=CAPTURE_MARKER_CLEAR_FAILED REASON=${rootpxe_capture_marker_clear_error_reason:-marker_clear_failed}"
+            rootpxe_console_message WARN 'Marker retained for manual cleanup.'
+        fi
         rootpxe_cleanup_task_json
         break
     fi
@@ -56,5 +59,5 @@ while true; do
     let count+=1
     usleep $((500000 * (1 << (count > 5 ? 5 : count))))
 done
-echo "Done"
+echo " * Task Complete"
 debugPause

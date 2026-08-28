@@ -43,8 +43,12 @@ rootpxe_require_task_context() { return 0; }
 rootpxe_stage() { return 0; }
 rootpxe_finalize_capture() { return 0; }
 rootpxe_build_original_schema() { return 0; }
-rootpxe_clear_capture_marker() { : > "${MOCK_MARKER_CLEARED:?}"; }
+rootpxe_clear_capture_marker() {
+    [[ ${MOCK_MARKER_CLEAR_FAIL:-no} == yes ]] && return 1
+    : > "${MOCK_MARKER_CLEARED:?}"
+}
 rootpxe_cleanup_task_json() { : > "${MOCK_JSON_CLEARED:?}"; }
+rootpxe_console_message() { printf '[%s] %s\n' "$1" "$2"; }
 dots() { :; }
 debugPause() { :; }
 handleError() { printf 'HANDLE_ERROR:%s\n' "$*" >&2; exit 91; }
@@ -62,6 +66,27 @@ assert_eq "$imgcomplete_rc" 0 '完成回调临时失败后应重试并成功'
 assert_eq "$(cat "$tmp/curl-count")" 2 '完成回调应执行两次 curl'
 [[ -f "$tmp/marker-cleared" && -f "$tmp/json-cleared" ]] || fail '成功后必须执行安全清理'
 pass 'finish retry survives bash errexit'
+
+# finish 已被服务端确认后，marker 的保守清理失败只能留下告警，不能把已完成
+# 的业务任务重新报告为失败或让终端显示提前完成。
+printf '1' >"$tmp/marker-warning-curl-count"
+set +e
+PATH="$tmp/bin:$PATH" BASH_ENV="$tmp/bash_env" MOCK_CURL_COUNT="$tmp/marker-warning-curl-count" \
+    MOCK_MARKER_CLEARED="$tmp/marker-warning-cleared" MOCK_JSON_CLEARED="$tmp/marker-warning-json-cleared" \
+    MOCK_MARKER_CLEAR_FAIL=yes type=down taskid=1 task_token=secret mac=001122334455 web='http://mock/' \
+    bash -e "$imgcomplete" >"$tmp/marker-warning.out" 2>"$tmp/marker-warning.err"
+marker_warning_rc=$?
+set -e
+assert_eq "$marker_warning_rc" 0 'finish 确认后的 marker 清理失败不得变成业务失败'
+grep -Fq 'CODE=CAPTURE_MARKER_CLEAR_FAILED' "$tmp/marker-warning.out" || fail 'marker 清理失败必须输出稳定告警码'
+grep -Fxq 'Done' "$tmp/marker-warning.out" || fail 'finish 成功状态行必须在 marker 告警前结束'
+grep -Fq ' * Task Complete' "$tmp/marker-warning.out" || fail 'Task Complete 必须在 finish 确认流程结束后输出'
+done_line=$(grep -n -m1 -x 'Done' "$tmp/marker-warning.out" | cut -d: -f1)
+warning_line=$(grep -n -m1 'CODE=CAPTURE_MARKER_CLEAR_FAILED' "$tmp/marker-warning.out" | cut -d: -f1)
+complete_line=$(grep -n -m1 -F ' * Task Complete' "$tmp/marker-warning.out" | cut -d: -f1)
+[[ $done_line =~ ^[1-9][0-9]*$ && $warning_line =~ ^[1-9][0-9]*$ && $complete_line =~ ^[1-9][0-9]*$ && $done_line -lt $warning_line && $warning_line -lt $complete_line ]] || fail 'finish状态、marker告警和Task Complete的输出顺序错误'
+[[ ! -e $tmp/marker-warning-cleared && -f $tmp/marker-warning-json-cleared ]] || fail 'marker 失败应保留 marker 并仍清理任务上下文'
+pass 'finish-confirmed marker cleanup failure is warning-only'
 
 # capture 的压缩器失败时，后台 writer 的 wait 必须返回失败，不能被 split 的成功掩盖。
 cat > "$tmp/bin/nproc" <<'EOF'
