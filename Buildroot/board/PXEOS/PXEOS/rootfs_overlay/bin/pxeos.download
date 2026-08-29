@@ -149,7 +149,9 @@ if [[ ${imgType:-} == [Nn] ]]; then
     # NVMe reformat may have changed logical geometry; resolve once more before
     # the final sfdisk write and verify the table after applying it.
     rootpxe_validate_deployment_layout "$hd" "$originalSchemaFile" "$deploymentLayoutFile" || handleError "PXEOS_STAGE=layout_validation CODE=INVALID_DEPLOYMENT_LAYOUT REASON=post_format_validation_failed"
-    rootpxe_apply_deployment_layout "$hd" "$sector_metadata" || handleError "PXEOS_STAGE=layout_apply CODE=LAYOUT_READBACK_FAILED REASON=sfdisk_layout_mismatch"
+    if ! rootpxe_apply_deployment_layout "$hd" "$sector_metadata"; then
+        handleError "PXEOS_STAGE=layout_apply CODE=${rootpxe_layout_apply_code:-LAYOUT_APPLY_FAILED} REASON=${rootpxe_layout_apply_reason:-unknown}${rootpxe_layout_diagnostics_file:+ DIAGNOSTICS=${rootpxe_layout_diagnostics_file}}"
+    fi
     rootpxe_restore_deployment_boot_code "$hd" 1 "$imagePath" "$originalSchemaFile" || handleError "PXEOS_STAGE=layout_apply CODE=BOOT_CODE_RESTORE_FAILED REASON=boot_code_metadata_invalid"
 fi
 [[ $nombr -ne 1 ]] && rootpxe_stage prepare_partitions "partition layout prepared"

@@ -813,10 +813,25 @@ rootpxe_sfdisk_layout_fingerprint() {
 rootpxe_layout_readback_failed() {
     local reason="$1"
     rootpxe_layout_readback_reason="$reason"
+    rootpxe_layout_apply_code=LAYOUT_READBACK_FAILED
+    rootpxe_layout_apply_reason="sfdisk_${reason}"
     # Field names and the normalized mismatch class are safe to display; raw
     # partition data is deliberately kept out of task logs.
     rootpxe_console_message ERROR "Deployment layout readback mismatch: $reason"
     rootpxe_stage layout_apply "Deployment layout readback mismatch: $reason"
+    return 1
+}
+
+rootpxe_layout_apply_failed() {
+    local code="$1" reason="$2" diagnostics="${3:-}"
+    rootpxe_layout_apply_code="$code"
+    rootpxe_layout_apply_reason="$reason"
+    rootpxe_layout_diagnostics_file="$diagnostics"
+    [[ -z $diagnostics ]] || chmod 600 "$diagnostics" 2>/dev/null
+    # Do not print the partition table: sfdisk stderr is retained only in the
+    # protected diagnostic file, while task logs receive a stable phase code.
+    rootpxe_console_message ERROR "Deployment layout apply failed: $code ($reason)${diagnostics:+; diagnostics: $diagnostics}"
+    rootpxe_stage layout_apply "Deployment layout apply failed: $code ($reason)${diagnostics:+; diagnostics: $diagnostics}"
     return 1
 }
 
@@ -870,40 +885,43 @@ rootpxe_restore_deployment_boot_code() {
 }
 
 rootpxe_apply_deployment_layout() {
-    local disk="$1" template="$2" map output verify expected actual expected_numbers actual_numbers logical disk_bytes total_sectors table template_sector first_lba= last_lba= is_gpt=0
-    [[ -r ${rootpxe_resolved_layout_file:-} && -r $template ]] || return 1
-    logical=$(blockdev --getss "$disk" 2>/dev/null) || return 1
-    disk_bytes=$(blockdev --getsize64 "$disk" 2>/dev/null) || return 1
-    [[ $logical =~ ^[1-9][0-9]*$ && $disk_bytes =~ ^[1-9][0-9]*$ ]] || return 1
-    (( logical <= 9223372036854775807 && disk_bytes <= 9223372036854775807 && disk_bytes % logical == 0 )) || return 1
+    local disk="$1" template="$2" map output verify expected actual expected_numbers actual_numbers logical disk_bytes total_sectors table template_sector first_lba= last_lba= is_gpt=0 write_stderr partprobe_stderr dump_stderr reread_attempt reread_max=5 reread_ok=0
+    rootpxe_layout_apply_code=""
+    rootpxe_layout_apply_reason=""
+    rootpxe_layout_diagnostics_file=""
+    [[ -r ${rootpxe_resolved_layout_file:-} && -r $template ]] || { rootpxe_layout_apply_failed LAYOUT_METADATA_INVALID layout_or_partition_template_missing; return 1; }
+    logical=$(blockdev --getss "$disk" 2>/dev/null) || { rootpxe_layout_apply_failed LAYOUT_TARGET_GEOMETRY_UNAVAILABLE logical_sector_size_unavailable; return 1; }
+    disk_bytes=$(blockdev --getsize64 "$disk" 2>/dev/null) || { rootpxe_layout_apply_failed LAYOUT_TARGET_GEOMETRY_UNAVAILABLE disk_size_unavailable; return 1; }
+    [[ $logical =~ ^[1-9][0-9]*$ && $disk_bytes =~ ^[1-9][0-9]*$ ]] || { rootpxe_layout_apply_failed LAYOUT_TARGET_GEOMETRY_INVALID invalid_target_geometry; return 1; }
+    (( logical <= 9223372036854775807 && disk_bytes <= 9223372036854775807 && disk_bytes % logical == 0 )) || { rootpxe_layout_apply_failed LAYOUT_TARGET_GEOMETRY_INVALID unaligned_target_geometry; return 1; }
     total_sectors=$((disk_bytes / logical))
-    (( total_sectors > 0 )) || return 1
-    table=$(awk '/^label:/{print tolower($2); count++} END{if(count != 1) exit 1}' "$template") || return 1
-    [[ $table == gpt || $table == dos ]] || return 1
-    template_sector=$(awk '/^sector-size:/{print $2; count++} END{if(count != 1) exit 1}' "$template") || return 1
-    [[ $template_sector =~ ^[1-9][0-9]*$ && $template_sector == "$logical" ]] || return 1
+    (( total_sectors > 0 )) || { rootpxe_layout_apply_failed LAYOUT_TARGET_GEOMETRY_INVALID zero_target_sectors; return 1; }
+    table=$(awk '/^label:/{print tolower($2); count++} END{if(count != 1) exit 1}' "$template") || { rootpxe_layout_apply_failed LAYOUT_TEMPLATE_INVALID partition_table_type_missing; return 1; }
+    [[ $table == gpt || $table == dos ]] || { rootpxe_layout_apply_failed LAYOUT_TEMPLATE_INVALID unsupported_partition_table_type; return 1; }
+    template_sector=$(awk '/^sector-size:/{print $2; count++} END{if(count != 1) exit 1}' "$template") || { rootpxe_layout_apply_failed LAYOUT_TEMPLATE_INVALID sector_size_missing; return 1; }
+    [[ $template_sector =~ ^[1-9][0-9]*$ && $template_sector == "$logical" ]] || { rootpxe_layout_apply_failed LAYOUT_TEMPLATE_INVALID sector_size_mismatch; return 1; }
     if [[ $table == gpt ]]; then
         is_gpt=1
-        first_lba=$(awk '/^first-lba:/{print $2; count++} END{if(count != 1) exit 1}' "$template") || return 1
-        [[ $first_lba =~ ^[1-9][0-9]*$ ]] || return 1
-        (( first_lba < total_sectors && total_sectors - first_lba >= first_lba )) || return 1
+        first_lba=$(awk '/^first-lba:/{print $2; count++} END{if(count != 1) exit 1}' "$template") || { rootpxe_layout_apply_failed LAYOUT_TEMPLATE_INVALID gpt_first_lba_missing; return 1; }
+        [[ $first_lba =~ ^[1-9][0-9]*$ ]] || { rootpxe_layout_apply_failed LAYOUT_TEMPLATE_INVALID gpt_first_lba_invalid; return 1; }
+        (( first_lba < total_sectors && total_sectors - first_lba >= first_lba )) || { rootpxe_layout_apply_failed LAYOUT_TARGET_GEOMETRY_INVALID gpt_usable_lba_unavailable; return 1; }
         last_lba=$((total_sectors - first_lba))
     fi
-    map=$(mktemp /tmp/rootpxe-layout-map.XXXXXX) || return 1
-    output=$(mktemp /tmp/rootpxe-layout-sfdisk.XXXXXX) || { rm -f "$map"; return 1; }
+    map=$(mktemp /tmp/rootpxe-layout-map.XXXXXX) || { rootpxe_layout_apply_failed LAYOUT_PLAN_FAILED map_file_create_failed; return 1; }
+    output=$(mktemp /tmp/rootpxe-layout-sfdisk.XXXXXX) || { rm -f "$map"; rootpxe_layout_apply_failed LAYOUT_TEMPLATE_REWRITE_FAILED output_file_create_failed; return 1; }
     chmod 600 "$map" "$output"
-    jq -r '.[] | [.number,.startSectors,.resolvedSectors] | @tsv' "$rootpxe_resolved_layout_file" >"$map" || { rm -f "$map" "$output"; return 1; }
+    jq -r '.[] | [.number,.startSectors,.resolvedSectors] | @tsv' "$rootpxe_resolved_layout_file" >"$map" || { rm -f "$map" "$output"; rootpxe_layout_apply_failed LAYOUT_PLAN_INVALID layout_map_parse_failed; return 1; }
     while IFS=$'\t' read -r number start size extra; do
         size=${size%$'\r'}
         extra=${extra%$'\r'}
-        [[ -n $number && -z ${extra:-} && $number =~ ^[1-9][0-9]*$ && $start =~ ^(0|[1-9][0-9]*)$ && $size =~ ^[1-9][0-9]*$ ]] || { rm -f "$map" "$output"; return 1; }
-        (( number <= 2147483647 && start < total_sectors && size <= total_sectors - start )) || { rm -f "$map" "$output"; return 1; }
-        (( is_gpt == 0 || start + size - 1 <= last_lba )) || { rm -f "$map" "$output"; return 1; }
+        [[ -n $number && -z ${extra:-} && $number =~ ^[1-9][0-9]*$ && $start =~ ^(0|[1-9][0-9]*)$ && $size =~ ^[1-9][0-9]*$ ]] || { rm -f "$map" "$output"; rootpxe_layout_apply_failed LAYOUT_PLAN_INVALID invalid_partition_plan_entry; return 1; }
+        (( number <= 2147483647 && start < total_sectors && size <= total_sectors - start )) || { rm -f "$map" "$output"; rootpxe_layout_apply_failed LAYOUT_PLAN_INVALID partition_plan_exceeds_target; return 1; }
+        (( is_gpt == 0 || start + size - 1 <= last_lba )) || { rm -f "$map" "$output"; rootpxe_layout_apply_failed LAYOUT_PLAN_INVALID partition_plan_exceeds_gpt_usable_range; return 1; }
     done <"$map"
-    awk -F'\t' 'NF != 3 || seen[$1]++ {exit 1} END {exit (NR > 0 ? 0 : 1)}' "$map" || { rm -f "$map" "$output"; return 1; }
+    awk -F'\t' 'NF != 3 || seen[$1]++ {exit 1} END {exit (NR > 0 ? 0 : 1)}' "$map" || { rm -f "$map" "$output"; rootpxe_layout_apply_failed LAYOUT_PLAN_INVALID partition_plan_numbers_invalid; return 1; }
     expected_numbers=$(awk -F'\t' '{print $1}' "$map" | sort -n | tr '\n' ' ')
     actual_numbers=$(awk '/start=/ {n=$1; sub(/^.*[^0-9]/,"",n); print n}' "$template" | sort -n | tr '\n' ' ')
-    [[ $expected_numbers == "$actual_numbers" ]] || { rm -f "$map" "$output"; return 1; }
+    [[ $expected_numbers == "$actual_numbers" ]] || { rm -f "$map" "$output"; rootpxe_layout_apply_failed LAYOUT_PLAN_INVALID partition_plan_numbers_mismatch; return 1; }
     awk -v map="$map" -v disk="$disk" -v logical="$logical" -v is_gpt="$is_gpt" -v last_lba="$last_lba" '
       function partition_path(number) { return disk ((disk ~ /[0-9]$/) ? "p" number : number) }
       BEGIN { while ((getline < map) > 0) { split($0,a,"\t"); starts[a[1]]=a[2]; sizes[a[1]]=a[3]; expected++ } close(map) }
@@ -916,14 +934,38 @@ rootpxe_apply_deployment_layout() {
         sub(/start=[[:space:]]*[0-9]+/, "start=" sprintf("%12d", starts[n]), line);
         sub(/size=[[:space:]]*[0-9]+/, "size=" sprintf("%12d", sizes[n]), line); print line; parts++; next }
       { print }
-      END { if (devices != 1 || sectors != 1 || parts != expected || (is_gpt && (firsts != 1 || lasts != 1))) exit 21 }' "$template" >"$output" || { rm -f "$map" "$output"; return 1; }
-    applySfdiskPartitions "$disk" "$output" || { rm -f "$map" "$output"; return 1; }
-    runPartprobe "$disk" || { rm -f "$map" "$output"; return 1; }
-    verify=$(mktemp /tmp/rootpxe-layout-verify.XXXXXX) || { rm -f "$map" "$output"; return 1; }
-    expected=$(mktemp /tmp/rootpxe-layout-expected.XXXXXX) || { rm -f "$map" "$output" "$verify"; return 1; }
-    actual=$(mktemp /tmp/rootpxe-layout-actual.XXXXXX) || { rm -f "$map" "$output" "$verify" "$expected"; return 1; }
+      END { if (devices != 1 || sectors != 1 || parts != expected || (is_gpt && (firsts != 1 || lasts != 1))) exit 21 }' "$template" >"$output" || { rm -f "$map" "$output"; rootpxe_layout_apply_failed LAYOUT_TEMPLATE_REWRITE_FAILED sfdisk_template_rewrite_failed; return 1; }
+    write_stderr=$(mktemp /tmp/rootpxe-layout-sfdisk-write.XXXXXX.err) || { rm -f "$map" "$output"; rootpxe_layout_apply_failed SFDISK_WRITE_FAILED write_diagnostic_create_failed; return 1; }
+    chmod 600 "$write_stderr"
+    # Let this n-layout path own the kernel reread.  util-linux otherwise
+    # requests BLKRRPART as part of sfdisk, where transient device busy races
+    # lose the original error context before the bounded retry below can run.
+    flock "$disk" sfdisk --no-reread --no-tell-kernel "$disk" <"$output" >/dev/null 2>"$write_stderr" || { rm -f "$map" "$output"; rootpxe_layout_apply_failed SFDISK_WRITE_FAILED sfdisk_write_failed "$write_stderr"; return 1; }
+    rm -f "$write_stderr"
+    partprobe_stderr=$(mktemp /tmp/rootpxe-layout-partprobe.XXXXXX.err) || { rm -f "$map" "$output"; rootpxe_layout_apply_failed PARTPROBE_FAILED diagnostic_create_failed; return 1; }
+    chmod 600 "$partprobe_stderr"
+    # Kernel partition-table reread is the synchronization point after the
+    # no-reread sfdisk write.  It can transiently fail while udev observes the
+    # new GPT; retry a short, fixed number of times without weakening the
+    # later dump and semantic readback checks.
+    for ((reread_attempt = 1; reread_attempt <= reread_max; reread_attempt++)); do
+        udevadm settle >/dev/null 2>>"$partprobe_stderr" || :
+        if blockdev --rereadpt "$disk" >/dev/null 2>>"$partprobe_stderr"; then
+            reread_ok=1
+            break
+        fi
+        (( reread_attempt < reread_max )) && sleep 1
+    done
+    [[ $reread_ok -eq 1 ]] || { rm -f "$map" "$output"; rootpxe_layout_apply_failed PARTPROBE_FAILED partition_table_reread_failed "$partprobe_stderr"; return 1; }
+    rm -f "$partprobe_stderr"
+    verify=$(mktemp /tmp/rootpxe-layout-verify.XXXXXX) || { rm -f "$map" "$output"; rootpxe_layout_apply_failed SFDISK_DUMP_FAILED verify_file_create_failed; return 1; }
+    expected=$(mktemp /tmp/rootpxe-layout-expected.XXXXXX) || { rm -f "$map" "$output" "$verify"; rootpxe_layout_apply_failed LAYOUT_READBACK_FAILED expected_file_create_failed; return 1; }
+    actual=$(mktemp /tmp/rootpxe-layout-actual.XXXXXX) || { rm -f "$map" "$output" "$verify" "$expected"; rootpxe_layout_apply_failed LAYOUT_READBACK_FAILED actual_file_create_failed; return 1; }
     chmod 600 "$expected" "$actual"
-    saveSfdiskPartitions "$disk" "$verify" || { rm -f "$map" "$output" "$verify" "$expected" "$actual"; return 1; }
+    dump_stderr=$(mktemp /tmp/rootpxe-layout-sfdisk-dump.XXXXXX.err) || { rm -f "$map" "$output" "$verify" "$expected" "$actual"; rootpxe_layout_apply_failed SFDISK_DUMP_FAILED dump_diagnostic_create_failed; return 1; }
+    chmod 600 "$dump_stderr"
+    flock "$disk" sfdisk -d "$disk" >"$verify" 2>"$dump_stderr" || { rm -f "$map" "$output" "$verify" "$expected" "$actual"; rootpxe_layout_apply_failed SFDISK_DUMP_FAILED sfdisk_dump_failed "$dump_stderr"; return 1; }
+    rm -f "$dump_stderr"
     awk -v disk="$disk" -v logical="$logical" -v is_gpt="$is_gpt" -v last_lba="$last_lba" '
       /^device:[[:space:]]*/ { devices++; if ($2 != disk) exit 1 }
       /^sector-size:[[:space:]]*/ { sectors++; if ($2 != logical) exit 1 }

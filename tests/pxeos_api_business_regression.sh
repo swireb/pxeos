@@ -331,6 +331,8 @@ permit_line=$(grep -n 'rootpxe_wait_for_disk_permit "$rootpxe_planned_target_id"
 prepare_line=$(grep -n 'Skipping partition layout (Single Partition restore)' "$download" | head -n 1 | cut -d: -f1)
 apply_layout_line=$(grep -n 'rootpxe_apply_deployment_layout' "$download" | head -n 1 | cut -d: -f1)
 [[ $pre_layout_validation_line =~ ^[1-9][0-9]*$ && $permit_line =~ ^[1-9][0-9]*$ && $prepare_line =~ ^[1-9][0-9]*$ && $apply_layout_line =~ ^[1-9][0-9]*$ && $pre_layout_validation_line -lt $permit_line && $permit_line -lt $prepare_line && $prepare_line -lt $apply_layout_line ]] || fail layout-capacity-validation-must-precede-permit-and-write
+grep -Fq 'CODE=${rootpxe_layout_apply_code:-LAYOUT_APPLY_FAILED}' "$download" || fail layout-apply-must-report-real-stage-code
+! grep -Fq 'CODE=LAYOUT_READBACK_FAILED REASON=sfdisk_layout_mismatch' "$download" || fail layout-apply-must-not-misreport-all-failures-as-readback
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -399,8 +401,56 @@ case "$1" in
   --getsize64)
     [[ ${MODE:-} == layout_apply ]] && echo ${TARGET_BYTES:-409600000} || echo 102400000
     ;;
+  --rereadpt)
+    if [[ -n ${LAYOUT_PARTPROBE_TRACE:-} ]]; then
+        printf 'rereadpt:%s\n' "$2" >>"$LAYOUT_PARTPROBE_TRACE"
+        attempts=$(wc -l <"$LAYOUT_PARTPROBE_TRACE")
+        [[ $attempts -le ${LAYOUT_PARTPROBE_FAILS:-0} ]] && exit 1
+    fi
+    exit ${LAYOUT_PARTPROBE_STATUS:-0}
+    ;;
   *) exit 1 ;;
 esac
+EOF
+cat >$tmp/mock/udevadm <<'EOF'
+#!/usr/bin/env bash
+[[ ${1:-} == settle ]] || exit 1
+exit ${LAYOUT_UDEVADM_STATUS:-0}
+EOF
+cat >$tmp/mock/sleep <<'EOF'
+#!/usr/bin/env bash
+printf 'sleep:%s\n' "$1" >>"$LAYOUT_SLEEP_TRACE"
+EOF
+cat >$tmp/mock/flock <<'EOF'
+#!/usr/bin/env bash
+shift
+exec "$@"
+EOF
+cat >$tmp/mock/sfdisk <<'EOF'
+#!/usr/bin/env bash
+if [[ ${1:-} == -d ]]; then
+    shift
+    case ${LAYOUT_SFDISK_MODE:-canonical} in
+        dump_fail) printf 'mock sfdisk dump failure\n' >&2; exit 43 ;;
+        canonical)
+            sed -E \
+                -e '/^label-id:/ s/[A-F]/\L&/g' \
+                -e '/start=/ s/(type|uuid)=([0-9A-F-]+)/\1=\L\2/g' \
+                "$LAYOUT_APPLIED"
+            ;;
+        header_geometry) sed 's/^device: .*/device: \/dev\/wrong/' "$LAYOUT_APPLIED" ;;
+        partition_numbers) sed '/p2 : start=/d; /sda2 : start=/d' "$LAYOUT_APPLIED" ;;
+        partition_geometry) sed -E '0,/size=[[:space:]]*[0-9]+/s//size=        1023/' "$LAYOUT_APPLIED" ;;
+        semantic_identity) sed 's/name="root data"/name="wrong partition"/' "$LAYOUT_APPLIED" ;;
+        *) exit 44 ;;
+    esac
+    exit 0
+fi
+[[ -z ${LAYOUT_SFDISK_ARGS:-} ]] || printf '%s\n' "$*" >>"$LAYOUT_SFDISK_ARGS"
+case ${LAYOUT_SFDISK_MODE:-canonical} in
+    write_fail) printf 'mock sfdisk write failure\n' >&2; exit 42 ;;
+esac
+cat >"$LAYOUT_APPLIED"
 EOF
 cat >$tmp/mock/blkid <<'EOF'
 #!/usr/bin/env bash
@@ -963,6 +1013,7 @@ cat >$layout_plan <<'EOF'
 EOF
 rootpxe_resolved_layout_file=$layout_plan
 layout_applied=$tmp/layout-applied.partitions
+LAYOUT_APPLIED=$layout_applied; export LAYOUT_APPLIED
 layout_apply_assert_table() {
     local disk="$1" table="$2" first=34 last=799966 expected_p1 expected_p2
     [[ -s $table && $disk == "$LAYOUT_EXPECT_DISK" ]] || return 1
@@ -988,38 +1039,52 @@ layout_apply_assert_table() {
       }
     ' "$table"
 }
-applySfdiskPartitions() {
-    layout_apply_assert_table "$1" "$2" || return 1
-    cp "$2" "$layout_applied"
-}
-runPartprobe() { :; }
-saveSfdiskPartitions() {
-    [[ -s $layout_applied ]] || return 1
-    case ${LAYOUT_READBACK_VARIANT:-canonical} in
-        canonical)
-            # sfdisk dump output may canonicalize GUID casing without changing
-            # the partition identity.  Readback verification must compare the
-            # semantic value rather than the original presentation.
-            sed -E \
-                -e '/^label-id:/ s/[A-F]/\L&/g' \
-                -e '/start=/ s/(type|uuid)=([0-9A-F-]+)/\1=\L\2/g' \
-                "$layout_applied" >"$2"
-            ;;
-        identity_mismatch)
-            sed 's/name="root data"/name="wrong partition"/' "$layout_applied" >"$2"
-            ;;
-        *) return 1 ;;
-    esac
-}
 MODE=layout_apply; export MODE
 TEST_SECTOR=512; export TEST_SECTOR
+LAYOUT_SFDISK_MODE=canonical; export LAYOUT_SFDISK_MODE
+LAYOUT_SFDISK_ARGS=$tmp/layout-sfdisk-args; export LAYOUT_SFDISK_ARGS
+LAYOUT_PARTPROBE_TRACE=$tmp/layout-partprobe-trace; export LAYOUT_PARTPROBE_TRACE
+LAYOUT_SLEEP_TRACE=$tmp/layout-sleep-trace; export LAYOUT_SLEEP_TRACE
 LAYOUT_EXPECT_DISK=/dev/sda
 rootpxe_apply_deployment_layout /dev/sda $layout_template || fail layout-apply-nvme-to-sata
+layout_apply_assert_table /dev/sda "$layout_applied" || fail layout-apply-nvme-to-sata-rewritten-table
+grep -Fqx -- '--no-reread --no-tell-kernel /dev/sda' "$LAYOUT_SFDISK_ARGS" || fail layout-sfdisk-write-must-disable-implicit-kernel-reread
 LAYOUT_EXPECT_DISK=/dev/nvme0n1
 rootpxe_apply_deployment_layout /dev/nvme0n1 $layout_template || fail layout-apply-nvme-suffix
-LAYOUT_READBACK_VARIANT=identity_mismatch
-rootpxe_apply_deployment_layout /dev/nvme0n1 $layout_template && fail layout-readback-identity-mismatch-must-reject
-LAYOUT_READBACK_VARIANT=canonical
+layout_apply_assert_table /dev/nvme0n1 "$layout_applied" || fail layout-apply-nvme-suffix-rewritten-table
+: >"$LAYOUT_PARTPROBE_TRACE"
+: >"$LAYOUT_SLEEP_TRACE"
+LAYOUT_PARTPROBE_FAILS=2; export LAYOUT_PARTPROBE_FAILS
+rootpxe_apply_deployment_layout /dev/nvme0n1 $layout_template || fail layout-partprobe-transient-failure-must-recover
+[[ $(wc -l <"$LAYOUT_PARTPROBE_TRACE") -eq 3 ]] || fail layout-partprobe-must-retry-three-times
+[[ $(wc -l <"$LAYOUT_SLEEP_TRACE") -eq 2 ]] || fail layout-partprobe-retries-must-use-bounded-delay
+unset LAYOUT_PARTPROBE_FAILS
+: >"$LAYOUT_PARTPROBE_TRACE"
+: >"$LAYOUT_SLEEP_TRACE"
+LAYOUT_PARTPROBE_FAILS=5; export LAYOUT_PARTPROBE_FAILS
+rootpxe_apply_deployment_layout /dev/nvme0n1 $layout_template && fail layout-partprobe-exhaustion-must-reject
+[[ $rootpxe_layout_apply_code == PARTPROBE_FAILED && $rootpxe_layout_apply_reason == partition_table_reread_failed && -r $rootpxe_layout_diagnostics_file ]] || fail layout-partprobe-exhaustion-category
+[[ $(wc -l <"$LAYOUT_PARTPROBE_TRACE") -eq 5 ]] || fail layout-partprobe-must-stop-at-five-attempts
+[[ $(wc -l <"$LAYOUT_SLEEP_TRACE") -eq 4 ]] || fail layout-partprobe-exhaustion-delay-bound
+unset LAYOUT_PARTPROBE_FAILS
+for layout_variant in header_geometry partition_numbers partition_geometry semantic_identity; do
+    LAYOUT_SFDISK_MODE=$layout_variant
+    rootpxe_apply_deployment_layout /dev/nvme0n1 $layout_template && fail "layout-readback-$layout_variant-must-reject"
+    [[ $rootpxe_layout_apply_code == LAYOUT_READBACK_FAILED && $rootpxe_layout_apply_reason == sfdisk_$layout_variant ]] || fail "layout-readback-$layout_variant-category"
+done
+LAYOUT_SFDISK_MODE=write_fail
+rootpxe_apply_deployment_layout /dev/nvme0n1 $layout_template && fail layout-sfdisk-write-failure-must-reject
+[[ $rootpxe_layout_apply_code == SFDISK_WRITE_FAILED && $rootpxe_layout_apply_reason == sfdisk_write_failed && -r $rootpxe_layout_diagnostics_file ]] || fail layout-sfdisk-write-failure-category
+grep -Fqx 'mock sfdisk write failure' "$rootpxe_layout_diagnostics_file" || fail layout-sfdisk-write-failure-diagnostics
+LAYOUT_PARTPROBE_STATUS=1; export LAYOUT_PARTPROBE_STATUS
+LAYOUT_SFDISK_MODE=canonical
+rootpxe_apply_deployment_layout /dev/nvme0n1 $layout_template && fail layout-partprobe-failure-must-reject
+[[ $rootpxe_layout_apply_code == PARTPROBE_FAILED && $rootpxe_layout_apply_reason == partition_table_reread_failed && -r $rootpxe_layout_diagnostics_file ]] || fail layout-partprobe-failure-category
+unset LAYOUT_PARTPROBE_STATUS
+LAYOUT_SFDISK_MODE=dump_fail
+rootpxe_apply_deployment_layout /dev/nvme0n1 $layout_template && fail layout-sfdisk-dump-failure-must-reject
+[[ $rootpxe_layout_apply_code == SFDISK_DUMP_FAILED && $rootpxe_layout_apply_reason == sfdisk_dump_failed && -r $rootpxe_layout_diagnostics_file ]] || fail layout-sfdisk-dump-failure-category
+LAYOUT_SFDISK_MODE=canonical
 mbr_layout_template=$tmp/mbr-layout-template.partitions
 mbr_layout_plan=$tmp/mbr-layout-plan.json
 cat >$mbr_layout_template <<'EOF'
@@ -1044,7 +1109,7 @@ rootpxe_apply_deployment_layout /dev/sda $mbr_layout_template || fail layout-app
 LAYOUT_EXPECT_DISK=/dev/nvme0n1
 rootpxe_apply_deployment_layout /dev/nvme0n1 $mbr_layout_template || fail layout-apply-mbr-nvme-suffix
 rootpxe_resolved_layout_file=$layout_plan
-unset MODE LAYOUT_EXPECT_DISK LAYOUT_READBACK_VARIANT
+unset MODE LAYOUT_EXPECT_DISK LAYOUT_SFDISK_MODE LAYOUT_APPLIED LAYOUT_SFDISK_ARGS LAYOUT_PARTPROBE_TRACE LAYOUT_SLEEP_TRACE
 
 # Windows NTFS 恢复后，活动部署布局只允许实际扩大的物理分区绕过
 # 捕获时 fixed 列表；同一布局内保持原始大小的恢复/EFI 等分区仍须
