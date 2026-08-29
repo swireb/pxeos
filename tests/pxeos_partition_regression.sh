@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# 合并后的 PXEOS 回归测试；每个原脚本在独立子 shell 中运行。
+set -euo pipefail
+
+# ===== 原脚本：tests/pxeos_partition_regression.sh =====
+(
 # PXEOS 分区安全回归：仅使用临时文件和 PATH mock，绝不触碰真实块设备。
 set -euo pipefail
 
@@ -352,3 +357,794 @@ unset -f read
 must_not_call_format
 
 printf 'PASS: PXEOS partition regression contract\n'
+)
+# ===== 原脚本结束：tests/pxeos_partition_regression.sh =====
+
+# ===== 原脚本：tests/pxeos_partition_inventory_regression.sh =====
+(
+# Uses the installed jq and only temporary command stubs; no host disk is read.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+fail() { echo "FAIL: $*" >&2; exit 1; }
+command -v jq >/dev/null || fail "real jq required"
+mkdir -p "$tmp/bin" "$tmp/capture"
+cat >"$tmp/bin/blockdev" <<'EOF'
+#!/usr/bin/env bash
+case "$1:$2" in
+  --getss:*) echo 512;; --getpbsz:*) echo 512;;
+  --getsize64:/dev/nvme0n1) echo 1073741824;; --getsize64:/dev/sda) echo 536870912;;
+  *) exit 1;; esac
+EOF
+cat >"$tmp/bin/blkid" <<'EOF'
+#!/usr/bin/env bash
+for last; do :; done
+case "$last:$2" in
+  /dev/nvme0n1p1:TYPE) echo vfat;; /dev/nvme0n1p1:UUID) echo efi-uuid;; /dev/nvme0n1p1:PARTUUID) echo efi-partuuid;;
+  /dev/sda1:TYPE) echo xfs;; /dev/sda1:UUID) echo data-uuid;; /dev/sda1:PARTUUID) echo data-partuuid;;
+esac
+EOF
+chmod +x "$tmp/bin"/*
+export PATH="$tmp/bin:$PATH"
+: >"$tmp/proc-cmdline"
+sed -e "s|/usr/share/pxeos|$overlay/usr/share/pxeos|g" -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" "$overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/funcs.sh"
+# shellcheck disable=SC1090
+ismajordebug=0; . "$tmp/funcs.sh"
+getPartitions() { case "$1" in /dev/nvme0n1) parts='/dev/nvme0n1p1';; /dev/sda) parts='/dev/sda1';; *) parts='';; esac; }
+cat >"$tmp/capture/d1.partitions" <<'EOF'
+label: gpt
+device: /dev/nvme0n1
+unit: sectors
+sector-size: 512
+/dev/nvme0n1p1 : start=        2048, size=     1024000, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+EOF
+rootpxe_build_partition_inventory "$tmp/capture" mps /dev/nvme0n1 "" || fail mps
+jq -e '.version == 1 and (.disks|length)==1 and .disks[0].partitions[0].fs == "vfat" and .disks[0].partitions[0].uuid == "efi-uuid"' "$rootpxe_partition_inventory_file" >/dev/null || fail mps-facts
+# This exercises the real jq invocation in the n schema builder with no LVM
+# rawfile supplied, which previously compiled `$lvm` as an undefined variable.
+cp "$tmp/capture/d1.partitions" "$tmp/capture/d1.minimum.partitions"
+: >"$tmp/capture/d1p1.img"
+rootpxe_build_original_schema /dev/nvme0n1 "$tmp/capture" || fail n-schema-real-jq
+jq -e '.partitionTable == "gpt" and .partitions[0].fs == "vfat"' "$rootpxe_original_schema_file" >/dev/null || fail n-schema-facts
+# Exercise the production LVM layout resolver with the real jq binary too.
+# The separate LVM suite intentionally replaces jq to focus on command-flow
+# failures, so it cannot detect jq syntax or result-shape regressions here.
+cat >"$tmp/lvm-schema.json" <<'EOF'
+{"version":2,"logicalSectorBytes":512,"lvm":{"version":2,"pvs":[{"partitionNumber":1,"uuid":"pv-1","vgUuid":"vg-1","originalBytes":268435456,"minBytes":67108864,"peStartBytes":1048576,"artifact":"d1.pv.meta","vgConfigArtifact":"d1.vg.cfg"}],"vgs":[{"name":"vg0","uuid":"vg-1","extentBytes":4194304,"pvPartitionNumbers":[1],"originalFreeBytes":0,"lvs":[{"name":"root","uuid":"lv-root","layout":"linear","originalBytes":67108864,"minBytes":67108864,"fs":"ext4","role":"data","resizable":true,"artifact":"d1.lv.img"}]}]}}
+EOF
+printf '%s\n' '{"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"preserveOriginal","volumes":[{"uuid":"lv-root","mode":"original"}]}]}' >"$tmp/lvm-layout.json"
+printf '%s\n' '[{"number":1,"resolvedSectors":524288}]' >"$tmp/lvm-partitions.json"
+rootpxe_validate_lvm_deployment_layout "$tmp/lvm-schema.json" "$tmp/lvm-layout.json" "$tmp/lvm-partitions.json" || fail lvm-layout-real-jq
+jq -e '.volumes|type == "array" and length == 1 and .[0].resolvedBytes == 67108864' "$rootpxe_resolved_lvm_layout_file" >/dev/null || fail lvm-layout-result-shape
+cat >"$tmp/capture/d2.partitions" <<'EOF'
+label: dos
+device: /dev/sda
+unit: sectors
+sector-size: 512
+/dev/sda1 : start=        2048, size=      524288, type=83
+EOF
+rootpxe_build_partition_inventory "$tmp/capture" mpa /dev/nvme0n1 "/dev/nvme0n1 /dev/sda" || fail mpa
+jq -e '[.disks[].number] == [1,2] and .disks[0].partitionTable == "gpt" and .disks[1].partitionTable == "mbr"' "$rootpxe_partition_inventory_file" >/dev/null || fail mpa-order
+rm -f "$tmp/capture/d1.partitions"
+rootpxe_build_partition_inventory "$tmp/capture" dd /dev/nvme0n1 "" || fail dd
+jq -e '.disks[0].partitionTable == "none" and (.disks[0].partitions|length)==0' "$rootpxe_partition_inventory_file" >/dev/null || fail dd-none
+cat >"$tmp/capture/d1.partitions" <<'EOF'
+label: gpt
+device: /dev/nvme0n1
+unit: sectors
+sector-size: 512
+EOF
+rootpxe_build_partition_inventory "$tmp/capture" dd /dev/nvme0n1 "" || fail dd-empty-gpt
+jq -e '.disks[0].partitionTable == "gpt" and (.disks[0].partitions|length)==0' "$rootpxe_partition_inventory_file" >/dev/null || fail dd-empty-gpt-facts
+sed 's/^label: gpt$/label: dos/' "$tmp/capture/d1.partitions" >"$tmp/capture/d1.partitions.mbr"
+mv "$tmp/capture/d1.partitions.mbr" "$tmp/capture/d1.partitions"
+rootpxe_build_partition_inventory "$tmp/capture" dd /dev/nvme0n1 "" || fail dd-empty-mbr
+jq -e '.disks[0].partitionTable == "mbr" and (.disks[0].partitions|length)==0' "$rootpxe_partition_inventory_file" >/dev/null || fail dd-empty-mbr-facts
+# Run imgcomplete itself with only its callback/finalisation collaborators
+# mocked.  Every successful capture type must submit the inventory, while n
+# is the only one that additionally produces editable schema metadata.
+for image_type in n mps mpa dd; do
+  callback="$tmp/finish-$image_type.args"
+  export callback
+  type=up imgType="$image_type" hd=/dev/nvme0n1 disks='/dev/nvme0n1 /dev/sda' \
+    taskid=42 task_token=token mac=aa:bb:cc:dd:ee:ff web=https://rootpxe.invalid/ \
+    env -u rootpxe_original_schema_file -u rootpxe_partition_inventory_file bash -s -- "$overlay/bin/pxeos.imgcomplete" "$tmp" <<'EOF'
+script=$1; test_tmp=$2
+dmidecode() { printf '%s\n' test-uuid; }
+rootpxe_require_task_context() { :; }
+rootpxe_stage() { :; }
+rootpxe_finalize_capture() { rootpxe_final_capture_path="$test_tmp/capture"; capture_size_bytes=8; }
+rootpxe_build_partition_inventory() { rootpxe_partition_inventory_file="$test_tmp/inventory-${imgType}"; printf '%s\n' '{"version":1,"disks":[{"number":1,"sourceDevice":"/dev/mock","partitionTable":"none","originalDiskBytes":1,"logicalSectorBytes":1,"physicalSectorBytes":1,"partitions":[]}]}' >"$rootpxe_partition_inventory_file"; }
+rootpxe_build_original_schema() { rootpxe_original_schema_file="$test_tmp/schema-${imgType}"; printf '%s\n' '{"version":1}' >"$rootpxe_original_schema_file"; }
+rootpxe_clear_capture_marker() { :; }
+rootpxe_cleanup_task_json() { :; }
+rootpxe_console_message() { :; }
+dots() { :; }
+debugPause() { :; }
+curl() { printf '%s\n' "$@" >"$callback"; printf '%s\n' '{"success":true}'; }
+# shellcheck disable=SC1090
+. "$script"
+EOF
+  grep -Fq 'partitionInventory={"version":1' "$callback" || fail "imgcomplete-$image_type-inventory"
+  if [[ $image_type == n ]]; then
+    grep -Fq 'originalSchema={"version":1}' "$callback" || fail imgcomplete-n-schema
+  elif grep -Fq 'originalSchema=' "$callback"; then
+    fail "imgcomplete-$image_type-fixed-schema"
+  fi
+done
+echo 'PASS: PXEOS partition inventory regression'
+)
+# ===== 原脚本结束：tests/pxeos_partition_inventory_regression.sh =====
+
+# ===== 原脚本：tests/pxeos_lvm_regression.sh =====
+(
+# Temporary command stubs only: this suite never accesses host LVM or disks.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+fail() { echo "FAIL: $*" >&2; exit 1; }
+mkdir -p "$tmp/bin" "$tmp/image"; export PATH="$tmp/bin:$PATH" LVM_TRACE="$tmp/trace"; : >"$LVM_TRACE"
+cat >"$tmp/bin/pvs" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+ *' pv_name,pv_uuid,vg_name,vg_uuid,pv_size,pe_start '*) printf ' /dev/mock1 | pv-1 | vg0 | vg-1 | 268435456 | 1048576\n'; [[ ${PVS_FAIL:-0} != 1 ]] || exit 1; [[ ${LVM_MODE:-ok} != multi ]] || printf ' /dev/mock1 | pv-2 | vg0 | vg-1 | 268435456 | 1048576\n'; exit 0;;
+ *' pv_name,vg_uuid '*) printf ' /dev/mock1 | vg-1\n'; [[ ${PVS_ALL_FAIL:-0} != 1 ]] || exit 1; [[ ${LVM_MODE:-ok} != cross ]] || printf ' /dev/foreign1 | vg-1\n'; exit 0;;
+ *' pv_uuid '*) printf ' pv-1\n';;
+esac
+EOF
+cat >"$tmp/bin/vgs" <<'EOF'
+#!/usr/bin/env bash
+printf ' vg0 | vg-1 | 4194304 | 0\n'; [[ ${VGS_FAIL:-0} != 1 ]] || exit 1
+EOF
+cat >"$tmp/bin/lvs" <<'EOF'
+#!/usr/bin/env bash
+printf ' root | lv-root | /dev/vg0/root | 67108864 | -wi-a----- | %s |  |  |  | \n' "${LVM_SEGTYPE:-linear}"
+printf ' swap | lv-swap | /dev/vg0/swap | 33554432 | -wi-a----- | linear |  |  |  | \n'
+[[ ${LVS_FAIL:-0} != 1 ]] || exit 1
+EOF
+cat >"$tmp/bin/blockdev" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in --getsize64) case "$2" in /dev/mock1) echo 268435456;; /dev/vg0/root) [[ -f ${LVM_SIZE_STATE:-} ]] && cat "$LVM_SIZE_STATE" || echo 67108864;; /dev/vg0/swap) echo 33554432;; *) echo 209715200;; esac;; --getss|--getpbsz) echo 512;; *) exit 1;; esac
+EOF
+cat >"$tmp/bin/blkid" <<'EOF'
+#!/usr/bin/env bash
+for last; do :; done
+case " $* " in *' TYPE '*) [[ ${LVM_MODE:-ok} == crypt ]] && { echo crypto_LUKS; exit 0; }; [[ ${LVM_MODE:-ok} == mdraid ]] && { echo linux_raid_member; exit 0; }; [[ $last == /dev/vg0/swap ]] && echo swap || echo "${LVM_FS:-ext4}";; *' UUID '*) [[ $last == /dev/vg0/swap ]] && echo swap-uuid || echo root-uuid;; esac
+EOF
+cat >"$tmp/bin/pvdisplay" <<'EOF'
+#!/usr/bin/env bash
+[[ ${PV_FAIL:-0} == 1 ]] && exit 1; echo 'PV UUID pv-1'
+EOF
+cat >"$tmp/bin/vgcfgbackup" <<'EOF'
+#!/usr/bin/env bash
+[[ ${VG_FAIL:-0} == 1 ]] && exit 1; while (($#)); do [[ $1 == -f ]] && { echo pv-1 >"$2"; exit 0; }; shift; done; exit 1
+EOF
+cat >"$tmp/bin/resize2fs" <<'EOF'
+#!/usr/bin/env bash
+[[ $1 == -P ]] && { echo 'Estimated minimum size of the filesystem: 8192'; exit 0; }; echo "resize2fs:$*" >>"$LVM_TRACE"
+EOF
+cat >"$tmp/bin/dumpe2fs" <<'EOF'
+#!/usr/bin/env bash
+echo 'Block size:               4096'
+EOF
+for cmd in partclone.extfs partclone.xfs pvcreate vgcfgrestore pvresize vgchange lvresize lvreduce lvextend lvcreate vgcreate mkswap e2fsck; do
+printf '#!/usr/bin/env bash\necho "%s:$*" >>"$LVM_TRACE"\nexit 0\n' "$cmd" >"$tmp/bin/$cmd"; chmod +x "$tmp/bin/$cmd"
+done
+cat >"$tmp/bin/lvresize" <<'EOF'
+#!/usr/bin/env bash
+echo "lvresize:$*" >>"$LVM_TRACE"
+while (($#)); do
+  if [[ $1 == -L ]]; then
+    value=${2%B}
+    shift 2
+    [[ ${!#} == /dev/vg0/root && $value =~ ^[1-9][0-9]*$ ]] && printf '%s\n' "$value" >"$LVM_SIZE_STATE"
+    exit 0
+  fi
+  shift
+done
+exit 1
+EOF
+chmod +x "$tmp/bin/lvresize"
+cat >"$tmp/bin/lvreduce" <<'EOF'
+#!/usr/bin/env bash
+echo "lvreduce:$*" >>"$LVM_TRACE"; [[ ${LVREDUCE_FAIL:-0} != 1 ]] || exit 1; echo 37748736 >"$LVM_SIZE_STATE"
+EOF
+chmod +x "$tmp/bin/lvreduce"
+cat >"$tmp/bin/lvextend" <<'EOF'
+#!/usr/bin/env bash
+echo "lvextend:$*" >>"$LVM_TRACE"; echo 67108864 >"$LVM_SIZE_STATE"
+EOF
+chmod +x "$tmp/bin/lvextend"
+cat >"$tmp/bin/e2fsck" <<'EOF'
+#!/usr/bin/env bash
+echo "e2fsck:$*" >>"$LVM_TRACE"
+exit "${E2FSCK_RC:-0}"
+EOF
+chmod +x "$tmp/bin/e2fsck"
+cat >"$tmp/bin/jq" <<'EOF'
+#!/usr/bin/env bash
+args="$*"
+[[ $args == *'--argjson number'* || $args == *'has("lvm")'* || $args == *'.version == 2'* ]] && exit 0
+if [[ $args == *'--rawfile lvs'* ]]; then [[ -n ${JQ_ARGS_LOG:-} ]] && printf '%s\n' "$args" >>"$JQ_ARGS_LOG"; echo '{"version":2,"pvs":[{"partitionNumber":1,"uuid":"pv-1","vgUuid":"vg-1","originalBytes":268435456,"minBytes":105906176,"peStartBytes":1048576,"artifact":"d1.pv.pv-1.meta","vgConfigArtifact":"d1.vg.vg-1.cfg"}],"vgs":[{"name":"vg0","uuid":"vg-1","extentBytes":4194304,"pvPartitionNumbers":[1],"originalFreeBytes":0,"lvs":[{"name":"root","uuid":"lv-root","layout":"linear","originalBytes":67108864,"minBytes":37748736,"fs":"ext4","role":"data","resizable":true,"artifact":"d1.lv.lv-root.img"},{"name":"swap","uuid":"lv-swap","layout":"linear","originalBytes":33554432,"minBytes":33554432,"fs":"swap","role":"swap","resizable":false,"artifact":"","swapUuid":"swap-uuid"}]}]}'; exit 0; fi
+if [[ $args == *'--slurpfile schema'* ]]; then [[ ${LAYOUT_MODE:-ok} != belowmin ]] || exit 1; echo '{"pv":{"partitionNumber":1,"uuid":"pv-1","originalBytes":268435456,"artifact":"d1.pv.pv-1.meta","vgConfigArtifact":"d1.vg.vg-1.cfg"},"vg":{"name":"vg0","uuid":"vg-1","extentBytes":4194304},"pvBytes":268435456,"volumes":[{"name":"root","uuid":"lv-root","fs":"ext4","artifact":"d1.lv.lv-root.img","resolvedBytes":67108864},{"name":"swap","uuid":"lv-swap","fs":"swap","artifact":"","swapUuid":"swap-uuid","resolvedBytes":33554432}]}'; exit 0; fi
+if [[ $args == *'.volumes[]|.name,'* ]]; then
+  [[ ${LVM_LIST_MODE:-ok} != fail ]] || exit 1
+  [[ ${LVM_LIST_MODE:-ok} != empty ]] || exit 0
+  artifact=${LVM_PIPE_ARTIFACT:+d1.lv.name\|safe.img}; artifact=${artifact:-d1.lv.lv-root.img}
+  printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' root lv-root ext4 "$artifact" 67108864 swap lv-swap swap '' 33554432
+  exit 0
+fi
+case "$args" in *'.volumes|length'*) echo 2;; *'.pv.uuid'*) echo pv-1;; *'.vg.name'*) echo vg0;; *'.pv.originalBytes'*) echo 268435456;; *'.vg.uuid'*) echo vg-1;; *'.vg.extentBytes'*) echo 4194304;; *'.pv.partitionNumber'*) echo 1;; *'.pv.artifact'*) echo d1.pv.pv-1.meta;; *'.pv.vgConfigArtifact'*) echo d1.vg.vg-1.cfg;; *'.pvBytes'*) [[ ${LVM_SMALL:-0} == 1 ]] && echo 134217728 || echo 268435456;; *'swapUuid'*) echo swap-uuid;; *) exit 1;; esac
+EOF
+chmod +x "$tmp/bin"/*
+# funcs.sh imports kernel arguments at source time.  Redirect that read to an
+# empty fixture so this mock-only suite never depends on the Windows host's
+# missing /proc filesystem.
+: >"$tmp/proc-cmdline"
+sed -e "s|/usr/share/pxeos|$overlay/usr/share/pxeos|g" \
+    -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" \
+    "$overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/funcs.sh"
+# shellcheck disable=SC1090
+ismajordebug=0
+. "$tmp/funcs.sh"
+# The production trimmer uses sed, which makes this pure mock suite very slow
+# under Git Bash on Windows.  Keep equivalent whitespace semantics locally so
+# branch coverage is bounded without replacing any production command flow.
+rootpxe_lvm_trim() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "$value"
+}
+# Keep the LVM command contract in-process. Git Bash process startup otherwise
+# dominates this mock matrix and obscures whether a failure is handled by the
+# production preflight rather than by the test runner timeout.
+pvs() {
+  case " $* " in
+    *' pv_name,pv_uuid,vg_name,vg_uuid,pv_size,pe_start '*)
+      [[ ${LVM_MODE:-ok} == none ]] && return 0
+      printf ' /dev/mock1 | pv-1 | vg0 | vg-1 | 268435456 | 1048576\n'; [[ ${PVS_FAIL:-0} != 1 ]] || return 1
+      [[ ${LVM_MODE:-ok} != multi ]] || printf ' /dev/mock1 | pv-2 | vg0 | vg-1 | 268435456 | 1048576\n'; return 0 ;;
+    *' pv_name,vg_uuid '*)
+      printf ' /dev/mock1 | vg-1\n'; [[ ${PVS_ALL_FAIL:-0} != 1 ]] || return 1
+      [[ ${LVM_MODE:-ok} != cross ]] || printf ' /dev/foreign1 | vg-1\n'; return 0 ;;
+    *' pv_uuid '*) printf ' pv-1\n'; return 0 ;;
+  esac
+  return 0
+}
+vgs() { printf ' vg0 | vg-1 | 4194304 | 0\n'; [[ ${VGS_FAIL:-0} != 1 ]]; }
+lvs() {
+  printf ' root | lv-root | /dev/vg0/root | 67108864 | -wi-a----- | %s |  |  |  | \n' "${LVM_SEGTYPE:-linear}"
+  printf ' swap | lv-swap | /dev/vg0/swap | 33554432 | -wi-a----- | linear |  |  |  | \n'
+  [[ ${LVS_FAIL:-0} != 1 ]]
+}
+export LVM_SIZE_STATE="$tmp/lv-size"; echo 67108864 >"$LVM_SIZE_STATE"
+getPartitions() { parts='/dev/mock1'; }
+getPartitionNumber() { part_number=${1##*mock}; part_number=${part_number##*p}; }
+uploadFormat() { [[ ${UPLOAD_FAIL:-0} != 1 ]] || return 1; : >"$2.000"; rootpxe_last_writer_pid=1; }
+rootpxe_wait_for_writer() { [[ ${WRITER_FAIL:-0} != 1 ]]; }
+
+# Legal preflight/capture executes real helper branches; it occurs before any permit.
+rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" || fail legal-preflight
+[[ $rootpxe_lvm_active == yes && $rootpxe_lvm_pv_number == 1 ]] || fail facts
+export LVM_MODE=none
+rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" || fail non-lvm-preflight
+[[ ${rootpxe_lvm_active:-} == no && -z ${rootpxe_lvm_facts_file:-} && -z ${rootpxe_lvm_lv_facts_file:-} ]] || fail non-lvm-facts
+unset LVM_MODE
+for command_failure in PVS_FAIL PVS_ALL_FAIL VGS_FAIL LVS_FAIL; do
+  export "$command_failure"=1
+  rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail "$command_failure-process-substitution-hidden"
+  [[ ${rootpxe_lvm_active:-no} != yes && -z ${rootpxe_lvm_facts_file:-} && -z ${rootpxe_lvm_lv_facts_file:-} ]] || fail "$command_failure-facts-not-cleaned"
+  unset "$command_failure"
+done
+rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" || fail preflight-after-command-failure
+export E2FSCK_RC=1; rootpxe_capture_lvm_volumes "$tmp/image" || fail legal-capture-e2fsck-fixed; unset E2FSCK_RC
+[[ -s "$tmp/image/d1.lvm.schema.json" && -f "$tmp/image/d1.lv.lv-root.img" && ! -e "$tmp/image/d1.lv.lv-swap.img" ]] || fail artifacts
+awk -F'|' '$5 == "swap" && $6 != "" { exit 1 }' "$tmp/image/d1.lvm.capture.tsv" || fail swap-artifact-inherited
+grep -Fq 'partclone.extfs:' "$LVM_TRACE" || fail writer-not-run
+grep -Fq 'lvreduce:' "$LVM_TRACE" || fail source-shrink-missing
+grep -Fq 'lvextend:' "$LVM_TRACE" || fail source-expand-missing
+# Later injected producer/writer failures only verify that the capture branch
+# invokes cleanup.  The successful path above already exercises the real
+# source expand helper; a marker avoids turning an expected writer failure
+# into a host-shell timing test.
+rootpxe_lvm_restore_source_lv() { echo "source-cleanup:$*" >>"$LVM_TRACE"; }
+export LVM_MODE=multi; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail multipv; unset LVM_MODE
+rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" || fail facts-after-multipv
+export PV_FAIL=1; rootpxe_capture_lvm_volumes "$tmp/image" && fail sidecar-failure; unset PV_FAIL
+export WRITER_FAIL=1; rootpxe_capture_lvm_volumes "$tmp/image" && fail writer-failure; unset WRITER_FAIL
+: >"$LVM_TRACE"; export UPLOAD_FAIL=1; rootpxe_capture_lvm_volumes "$tmp/image" && fail upload-failure; unset UPLOAD_FAIL
+grep -Fq 'source-cleanup:' "$LVM_TRACE" || fail upload-failure-source-rollback
+: >"$LVM_TRACE"; export LVREDUCE_FAIL=1; rootpxe_capture_lvm_volumes "$tmp/image" && fail reduce-failure; unset LVREDUCE_FAIL
+grep -Fq 'source-cleanup:' "$LVM_TRACE" || fail reduce-failure-source-cleanup
+export LVM_MODE=cross; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail cross-disk-vg; unset LVM_MODE
+export LVM_SEGTYPE=thin; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail thin-topology; unset LVM_SEGTYPE
+export LVM_MODE=crypt; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail crypt-topology; unset LVM_MODE
+export LVM_MODE=mdraid; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail mdraid-topology; unset LVM_MODE
+grep -Fq '[[ $fs == xfs ]]' "$overlay/usr/share/pxeos/lib/funcs.sh" || fail xfs-capture-branch
+grep -Fq '.[4] != "xfs"' "$overlay/usr/share/pxeos/lib/funcs.sh" || fail xfs-nonresizable-schema
+
+# Resolver produces an LVM plan with no LVM write command before permit.
+printf '{"version":2,"lvm":{"version":2}}' >"$tmp/schema.json"; printf '{"lvm":[]}' >"$tmp/layout.json"; printf '[]' >"$tmp/partitions.json"; : >"$LVM_TRACE"
+rootpxe_validate_lvm_deployment_layout "$tmp/schema.json" "$tmp/layout.json" "$tmp/partitions.json" || fail layout-plan
+[[ ! -s "$LVM_TRACE" ]] || fail prepermit-write
+for mode in fixed percentage remaining; do export LAYOUT_MODE="$mode"; rootpxe_validate_lvm_deployment_layout "$tmp/schema.json" "$tmp/layout.json" "$tmp/partitions.json" || fail "layout-$mode"; unset LAYOUT_MODE; done
+export LAYOUT_MODE=belowmin; rootpxe_validate_lvm_deployment_layout "$tmp/schema.json" "$tmp/layout.json" "$tmp/partitions.json" && fail layout-below-min; unset LAYOUT_MODE
+node -e 'const extent=4194304,capacity=100*extent,min=9*extent,fixed=10*extent,pct=Math.floor(capacity*25/100/extent)*extent,remaining=capacity-fixed-pct;if(fixed<min||pct<=0||remaining<min)process.exit(1)' || fail layout-capacity-oracle
+
+rootpxe_resolved_lvm_layout_file="$tmp/plan.json"; printf '{}' >"$rootpxe_resolved_lvm_layout_file"; rootpxe_disk_permit_granted=no
+rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail no-permit
+[[ ! -s "$LVM_TRACE" ]] || fail no-permit-write
+echo pv-1 >"$tmp/image/d1.pv.pv-1.meta"; echo pv-1 >"$tmp/image/d1.vg.vg-1.cfg"; : >"$tmp/image/d1.lv.lv-root.img"
+rootpxe_disk_stable_identity() { echo target-1; }; rootpxe_disk_permit_granted=yes; rootpxe_disk_permit_target_id=target-1; rootpxe_disk_permit_operation=deploy_write
+writeImage() { echo "writeImage:$*" >>"$LVM_TRACE"; }
+for list_mode in fail empty; do
+  : >"$LVM_TRACE"; export LVM_LIST_MODE="$list_mode"
+  rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail "lvm-list-$list_mode"
+  [[ ! -s "$LVM_TRACE" ]] || fail "lvm-list-$list_mode-wrote-before-parse"
+  unset LVM_LIST_MODE
+done
+rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock || fail permitted-restore
+for marker in pvcreate vgcfgrestore pvresize lvresize writeImage; do grep -Fq "$marker:" "$LVM_TRACE" || fail "missing-$marker"; done
+grep -Fq 'lvcreate:' "$LVM_TRACE" && fail lvcreate-after-vgcfgrestore
+: >"$LVM_TRACE"; export LVM_PIPE_ARTIFACT=1; : >"$tmp/image/d1.lv.name|safe.img"; rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock || fail pipe-artifact-restore; unset LVM_PIPE_ARTIFACT
+grep -Fq 'd1.lv.name|safe.img' "$LVM_TRACE" || fail pipe-artifact-shifted
+: >"$LVM_TRACE"; export LVM_SMALL=1; rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock || fail small-pv-rebuild; unset LVM_SMALL
+grep -Fq 'vgcreate:' "$LVM_TRACE" || fail small-pv-vg-rebuild
+grep -Fq 'lvcreate:' "$LVM_TRACE" || fail small-pv-lv-rebuild
+grep -Fq -- '--norestorefile' "$LVM_TRACE" || fail small-pv-no-restorefile
+echo 'PASS: PXEOS LVM behavior regression'
+)
+# ===== 原脚本结束：tests/pxeos_lvm_regression.sh =====
+
+# ===== 原脚本：tests/pxeos_disk_identity_regression.sh =====
+(
+# Offline stable-disk-identity contract.  It extracts only identity and NVMe
+# binding helpers, replacing udev, hashing and block probing with local mocks.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+expect_status() {
+    local expected="$1" actual
+    shift
+    set +e
+    "$@" >"$tmp/out" 2>&1
+    actual=$?
+    set -e
+    [[ $actual -eq $expected ]] || fail "expected status $expected, got $actual: $(<"$tmp/out")"
+}
+
+awk '/^rootpxe_disk_stable_identity\(\)/ { copy = 1 } /^rootpxe_nvme_permit_matches\(\)/ { exit } copy' "$funcs" >"$tmp/identity.sh"
+awk '/^rootpxe_nvme_permit_matches\(\)/ { copy = 1 } /^rootpxe_nvme_find_metadata_free_lbaf\(\)/ { exit } copy' "$funcs" >"$tmp/permit-match.sh"
+awk '/^rootpxe_nvme_wait_for_reenumeration\(\)/ { copy = 1 } /^rootpxe_nvme_reformat_to_sector_size\(\)/ { exit } copy' "$funcs" >"$tmp/reenumerate.sh"
+[[ -s $tmp/identity.sh && -s $tmp/permit-match.sh && -s $tmp/reenumerate.sh ]] || fail 'identity helpers were not extracted'
+
+identity_property=''
+identity_udev_status=0
+identity_hash_status=0
+udevadm() {
+    [[ $1 == info ]] || return 1
+    [[ $identity_udev_status -eq 0 ]] || return "$identity_udev_status"
+    printf '%s\n' "$identity_property"
+}
+sha256sum() {
+    [[ $identity_hash_status -eq 0 ]] || return "$identity_hash_status"
+    command sha256sum "$@"
+}
+. "$tmp/identity.sh"
+. "$tmp/permit-match.sh"
+. "$tmp/reenumerate.sh"
+
+identity_for() {
+    identity_property="$1"
+    identity_udev_status=0
+    identity_hash_status=0
+    rootpxe_disk_stable_identity /dev/mockdisk
+}
+
+legal='wwn-0x5000c500a1b2c3d4'
+[[ $(identity_for "ID_WWN=$legal") == "$legal" ]] || fail 'legal backend-compatible ID_WWN must remain unchanged'
+legal_128=$(printf 'a%.0s' {1..128})
+[[ $(identity_for "ID_SERIAL=$legal_128") == "$legal_128" ]] || fail 'legal 128-character ID_SERIAL must remain unchanged'
+[[ $(identity_for $'ID_WWN=\nID_SERIAL=serial-42') == serial-42 ]] || fail 'empty preferred property must fall through to non-empty ID_SERIAL'
+[[ $(identity_for $'ID_SERIAL=serial-first\nID_WWN=wwn-later') == serial-first ]] || fail 'first non-empty ID_SERIAL must keep existing udev output selection order'
+
+for raw in 'serial with spaces' 'serial/with/slashes' 'serial=with=equals' 'disk-编号' "$(printf 'x%.0s' {1..129})" 'sha256:looks-like-an-encoded-id'; do
+    first=$(identity_for "ID_WWN=$raw") || fail "invalid ID did not produce a hash: $raw"
+    second=$(identity_for "ID_WWN=$raw") || fail "invalid ID was not stable: $raw"
+    [[ $first =~ ^sha256:[0-9a-f]{64}$ ]] || fail "invalid ID did not produce sha256 namespace: $raw"
+    [[ $first == "$second" ]] || fail "same raw ID did not produce same stable identity: $raw"
+    [[ $first != "$raw" ]] || fail "reserved sha256 prefix or invalid raw ID was returned verbatim: $raw"
+done
+
+space_hash=$(identity_for 'ID_WWN=serial with spaces')
+slash_hash=$(identity_for 'ID_WWN=serial/with/slashes')
+equals_hash=$(identity_for 'ID_WWN=serial=with=equals')
+[[ $space_hash != "$slash_hash" && $space_hash != "$equals_hash" && $slash_hash != "$equals_hash" ]] || fail 'different raw IDs collided after normalization'
+[[ $(identity_for 'ID_WWN=serial=one') != "$(identity_for 'ID_WWN=serial=two')" ]] || fail 'values after equals were truncated before hashing'
+[[ $(identity_for 'ID_WWN= serial') != "$(identity_for 'ID_WWN=serial')" ]] || fail 'leading whitespace was trimmed before hashing'
+[[ $(identity_for 'ID_WWN=serial ') != "$(identity_for 'ID_WWN=serial')" ]] || fail 'trailing whitespace was trimmed before hashing'
+unsafe_digest=$(identity_for 'ID_WWN=another/unsafe/id')
+[[ $(identity_for "ID_WWN=$unsafe_digest") != "$unsafe_digest" ]] || fail 'raw value in sha256 namespace was not hashed again'
+
+expect_status 1 identity_for $'ID_WWN=   \nID_SERIAL=\t'
+expect_status 1 identity_for ''
+expect_status 1 identity_for 'ID_MODEL=missing-stable-property'
+identity_property='ID_WWN=serial-42'
+identity_udev_status=7
+identity_hash_status=0
+expect_status 1 rootpxe_disk_stable_identity /dev/mockdisk
+identity_property='ID_WWN=serial with spaces'
+identity_udev_status=0
+identity_hash_status=7
+expect_status 1 rootpxe_disk_stable_identity /dev/mockdisk
+
+# Re-enumeration and NVMe permit checks must compare the normalized identity,
+# never a raw udev value or a device path.
+expected=$(identity_for 'ID_WWN=nvme serial/with slash')
+rootpxe_disk_permit_granted=yes
+rootpxe_disk_permit_target_id="$expected"
+rootpxe_disk_permit_operation=nvme_format+deploy_write
+rootpxe_nvme_permit_matches "$expected" || fail 'normalized target ID did not match permit binding'
+! rootpxe_nvme_permit_matches 'nvme serial/with slash' || fail 'raw target ID bypassed normalized permit binding'
+
+PXEOS_NVME_REENUM_DEVICE=/dev/mocknvme
+PXEOS_NVME_REENUM_TIMEOUT_SEC=0
+blockdev() { [[ $1 == --getss ]] && { printf '512\n'; return 0; }; return 1; }
+sleep() { :; }
+identity_property='ID_WWN=nvme serial/with slash'
+identity_udev_status=0
+identity_hash_status=0
+rootpxe_nvme_wait_for_reenumeration "$expected" 512 || fail 'same normalized ID was not re-identified after NVMe re-enumeration'
+[[ ${rootpxe_nvme_reformatted_disk:-} == /dev/mocknvme ]] || fail 're-enumeration selected unexpected disk path'
+identity_property='ID_WWN=other serial/with slash'
+unset rootpxe_nvme_reformatted_disk
+expect_status 1 rootpxe_nvme_wait_for_reenumeration "$expected" 512
+
+echo 'PASS: disk IDs preserve valid values and hash incompatible values before strict permit binding'
+)
+# ===== 原脚本结束：tests/pxeos_disk_identity_regression.sh =====
+
+# ===== 原脚本：tests/pxeos_disk_permit_regression.sh =====
+(
+# Offline disk-permit contract.  It extracts only permit helpers and replaces
+# curl/sleep/error reporting; it never sources or runs a PXEOS top-level script.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+expect_status() {
+    local expected="$1" actual
+    shift
+    set +e
+    "$@" >"$tmp/out" 2>&1
+    actual=$?
+    set -e
+    [[ $actual -eq $expected ]] || fail "expected status $expected, got $actual: $(<"$tmp/out")"
+}
+
+# Keep the harness isolated from the rest of funcs.sh, whose top-level state
+# and hardware helpers are deliberately not suitable for host execution.
+awk '/^rootpxe_console_message\(\)/ { copy = 1 } /^# Appends dots/ { exit } copy' "$funcs" >"$tmp/console.sh"
+awk '/^dots\(\)/ { copy = 1 } /^# Enables write caching/ { exit } copy' "$funcs" >"$tmp/dots.sh"
+awk '/^rootpxe_request_disk_permit\(\)/ { copy = 1 } /^rootpxe_error_wait_for_retry\(\)/ { exit } copy' "$funcs" >"$tmp/permit.sh"
+
+# PXEOS carries jq, while the host Git Bash used by this offline harness does
+# not.  This controlled substitute accepts only the JSON fields below.  It is
+# not a jq integration test: it preserves jq -e false status and typed boolean
+# behavior so the permit contract cannot accidentally depend on mock leniency.
+jq() {
+    local args="$*" arg has_e=0 input value
+    for arg in "$@"; do
+        [[ $arg == -* && $arg == *e* ]] && has_e=1
+    done
+    input=$(cat)
+    [[ $input == \{*\} ]] || return 1
+    if [[ $args == *'.granted'* ]]; then
+        [[ $input =~ \"granted\"[[:space:]]*:[[:space:]]*(true|false) ]] || return 1
+        value=${BASH_REMATCH[1]}
+        printf '%s\n' "$value"
+        [[ $has_e -eq 1 && $value == false ]] && return 1
+        return 0
+    fi
+    if [[ $args == *'.targetId'* ]]; then
+        [[ $input =~ \"targetId\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]] || return 1
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    if [[ $args == *'.operation'* ]]; then
+        [[ $input =~ \"operation\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]] || return 1
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    if [[ $args == *'.code'* ]]; then
+        [[ $input =~ \"code\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]] || return 1
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    if [[ $args == *'.status'* ]]; then
+        [[ $input =~ \"status\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]] || return 1
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    return 0
+}
+
+if jq -er '.granted // false' <<< '{"granted":false}' >/dev/null; then
+    fail 'jq mock must preserve jq -e false status'
+fi
+[[ $(jq -r 'if (.granted | type) == "boolean" then .granted else error("invalid") end' <<< '{"granted":false}') == false ]] || fail 'jq mock must accept boolean false without -e'
+if jq -r 'if (.granted | type) == "boolean" then .granted else error("invalid") end' <<< '{"granted":"true"}' >/dev/null; then
+    fail 'jq mock must reject string true for typed boolean filter'
+fi
+
+run_request() {
+    local permit_response="$1" status_response="$2" target_id="${3:-disk-serial-1}"
+    local request_log="$tmp/request.log"
+    taskid=7 task_token='test-token-0123456789' mac='00:0c:29:ae:cc:4f'
+    pxeapi='https://rootpxe.invalid/api/'
+    curl() {
+        case " $* " in
+            *disk-permit*) printf '%s\n' "$*" >>"$request_log"; [[ $permit_response == __CURL_TRANSPORT_FAILURE__ ]] && return 7; printf '%s' "$permit_response" ;;
+            *task-status*) [[ $status_response == __CURL_TRANSPORT_FAILURE__ ]] && return 7; printf '%s' "$status_response" ;;
+            *) return 1 ;;
+        esac
+    }
+    sleep() { :; }
+    rootpxe_require_task_context() { return 0; }
+    . "$tmp/console.sh"
+    . "$tmp/permit.sh"
+    rootpxe_request_disk_permit_for_target "$target_id" 'deploy_write'
+}
+
+success=$'{"granted":true,"targetId":"disk-serial-1","operation":"deploy_write"}\n200'
+false_200=$'{"granted":false,"code":"DISK_PERMIT_TASK_REJECTED"}\n200'
+string_true=$'{"granted":"true","targetId":"disk-serial-1","operation":"deploy_write"}\n200'
+invalid_json=$'not-json\n200'
+wrong_target=$'{"granted":true,"targetId":"other-disk","operation":"deploy_write"}\n200'
+wrong_operation=$'{"granted":true,"targetId":"disk-serial-1","operation":"capture_read_write"}\n200'
+bad_request=$'{"error":"bad","code":"DISK_PERMIT_INVALID_TARGET"}\n400'
+forbidden=$'{"error":"forbidden","code":"DISK_PERMIT_TASK_REJECTED"}\n403'
+conflict=$'{"error":"conflict","code":"DISK_PERMIT_BINDING_CONFLICT"}\n409'
+missing=$'<html>not found</html>\n404'
+server_error=$'{"error":"temporary"}\n500'
+transport_failure='__CURL_TRANSPORT_FAILURE__'
+cancelled=$'{"status":"cancelled"}\n200'
+superseded=$'{"status":"superseded"}\n200'
+deleted_404=$'{"status":"deleted"}\n404'
+running=$'{"status":"running"}\n200'
+html_404=$'<html>not found</html>\n404'
+unauthorized=$'{"error":"unauthorized"}\n401'
+unknown_code=$'{"error":"do-not-show","code":"DISK_PERMIT_UNRECOGNIZED"}\n403'
+
+# Red/green behavioral matrix: only task-status JSON confirmation may return 10.
+expect_status 0 run_request "$success" "$running"
+hashed_target='sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+hashed_success=$'{"granted":true,"targetId":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","operation":"deploy_write"}\n200'
+expect_status 0 run_request "$hashed_success" "$running" "$hashed_target"
+grep -Fq -- "targetId=$hashed_target" "$tmp/request.log" || fail 'hashed target ID was not sent in the permit request'
+expect_status 12 run_request "$false_200" "$running"
+expect_status 10 run_request "$false_200" "$cancelled"
+expect_status 12 run_request "$string_true" "$running"
+expect_status 12 run_request "$invalid_json" "$running"
+expect_status 12 run_request "$wrong_target" "$running"
+expect_status 12 run_request "$wrong_operation" "$running"
+for response in "$bad_request" "$forbidden" "$conflict" "$missing"; do
+    expect_status 12 run_request "$response" "$running"
+done
+expect_status 10 run_request "$forbidden" "$cancelled"
+expect_status 10 run_request "$forbidden" "$superseded"
+expect_status 10 run_request "$missing" "$deleted_404"
+expect_status 12 run_request "$missing" "$html_404"
+expect_status 12 run_request "$forbidden" "$unauthorized"
+expect_status 11 run_request "$server_error" "$running"
+expect_status 11 run_request "$transport_failure" "$running"
+expect_status 12 run_request "$forbidden" "$transport_failure"
+
+# Missing identity context or API configuration is retryable and must not emit
+# a permit request.  The curl mock makes any accidental request observable.
+for missing_mode in context api; do
+    set +e
+    (
+        taskid=7 task_token='test-token-0123456789' mac='00:0c:29:ae:cc:4f'
+        pxeapi='' web=''
+        curl_marker="$tmp/missing-$missing_mode.curl"
+        curl() { : >"$curl_marker"; return 70; }
+        if [[ $missing_mode == context ]]; then
+            rootpxe_require_task_context() { return 1; }
+        else
+            rootpxe_require_task_context() { return 0; }
+        fi
+        . "$tmp/permit.sh"
+        rootpxe_request_disk_permit_for_target 'disk-serial-1' deploy_write
+        result=$?
+        [[ $result -eq 11 && ! -e $curl_marker ]]
+    ) >"$tmp/missing-$missing_mode.out" 2>&1
+    missing_status=$?
+    set -e
+    [[ $missing_status -eq 0 ]] || fail "missing $missing_mode did not safely retry without curl"
+done
+
+# Successful grants must overwrite old flags; a later denial must clear them.
+set +e
+(
+    rootpxe_disk_permit_granted=yes
+    rootpxe_disk_permit_target_id=stale-target
+    rootpxe_disk_permit_operation=stale-operation
+    run_request "$bad_request" "$running"
+    result=$?
+    [[ $result -eq 12 ]] || exit 91
+    [[ -z ${rootpxe_disk_permit_granted:-} && -z ${rootpxe_disk_permit_target_id:-} && -z ${rootpxe_disk_permit_operation:-} ]]
+) >"$tmp/stale.out" 2>&1
+stale_status=$?
+set -e
+[[ $stale_status -eq 0 ]] || fail 'a rejected permit retained stale grant flags'
+
+# An explicit denial must report through the existing error-wait path.  Its
+# known terminal result maps to 20; any abnormal callback result is retried.
+set +e
+(
+    taskid=7 task_token='test-token-0123456789' mac='00:0c:29:ae:cc:4f'
+    pxeapi='https://rootpxe.invalid/api/'
+    curl() {
+        case " $* " in
+            *disk-permit*) printf '%s' "$forbidden" ;;
+            *task-status*) printf '%s' "$running" ;;
+            *) return 1 ;;
+        esac
+    }
+    rootpxe_require_task_context() { return 0; }
+    rootpxe_error_wait_for_retry() { printf 'report:%s:%s\n' "$1" "$2"; return 2; }
+    sleep() { printf 'sleep:%s\n' "$1"; }
+    . "$tmp/console.sh"
+    . "$tmp/dots.sh"
+    . "$tmp/permit.sh"
+    dots 'Waiting for disk permit'
+    if rootpxe_wait_for_disk_permit 'disk-serial-1' deploy_write; then
+        exit 90
+    else
+        result=$?
+    fi
+    [[ $result -eq 20 ]]
+) >"$tmp/attention.out" 2>&1
+attention_status=$?
+set -e
+[[ $attention_status -eq 0 ]] || fail 'permit denial did not reach error wait terminal path'
+grep -Fqx 'report:任务或磁盘绑定校验被拒绝，请确认任务状态。（HTTP 403，DISK_PERMIT_TASK_REJECTED）:PXEOS_DISK_PERMIT_DENIED' "$tmp/attention.out" || fail 'permit denial report contract changed'
+grep -Fq '[ERROR] Disk permission denied (HTTP 403).' "$tmp/attention.out" || fail 'HTTP diagnosis missing'
+! grep -Eq '\[INFO\].*\[ERROR\]' "$tmp/attention.out" || fail 'unfinished disk-permit progress was not terminated before ERROR'
+grep -Fqx '[INFO]  Server code: DISK_PERMIT_TASK_REJECTED.' "$tmp/attention.out" || fail 'known permit code diagnosis missing'
+! grep -Fq 'test-token-0123456789' "$tmp/attention.out" || fail 'task token leaked to console'
+! grep -Fq '"error":"forbidden"' "$tmp/attention.out" || fail 'raw response body leaked to console'
+
+set +e
+(
+    taskid=7 task_token='test-token-0123456789' mac='00:0c:29:ae:cc:4f'
+    pxeapi='https://rootpxe.invalid/api/'
+    curl() {
+        case " $* " in
+            *disk-permit*) printf '%s' "$unknown_code" ;;
+            *task-status*) printf '%s' "$running" ;;
+            *) return 1 ;;
+        esac
+    }
+    rootpxe_require_task_context() { return 0; }
+    rootpxe_error_wait_for_retry() { return 2; }
+    sleep() { :; }
+    . "$tmp/permit.sh"
+    if rootpxe_wait_for_disk_permit 'disk-serial-1' deploy_write; then
+        exit 90
+    else
+        result=$?
+    fi
+    [[ $result -eq 20 ]]
+) >"$tmp/unknown-code.out" 2>&1
+unknown_status=$?
+set -e
+[[ $unknown_status -eq 0 ]] || fail 'unknown permit code did not enter attention path'
+! grep -Fq 'DISK_PERMIT_UNRECOGNIZED' "$tmp/unknown-code.out" || fail 'unknown permit code leaked to console'
+! grep -Fq 'do-not-show' "$tmp/unknown-code.out" || fail 'unknown permit response leaked to console'
+
+# A non-terminal report callback must not become cancellation/reboot.  The
+# second mocked request grants permission, proving the loop safely continues.
+set +e
+(
+    taskid=7 task_token='test-token-0123456789' mac='00:0c:29:ae:cc:4f'
+    pxeapi='https://rootpxe.invalid/api/'
+    counter="$tmp/retry-count"
+    : >"$counter"
+    curl() {
+        case " $* " in
+            *disk-permit*)
+                count=$(wc -l <"$counter")
+                printf 'x\n' >>"$counter"
+                if [[ $count -eq 0 ]]; then printf '%s' "$forbidden"; else printf '%s' "$success"; fi
+                ;;
+            *task-status*) printf '%s' "$running" ;;
+            *) return 1 ;;
+        esac
+    }
+    rootpxe_require_task_context() { return 0; }
+    rootpxe_error_wait_for_retry() { return 1; }
+    sleep() { printf 'sleep:%s\n' "$1"; }
+    . "$tmp/permit.sh"
+    rootpxe_wait_for_disk_permit 'disk-serial-1' deploy_write
+) >"$tmp/retry.out" 2>&1
+retry_status=$?
+set -e
+[[ $retry_status -eq 0 ]] || fail 'abnormal error-wait callback did not safely retry'
+grep -Fqx 'sleep:5' "$tmp/retry.out" || fail 'abnormal error-wait callback must sleep before retry'
+
+# All three top-level call sites may only make cancellation (10) or completed
+# attention (20) terminal.  A catch-all reboot branch would reintroduce the
+# immediate-reboot failure this contract prevents.
+upload="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.upload"
+download="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.download"
+for script in "$upload" "$download"; do
+    grep -Fq 'if rootpxe_wait_for_disk_permit ' "$script" || fail "$script does not collect permit failures with if/else"
+done
+[[ $(grep -Fc 'if rootpxe_wait_for_disk_permit ' "$download") -eq 2 ]] || fail 'download must protect both normal and resume permit paths'
+[[ $(grep -hFc '20) exit 2' "$upload" "$download" | awk '{ total += $1 } END { print total }') -eq 3 ]] || fail 'all permit callers must preserve error-wait terminal action'
+! grep -Fq '*) printf '\''%s\n'\'' reboot' "$upload" "$download" || fail 'permit callers retain an immediate-reboot catch-all'
+
+# Run only the three permit gates extracted from the top-level scripts.  A
+# completed attention wait (20) must stop before postinit, image work, or the
+# resume postdeploy hook.  The snippets never receive a grant and therefore do
+# not write /tmp state, mount storage, or touch a disk.
+awk '/^capture_target_id=/ { armed = 1 } armed && /^while :; do/ { copy = 1 } copy { print } copy && /^done$/ { getline; print; exit }' "$upload" >"$tmp/upload-gate.sh"
+awk '/^rootpxe_plan_deploy_disk_operation/ { armed = 1 } armed && /^while :; do/ { copy = 1 } copy { print } copy && /^done$/ { getline; print; exit }' "$download" >"$tmp/download-gate.sh"
+awk '/^if \[\[ \$\{resumeStage:-\} == customizing_hostname \]\]/ { copy = 1 } /^if \[\[ \$\{imgType:-\}/ { exit } copy' "$download" >"$tmp/resume-gate.sh"
+for snippet in "$tmp/upload-gate.sh" "$tmp/download-gate.sh" "$tmp/resume-gate.sh"; do
+    [[ -s $snippet ]] || fail "empty dynamic permit gate: $snippet"
+    bash -n "$snippet" || fail "invalid dynamic permit gate: $snippet"
+done
+
+expect_terminal_gate() {
+    local name="$1" snippet="$2" mode="$3" status
+    set +e
+    (
+        set -e
+        capture_target_id=disk-serial-1
+        rootpxe_planned_target_id=disk-serial-1
+        rootpxe_planned_disk_operation=deploy_write
+        resumeStage="$mode"
+        hd=/dev/mockdisk
+        changeHostname=false
+        rootpxe_disk_stable_identity() { printf 'disk-serial-1\n'; }
+        permit_wait_calls=0
+        rootpxe_wait_for_disk_permit() {
+            permit_wait_calls=$((permit_wait_calls + 1))
+            if [[ $permit_wait_calls -eq 1 ]]; then return 99; fi
+            return 20
+        }
+        sleep() { printf 'sleep:%s\n' "$1"; }
+        rootpxe_run_postinit() { printf 'UNEXPECTED:postinit\n'; return 0; }
+        rootpxe_stage() { printf 'UNEXPECTED:stage\n'; return 0; }
+        rootpxe_apply_hostname_for_disk() { printf 'UNEXPECTED:hostname\n'; return 0; }
+        . "$snippet"
+    ) >"$tmp/$name.out" 2>&1
+    status=$?
+    set -e
+    [[ $status -eq 2 ]] || fail "$name did not stop after completed attention wait: $status"
+    ! grep -Fq 'UNEXPECTED:' "$tmp/$name.out" || fail "$name ran a hook, image stage, or resume action after permit failure"
+    grep -Fqx 'sleep:5' "$tmp/$name.out" || fail "$name did not safely retry an unknown permit result"
+}
+
+expect_terminal_gate upload "$tmp/upload-gate.sh" ''
+expect_terminal_gate download "$tmp/download-gate.sh" ''
+expect_terminal_gate resume "$tmp/resume-gate.sh" customizing_hostname
+
+echo 'PASS: disk permit rejection waits for attention; only confirmed cancellation exits'
+)
+# ===== 原脚本结束：tests/pxeos_disk_permit_regression.sh =====
