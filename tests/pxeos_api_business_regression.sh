@@ -544,6 +544,87 @@ isdebug=0
 . $tmp/funcs.sh
 rootpxe_require_task_context() { return 0; }
 rootpxe_require_identity() { return 0; }
+
+# n no longer has a legacy deployment path.  The required snapshot files are
+# checked before disk permission and the old table/fill preparation is never
+# reached; mps remains on its historical preparation branch.
+layout_contract_dir=$tmp/n-layout-contract; mkdir -p $layout_contract_dir
+printf 'label: gpt\n' >$layout_contract_dir/d1.partitions
+printf '{"partitionTable":"gpt","partitions":[{"startSectors":8}]}\n' >$layout_contract_dir/schema.json
+printf '{"partitions":[]}\n' >$layout_contract_dir/layout.json
+rootpxe_require_single_disk_layout_metadata "$layout_contract_dir/d1.partitions" "$layout_contract_dir/schema.json" "$layout_contract_dir/layout.json" || fail n-layout-metadata-present
+rm -f $layout_contract_dir/d1.partitions
+rootpxe_require_single_disk_layout_metadata "$layout_contract_dir/d1.partitions" "$layout_contract_dir/schema.json" "$layout_contract_dir/layout.json" && fail n-layout-partition-table-missing-must-reject
+[[ $rootpxe_layout_metadata_reason == partition_table_missing ]] || fail n-layout-partition-table-missing-reason
+printf 'label: gpt\n' >$layout_contract_dir/d1.partitions
+rm -f $layout_contract_dir/schema.json
+rootpxe_require_single_disk_layout_metadata "$layout_contract_dir/d1.partitions" "$layout_contract_dir/schema.json" "$layout_contract_dir/layout.json" && fail n-layout-original-schema-missing-must-reject
+[[ $rootpxe_layout_metadata_reason == original_schema_missing ]] || fail n-layout-original-schema-missing-reason
+printf '{"partitionTable":"gpt","partitions":[{"startSectors":8}]}\n' >$layout_contract_dir/schema.json
+rm -f $layout_contract_dir/layout.json
+rootpxe_require_single_disk_layout_metadata "$layout_contract_dir/d1.partitions" "$layout_contract_dir/schema.json" "$layout_contract_dir/layout.json" && fail n-layout-metadata-missing-must-reject
+[[ $rootpxe_layout_metadata_reason == deployment_layout_missing ]] || fail n-layout-metadata-reason
+printf '{"partitions":[]}\n' >$layout_contract_dir/layout.json
+
+# The final sfdisk write owns the partition table.  Only the first 440-byte
+# boot-code region may be restored afterwards; partition entries and GPT/MBR
+# metadata must remain the target-specific layout just applied.
+printf 'A%.0s' {1..512} >$layout_contract_dir/d1.grub.mbr
+printf 'B%.0s' {1..512} >$layout_contract_dir/target-disk
+MODE=layout_apply; export MODE
+rootpxe_restore_deployment_boot_code "$layout_contract_dir/target-disk" 1 "$layout_contract_dir" "$layout_contract_dir/schema.json" || fail n-layout-boot-code
+head -c 440 $layout_contract_dir/target-disk | tr -d A | grep -q . && fail n-layout-boot-code-prefix
+tail -c +441 $layout_contract_dir/target-disk | tr -d B | grep -q . && fail n-layout-boot-code-must-not-overwrite-partition-table
+
+# GPT dN.mbr is an sgdisk backup, not raw boot code.  Without the separate
+# dN.grub.mbr artifact, deployment must leave the target's protective MBR and
+# GPT metadata untouched.
+rm -f $layout_contract_dir/d1.grub.mbr
+printf 'C%.0s' {1..512} >$layout_contract_dir/d1.mbr
+printf 'B%.0s' {1..512} >$layout_contract_dir/target-disk
+rootpxe_restore_deployment_boot_code "$layout_contract_dir/target-disk" 1 "$layout_contract_dir" "$layout_contract_dir/schema.json" || fail n-layout-gpt-backup-must-skip
+tr -d B <$layout_contract_dir/target-disk | grep -q . && fail n-layout-gpt-backup-must-not-write
+
+# DOS/MBR dN.mbr is a raw capture.  Restore its boot-code bytes while keeping
+# the final sfdisk partition entries and signature (bytes 440-511) untouched.
+printf '{"partitionTable":"mbr","partitions":[{"startSectors":8}]}\n' >$layout_contract_dir/schema.json
+printf 'C%.0s' {1..512} >$layout_contract_dir/d1.mbr
+printf 'B%.0s' {1..512} >$layout_contract_dir/target-disk
+rootpxe_restore_deployment_boot_code "$layout_contract_dir/target-disk" 1 "$layout_contract_dir" "$layout_contract_dir/schema.json" || fail n-layout-mbr-boot-code
+head -c 440 $layout_contract_dir/target-disk | tr -d C | grep -q . && fail n-layout-mbr-boot-code-prefix
+tail -c +441 $layout_contract_dir/target-disk | tr -d B | grep -q . && fail n-layout-mbr-boot-code-must-not-overwrite-partition-table
+
+# A captured DOS GRUB marker permits restoring only the embedding area between
+# the final MBR and the first partition; it must not spill into final partition
+# data or the 440-511 byte partition-table/signature region.
+printf '{"partitionTable":"mbr","partitions":[{"startSectors":16}]}\n' >$layout_contract_dir/schema.json
+: >$layout_contract_dir/d1.has_grub
+printf 'C%.0s' {1..8192} >$layout_contract_dir/d1.mbr
+printf 'B%.0s' {1..16384} >$layout_contract_dir/target-disk
+rootpxe_restore_deployment_boot_code "$layout_contract_dir/target-disk" 1 "$layout_contract_dir" "$layout_contract_dir/schema.json" || fail n-layout-mbr-grub-embedding
+head -c 440 $layout_contract_dir/target-disk | tr -d C | grep -q . && fail n-layout-mbr-grub-prefix
+dd if=$layout_contract_dir/target-disk bs=1 skip=440 count=72 2>/dev/null | tr -d B | grep -q . && fail n-layout-mbr-grub-must-preserve-partition-table
+dd if=$layout_contract_dir/target-disk bs=1 skip=512 count=7680 2>/dev/null | tr -d C | grep -q . && fail n-layout-mbr-grub-embedding-area
+tail -c +8193 $layout_contract_dir/target-disk | tr -d B | grep -q . && fail n-layout-mbr-grub-must-not-overwrite-first-partition
+rm -f $layout_contract_dir/d1.has_grub
+unset MODE
+
+awk '/^preparePartitions\(\)/ { on=1 } /^putDataBack\(\)/ { on=0 } on { print }' "$download" >$tmp/download-prepare.sh
+. $tmp/download-prepare.sh
+PREPARE_TRACE=$tmp/prepare-trace; : >$PREPARE_TRACE; export PREPARE_TRACE
+rootpxe_console_message() { printf 'console:%s\n' "$2" >>$PREPARE_TRACE; }
+prepareResizeDownloadPartitions() { printf 'legacy-resize\n' >>$PREPARE_TRACE; }
+restorePartitionTablesAndBootLoaders() { printf 'legacy-table\n' >>$PREPARE_TRACE; }
+runPartprobe() { printf 'partprobe\n' >>$PREPARE_TRACE; }
+imgType=n; hd=/dev/mock; imagePath=$layout_contract_dir; osid=50; imgPartitionType=all
+preparePartitions || fail n-layout-prepare
+grep -Eq 'legacy-resize|legacy-table|partprobe' $PREPARE_TRACE && fail n-layout-must-not-run-legacy-partition-flow
+: >$PREPARE_TRACE
+imgType=mps; global_gptcheck=no
+preparePartitions || fail mps-prepare
+grep -Fqx legacy-table $PREPARE_TRACE || fail mps-legacy-partition-flow-must-remain
+# Restore later mocks used by the broader business regression.
+runPartprobe() { :; }
 # The backend hashes the exact bytes of jq -cS output without its terminal
 # newline. Pin a known canonical JSON value so an accidental printf newline
 # changes this test's hash rather than silently drifting the task contract.
@@ -887,10 +968,16 @@ layout_apply_assert_table() {
     [[ -s $table && $disk == "$LAYOUT_EXPECT_DISK" ]] || return 1
     if [[ $disk == *[0-9] ]]; then expected_p1="${disk}p1"; expected_p2="${disk}p2"; else expected_p1="${disk}1"; expected_p2="${disk}2"; fi
     grep -Fqx "device: $disk" "$table" || return 1
-    grep -Fqx "first-lba: $first" "$table" || return 1
-    grep -Fqx "last-lba: $last" "$table" || return 1
     grep -Fq "$expected_p1 : start=" "$table" || return 1
     grep -Fq "$expected_p2 : start=" "$table" || return 1
+    if grep -Fqx 'label: dos' "$table"; then
+        grep -Fqx 'label-id: 0x7f1a2b3c' "$table" || return 1
+        grep -Fq 'type=7, bootable' "$table" || return 1
+        grep -Fq 'type=83' "$table" || return 1
+        return 0
+    fi
+    grep -Fqx "first-lba: $first" "$table" || return 1
+    grep -Fqx "last-lba: $last" "$table" || return 1
     grep -Fq 'type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, uuid=5F821F97-A35F-434F-AA4F-D91D4AB56347, name="EFI System Partition", attrs="LegacyBIOSBootable"' "$table" || return 1
     grep -Fq 'type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=60B6F988-1027-4E49-8C08-4544B6F427CB, name="root data"' "$table" || return 1
     awk -v last="$last" '
@@ -906,14 +993,58 @@ applySfdiskPartitions() {
     cp "$2" "$layout_applied"
 }
 runPartprobe() { :; }
-saveSfdiskPartitions() { [[ -s $layout_applied ]] && cp "$layout_applied" "$2"; }
+saveSfdiskPartitions() {
+    [[ -s $layout_applied ]] || return 1
+    case ${LAYOUT_READBACK_VARIANT:-canonical} in
+        canonical)
+            # sfdisk dump output may canonicalize GUID casing without changing
+            # the partition identity.  Readback verification must compare the
+            # semantic value rather than the original presentation.
+            sed -E \
+                -e '/^label-id:/ s/[A-F]/\L&/g' \
+                -e '/start=/ s/(type|uuid)=([0-9A-F-]+)/\1=\L\2/g' \
+                "$layout_applied" >"$2"
+            ;;
+        identity_mismatch)
+            sed 's/name="root data"/name="wrong partition"/' "$layout_applied" >"$2"
+            ;;
+        *) return 1 ;;
+    esac
+}
 MODE=layout_apply; export MODE
 TEST_SECTOR=512; export TEST_SECTOR
 LAYOUT_EXPECT_DISK=/dev/sda
 rootpxe_apply_deployment_layout /dev/sda $layout_template || fail layout-apply-nvme-to-sata
 LAYOUT_EXPECT_DISK=/dev/nvme0n1
 rootpxe_apply_deployment_layout /dev/nvme0n1 $layout_template || fail layout-apply-nvme-suffix
-unset MODE LAYOUT_EXPECT_DISK
+LAYOUT_READBACK_VARIANT=identity_mismatch
+rootpxe_apply_deployment_layout /dev/nvme0n1 $layout_template && fail layout-readback-identity-mismatch-must-reject
+LAYOUT_READBACK_VARIANT=canonical
+mbr_layout_template=$tmp/mbr-layout-template.partitions
+mbr_layout_plan=$tmp/mbr-layout-plan.json
+cat >$mbr_layout_template <<'EOF'
+label: dos
+label-id: 0x7f1a2b3c
+device: /dev/nvme0n1
+unit: sectors
+sector-size: 512
+
+/dev/nvme0n1p1 : start=        2048, size=       40960, type=7, bootable
+/dev/nvme0n1p2 : start=       43008, size=      756992, type=83
+EOF
+cat >$mbr_layout_plan <<'EOF'
+[
+  {"number":1,"startSectors":2048,"resolvedSectors":40960},
+  {"number":2,"startSectors":43008,"resolvedSectors":756992}
+]
+EOF
+rootpxe_resolved_layout_file=$mbr_layout_plan
+LAYOUT_EXPECT_DISK=/dev/sda
+rootpxe_apply_deployment_layout /dev/sda $mbr_layout_template || fail layout-apply-mbr-nvme-to-sata
+LAYOUT_EXPECT_DISK=/dev/nvme0n1
+rootpxe_apply_deployment_layout /dev/nvme0n1 $mbr_layout_template || fail layout-apply-mbr-nvme-suffix
+rootpxe_resolved_layout_file=$layout_plan
+unset MODE LAYOUT_EXPECT_DISK LAYOUT_READBACK_VARIANT
 
 # Windows NTFS 恢复后，活动部署布局只允许实际扩大的物理分区绕过
 # 捕获时 fixed 列表；同一布局内保持原始大小的恢复/EFI 等分区仍须

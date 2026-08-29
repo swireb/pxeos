@@ -761,8 +761,116 @@ rootpxe_restore_lvm_volumes() {
     [[ $restored_lvs -eq $expected_lvs ]]
 }
 
+rootpxe_sfdisk_layout_fingerprint() {
+    local table_file="$1"
+    [[ -r $table_file ]] || return 1
+    # sfdisk dumps may normalize GUID casing and reorder partition lines.  Keep
+    # those presentation details out of the comparison, but retain every
+    # partition identity and geometry field that PXEOS supplies to sfdisk.
+    awk '
+      function trim(value) { gsub(/\r/, "", value); sub(/^[[:space:]]+/, "", value); sub(/[[:space:]]+$/, "", value); return value }
+      function value_for(text, key,    pattern,value,end) {
+        pattern = "(^|,)[[:space:]]*" key "="
+        if (!match(text, pattern)) return "<absent>"
+        value = substr(text, RSTART + RLENGTH)
+        if (substr(value, 1, 1) == "\"") {
+          value = substr(value, 2)
+          end = index(value, "\"")
+          if (end == 0) return "<invalid>"
+          return "\"" substr(value, 1, end - 1) "\""
+        }
+        sub(/,.*/, "", value)
+        return trim(value)
+      }
+      function flag_for(text, key,    pattern) {
+        pattern = "(^|,)[[:space:]]*" key "([[:space:]]*,|[[:space:]]*$)"
+        return match(text, pattern) ? "true" : "<absent>"
+      }
+      /^label:[[:space:]]*/ { value=trim($2); if (++labels != 1 || value !~ /^(gpt|dos)$/) bad=1; table=tolower(value); print "header\tlabel\t" table; next }
+      /^label-id:[[:space:]]*/ { value=trim($2); if (++label_ids != 1 || (value !~ /^[0-9A-Fa-f-]+$/ && value !~ /^0x[0-9A-Fa-f]+$/)) bad=1; print "header\tlabel-id\t" tolower(value); next }
+      /^device:[[:space:]]*/ { value=trim($2); if (++devices != 1 || index(value, "/dev/") != 1) bad=1; print "header\tdevice\t" value; next }
+      /^unit:[[:space:]]*/ { value=trim($2); if (++units != 1 || value != "sectors") bad=1; print "header\tunit\t" value; next }
+      /^first-lba:[[:space:]]*/ { value=trim($2); if (++firsts != 1 || value !~ /^[1-9][0-9]*$/) bad=1; print "header\tfirst-lba\t" value; next }
+      /^last-lba:[[:space:]]*/ { value=trim($2); if (++lasts != 1 || value !~ /^[1-9][0-9]*$/) bad=1; print "header\tlast-lba\t" value; next }
+      /^sector-size:[[:space:]]*/ { value=trim($2); if (++sectors != 1 || value !~ /^[1-9][0-9]*$/) bad=1; print "header\tsector-size\t" value; next }
+      /start=/ {
+        path=$1; number=path
+        if (!sub(/^.*[^0-9]/, "", number) || number !~ /^[1-9][0-9]*$/ || seen[number]++) { bad=1; next }
+        text=$0; sub(/^[^:]*:[[:space:]]*/, "", text)
+        start=value_for(text, "start"); size=value_for(text, "size"); type=value_for(text, "type"); uuid=value_for(text, "uuid"); name=value_for(text, "name"); attrs=value_for(text, "attrs"); bootable=flag_for(text, "bootable")
+        if (start !~ /^(0|[1-9][0-9]*)$/ || size !~ /^[1-9][0-9]*$/ || type == "<invalid>" || uuid == "<invalid>" || name == "<invalid>" || attrs == "<invalid>" || bootable == "<invalid>") { bad=1; next }
+        print "partition\t" sprintf("%010d", number) "\tstart=" start "\tsize=" size "\ttype=" tolower(type) "\tuuid=" tolower(uuid) "\tname=" name "\tattrs=" attrs "\tbootable=" tolower(bootable)
+        parts++
+      }
+      END {
+        if (labels != 1 || devices != 1 || units != 1 || sectors != 1 || parts < 1) bad=1
+        if (table == "gpt" && (label_ids != 1 || firsts != 1 || lasts != 1)) bad=1
+        if (bad) exit 1
+      }' "$table_file" | LC_ALL=C sort
+    return "${PIPESTATUS[0]}"
+}
+
+rootpxe_layout_readback_failed() {
+    local reason="$1"
+    rootpxe_layout_readback_reason="$reason"
+    # Field names and the normalized mismatch class are safe to display; raw
+    # partition data is deliberately kept out of task logs.
+    rootpxe_console_message ERROR "Deployment layout readback mismatch: $reason"
+    rootpxe_stage layout_apply "Deployment layout readback mismatch: $reason"
+    return 1
+}
+
+rootpxe_require_single_disk_layout_metadata() {
+    local partition_file="$1" schema_file="$2" layout_file="$3"
+    rootpxe_layout_metadata_reason=""
+    [[ -r $partition_file ]] || { rootpxe_layout_metadata_reason=partition_table_missing; return 1; }
+    [[ -r $schema_file ]] || { rootpxe_layout_metadata_reason=original_schema_missing; return 1; }
+    [[ -r $layout_file ]] || { rootpxe_layout_metadata_reason=deployment_layout_missing; return 1; }
+}
+
+rootpxe_restore_deployment_boot_code() {
+    local disk="$1" disk_number="$2" image_path="$3" schema_file="$4" table boot_file size logical first_start expected_sectors expected_bytes restore_embedding=no
+    [[ -n $disk && $disk_number =~ ^[1-9][0-9]*$ && -d $image_path && -r $schema_file ]] || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    table=$(jq -er '.partitionTable' "$schema_file" 2>/dev/null) || return 1
+    [[ $table == gpt || $table == mbr ]] || return 1
+    logical=$(jq -er '.logicalSectorBytes // 512 | if type == "number" and . > 0 and floor == . then . else error("invalid logical sector size") end' "$schema_file" 2>/dev/null) || return 1
+    first_start=$(jq -er '[.partitions[]? | select((.startSectors | type) == "number" and .startSectors > 0 and (.startSectors | floor) == .startSectors) | .startSectors] | min // error("missing first partition")' "$schema_file" 2>/dev/null) || return 1
+    [[ $logical =~ ^[1-9][0-9]*$ && $first_start =~ ^[1-9][0-9]*$ ]] || return 1
+    expected_sectors=$first_start
+    [[ $expected_sectors -gt 2048 ]] && expected_sectors=2048
+    [[ $expected_sectors -eq 8 || $expected_sectors -eq 63 ]] && expected_sectors=1
+    expected_bytes=$((expected_sectors * logical))
+    case $table in
+        gpt)
+            # dN.mbr is an sgdisk GPT backup, not the raw boot sector.  The
+            # separate GRUB capture is the only safe GPT source; its absence
+            # is normal for UEFI Windows/Linux and must be a no-op.
+            boot_file="$image_path/d${disk_number}.grub.mbr"
+            [[ -e $boot_file ]] || return 0
+            ;;
+        mbr)
+            boot_file="$image_path/d${disk_number}.mbr"
+            [[ -e "$image_path/d${disk_number}.has_grub" ]] && restore_embedding=yes
+            ;;
+    esac
+    [[ -r $boot_file ]] || return 1
+    size=$(wc -c <"$boot_file" 2>/dev/null) || return 1
+    [[ $size =~ ^[0-9]+$ && $size -eq $expected_bytes && $size -ge 512 ]] || return 1
+    # sfdisk has already written the final MBR/GPT metadata.  Restore only the
+    # boot-code region and never the MBR partition entries (446-511), so this
+    # cannot reintroduce the source disk layout after it has been resolved for
+    # the target disk.
+    dd if="$boot_file" of="$disk" bs=1 count=440 conv=notrunc >/dev/null 2>&1 || return 1
+    [[ $restore_embedding == yes && $expected_bytes -gt $logical ]] || return 0
+    # saveGRUB captures only the pre-first-partition region.  Keep the final
+    # MBR entries/signature at 440-511 intact, then restore only the captured
+    # embedding area up to (never into) the first final partition.
+    dd if="$boot_file" of="$disk" bs=1 skip="$logical" seek="$logical" count=$((expected_bytes - logical)) conv=notrunc >/dev/null 2>&1
+}
+
 rootpxe_apply_deployment_layout() {
-    local disk="$1" template="$2" map output verify expected_numbers actual_numbers logical disk_bytes total_sectors table template_sector first_lba= last_lba= is_gpt=0
+    local disk="$1" template="$2" map output verify expected actual expected_numbers actual_numbers logical disk_bytes total_sectors table template_sector first_lba= last_lba= is_gpt=0
     [[ -r ${rootpxe_resolved_layout_file:-} && -r $template ]] || return 1
     logical=$(blockdev --getss "$disk" 2>/dev/null) || return 1
     disk_bytes=$(blockdev --getsize64 "$disk" 2>/dev/null) || return 1
@@ -812,19 +920,25 @@ rootpxe_apply_deployment_layout() {
     applySfdiskPartitions "$disk" "$output" || { rm -f "$map" "$output"; return 1; }
     runPartprobe "$disk" || { rm -f "$map" "$output"; return 1; }
     verify=$(mktemp /tmp/rootpxe-layout-verify.XXXXXX) || { rm -f "$map" "$output"; return 1; }
-    saveSfdiskPartitions "$disk" "$verify" || { rm -f "$map" "$output" "$verify"; return 1; }
+    expected=$(mktemp /tmp/rootpxe-layout-expected.XXXXXX) || { rm -f "$map" "$output" "$verify"; return 1; }
+    actual=$(mktemp /tmp/rootpxe-layout-actual.XXXXXX) || { rm -f "$map" "$output" "$verify" "$expected"; return 1; }
+    chmod 600 "$expected" "$actual"
+    saveSfdiskPartitions "$disk" "$verify" || { rm -f "$map" "$output" "$verify" "$expected" "$actual"; return 1; }
     awk -v disk="$disk" -v logical="$logical" -v is_gpt="$is_gpt" -v last_lba="$last_lba" '
       /^device:[[:space:]]*/ { devices++; if ($2 != disk) exit 1 }
       /^sector-size:[[:space:]]*/ { sectors++; if ($2 != logical) exit 1 }
       /^last-lba:[[:space:]]*/ { lasts++; if (is_gpt && $2 != last_lba) exit 1 }
-      END { if (devices != 1 || sectors != 1 || (is_gpt && lasts != 1)) exit 1 }' "$verify" || { rm -f "$map" "$output" "$verify"; return 1; }
+      END { if (devices != 1 || sectors != 1 || (is_gpt && lasts != 1)) exit 1 }' "$verify" || { rm -f "$map" "$output" "$verify" "$expected" "$actual"; rootpxe_layout_readback_failed header_geometry; return 1; }
     actual_numbers=$(awk '/start=/ {n=$1; sub(/^.*[^0-9]/,"",n); print n}' "$verify" | sort -n | tr '\n' ' ')
-    [[ $expected_numbers == "$actual_numbers" ]] || { rm -f "$map" "$output" "$verify"; return 1; }
+    [[ $expected_numbers == "$actual_numbers" ]] || { rm -f "$map" "$output" "$verify" "$expected" "$actual"; rootpxe_layout_readback_failed partition_numbers; return 1; }
     awk -v map="$map" '
       BEGIN { ok=1; while ((getline < map) > 0) { split($0,a,"\t"); starts[a[1]]=a[2]; sizes[a[1]]=a[3] } close(map) }
       /start=/ { dev=$1; n=dev; sub(/^.*[^0-9]/,"",n); split($0,a,","); st=a[1]; sub(/.*start=[[:space:]]*/,"",st); sz=a[2]; sub(/.*size=[[:space:]]*/,"",sz); if ((n in starts) && (st != starts[n] || sz != sizes[n])) ok=0 }
-      END { exit(ok ? 0 : 1) }' "$verify" || { rm -f "$map" "$output" "$verify"; return 1; }
-    rm -f "$map" "$output" "$verify"
+      END { exit(ok ? 0 : 1) }' "$verify" || { rm -f "$map" "$output" "$verify" "$expected" "$actual"; rootpxe_layout_readback_failed partition_geometry; return 1; }
+    rootpxe_sfdisk_layout_fingerprint "$output" >"$expected" || { rm -f "$map" "$output" "$verify" "$expected" "$actual"; rootpxe_layout_readback_failed expected_format; return 1; }
+    rootpxe_sfdisk_layout_fingerprint "$verify" >"$actual" || { rm -f "$map" "$output" "$verify" "$expected" "$actual"; rootpxe_layout_readback_failed actual_format; return 1; }
+    cmp -s "$expected" "$actual" || { rm -f "$map" "$output" "$verify" "$expected" "$actual"; rootpxe_layout_readback_failed semantic_identity; return 1; }
+    rm -f "$map" "$output" "$verify" "$expected" "$actual"
 }
 rootpxe_clear_smb_plaintext() { unset smb_username smb_password smb_domain; }
 rootpxe_cleanup_smb_credentials() { [[ -n ${smb_credentials_file:-} ]] && rm -f -- "$smb_credentials_file"; smb_credentials_file=""; rootpxe_clear_smb_plaintext; }
