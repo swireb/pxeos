@@ -14,6 +14,15 @@
 [[ ! -h /dev/stdin ]] && ln -s /proc/self/fd/0 /dev/stdin
 [[ ! -h /dev/stdout ]] && ln -s /proc/self/fd/1 /dev/stdout
 [[ ! -h /dev/stderr ]] && ln -s /proc/self/fd/2 /dev/stderr
+
+# SSH 调试模式只保留网络初始化后的登录入口，不能触发 RAID 组装、任务或电源操作。
+case $isdebug in
+    [Yy][Ee][Ss]|[Yy])
+        pxeos.debug
+        exit $?
+        ;;
+esac
+
 if [[ $mdraid == true ]]; then
     mdadm --auto-detect
     mdadm --assemble --scan
@@ -21,37 +30,30 @@ if [[ $mdraid == true ]]; then
 fi
 [[ -n $keymap ]] && loadkeys $keymap
 
-case $isdebug in
-    [Yy][Ee][Ss]|[Yy])
-        pxeos.debug
-        ;;
-    *)
-        pxeos
-        rc=$?
-        if [[ $rc -eq 0 ]]; then
-            sleep 5 >/dev/null 2>&1
-            # 优先读取 checkin 下发并落盘的 shutdown（0/1）
-            shutdown_local="$shutdown"
-            if [[ -f /tmp/pxeos.shutdown ]]; then
-                shutdown_local="$(tr -d '\r\n\0' </tmp/pxeos.shutdown)"
-            fi
-            if [[ "$shutdown_local" == "1" ]]; then
-                echo "[INFO]  Task completed. Powering off."
-                poweroff >/dev/null 2>&1
-            else
-                echo "[INFO]  Task completed. Rebooting."
-                reboot -f >/dev/null 2>&1
-            fi
-        else
-            echo "[WARN]  Task exited with code: $rc."
-            failure_action="reboot"
-            [[ -f /tmp/pxeos.failure_action ]] && failure_action="$(tr -d '\r\n\0' </tmp/pxeos.failure_action)"
-            echo "[INFO]  Running configured failure action: $failure_action."
-            if [[ "$failure_action" == "shutdown" ]]; then
-                poweroff >/dev/null 2>&1
-            else
-                reboot -f >/dev/null 2>&1
-            fi
-        fi
-        ;;
-esac
+pxeos
+rc=$?
+if [[ $rc -eq 0 ]]; then
+    sleep 5 >/dev/null 2>&1
+    # 优先读取 checkin 下发并落盘的 shutdown（0/1）
+    shutdown_local="$shutdown"
+    if [[ -f /tmp/pxeos.shutdown ]]; then
+        shutdown_local="$(tr -d '\r\n\0' </tmp/pxeos.shutdown)"
+    fi
+    if [[ "$shutdown_local" == "1" ]]; then
+        echo "[INFO]  Task completed. Powering off."
+        poweroff >/dev/null 2>&1
+    else
+        echo "[INFO]  Task completed. Rebooting."
+        reboot -f >/dev/null 2>&1
+    fi
+else
+    echo "[WARN]  Task exited with code: $rc."
+    failure_action="reboot"
+    [[ -f /tmp/pxeos.failure_action ]] && failure_action="$(tr -d '\r\n\0' </tmp/pxeos.failure_action)"
+    echo "[INFO]  Running configured failure action: $failure_action."
+    if [[ "$failure_action" == "shutdown" ]]; then
+        poweroff >/dev/null 2>&1
+    else
+        reboot -f >/dev/null 2>&1
+    fi
+fi

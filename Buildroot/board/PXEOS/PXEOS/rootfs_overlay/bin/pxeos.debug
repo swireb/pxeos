@@ -1,32 +1,31 @@
 #!/bin/bash
-. /usr/share/pxeos/lib/funcs.sh
-clearScreen
-displayBanner
-echo " You have entered into PXEOS debug mode."
-echo -e "\nBelow is a variable dump:"
-osname=""
-mbrfile=""
-defaultpart2start=""
-disks=""
-hd=""
-[[ -n $osid ]] && determineOS "$osid"
-[[ -n $osid ]] && echo "osid=$osid"
-echo "osname=$osname"
-echo "mbrfile=$mbrfile"
-echo "type=$type"
-echo "storage=$storage"
-echo "exportpath=${export_path:-${exportpath:-}}"
-echo "capturepath=${capture_path:-${capturepath:-}}"
-echo "postinitpath=${postinit_path:-${postinitpath:-}}"
-echo "img=$img"
-echo "imgType=$imgType"
-echo "imgFormat=$imgFormat"
-echo "imgPartitionType=$imgPartitionType"
-getHardDisk
-echo "disks=$disks"
-echo "hd=$hd"
+# isdebug=yes 只提供网络地址和 SSH 接入提示。不要加载任务变量、挂载存储或扫描磁盘；
+# 调试人员通过 SSH 自行选择要执行的 PXEOS 脚本。
+clear >/dev/null 2>&1 || :
+printf '%s\n' '==================== PXEOS Runtime ===================='
+printf '%s\n' ' PXEOS SSH 调试模式'
+printf '%s\n' ' 已跳过任务执行、存储挂载和磁盘扫描。'
+printf '%s\n\n' ' 请通过 SSH 登录后手工执行需要调试的脚本。'
 
-# 与参考 FOS/FOG 一致：只做信息展示并停住。
-# 交互 shell 由 busybox init 的 /etc/inittab（tty0::respawn:-/bin/bash）提供。
-debugPause
+addresses=$(/sbin/ip -o -4 addr show scope global 2>/dev/null | awk '{
+    iface=$2
+    cidr=$4
+    sub(/\/.*$/, "", cidr)
+    if (iface != "lo" && cidr != "") {
+        printf "%s %s %s\n", iface, $4, cidr
+    }
+}')
+
+if [[ -n $addresses ]]; then
+    printf '%s\n' ' 可用于 SSH 的 IPv4 地址：'
+    while read -r iface cidr address; do
+        [[ -z $iface || -z $cidr || -z $address ]] && continue
+        printf '  %s: %s\n' "$iface" "$cidr"
+        printf '  ssh root@%s\n' "$address"
+    done <<<"$addresses"
+else
+    printf '%s\n' '[WARN] 未检测到可用于 SSH 的全局 IPv4 地址。'
+    printf '%s\n' ' 请在本地控制台检查网络配置、DHCP 状态和网线连接。'
+fi
+
 exit 0

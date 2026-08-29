@@ -173,3 +173,106 @@ must_have "$overlay/etc/init.d/S99pxeos" '/tmp/pxeos.failure_action'
 printf 'PASS: PXEOS storage regression contract\n'
 )
 # ===== 原脚本结束：tests/pxeos_storage_regression.sh =====
+
+# ===== PXEOS SSH 调试模式回归 =====
+(
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
+debug="$overlay/bin/pxeos.debug"
+s99="$overlay/etc/init.d/S99pxeos"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+mkdir -p "$tmp/mock"
+
+cat >"$tmp/mock/ip" <<'EOF'
+#!/usr/bin/env bash
+case "${PXEOS_DEBUG_IP_MODE:-has-ip}" in
+  has-ip) printf '2: eth0    inet 192.0.2.10/24 brd 192.0.2.255 scope global eth0\n' ;;
+  no-ip) exit 0 ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$tmp/mock/ip"
+
+sed "s|/sbin/ip|$tmp/mock/ip|g" "$debug" >"$tmp/pxeos.debug"
+chmod +x "$tmp/pxeos.debug"
+
+set +e
+PXEOS_DEBUG_IP_MODE=has-ip \
+    osid=secret-os task_token=secret-token pxeapi=https://token:password@example.invalid \
+    bash "$tmp/pxeos.debug" >"$tmp/has-ip.out" 2>&1
+rc=$?
+set -e
+[[ $rc -eq 0 ]] || fail "有 IPv4 时调试模式退出码: $rc"
+grep -Fq 'PXEOS SSH 调试模式' "$tmp/has-ip.out" || fail '缺少 SSH 调试模式说明'
+grep -Fq 'eth0: 192.0.2.10/24' "$tmp/has-ip.out" || fail '缺少接口和 CIDR'
+grep -Fq 'ssh root@192.0.2.10' "$tmp/has-ip.out" || fail '缺少 SSH 连接提示'
+! grep -Fq 'secret-os' "$tmp/has-ip.out" || fail '泄露任务变量'
+! grep -Fq 'secret-token' "$tmp/has-ip.out" || fail '泄露任务令牌'
+! grep -Fq 'token:password' "$tmp/has-ip.out" || fail '泄露接口凭据'
+
+set +e
+PXEOS_DEBUG_IP_MODE=no-ip bash "$tmp/pxeos.debug" >"$tmp/no-ip.out" 2>&1
+rc=$?
+set -e
+[[ $rc -eq 0 ]] || fail "无 IPv4 时调试模式退出码: $rc"
+grep -Fq '未检测到可用于 SSH 的全局 IPv4 地址' "$tmp/no-ip.out" || fail '无 IPv4 时缺少明确警告'
+grep -Fq '请在本地控制台检查网络配置' "$tmp/no-ip.out" || fail '无 IPv4 时缺少本地排查提示'
+
+for forbidden in determineOS getHardDisk debugPause pxeos.mount pxeos.checkin task_token pxeapi storage exportpath capturepath postinitpath; do
+    ! grep -Fq -- "$forbidden" "$debug" || fail "调试脚本包含禁止任务或磁盘入口: $forbidden"
+done
+grep -Fq 'pxeos.debug' "$s99" || fail 'S99 未进入调试脚本'
+! awk '/\[Yy\]\[Ee\]\[Ss\]\|\[Yy\]\)/, /^[[:space:]]*;;/ { print }' "$s99" | grep -Eq '(^|[[:space:]])pxeos([[:space:]]|$)|reboot|poweroff' || fail 'S99 调试分支进入正常任务或电源路径'
+
+for command in mdadm pxeos pxeos.debug poweroff reboot sleep loadkeys; do
+    cat >"$tmp/mock/$command" <<'EOF'
+#!/usr/bin/env bash
+printf '%s:%s\n' "$(basename "$0")" "$*" >>"$PXEOS_S99_LOG"
+case "$(basename "$0")" in
+  pxeos) exit "${PXEOS_S99_PXEOS_RC:-0}" ;;
+esac
+EOF
+    chmod +x "$tmp/mock/$command"
+done
+
+sed \
+    -e "s|/tmp/pxeos.shutdown|$tmp/pxeos.shutdown|g" \
+    -e "s|/tmp/pxeos.failure_action|$tmp/pxeos.failure_action|g" \
+    "$s99" >"$tmp/S99pxeos"
+chmod +x "$tmp/S99pxeos"
+
+: >"$tmp/debug-s99.log"
+PXEOS_S99_LOG="$tmp/debug-s99.log" PATH="$tmp/mock:$PATH" \
+    mdraid=true isdebug=yes bash "$tmp/S99pxeos"
+[[ $(<"$tmp/debug-s99.log") == 'pxeos.debug:' ]] || fail '调试模式执行了 RAID、正常任务或电源操作'
+
+run_normal_s99() {
+    local name="$1"
+    local pxeos_rc="$2"
+    local shutdown_value="$3"
+    local failure_action="$4"
+    local log="$tmp/$name.log"
+    : >"$log"
+    rm -f "$tmp/pxeos.shutdown" "$tmp/pxeos.failure_action"
+    [[ -n $shutdown_value ]] && printf '%s\n' "$shutdown_value" >"$tmp/pxeos.shutdown"
+    [[ -n $failure_action ]] && printf '%s\n' "$failure_action" >"$tmp/pxeos.failure_action"
+    PXEOS_S99_LOG="$log" PXEOS_S99_PXEOS_RC="$pxeos_rc" PATH="$tmp/mock:$PATH" \
+        mdraid=true isdebug='' shutdown=0 bash "$tmp/S99pxeos" >/dev/null
+    printf '%s\n' "$log"
+}
+
+normal_log=$(run_normal_s99 normal-success-reboot 0 '' '')
+expected=$'mdadm:--auto-detect\nmdadm:--assemble --scan\nmdadm:--incremental --run --scan\npxeos:\nsleep:5\nreboot:-f'
+[[ $(<"$normal_log") == "$expected" ]] || fail '普通成功路径未保留 RAID、任务和重启顺序'
+normal_log=$(run_normal_s99 normal-success-poweroff 0 1 '')
+grep -Fxq 'poweroff:' "$normal_log" || fail '普通成功关机路径改变'
+normal_log=$(run_normal_s99 normal-failure-reboot 9 '' '')
+grep -Fxq 'reboot:-f' "$normal_log" || fail '普通失败重启路径改变'
+normal_log=$(run_normal_s99 normal-failure-poweroff 9 '' shutdown)
+grep -Fxq 'poweroff:' "$normal_log" || fail '普通失败关机路径改变'
+printf 'PASS: PXEOS SSH debug mode regression\n'
+)
+# ===== PXEOS SSH 调试模式回归结束 =====
