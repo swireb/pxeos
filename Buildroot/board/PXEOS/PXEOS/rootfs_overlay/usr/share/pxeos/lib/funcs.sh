@@ -758,25 +758,62 @@ rootpxe_restore_lvm_volumes() {
 }
 
 rootpxe_apply_deployment_layout() {
-    local disk="$1" template="$2" map output verify expected_numbers actual_numbers
-    [[ -r $rootpxe_resolved_layout_file && -r $template ]] || return 1
+    local disk="$1" template="$2" map output verify expected_numbers actual_numbers logical disk_bytes total_sectors table template_sector first_lba= last_lba= is_gpt=0
+    [[ -r ${rootpxe_resolved_layout_file:-} && -r $template ]] || return 1
+    logical=$(blockdev --getss "$disk" 2>/dev/null) || return 1
+    disk_bytes=$(blockdev --getsize64 "$disk" 2>/dev/null) || return 1
+    [[ $logical =~ ^[1-9][0-9]*$ && $disk_bytes =~ ^[1-9][0-9]*$ ]] || return 1
+    (( logical <= 9223372036854775807 && disk_bytes <= 9223372036854775807 && disk_bytes % logical == 0 )) || return 1
+    total_sectors=$((disk_bytes / logical))
+    (( total_sectors > 0 )) || return 1
+    table=$(awk '/^label:/{print tolower($2); count++} END{if(count != 1) exit 1}' "$template") || return 1
+    [[ $table == gpt || $table == dos ]] || return 1
+    template_sector=$(awk '/^sector-size:/{print $2; count++} END{if(count != 1) exit 1}' "$template") || return 1
+    [[ $template_sector =~ ^[1-9][0-9]*$ && $template_sector == "$logical" ]] || return 1
+    if [[ $table == gpt ]]; then
+        is_gpt=1
+        first_lba=$(awk '/^first-lba:/{print $2; count++} END{if(count != 1) exit 1}' "$template") || return 1
+        [[ $first_lba =~ ^[1-9][0-9]*$ ]] || return 1
+        (( first_lba < total_sectors && total_sectors - first_lba >= first_lba )) || return 1
+        last_lba=$((total_sectors - first_lba))
+    fi
     map=$(mktemp /tmp/rootpxe-layout-map.XXXXXX) || return 1
     output=$(mktemp /tmp/rootpxe-layout-sfdisk.XXXXXX) || { rm -f "$map"; return 1; }
     chmod 600 "$map" "$output"
     jq -r '.[] | [.number,.startSectors,.resolvedSectors] | @tsv' "$rootpxe_resolved_layout_file" >"$map" || { rm -f "$map" "$output"; return 1; }
+    while IFS=$'\t' read -r number start size extra; do
+        size=${size%$'\r'}
+        extra=${extra%$'\r'}
+        [[ -n $number && -z ${extra:-} && $number =~ ^[1-9][0-9]*$ && $start =~ ^(0|[1-9][0-9]*)$ && $size =~ ^[1-9][0-9]*$ ]] || { rm -f "$map" "$output"; return 1; }
+        (( number <= 2147483647 && start < total_sectors && size <= total_sectors - start )) || { rm -f "$map" "$output"; return 1; }
+        (( is_gpt == 0 || start + size - 1 <= last_lba )) || { rm -f "$map" "$output"; return 1; }
+    done <"$map"
+    awk -F'\t' 'NF != 3 || seen[$1]++ {exit 1} END {exit (NR > 0 ? 0 : 1)}' "$map" || { rm -f "$map" "$output"; return 1; }
     expected_numbers=$(awk -F'\t' '{print $1}' "$map" | sort -n | tr '\n' ' ')
     actual_numbers=$(awk '/start=/ {n=$1; sub(/^.*[^0-9]/,"",n); print n}' "$template" | sort -n | tr '\n' ' ')
     [[ $expected_numbers == "$actual_numbers" ]] || { rm -f "$map" "$output"; return 1; }
-    awk -v map="$map" '
-      BEGIN { while ((getline < map) > 0) { split($0,a,"\t"); starts[a[1]]=a[2]; sizes[a[1]]=a[3] } close(map) }
-      /start=/ { line=$0; dev=$1; n=dev; sub(/^.*[^0-9]/,"",n); if (!(n in starts)) exit 20;
+    awk -v map="$map" -v disk="$disk" -v logical="$logical" -v is_gpt="$is_gpt" -v last_lba="$last_lba" '
+      function partition_path(number) { return disk ((disk ~ /[0-9]$/) ? "p" number : number) }
+      BEGIN { while ((getline < map) > 0) { split($0,a,"\t"); starts[a[1]]=a[2]; sizes[a[1]]=a[3]; expected++ } close(map) }
+      /^device:[[:space:]]*/ { devices++; print "device: " disk; next }
+      /^sector-size:[[:space:]]*/ { sectors++; print "sector-size: " logical; next }
+      /^first-lba:[[:space:]]*/ { firsts++; print; next }
+      /^last-lba:[[:space:]]*/ { lasts++; if (is_gpt) { print "last-lba: " last_lba; next } print; next }
+      /start=/ { line=$0; dev=$1; n=dev; sub(/^.*[^0-9]/,"",n); if (!(n in starts) || seen[n]++) exit 20;
+        sub(/^[^[:space:]]+/, partition_path(n), line);
         sub(/start=[[:space:]]*[0-9]+/, "start=" sprintf("%12d", starts[n]), line);
-        sub(/size=[[:space:]]*[0-9]+/, "size=" sprintf("%12d", sizes[n]), line); print line; next }
-      { print }' "$template" >"$output" || { rm -f "$map" "$output"; return 1; }
-    applySfdiskPartitions "$disk" "$output"
-    runPartprobe "$disk"
+        sub(/size=[[:space:]]*[0-9]+/, "size=" sprintf("%12d", sizes[n]), line); print line; parts++; next }
+      { print }
+      END { if (devices != 1 || sectors != 1 || parts != expected || (is_gpt && (firsts != 1 || lasts != 1))) exit 21 }' "$template" >"$output" || { rm -f "$map" "$output"; return 1; }
+    applySfdiskPartitions "$disk" "$output" || { rm -f "$map" "$output"; return 1; }
+    runPartprobe "$disk" || { rm -f "$map" "$output"; return 1; }
     verify=$(mktemp /tmp/rootpxe-layout-verify.XXXXXX) || { rm -f "$map" "$output"; return 1; }
-    saveSfdiskPartitions "$disk" "$verify"
+    saveSfdiskPartitions "$disk" "$verify" || { rm -f "$map" "$output" "$verify"; return 1; }
+    awk -v disk="$disk" -v logical="$logical" -v is_gpt="$is_gpt" -v last_lba="$last_lba" '
+      /^device:[[:space:]]*/ { devices++; if ($2 != disk) exit 1 }
+      /^sector-size:[[:space:]]*/ { sectors++; if ($2 != logical) exit 1 }
+      /^last-lba:[[:space:]]*/ { lasts++; if (is_gpt && $2 != last_lba) exit 1 }
+      END { if (devices != 1 || sectors != 1 || (is_gpt && lasts != 1)) exit 1 }' "$verify" || { rm -f "$map" "$output" "$verify"; return 1; }
     actual_numbers=$(awk '/start=/ {n=$1; sub(/^.*[^0-9]/,"",n); print n}' "$verify" | sort -n | tr '\n' ' ')
     [[ $expected_numbers == "$actual_numbers" ]] || { rm -f "$map" "$output" "$verify"; return 1; }
     awk -v map="$map" '

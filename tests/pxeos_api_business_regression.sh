@@ -328,10 +328,15 @@ grep -Fq RESUME_TARGET_IDENTITY_UNAVAILABLE "$download" || fail resume
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p $tmp/mock $tmp/ntfs
+REAL_JQ=$(command -v jq) || fail '需要真实 jq 来验证部署分区表重写'
+export REAL_JQ
 : >$tmp/jq-args
 export JQ_ARGS_LOG=$tmp/jq-args
 cat >$tmp/mock/jq <<'EOF'
 #!/usr/bin/env bash
+if [[ ${MODE:-} == layout_apply ]]; then
+  exec "${REAL_JQ:?}" "$@"
+fi
 case "$*" in
   *'-cS '*)
     for last; do :; done
@@ -380,7 +385,14 @@ esac
 EOF
 cat >$tmp/mock/blockdev <<'EOF'
 #!/usr/bin/env bash
-case "$1" in --getss) echo ${TEST_SECTOR:-512} ;; --getpbsz) echo 512 ;; --getsize64) echo 102400000 ;; *) exit 1 ;; esac
+case "$1" in
+  --getss) echo ${TEST_SECTOR:-512} ;;
+  --getpbsz) echo 512 ;;
+  --getsize64)
+    [[ ${MODE:-} == layout_apply ]] && echo 409600000 || echo 102400000
+    ;;
+  *) exit 1 ;;
+esac
 EOF
 cat >$tmp/mock/blkid <<'EOF'
 #!/usr/bin/env bash
@@ -811,6 +823,66 @@ rootpxe_plan_deploy_disk_operation /dev/nvme0n1 $tmp/sector.partitions && fail n
 rootpxe_nvme_find_metadata_free_lbaf() { echo 3; }
 rootpxe_plan_deploy_disk_operation /dev/nvme0n1 $tmp/sector.partitions || fail nvme-lbaf-plan
 [[ $rootpxe_planned_disk_operation == nvme_format+deploy_write ]] || fail nvme-operation
+
+# Deployment layout data is captured with the source disk's path and GPT
+# usable-LBA bound.  A resolved layout for a larger target must be rewritten
+# before sfdisk sees it: preserving /dev/nvme0n1pN or the smaller source
+# last-lba rejects an NVMe-to-SATA restore even though the resolved sectors
+# are valid on the target.
+layout_template=$tmp/layout-template.partitions
+layout_plan=$tmp/layout-plan.json
+cat >$layout_template <<'EOF'
+label: gpt
+label-id: 81130EC9-8E47-47FD-8D5B-6FA8078753A4
+device: /dev/nvme0n1
+unit: sectors
+first-lba: 34
+last-lba: 99966
+sector-size: 512
+
+/dev/nvme0n1p1 : start=        2048, size=        1024, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, uuid=5F821F97-A35F-434F-AA4F-D91D4AB56347, name="EFI System Partition", attrs="LegacyBIOSBootable"
+/dev/nvme0n1p2 : start=        3072, size=       90000, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=60B6F988-1027-4E49-8C08-4544B6F427CB, name="root data"
+EOF
+cat >$layout_plan <<'EOF'
+[
+  {"number":1,"startSectors":2048,"resolvedSectors":1024},
+  {"number":2,"startSectors":3072,"resolvedSectors":796895}
+]
+EOF
+rootpxe_resolved_layout_file=$layout_plan
+layout_applied=$tmp/layout-applied.partitions
+layout_apply_assert_table() {
+    local disk="$1" table="$2" first=34 last=799966 expected_p1 expected_p2
+    [[ -s $table && $disk == "$LAYOUT_EXPECT_DISK" ]] || return 1
+    if [[ $disk == *[0-9] ]]; then expected_p1="${disk}p1"; expected_p2="${disk}p2"; else expected_p1="${disk}1"; expected_p2="${disk}2"; fi
+    grep -Fqx "device: $disk" "$table" || return 1
+    grep -Fqx "first-lba: $first" "$table" || return 1
+    grep -Fqx "last-lba: $last" "$table" || return 1
+    grep -Fq "$expected_p1 : start=" "$table" || return 1
+    grep -Fq "$expected_p2 : start=" "$table" || return 1
+    grep -Fq 'type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, uuid=5F821F97-A35F-434F-AA4F-D91D4AB56347, name="EFI System Partition", attrs="LegacyBIOSBootable"' "$table" || return 1
+    grep -Fq 'type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=60B6F988-1027-4E49-8C08-4544B6F427CB, name="root data"' "$table" || return 1
+    awk -v last="$last" '
+      /start=/ {
+        split($0,a,","); st=a[1]; sub(/.*start=[[:space:]]*/,"",st)
+        sz=a[2]; sub(/.*size=[[:space:]]*/,"",sz)
+        if (st !~ /^[0-9]+$/ || sz !~ /^[1-9][0-9]*$/ || st + sz - 1 > last) exit 1
+      }
+    ' "$table"
+}
+applySfdiskPartitions() {
+    layout_apply_assert_table "$1" "$2" || return 1
+    cp "$2" "$layout_applied"
+}
+runPartprobe() { :; }
+saveSfdiskPartitions() { [[ -s $layout_applied ]] && cp "$layout_applied" "$2"; }
+MODE=layout_apply; export MODE
+TEST_SECTOR=512; export TEST_SECTOR
+LAYOUT_EXPECT_DISK=/dev/sda
+rootpxe_apply_deployment_layout /dev/sda $layout_template || fail layout-apply-nvme-to-sata
+LAYOUT_EXPECT_DISK=/dev/nvme0n1
+rootpxe_apply_deployment_layout /dev/nvme0n1 $layout_template || fail layout-apply-nvme-suffix
+unset MODE LAYOUT_EXPECT_DISK
 
 # Resume is deliberately before layout validation and postinit, and must not
 # reinvoke image restoration after a hostname attention retry.  Execute the
