@@ -547,7 +547,7 @@ rootpxe_canonical_json_hash() {
 }
 
 rootpxe_validate_deployment_layout() {
-    local disk="$1" schema_file="$2" layout_file="$3" schema_logical target_bytes target_sectors source_hash layout_hash
+    local disk="$1" schema_file="$2" layout_file="$3" schema_logical original_disk_bytes target_bytes target_sectors source_hash layout_hash
     [[ -r $schema_file && -r $layout_file ]] || return 1
     command -v jq >/dev/null 2>&1 || return 1
     # MBR extended containers require EBR-chain reconstruction.  Do not turn
@@ -558,8 +558,12 @@ rootpxe_validate_deployment_layout() {
     # Target 4Kn/512e geometry must therefore be converted through bytes, not
     # by incorrectly substituting target --getss into source-sector fields.
     schema_logical=$(jq -er '.logicalSectorBytes' "$schema_file" 2>/dev/null) || return 1
+    original_disk_bytes=$(jq -er '.originalDiskBytes' "$schema_file" 2>/dev/null) || return 1
     target_bytes=$(blockdev --getsize64 "$disk" 2>/dev/null) || return 1
-    [[ $schema_logical =~ ^[1-9][0-9]*$ && $target_bytes =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ $schema_logical =~ ^[1-9][0-9]*$ && $original_disk_bytes =~ ^[1-9][0-9]*$ && $target_bytes =~ ^[1-9][0-9]*$ ]] || return 1
+    # 单磁盘可调整镜像只允许扩容。这里发生在分区表应用和磁盘许可前，
+    # 因此目标盘小于捕获原始容量不会触及目标磁盘。
+    (( target_bytes >= original_disk_bytes )) || return 1
     (( target_bytes % schema_logical == 0 )) || return 1
     target_sectors=$(( target_bytes / schema_logical ))
     source_hash=$(rootpxe_canonical_json_hash "$schema_file") || return 1
@@ -603,7 +607,7 @@ rootpxe_validate_deployment_layout() {
             if $mode == "fixed" and ((($o.fixedBytes // null)|type) != "number" or ($o.fixedBytes <= 0) or ($o|has("percentage"))) then error("invalid fixed mode") else . end |
             if $mode == "percentage" and ((($o.percentage // null)|type) != "number" or ($o|has("fixedBytes"))) then error("invalid percentage mode") else . end |
             if ($mode == "original" or $mode == "remaining") and (($o|has("fixedBytes")) or ($o|has("percentage"))) then error("unexpected mode field") else . end |
-            if (($p.role|IN("efi","msr","boot","recovery")) or $p.resizable != true) and $mode != "original" then error("protected partition changed") else . end |
+            if $mode == "fixed" and $o.fixedBytes < ($p.originalSectors * $logical) then error("original size violated") else . end |
             {p:$p,o:$o,mode:$mode} ] as $items |
           ([ $items[]|select(.mode == "remaining") ]|length) as $remainingCount |
           if $remainingCount > 1 then error("multiple remaining") else . end |
@@ -618,7 +622,7 @@ rootpxe_validate_deployment_layout() {
           (reduce range(0;($items|length)) as $i ({cursor:$front,out:[]};
             ($items[$i]) as $item | ($pre[$i]) as $base |
             (if $item.mode == "remaining" then $remaining else $base end) as $size |
-            if $size < $item.p.minSectors then error("minimum size violated") else . end |
+            if $size < $item.p.originalSectors then error("original size violated") else . end |
             .cursor = align_up(.cursor;$alignment) |
             .out += [$item.p + {startSectors:.cursor,resolvedSectors:$size}] |
             .cursor += $size) |
@@ -4506,6 +4510,37 @@ prepareResizeDownloadPartitions() {
 # $2 is the image path
 # $3 is the image partition type (either all or partition number)
 # $4 is the flag to say whether this is multicast or not
+rootpxe_expansion_fixed_partitions() {
+    local fixed_partitions="$1" schema_file="${originalSchemaFile:-}" resolved_file="${rootpxe_resolved_layout_file:-}"
+    local expanded_partitions candidate filtered=""
+    [[ -n $fixed_partitions && -r $schema_file && -r $resolved_file ]] || { printf '%s' "$fixed_partitions"; return 0; }
+    command -v jq >/dev/null 2>&1 || { printf '%s' "$fixed_partitions"; return 0; }
+
+    # 仅从已验证的布局中找出实际扩大过的叶子物理分区。MBR extended
+    # 容器是由逻辑分区派生的边界，不是可恢复的分区内容，不能借此解除
+    # fixed 抑制。解析异常时保守地维持捕获期的 fixed 行为。
+    expanded_partitions=$(jq -ner --slurpfile schema "$schema_file" --slurpfile resolved "$resolved_file" '
+        ($schema[0].partitions // []) as $captured |
+        ([$captured[] | select(.kind != "extended") |
+          {key:(.number|tostring), value:(.originalSectors // 0)}] | from_entries) as $originals |
+        [$resolved[0][]? |
+          .number as $number |
+          ($originals[($number|tostring)] // null) as $original |
+          select((($original|type) == "number") and ((.resolvedSectors|type) == "number") and (.resolvedSectors > $original)) |
+          $number] | join(":")
+    ' 2>/dev/null) || { printf '%s' "$fixed_partitions"; return 0; }
+    [[ -n $expanded_partitions ]] || { printf '%s' "$fixed_partitions"; return 0; }
+
+    for candidate in ${fixed_partitions//:/ }; do
+        [[ $candidate =~ ^[1-9][0-9]*$ ]] || { printf '%s' "$fixed_partitions"; return 0; }
+        case ":$expanded_partitions:" in
+            *":$candidate:"*) ;;
+            *) filtered+="${filtered:+:}$candidate" ;;
+        esac
+    done
+    printf '%s' "$filtered"
+}
+
 performRestore() {
     local disks="$1"
     local disk=""
@@ -4519,6 +4554,8 @@ performRestore() {
     local part_number=0
     local restoreparts=""
     local sfdiskoriginalpartitionfilename=""
+    local expansion_fixed_size_partitions
+    expansion_fixed_size_partitions=$(rootpxe_expansion_fixed_partitions "$fixed_size_partitions")
     [[ $imgType =~ [Nn] ]] && local tmpebrfilename=""
     for disk in $disks; do
         sfdiskoriginalpartitionfilename=""
@@ -4530,7 +4567,7 @@ performRestore() {
             [[ $imgType =~ [Nn] ]] && tmpEBRFileName "$disk_number" "$part_number"
             restorePartition "$restorepart" "$disk_number" "$imagePath" "$mc"
             [[ $imgType =~ [Nn] ]] && restoreEBR "$restorepart" "$tmpebrfilename"
-            [[ $imgType =~ [Nn] ]] && expandPartition "$restorepart" "$fixed_size_partitions"
+            [[ $imgType =~ [Nn] ]] && expandPartition "$restorepart" "$expansion_fixed_size_partitions"
             [[ $osid == +([5-7]) && $imgType =~ [Nn] ]] && fixWin7boot "$restorepart"
         done
         restoreparts=""

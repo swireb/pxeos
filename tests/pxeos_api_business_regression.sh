@@ -324,6 +324,13 @@ grep -Fq rootpxe_normalize_compression_level "$checkin" || fail parser
 grep -Fq rootpxe_find_windows_system_partition "$funcs" || fail selector
 grep -Fq 'rootpxe_apply_hostname_for_disk "$hd"' "$funcs" || fail complete-hostname-dispatch
 grep -Fq RESUME_TARGET_IDENTITY_UNAVAILABLE "$download" || fail resume
+# 单盘可调整布局必须在申请磁盘许可、擦盘和最终 sfdisk 写入之前先校验
+# 真实目标容量；避免小于捕获盘的目标盘被触及。
+pre_layout_validation_line=$(grep -n 'pre_permit_validation_failed' "$download" | head -n 1 | cut -d: -f1)
+permit_line=$(grep -n 'rootpxe_wait_for_disk_permit "$rootpxe_planned_target_id"' "$download" | head -n 1 | cut -d: -f1)
+prepare_line=$(grep -n 'Skipping partition layout (Single Partition restore)' "$download" | head -n 1 | cut -d: -f1)
+apply_layout_line=$(grep -n 'rootpxe_apply_deployment_layout' "$download" | head -n 1 | cut -d: -f1)
+[[ $pre_layout_validation_line =~ ^[1-9][0-9]*$ && $permit_line =~ ^[1-9][0-9]*$ && $prepare_line =~ ^[1-9][0-9]*$ && $apply_layout_line =~ ^[1-9][0-9]*$ && $pre_layout_validation_line -lt $permit_line && $permit_line -lt $prepare_line && $prepare_line -lt $apply_layout_line ]] || fail layout-capacity-validation-must-precede-permit-and-write
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -380,6 +387,7 @@ case "$*" in
   *'.schemaHash // empty'*) echo $SCHEMAHASH ;;
   *'schemaHash'*) echo hash ;;
   *'.logicalSectorBytes'*) echo $SCHEMA_SECTOR ;;
+  *'.originalDiskBytes'*) echo ${SCHEMA_ORIGINAL:-102400000} ;;
   *) cat ;;
 esac
 EOF
@@ -389,7 +397,7 @@ case "$1" in
   --getss) echo ${TEST_SECTOR:-512} ;;
   --getpbsz) echo 512 ;;
   --getsize64)
-    [[ ${MODE:-} == layout_apply ]] && echo 409600000 || echo 102400000
+    [[ ${MODE:-} == layout_apply ]] && echo ${TARGET_BYTES:-409600000} || echo 102400000
     ;;
   *) exit 1 ;;
 esac
@@ -776,20 +784,20 @@ rootpxe_build_original_schema /dev/mock $swapdir || fail primary-swap-schema
 grep -Fq '"role":"swap"' $rootpxe_original_schema_file || fail swap-role
 grep -Fq '"artifact":""' $rootpxe_original_schema_file || fail swap-artifact
 
-# Protected MBR/GPT roles are not a layout resizing target.  Original mode
-# preserves each protected partition's size; later partitions may move when
-# an earlier allowed data partition is resized.
+# 每个真实物理分区都可保存扩容策略；extended 容器仍仅可由逻辑分区
+# 派生。默认布局由后端保留给普通 data 分区的 remaining 策略。
 grep -Fq '== "0xef"' $funcs || fail mbr-efi
 grep -Fq '== "0x27"' $funcs || fail mbr-recovery
-grep -Fq 'resizable != true' $funcs || fail protected-layout
+grep -Fq 'original size violated' $funcs || fail grow-only-layout
+grep -Fq 'target_bytes >= original_disk_bytes' $funcs || fail target-original-capacity-guard
 grep -Fq 'align_down(($available-$used);$alignment)' $funcs || fail remaining-floor
 node -e 'const a=512,r=Math.floor((7000-3500)/a)*a;if(r!==3072||r%a)process.exit(1)' || fail remaining-oracle
 
 # Layout target capacity is converted through bytes into source Schema sectors:
 # a 102400000-byte 4Kn target remains 200000 512-byte Schema sectors.
 schema=$tmp/schema; layoutfile=$tmp/layout
-printf '{"logicalSectorBytes":512}\n' >$schema; printf '{}\n' >$layoutfile
-SCHEMA_SECTOR=512
+printf '{"logicalSectorBytes":512,"originalDiskBytes":102400000}\n' >$schema; printf '{}\n' >$layoutfile
+SCHEMA_SECTOR=512; SCHEMA_ORIGINAL=102400000
 SCHEMAHASH=$(rootpxe_canonical_json_hash $schema)
 TEST_SECTOR=4096
 export SCHEMA_SECTOR SCHEMAHASH TEST_SECTOR
@@ -803,7 +811,7 @@ grep -Fq -- '--argjson target 200000' $tmp/jq-args || fail target-byte-sector-co
 # passed to jq and independently pin the EBR-derived extent arithmetic.
 mbr_schema=$tmp/mbr-layout-schema
 mbr_layout=$tmp/mbr-layout
-printf '{"version":2,"partitionTable":"mbr","logicalSectorBytes":512,"partitions":[{"number":1,"kind":"extended","startSectors":2048,"originalSectors":8192,"ebrReservedSectors":2},{"number":5,"kind":"logical","parentNumber":1,"startSectors":2050,"originalSectors":2048,"minSectors":1024,"resizable":true,"role":"data"}]}' >$mbr_schema
+printf '{"version":2,"partitionTable":"mbr","logicalSectorBytes":512,"originalDiskBytes":102400000,"partitions":[{"number":1,"kind":"extended","startSectors":2048,"originalSectors":8192,"ebrReservedSectors":2},{"number":5,"kind":"logical","parentNumber":1,"startSectors":2050,"originalSectors":2048,"minSectors":1024,"resizable":true,"role":"data"}]}' >$mbr_schema
 SCHEMAHASH=$(rootpxe_canonical_json_hash $mbr_schema)
 printf '{"schemaHash":"%s","partitions":[{"number":1,"mode":"derived"},{"number":5,"mode":"original"}]}' "$SCHEMAHASH" >$mbr_layout
 schemaHash=$SCHEMAHASH; schemaRevision=1; SCHEMA_SECTOR=512; TEST_SECTOR=512
@@ -812,6 +820,29 @@ rootpxe_validate_deployment_layout /dev/mock $mbr_schema $mbr_layout || fail mbr
 grep -Fq 'extended container must be derived' $tmp/jq-args || fail mbr-derived-layout-jq-program
 node -e 'const logical=[{start:4098,size:2048},{start:8192,size:1024}],ebr=2,start=Math.min(...logical.map(p=>p.start))-ebr,end=Math.max(...logical.map(p=>p.start+p.size));if(start!==4096||end-start!==5120)process.exit(1)' || fail mbr-derived-layout-oracle
 TEST_SECTOR=4096; export TEST_SECTOR
+
+# 用真实 jq 执行解析器：目标容量在部署时才已知。100GB 源镜像到
+# 101/200/300GB 等更大目标均可解析，且每个叶子分区不小于原始大小；
+# 小于原始盘的目标和缩小 fixed 分区在写盘前拒绝。
+grow_schema=$tmp/grow-schema; grow_layout=$tmp/grow-layout
+cat >$grow_schema <<'EOF'
+{"version":1,"partitionTable":"gpt","originalDiskBytes":100000000,"logicalSectorBytes":512,"physicalSectorBytes":512,"minDeployBytes":50000000,"partitions":[{"number":1,"startSectors":2048,"originalSectors":90112,"minSectors":40000,"role":"efi","resizable":false},{"number":2,"startSectors":92160,"originalSectors":90112,"minSectors":30000,"role":"recovery","resizable":false}]}
+EOF
+MODE=layout_apply; export MODE
+SCHEMAHASH=$(rootpxe_canonical_json_hash $grow_schema)
+schemaHash=$SCHEMAHASH; schemaRevision=1
+for TARGET_BYTES in 101000192 200000000 300000256; do
+  export TARGET_BYTES
+  printf '{"version":1,"schemaHash":"%s","partitions":[{"number":1,"mode":"original"},{"number":2,"mode":"remaining"}]}' "$SCHEMAHASH" >$grow_layout
+  rootpxe_validate_deployment_layout /dev/mock $grow_schema $grow_layout || fail grow-only-target-$TARGET_BYTES
+  "$REAL_JQ" -e 'all(.[]; .resolvedSectors >= .originalSectors)' "$rootpxe_resolved_layout_file" >/dev/null || fail grow-only-leaf-$TARGET_BYTES
+done
+TARGET_BYTES=99999999; export TARGET_BYTES
+rootpxe_validate_deployment_layout /dev/mock $grow_schema $grow_layout >/dev/null 2>&1 && fail smaller-than-original-prewrite
+TARGET_BYTES=200000000; export TARGET_BYTES
+printf '{"version":1,"schemaHash":"%s","partitions":[{"number":1,"mode":"fixed","fixedBytes":46080000},{"number":2,"mode":"remaining"}]}' "$SCHEMAHASH" >$grow_layout
+rootpxe_validate_deployment_layout /dev/mock $grow_schema $grow_layout >/dev/null 2>&1 && fail fixed-shrink-prewrite
+unset TARGET_BYTES MODE
 
 # Sector mismatch is rejected before disk permit unless NVMe read-only LBAF
 # discovery succeeds.  This never runs nvme format.
@@ -883,6 +914,40 @@ rootpxe_apply_deployment_layout /dev/sda $layout_template || fail layout-apply-n
 LAYOUT_EXPECT_DISK=/dev/nvme0n1
 rootpxe_apply_deployment_layout /dev/nvme0n1 $layout_template || fail layout-apply-nvme-suffix
 unset MODE LAYOUT_EXPECT_DISK
+
+# Windows NTFS 恢复后，活动部署布局只允许实际扩大的物理分区绕过
+# 捕获时 fixed 列表；同一布局内保持原始大小的恢复/EFI 等分区仍须
+# 被抑制。历史无布局路径则对两者都保持原有抑制。
+EXPAND_TRACE=$tmp/expand-trace; : >$EXPAND_TRACE; export EXPAND_TRACE
+sfdiskOriginalPartitionFileName() { :; }
+getValidRestorePartitions() { restoreparts='/dev/mock1 /dev/mock2'; }
+getPartitionNumber() { part_number=${1##*mock}; }
+tmpEBRFileName() { :; }
+restorePartition() { :; }
+restoreEBR() { :; }
+expandPartition() { printf '%s|%s\n' "$1" "$2" >>$EXPAND_TRACE; }
+restoreUUIDInformation() { :; }
+makeAllSwapSystems() { :; }
+expansion_schema=$tmp/expansion-schema.json
+expansion_plan=$tmp/expansion-plan.json
+cat >$expansion_schema <<'EOF'
+{"version":2,"partitionTable":"mbr","originalDiskBytes":100000000,"logicalSectorBytes":512,"partitions":[{"number":1,"kind":"primary","originalSectors":1024},{"number":2,"kind":"primary","originalSectors":1024},{"number":3,"kind":"extended","originalSectors":2048}]}
+EOF
+cat >$expansion_plan <<'EOF'
+[{"number":1,"resolvedSectors":2048},{"number":2,"resolvedSectors":1024},{"number":3,"resolvedSectors":4096}]
+EOF
+imgType=n; osid=0; fixed_size_partitions=1:2:3
+originalSchemaFile=$expansion_schema
+rootpxe_resolved_layout_file=$expansion_plan
+MODE=layout_apply; export MODE
+performRestore /dev/mock $tmp all 0 || fail active-layout-restore
+grep -Fqx '/dev/mock1|2:3' $EXPAND_TRACE || fail active-layout-expanded-must-expand-ntfs
+grep -Fqx '/dev/mock2|2:3' $EXPAND_TRACE || fail active-layout-original-must-remain-fixed
+: >$EXPAND_TRACE
+unset rootpxe_resolved_layout_file originalSchemaFile MODE
+performRestore /dev/mock $tmp all 0 || fail legacy-restore
+grep -Fqx '/dev/mock1|1:2:3' $EXPAND_TRACE || fail legacy-first-fixed-list-must-remain
+grep -Fqx '/dev/mock2|1:2:3' $EXPAND_TRACE || fail legacy-second-fixed-list-must-remain
 
 # Resume is deliberately before layout validation and postinit, and must not
 # reinvoke image restoration after a hostname attention retry.  Execute the
