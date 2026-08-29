@@ -313,6 +313,10 @@ count=0
 [ -f "$count_file" ] && count=$(cat "$count_file")
 count=$((count + 1))
 printf '%s' "$count" > "$count_file"
+if [ "${MOCK_CURL_MODE:-transient}" = attention ]; then
+    printf '%s\n' ' { "success" : false, "status" : "attention", "error" : "捕获分区清单结构无效" }'
+    exit 0
+fi
 if [ "$count" -eq 1 ]; then
     printf '%s\n' 'transient finish error' >&2
     exit 7
@@ -357,6 +361,22 @@ assert_eq "$imgcomplete_rc" 0 '完成回调临时失败后应重试并成功'
 assert_eq "$(cat "$tmp/curl-count")" 2 '完成回调应执行两次 curl'
 [[ -f "$tmp/marker-cleared" && -f "$tmp/json-cleared" ]] || fail '成功后必须执行安全清理'
 pass 'finish retry survives bash errexit'
+
+# 红测：服务端已将任务转为 attention 时，完成回调不能继续重试并掩盖首个错误。
+set +e
+PATH="$tmp/bin:$PATH" BASH_ENV="$tmp/bash_env" MOCK_CURL_MODE=attention MOCK_CURL_COUNT="$tmp/attention-curl-count" \
+    MOCK_MARKER_CLEARED="$tmp/attention-marker-cleared" MOCK_JSON_CLEARED="$tmp/attention-json-cleared" \
+    type=down taskid=1 task_token=secret mac=001122334455 web='http://mock/' \
+    bash -e "$imgcomplete" >"$tmp/attention.out" 2>"$tmp/attention.err"
+attention_rc=$?
+set -e
+assert_eq "$attention_rc" 91 '服务端 attention 必须立刻进入故障等待，不能继续 finish 重试'
+assert_eq "$(cat "$tmp/attention-curl-count")" 1 '服务端 attention 后不得再次请求 finish'
+grep -Fq '"error" : "捕获分区清单结构无效"' "$tmp/attention.out" || fail '必须保留并输出服务端返回的首个错误'
+grep -Fq 'PXEOS_STAGE=finish_notify CODE=FINISH_REJECTED' "$tmp/attention.err" || fail 'attention 必须交给统一故障等待处理'
+[[ ! -e $tmp/attention-marker-cleared && ! -e $tmp/attention-json-cleared ]] || fail 'attention 时不得清理 capture marker 或任务上下文'
+! grep -Fq ' * Task Complete' "$tmp/attention.out" || fail 'attention 时不得误报 Task Complete'
+pass 'finish attention response stops retry and preserves the original error'
 
 # finish 已被服务端确认后，marker 的保守清理失败只能留下告警，不能把已完成
 # 的业务任务重新报告为失败或让终端显示提前完成。

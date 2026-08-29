@@ -42,6 +42,16 @@ while true; do
         rootpxe_cleanup_task_json
         break
     fi
+    # 服务端已接受失败并将任务转为 attention 时，继续 finish 只会收到
+    # "Task is not running"，从而掩盖此处返回的原始失败原因。
+    if echo "$res" | grep -q '"status"[[:space:]]*:[[:space:]]*"attention"'; then
+        echo "Failed"
+        debugPause
+        printf " * Error returned: %s" "$res"
+        echo
+        debugPause
+        handleError "PXEOS_STAGE=finish_notify CODE=FINISH_REJECTED REASON=rootpxe_finish_callback_attention RESPONSE=$res"
+    fi
     if [[ $count -lt 10 ]]; then
         echo "Failed"
         debugPause
