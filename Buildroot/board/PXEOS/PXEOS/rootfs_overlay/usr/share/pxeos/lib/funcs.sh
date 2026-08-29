@@ -159,7 +159,10 @@ rootpxe_lvm_capture_preflight() {
     vgs_rows=$(mktemp /tmp/rootpxe-lvm-vgs.XXXXXX) || { rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
     lvs_rows=$(mktemp /tmp/rootpxe-lvm-lvs.XXXXXX) || { rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
     chmod 600 "$rootpxe_lvm_facts_file" "$rootpxe_lvm_lv_facts_file" "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows" || { rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
-    if ! pvs --noheadings --separator '|' --units b --nosuffix -o pv_name,pv_uuid,vg_name,vg_uuid,pv_size,pe_start >"$pvs_rows" 2>/dev/null || [[ ! -s $pvs_rows ]]; then
+    # `pvs` exits successfully with no rows on an ordinary non-LVM disk.  It
+    # is not a topology failure: let the target-PV count below record the
+    # explicit non-LVM state instead of pausing every normal n capture.
+    if ! pvs --noheadings --separator '|' --units b --nosuffix -o pv_name,pv_uuid,vg_name,vg_uuid,pv_size,pe_start >"$pvs_rows" 2>/dev/null; then
         rootpxe_lvm_remove_probe_files "$pvs_rows" "$all_pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1
     fi
     while IFS='|' read -r pv_path pv_uuid vg_name vg_uuid pv_size pe_start; do
@@ -390,13 +393,15 @@ rootpxe_build_original_schema() {
              elif ($type|ascii_downcase) == "21686148-6449-6e6f-744e-656564454649" or ($flags|index("boot")) then "boot"
              elif (($type|ascii_downcase) == "e6d6d379-f507-44c2-a23c-238f2a3df928" or ($type|ascii_downcase) == "8e" or ($type|ascii_downcase) == "0x8e") then "lvm_pv"
              else "data" end;
-          (if ($lvm // "")|length > 0 then ($lvm|fromjson) else null end) as $lvmdata |
+          # `$ARGS.named` keeps the non-LVM case valid without declaring a
+          # jq variable that was never supplied by --rawfile.
+          (if ($ARGS.named.lvm // "")|length > 0 then ($ARGS.named.lvm|fromjson) else null end) as $lvmdata |
           (minmap) as $min | (factmap) as $facts |
           ($rows|split("\n")|map(select(length>0)|split("\t")|
             . as $row | ($facts[$row[0]] // {fs:"",uuid:"",partuuid:"",flags:[]}) as $fact |
             (($row[0]|tonumber)) as $number |
-            (if $row[7] == "extended" then "extended_container" elif ($lvmdata != null and [$lvmdata.pvs[]|select(.partitionNumber == $number)]|length == 1) then "lvm_pv" else role($row[3];$fact.flags;$fact.fs) end) as $role |
-            {number:$number,startSectors:($row[1]|tonumber),originalSectors:($row[2]|tonumber),minSectors:(if $row[7] == "extended" then 2 elif ($lvmdata != null and [$lvmdata.pvs[]|select(.partitionNumber == $number)]|length == 1) then (([$lvmdata.pvs[]|select(.partitionNumber == $number)][0].minBytes / $logical)|floor) else ($min[$row[0]] // ($row[2]|tonumber)) end),typeGuid:(if $version == 2 and $table == "mbr" then mbrtype($row[3]) else $row[3] end),flags:$fact.flags,role:$role,resizable:(($role == "data" and ($fact.fs|length) > 0) or $role == "lvm_pv"),fs:$fact.fs,uuid:$fact.uuid,partuuid:$fact.partuuid,artifact:(if $role == "swap" or $role == "lvm_pv" or $row[7] == "extended" then "" else ($row[5]|split("/")|last) end),_kind:(if $version == 2 and $row[7] == "" then "primary" else $row[7] end),_parent:($row[8] // "")})) as $base |
+            (if $row[7] == "extended" then "extended_container" elif ($lvmdata != null and ([$lvmdata.pvs[]|select(.partitionNumber == $number)]|length) == 1) then "lvm_pv" else role($row[3];$fact.flags;$fact.fs) end) as $role |
+            {number:$number,startSectors:($row[1]|tonumber),originalSectors:($row[2]|tonumber),minSectors:(if $row[7] == "extended" then 2 elif ($lvmdata != null and ([$lvmdata.pvs[]|select(.partitionNumber == $number)]|length) == 1) then (([$lvmdata.pvs[]|select(.partitionNumber == $number)][0].minBytes / $logical)|floor) else ($min[$row[0]] // ($row[2]|tonumber)) end),typeGuid:(if $version == 2 and $table == "mbr" then mbrtype($row[3]) else $row[3] end),flags:$fact.flags,role:$role,resizable:(($role == "data" and ($fact.fs|length) > 0) or $role == "lvm_pv"),fs:$fact.fs,uuid:$fact.uuid,partuuid:$fact.partuuid,artifact:(if $role == "swap" or $role == "lvm_pv" or $row[7] == "extended" then "" else ($row[5]|split("/")|last) end),_kind:(if $version == 2 and $row[7] == "" then "primary" else $row[7] end),_parent:($row[8] // "")})) as $base |
           (if $version == 2 then
             $base as $all | $base | map(. as $part | . + {
               kind:$part._kind
@@ -409,21 +414,117 @@ rootpxe_build_original_schema() {
           ({version:$version,partitionTable:$table,originalDiskBytes:$disk,logicalSectorBytes:$logical,physicalSectorBytes:$physical,minDeployBytes:([$parts[]|(.startSectors + .minSectors)*$logical]|max),partitions:$parts} + (if $lvmdata == null then {} else {lvm:$lvmdata} end))' >"$rootpxe_original_schema_file" || { rm -f "$parts_file" "$min_file" "$facts_file" "$rootpxe_original_schema_file"; return 1; }
     rm -f "$parts_file" "$min_file" "$facts_file"
     jq -e '
-      def base: (.logicalSectorBytes|type == "number" and . > 0) and
-        (.partitions|type == "array" and length > 0) and
+      def base:
+        .logicalSectorBytes as $logicalSectorBytes |
+        .originalDiskBytes as $originalDiskBytes |
+        (($logicalSectorBytes|type) == "number" and $logicalSectorBytes > 0) and
+        ((.partitions|type) == "array" and (.partitions|length) > 0) and
         ([.partitions[].number] as $numbers | ($numbers | unique | length) == ($numbers | length)) and
-        ([.partitions[] | select(.startSectors < 0 or .originalSectors <= 0 or .minSectors <= 0 or .minSectors > .originalSectors or (.startSectors + .originalSectors) * .logicalSectorBytes > .originalDiskBytes)] | length == 0);
+        ([.partitions[] | select(.startSectors < 0 or .originalSectors <= 0 or .minSectors <= 0 or .minSectors > .originalSectors or (.startSectors + .originalSectors) * $logicalSectorBytes > $originalDiskBytes)] | length == 0);
       if .version == 1 then
         (.partitionTable == "gpt" or .partitionTable == "dos" or .partitionTable == "mbr") and base
       elif .version == 2 then
-        base and ((.partitionTable == "gpt" and ([.partitions[]|select(.kind != "primary")]|length)==0) or (.partitionTable == "mbr" and (([.partitions[] | select(.kind == "extended")] | length == 0) or (([.partitions[] | select(.kind == "extended")] | length == 1) and ([.partitions[] | select(.kind == "extended" and (.number < 1 or .number > 4 or .role != "extended_container" or .artifact != "" or .resizable != false or .ebrReservedSectors != 2 or has("parentNumber")))] | length == 0) and ([.partitions[] | select(.kind == "logical" and (.number < 5 or (.parentNumber|type) != "number" or has("ebrReservedSectors") or has("logicalNumbers")))] | length == 0)))) and (if has("lvm") then (.lvm.version == 2 and (.lvm.pvs|length)==1 and (.lvm.vgs|length)==1) else true end)
+        base and
+        (if .partitionTable == "gpt" then
+           ([.partitions[] | select(.kind != "primary")] | length) == 0
+         elif .partitionTable == "mbr" then
+           (([.partitions[] | select(.kind == "extended")] | length) == 0) or
+           (([.partitions[] | select(.kind == "extended")] | length) == 1 and
+            ([.partitions[] | select(.kind == "extended" and (.number < 1 or .number > 4 or .role != "extended_container" or .artifact != "" or .resizable != false or .ebrReservedSectors != 2 or has("parentNumber")))] | length) == 0 and
+            ([.partitions[] | select(.kind == "logical" and (.number < 5 or (.parentNumber|type) != "number" or has("ebrReservedSectors") or has("logicalNumbers")))] | length) == 0)
+         else false end) and
+        (if has("lvm") then (.lvm.version == 2 and (.lvm.pvs|length)==1 and (.lvm.vgs|length)==1) else true end)
       else false end' "$rootpxe_original_schema_file" >/dev/null || { rm -f "$rootpxe_original_schema_file"; return 1; }
     export rootpxe_original_schema_file
 }
 
+# Partition inventory is a read-only capture fact.  It intentionally does not
+# reuse the n-type Schema/Layout contract: fixed images may contain several
+# disks and must never acquire editable deployment semantics merely because
+# their partition tables are displayed in RootPXE.
+rootpxe_build_partition_inventory_disk() {
+    local disk="$1" partitions_file="$2" disk_number="$3" rows enriched table logical physical bytes part_number part_start part_size part_type part_path fs uuid partuuid
+    command -v jq >/dev/null 2>&1 || return 1
+    logical=$(blockdev --getss "$disk" 2>/dev/null) || return 1
+    physical=$(blockdev --getpbsz "$disk" 2>/dev/null || printf '%s' "$logical")
+    bytes=$(blockdev --getsize64 "$disk" 2>/dev/null) || return 1
+    [[ $disk_number =~ ^[1-9][0-9]*$ && $logical =~ ^[1-9][0-9]*$ && $physical =~ ^[1-9][0-9]*$ && $bytes =~ ^[1-9][0-9]*$ ]] || return 1
+    table=none
+    if [[ -r $partitions_file ]]; then
+        table=$(awk '/^label:/{print tolower($2); exit}' "$partitions_file")
+        [[ $table == dos ]] && table=mbr
+        [[ $table == gpt || $table == mbr ]] || return 1
+    fi
+    rows=$(mktemp /tmp/rootpxe-inventory-rows.XXXXXX) || return 1
+    chmod 600 "$rows" || { rm -f "$rows"; return 1; }
+    if [[ $table != none ]]; then
+        awk '
+          /start=/ {
+            dev=$1; n=dev; sub(/^.*[^0-9]/,"",n)
+            split($0,a,","); start=a[1]; sub(/.*start=[[:space:]]*/,"",start)
+            size=a[2]; sub(/.*size=[[:space:]]*/,"",size)
+            type=a[3]; sub(/.*(type|Id)=[[:space:]]*/,"",type)
+            if (n !~ /^[1-9][0-9]*$/ || start !~ /^[0-9]+$/ || size !~ /^[1-9][0-9]*$/) exit 1
+            printf "%s\t%s\t%s\t%s\n", n,start,size,type
+          }' "$partitions_file" >"$rows" || { rm -f "$rows"; return 1; }
+    fi
+    enriched=$(mktemp /tmp/rootpxe-inventory-facts.XXXXXX) || { rm -f "$rows"; return 1; }
+    chmod 600 "$enriched" || { rm -f "$rows" "$enriched"; return 1; }
+    while IFS=$'\t' read -r part_number part_start part_size part_type; do
+        if [[ $disk == *[0-9] ]]; then part_path="${disk}p${part_number}"; else part_path="${disk}${part_number}"; fi
+        fs=$(blkid -s TYPE -o value "$part_path" 2>/dev/null | tr -d '\r\n')
+        uuid=$(blkid -s UUID -o value "$part_path" 2>/dev/null | tr -d '\r\n')
+        partuuid=$(blkid -s PARTUUID -o value "$part_path" 2>/dev/null | tr -d '\r\n')
+        [[ $fs != *$'\t'* && $uuid != *$'\t'* && $partuuid != *$'\t'* ]] || { rm -f "$rows" "$enriched"; return 1; }
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$part_number" "$part_start" "$part_size" "$part_type" "$fs" "$uuid" "$partuuid" >>"$enriched" || { rm -f "$rows" "$enriched"; return 1; }
+    done <"$rows"
+    mv "$enriched" "$rows" || { rm -f "$rows" "$enriched"; return 1; }
+    jq -cn --argjson number "$disk_number" --arg device "$disk" --arg table "$table" \
+        --argjson bytes "$bytes" --argjson logical "$logical" --argjson physical "$physical" --rawfile rows "$rows" '
+          {number:$number,sourceDevice:$device,partitionTable:$table,originalDiskBytes:$bytes,logicalSectorBytes:$logical,physicalSectorBytes:$physical,
+           partitions:($rows|split("\n")|map(select(length>0)|split("\t")|{number:(.[0]|tonumber),startSectors:(.[1]|tonumber),originalSectors:(.[2]|tonumber),typeGuid:.[3],fs:.[4],uuid:.[5],partuuid:.[6]}))}'
+    local result=$?
+    rm -f "$rows"
+    return $result
+}
+
+# `$4` is the full hardware disk list used by mpa capture.  It is traversed
+# with the exact same "has partitions" rule as pxeos.upload, preserving dN
+# numbering without persisting transient source device names as artifacts.
+rootpxe_build_partition_inventory() {
+    local capture_path="$1" image_type="$2" primary_disk="$3" all_disks="$4" inventory_rows disk disk_number=1 partitions_file
+    command -v jq >/dev/null 2>&1 || return 1
+    inventory_rows=$(mktemp /tmp/rootpxe-inventory-disks.XXXXXX) || return 1
+    chmod 600 "$inventory_rows" || { rm -f "$inventory_rows"; return 1; }
+    if [[ $image_type == mpa ]]; then
+        for disk in $all_disks; do
+            [[ $disk =~ mmcblk[0-9]+boot[0-9]+ ]] && continue
+            getPartitions "$disk"
+            [[ -n ${parts:-} ]] || continue
+            partitions_file="$capture_path/d${disk_number}.partitions"
+            rootpxe_build_partition_inventory_disk "$disk" "$partitions_file" "$disk_number" >>"$inventory_rows" || { rm -f "$inventory_rows"; return 1; }
+            disk_number=$((disk_number + 1))
+        done
+    else
+        # dd can image an intentionally unpartitioned disk.  A missing
+        # d1.partitions is represented as table=none and an empty partition
+        # list, while other image types require their captured table.
+        partitions_file="$capture_path/d1.partitions"
+        if [[ $image_type != dd && ! -r $partitions_file ]]; then rm -f "$inventory_rows"; return 1; fi
+        rootpxe_build_partition_inventory_disk "$primary_disk" "$partitions_file" 1 >>"$inventory_rows" || { rm -f "$inventory_rows"; return 1; }
+    fi
+    [[ -s $inventory_rows ]] || { rm -f "$inventory_rows"; return 1; }
+    rootpxe_partition_inventory_file=$(mktemp /tmp/rootpxe-partition-inventory.XXXXXX) || { rm -f "$inventory_rows"; return 1; }
+    chmod 600 "$rootpxe_partition_inventory_file"
+    jq -n --rawfile disks "$inventory_rows" '{version:1,disks:($disks|split("\n")|map(select(length>0)|fromjson))}' >"$rootpxe_partition_inventory_file" || { rm -f "$inventory_rows" "$rootpxe_partition_inventory_file"; unset rootpxe_partition_inventory_file; return 1; }
+    rm -f "$inventory_rows"
+    jq -e '.version == 1 and ((.disks|type) == "array" and (.disks|length) > 0) and ([.disks[] | select(.number < 1 or (.partitionTable != "gpt" and .partitionTable != "mbr" and .partitionTable != "none") or .originalDiskBytes <= 0 or .logicalSectorBytes <= 0 or .physicalSectorBytes < .logicalSectorBytes or (.partitionTable == "none" and (.partitions|length) != 0))] | length == 0)' "$rootpxe_partition_inventory_file" >/dev/null || { rm -f "$rootpxe_partition_inventory_file"; unset rootpxe_partition_inventory_file; return 1; }
+    export rootpxe_partition_inventory_file
+}
+
 rootpxe_cleanup_task_json() {
-    rm -f -- "${deploymentLayoutFile:-}" "${originalSchemaFile:-}" "${rootpxe_original_schema_file:-}"
-    unset deploymentLayoutFile originalSchemaFile rootpxe_original_schema_file
+    rm -f -- "${deploymentLayoutFile:-}" "${originalSchemaFile:-}" "${rootpxe_original_schema_file:-}" "${rootpxe_partition_inventory_file:-}"
+    unset deploymentLayoutFile originalSchemaFile rootpxe_original_schema_file rootpxe_partition_inventory_file
 }
 
 rootpxe_cleanup_session() {
@@ -559,10 +660,10 @@ rootpxe_validate_lvm_deployment_layout() {
       ($s.lvm) as $ls | ($l.lvm // []) as $ll |
       if ($ls.version != 2 or ($ls.pvs|length)!=1 or ($ls.vgs|length)!=1 or ($ll|length)!=1) then error("invalid lvm topology") else . end |
       ($ls.pvs[0]) as $pv | ($ls.vgs[0]) as $vg | ($ll[0]) as $plan |
-      if ($pv.vgUuid != $vg.uuid or $pv.partitionNumber != $vg.pvPartitionNumbers[0] or $plan.pvPartitionNumber != $pv.partitionNumber or ($plan.freeSpacePolicy|IN("preserveOriginal","allocateToRemaining")|not) or ($plan.volumes|length) != ($vg.lvs|length) then error("lvm identity mismatch") else . end |
+      if ($pv.vgUuid != $vg.uuid or $pv.partitionNumber != $vg.pvPartitionNumbers[0] or $plan.pvPartitionNumber != $pv.partitionNumber or ($plan.freeSpacePolicy|IN("preserveOriginal","allocateToRemaining")|not) or ($plan.volumes|length) != ($vg.lvs|length)) then error("lvm identity mismatch") else . end |
       ([$resolved[] | select(.number == $pv.partitionNumber)]|if length==1 then .[0] else error("resolved pv missing") end) as $resolvedPV |
       ($resolvedPV.resolvedSectors * $s.logicalSectorBytes) as $pvBytes |
-      if ($pvBytes < $pv.minBytes or $pv.peStartBytes < 0 or $pv.peStartBytes >= $pvBytes then error("invalid pv capacity") else . end |
+      if ($pvBytes < $pv.minBytes or $pv.peStartBytes < 0 or $pv.peStartBytes >= $pvBytes) then error("invalid pv capacity") else . end |
       (((($pvBytes - $pv.peStartBytes - (if $plan.freeSpacePolicy == "preserveOriginal" then $vg.originalFreeBytes else 0 end)) / $vg.extentBytes)|floor) * $vg.extentBytes) as $capacity |
       if $capacity < 0 then error("pv capacity exhausted") else . end |
       [range(0;($vg.lvs|length)) as $i | ($vg.lvs[$i]) as $lv | ($plan.volumes[$i]) as $v |
@@ -573,10 +674,13 @@ rootpxe_validate_lvm_deployment_layout() {
         if ($v.mode == "original" or $v.mode == "remaining") and ($v|has("fixedBytes") or has("percentage")) then error("unexpected lvm fields") else . end |
         {schema:$lv,layout:$v}] as $items |
       if ([$items[].layout|select(.mode=="remaining")]|length)>1 or ([$items[].layout|select(.mode=="percentage")|.percentage]|add//0)>100 then error("lvm mode totals") else . end |
-      ($items|map(. + {bytes:modebytes((.schema + .layout);$capacity;$vg.extentBytes)})) as $pre |
+      ($items | map(. + {bytes:modebytes((.schema + .layout);$capacity;$vg.extentBytes)})) as $pre |
       ($pre|map(.bytes)|add) as $used |
       if $used > $capacity then error("lvm capacity exceeded") else . end |
-      (reduce $pre[] as $item ({out:[]}; ($item.schema + {resolvedBytes:(if $item.layout.mode == "remaining" then ((($capacity-$used)/$vg.extentBytes|floor)*$vg.extentBytes) else $item.bytes end)}) as $entry | if $entry.resolvedBytes < $entry.minBytes then error("lvm minimum") else .out += [$entry] end)) as $volumes |
+      (reduce $pre[] as $item ({out:[]};
+        ($item.schema + {resolvedBytes:(if $item.layout.mode == "remaining" then ((($capacity-$used)/$vg.extentBytes|floor)*$vg.extentBytes) else $item.bytes end)}) as $entry |
+        if $entry.resolvedBytes < $entry.minBytes then error("lvm minimum") else .out += [$entry] end
+       ) | .out) as $volumes |
       if ([$volumes[]|.resolvedBytes]|add) > $capacity then error("lvm resolved capacity") else {pv:$pv,vg:$vg,pvBytes:$pvBytes,freeSpacePolicy:$plan.freeSpacePolicy,volumes:$volumes} end' >"$rootpxe_resolved_lvm_layout_file" || { rm -f "$rootpxe_resolved_lvm_layout_file"; unset rootpxe_resolved_lvm_layout_file; return 1; }
     export rootpxe_resolved_lvm_layout_file
 }

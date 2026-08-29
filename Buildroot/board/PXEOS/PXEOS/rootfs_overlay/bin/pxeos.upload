@@ -234,6 +234,10 @@ beginUpload() {
             ;;
         dd)
             imgpart="$imagePath/$img"
+            # A raw image may be intentionally unpartitioned.  Keep a best
+            # effort sfdisk dump for the read-only inventory but never turn a
+            # missing table into a capture failure.
+            sfdisk -d "$hd" >"$imagePath/d1.partitions" 2>/dev/null || rm -f "$imagePath/d1.partitions"
             # uploadFormat owns checked FIFO creation; remove any stale task FIFO first.
             rm -f /tmp/pigz1 >/dev/null 2>&1 || handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_SETUP_FAILED REASON=unable_to_clear_capture_fifo"
             uploadFormat "/tmp/pigz1" "$imgpart"

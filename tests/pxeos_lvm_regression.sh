@@ -124,6 +124,7 @@ rootpxe_lvm_trim() {
 pvs() {
   case " $* " in
     *' pv_name,pv_uuid,vg_name,vg_uuid,pv_size,pe_start '*)
+      [[ ${LVM_MODE:-ok} == none ]] && return 0
       printf ' /dev/mock1 | pv-1 | vg0 | vg-1 | 268435456 | 1048576\n'; [[ ${PVS_FAIL:-0} != 1 ]] || return 1
       [[ ${LVM_MODE:-ok} != multi ]] || printf ' /dev/mock1 | pv-2 | vg0 | vg-1 | 268435456 | 1048576\n'; return 0 ;;
     *' pv_name,vg_uuid '*)
@@ -148,6 +149,10 @@ rootpxe_wait_for_writer() { [[ ${WRITER_FAIL:-0} != 1 ]]; }
 # Legal preflight/capture executes real helper branches; it occurs before any permit.
 rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" || fail legal-preflight
 [[ $rootpxe_lvm_active == yes && $rootpxe_lvm_pv_number == 1 ]] || fail facts
+export LVM_MODE=none
+rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" || fail non-lvm-preflight
+[[ ${rootpxe_lvm_active:-} == no && -z ${rootpxe_lvm_facts_file:-} && -z ${rootpxe_lvm_lv_facts_file:-} ]] || fail non-lvm-facts
+unset LVM_MODE
 for command_failure in PVS_FAIL PVS_ALL_FAIL VGS_FAIL LVS_FAIL; do
   export "$command_failure"=1
   rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail "$command_failure-process-substitution-hidden"

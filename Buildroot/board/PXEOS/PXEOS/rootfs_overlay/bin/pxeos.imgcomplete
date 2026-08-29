@@ -9,6 +9,7 @@ res=""
 if [[ ${type:-} == "up" ]]; then
     rootpxe_stage finalizing "moving captured image into final path"
     rootpxe_finalize_capture || handleError "PXEOS_STAGE=capture_finalize CODE=${rootpxe_finalize_capture_error_code:-CAPTURE_FINALIZE_FAILED} REASON=${rootpxe_finalize_capture_error_reason:-unsafe_finalize_state}"
+    rootpxe_build_partition_inventory "$rootpxe_final_capture_path" "$imgType" "$hd" "${disks:-}" || handleError "PXEOS_STAGE=capture_inventory CODE=PARTITION_INVENTORY_INVALID REASON=capture_partition_facts_unavailable"
     if [[ ${imgType:-} == [Nn] ]]; then
         rootpxe_build_original_schema "$hd" "$rootpxe_final_capture_path" || handleError "PXEOS_STAGE=capture_schema CODE=ORIGINAL_SCHEMA_INVALID REASON=capture_facts_or_artifacts_unavailable"
     fi
@@ -22,6 +23,7 @@ finish_args=(
     --data-urlencode "message=pxeos imgcomplete type=$type"
 )
 [[ -n ${capture_size_bytes:-} ]] && finish_args+=(--data-urlencode "sizeBytes=$capture_size_bytes")
+[[ -n ${rootpxe_partition_inventory_file:-} ]] && finish_args+=(--data-urlencode "partitionInventory=$(cat "$rootpxe_partition_inventory_file")")
 [[ -n ${rootpxe_original_schema_file:-} ]] && finish_args+=(--data-urlencode "originalSchema=$(cat "$rootpxe_original_schema_file")")
 dots "Notifying RootPXE (finish)"
 while true; do
