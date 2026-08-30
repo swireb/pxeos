@@ -77,7 +77,7 @@ case $avmode in
         ;;
 esac
 for disk in $disks; do
-    dots "Using disk"
+    dots "Using disk device"
     echo "$disk"
     debugPause
     getPartitions "$disk"

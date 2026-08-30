@@ -2,6 +2,13 @@
 . /usr/share/pxeos/lib/funcs.sh
 clearScreen
 displayBanner
+display_registration_response() {
+    local level="$1" response="$2" response_line=""
+    while IFS= read -r response_line || [[ -n $response_line ]]; do
+        [[ -n $response_line ]] || continue
+        rootpxe_console_message "$level" "Server response: $response_line"
+    done <<< "$response"
+}
 disks=""
 disk=""
 hd=""
@@ -56,7 +63,7 @@ caseserial64=""
 caseasset64=""
 dots "Using disk device"
 echo 'Done'
-rootpxe_console_message INFO "Using disk device: $hd"
+rootpxe_console_message INFO "Using disk device: $hd."
 rootpxe_console_message INFO 'Starting host registration.'
 mac=$(getMACAddresses | base64)
 sysuuid=$(dmidecode -s system-uuid)
@@ -100,7 +107,7 @@ setIDs() {
                 IFS=$'\n'
                 for line in $res; do
                     let i+=1
-                    echo $line
+                    rootpxe_console_message INFO "$line"
                     if [[ $i -eq $max ]]; then
                         [[ $csvstyle =~ [Tt][Rr][Uu][Ee] ]] \
                             && rootpxe_console_prompt INFO "Press Enter or enter $str IDs separated by commas: " \
@@ -172,7 +179,10 @@ while [[ $res != "#!ok" ]]; do
     fi
     host=$(echo $host | base64)
     res=$(curl -Lks --data "host=$host" ${web}service/hostnameloop.php 2>/dev/null)
-    [[ $res != "#!ok" ]] && echo "$res"
+    if [[ $res != "#!ok" ]]; then
+        rootpxe_console_message WARN 'Hostname is unavailable. Please choose another name.'
+        display_registration_response WARN "$res"
+    fi
 done
 imageid=""
 setIDs "imageid" "image" "" "" 20
@@ -346,8 +356,9 @@ dots "Attempting to register host"
 res=""
 while [[ -z $res ]]; do
     res=$(curl -Lks --data "sysuuid=${sysuuid}&mac=$mac&advanced=$(echo -n 1 | base64)&host=$host&imageid=$imageid&primaryuser=$primaryuser&other1=$other1&other2=$other2&doimage=$realdoimage&doad=$blDoAD&location=$location64&username=$user64&password=$pass64&groupid=$group64&snapinid=$snapin64&productKey=$productKey" ${web}service/auto.register.php 2>/dev/null)
-    echo "$res"
     usleep 2000000
 done
+echo 'Done'
+display_registration_response INFO "$res"
 . /bin/pxeos.inventory
 usleep 2000000

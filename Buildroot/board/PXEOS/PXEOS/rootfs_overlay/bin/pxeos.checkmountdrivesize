@@ -1,21 +1,21 @@
 #!/bin/bash
-dots "Checking Server Disk Space"
+dots "Checking server disk space"
 getServerDiskSpaceUsage=$(df -h | grep "/storage" | sed -n '/dev/{s/  */ /gp}')
 echo "Done"
 
-dots "Server Disk Size Total"
+dots "Server disk size total"
 serverDiskSizeTotal=$(echo "$getServerDiskSpaceUsage" | cut -d ' ' -f2)
 echo "$serverDiskSizeTotal"
 
-dots "Server Disk Size Used"
+dots "Server disk size used"
 serverDiskSizeUsed=$(echo "$getServerDiskSpaceUsage" | cut -d ' ' -f3)
 echo "$serverDiskSizeUsed"
 
-dots "Server Disk Size Used Percentage"
+dots "Server disk size used percentage"
 serverDiskSizeUsedPercent=$(echo "$getServerDiskSpaceUsage" | cut -d ' ' -f5)
 echo "$serverDiskSizeUsedPercent"
 
-dots "Server Disk Size Available"
+dots "Server disk size available"
 serverDiskSizeAvailable=$(echo "$getServerDiskSpaceUsage" | cut -d ' ' -f4)
 [[ $serverDiskSizeAvailable == "0" ]] && serverDiskSizeAvailable="0M"
 echo "$serverDiskSizeAvailable"

@@ -2,7 +2,7 @@
 umount /ntfs >/dev/null 2>&1
 umount /storage >/dev/null 2>&1
 umount /bcdstore >/dev/null 2>&1
-dots "Mounting File System"
+dots "Mounting file system"
 [[ ! -L /storage && ( ! -e /storage || -d /storage ) ]] || handleError "Storage mount point is unsafe ($0)"
 if [[ ! -d /storage ]]; then
     mkdir -p /storage >/dev/null 2>&1

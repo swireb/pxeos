@@ -112,8 +112,8 @@ must_not_have_literal "$overlay/bin/pxeos.checkin" 'smb_domain_b64'
 must_not_have_literal "$overlay/bin/pxeos.checkin" 'curl -Lksf'
 must_have "$overlay/bin/pxeos.checkin" "-w \$'\\n%{http_code}'"
 must_have "$overlay/bin/pxeos.checkin" '[[ $http_code =~ ^4[0-9][0-9]$ ]]'
-must_have "$overlay/bin/pxeos.checkin" '[INFO]  Task aborted or withdrawn. Stopping PXEOS.'
-must_have "$overlay/bin/pxeos.checkin" '[WARN]  Check-in not confirmed. Retrying in 5s.'
+must_have "$overlay/bin/pxeos.checkin" "rootpxe_console_message INFO 'Task aborted or withdrawn. Stopping PXEOS.'"
+must_have "$overlay/bin/pxeos.checkin" "rootpxe_console_message WARN 'Check-in not confirmed. Retrying in 5s.'"
 must_have "$overlay/bin/pxeos.checkin" 'exit "$checkin_rc"'
 must_have "$overlay/bin/pxeos.mount" '${storage_export}" /storage'
 awk '/^rootpxe_validate_smb_export\(\)/ { on=1 } /^rootpxe_storage_path\(\)/ { on=0 } on { print }' \

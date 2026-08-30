@@ -1285,8 +1285,37 @@ awk '/^rootpxe_console_message\(\)/ { copy = 1 } /^# Appends dots/ { exit } copy
 awk '/^dots\(\)/ { copy = 1 } /^# Enables write caching/ { exit } copy' "$funcs" >"$tmp/dots.sh"
 awk '/^handleError\(\)/ { copy = 1 } /^# Re-reads the partition table/ { exit } copy' "$funcs" >"$tmp/handlers.sh"
 awk '/^displayBanner\(\)/ { copy = 1 } /^# Gets all system mac addresses except for loopback/ { exit } copy' "$funcs" >"$tmp/banner.sh"
+awk '/^pxeos_init_message\(\)/ { copy = 1 } /^# SSH/ { exit } copy' "$overlay/etc/init.d/S99pxeos" >"$tmp/init-console.sh"
+awk '/^display_registration_response\(\)/ { copy = 1 } /^disks=/{ exit } copy' "$overlay/bin/pxeos.auto.reg" >"$tmp/auto-registration-response.sh"
+awk '/^display_registration_response\(\)/ { copy = 1 } /^disks=/{ exit } copy' "$overlay/bin/pxeos.man.reg" >"$tmp/manual-registration-response.sh"
 [[ -s $tmp/console.sh ]] || fail 'console formatter was not extracted'
 [[ -s $tmp/banner.sh ]] || fail 'console banner was not extracted'
+[[ -s $tmp/init-console.sh ]] || fail 'init console formatter was not extracted'
+[[ -s $tmp/auto-registration-response.sh ]] || fail 'automatic registration response formatter was not extracted'
+[[ -s $tmp/manual-registration-response.sh ]] || fail 'manual registration response formatter was not extracted'
+
+(
+    . "$tmp/init-console.sh"
+    pxeos_init_message WARN 'Init formatter test.'
+) >"$tmp/init-console.out"
+[[ $(cat "$tmp/init-console.out") == '[WARN]  Init formatter test.' ]] || fail 'init console formatter must match the common level/body layout'
+must_fit "$(cat "$tmp/init-console.out")"
+
+(
+    . "$tmp/console.sh"
+    . "$tmp/auto-registration-response.sh"
+    display_registration_response $'#!ok\nregistered'
+) >"$tmp/auto-registration-response.out"
+grep -Fqx '[INFO]  Server response: #!ok' "$tmp/auto-registration-response.out" || fail 'automatic registration must render the first response line safely'
+grep -Fqx '[INFO]  Server response: registered' "$tmp/auto-registration-response.out" || fail 'automatic registration must render every response line safely'
+
+(
+    . "$tmp/console.sh"
+    . "$tmp/manual-registration-response.sh"
+    display_registration_response WARN $'name in use\nchoose another'
+) >"$tmp/manual-registration-response.out"
+grep -Fqx '[WARN]  Server response: name in use' "$tmp/manual-registration-response.out" || fail 'manual registration warning must render the first response line safely'
+grep -Fqx '[WARN]  Server response: choose another' "$tmp/manual-registration-response.out" || fail 'manual registration warning must render every response line safely'
 
 (
     . "$tmp/console.sh"
@@ -1437,42 +1466,42 @@ while IFS= read -r line; do
     must_fit "$line"
 done <"$tmp/long.out"
 
-must_have "$overlay/bin/pxeos.checkin" '[WARN]  Check-in not confirmed. Retrying in 5s.'
-must_have "$overlay/bin/pxeos.checkin" '[INFO]  SSH is available for troubleshooting.'
-must_have "$overlay/bin/pxeos.checkin" '[INFO]  Task aborted or withdrawn. Stopping PXEOS.'
-must_have "$overlay/bin/pxeos.checkin" '[INFO]  Checking in with RootPXE.'
+must_have "$overlay/bin/pxeos.checkin" "rootpxe_console_message WARN 'Check-in not confirmed. Retrying in 5s.'"
+must_have "$overlay/bin/pxeos.checkin" "rootpxe_console_message INFO 'SSH is available for troubleshooting.'"
+must_have "$overlay/bin/pxeos.checkin" "rootpxe_console_message INFO 'Task aborted or withdrawn. Stopping PXEOS.'"
+must_have "$overlay/bin/pxeos.checkin" "rootpxe_console_message INFO 'Checking in with RootPXE.'"
 must_have "$overlay/bin/pxeos.checkin" 'rootpxe_console_message INFO "$waitMsg"'
 must_have "$overlay/bin/pxeos.checkin" 'rootpxe_console_message INFO "Retrying in ${retryAfterSec}s."'
 must_have "$overlay/bin/pxeos.checkin" 'rootpxe_console_message INFO "Storage protocol: ${protocol^^}"'
-must_have "$overlay/bin/pxeos.checkin" '[INFO]  Check-in completed.'
+must_have "$overlay/bin/pxeos.checkin" "rootpxe_console_message INFO 'Check-in completed.'"
 must_not_have "$overlay/bin/pxeos.checkin" 'dots "Check in (RootPXE)"'
 must_not_have "$overlay/bin/pxeos.checkin" 'dots "$waitMsg"'
 must_not_have "$overlay/bin/pxeos.checkin" 'echo "Done"'
-must_have "$overlay/bin/pxeos.upload" "rootpxe_console_message INFO 'Preparing to send image file to server'"
-must_have "$overlay/bin/pxeos.upload" 'rootpxe_console_message INFO "Using Image: $img"'
+must_have "$overlay/bin/pxeos.upload" "rootpxe_console_message INFO 'Preparing to send image file to server.'"
+must_have "$overlay/bin/pxeos.upload" 'rootpxe_console_message INFO "Using image: $img."'
 must_have "$overlay/bin/pxeos.upload" "rootpxe_console_message INFO 'Capturing image with Partclone.'"
 must_not_have "$overlay/bin/pxeos.upload" 'echo " * Preparing to send image file to server"'
-must_have "$overlay/bin/pxeos.download" 'rootpxe_console_message INFO "Using Image: $img"'
-must_have "$overlay/bin/pxeos.download" "rootpxe_console_message INFO 'Preparing Partition layout'"
+must_have "$overlay/bin/pxeos.download" 'rootpxe_console_message INFO "Using image: $img."'
+must_have "$overlay/bin/pxeos.download" "rootpxe_console_message INFO 'Preparing partition layout.'"
 must_not_have "$overlay/bin/pxeos.download" 'echo " * Preparing Partition layout"'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message INFO "Using Disk: $hd"'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message INFO "Using Hard Disk: $hd"'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message WARN "No partitions for disk $disk"'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message INFO "Using Hard Disks: $disks"'
-must_have "$overlay/bin/pxeos.download" '[INFO]  Task aborted or deleted. Stopping PXEOS.'
-must_have "$overlay/etc/init.d/S99pxeos" '[INFO]  Task completed. Powering off.'
-must_have "$overlay/etc/init.d/S99pxeos" '[INFO]  Task completed. Rebooting.'
-must_have "$overlay/etc/init.d/S99pxeos" '[WARN]  Task exited with code: $rc.'
-must_have "$overlay/etc/init.d/S99pxeos" '[INFO]  Running configured failure action: $failure_action.'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message INFO "Using disk device: $hd."'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message WARN "No partitions found for disk device: $disk."'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message INFO "Using disk devices: $disks."'
+must_have "$overlay/bin/pxeos.download" "rootpxe_console_message INFO 'Task aborted or deleted. Stopping PXEOS.'"
+must_have "$overlay/bin/pxeos.download" "rootpxe_console_message WARN 'Disk permit wait was interrupted. Retrying in 5s.'"
+must_have "$overlay/etc/init.d/S99pxeos" 'pxeos_init_message INFO '\''Task completed. Powering off.'\'''
+must_have "$overlay/etc/init.d/S99pxeos" 'pxeos_init_message INFO '\''Task completed. Rebooting.'\'''
+must_have "$overlay/etc/init.d/S99pxeos" 'pxeos_init_message WARN "Task exited with code: $rc."'
+must_have "$overlay/etc/init.d/S99pxeos" 'pxeos_init_message INFO "Running configured failure action: $failure_action."'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  Disk permission not confirmed. Retrying in 5s.'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  Error report failed. Retrying in 5s.'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  Error report not confirmed. Retrying in 5s.'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[ERROR] Task paused. Error reported to RootPXE.'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[INFO]  Select Retry in the web UI to resume.'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[INFO]  Timeout: ${wait}s. Timeout action: $action.'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  Wait timed out. Timeout action: $action.'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[INFO]  Retry requested. Resuming task.'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[INFO]  Task deleted or aborted. Stopping PXEOS.'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" "rootpxe_console_message ERROR 'Task paused. Error reported to RootPXE.'"
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" "rootpxe_console_message INFO 'Select Retry in the web UI to resume.'"
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message INFO "Timeout: ${wait}s. Timeout action: $action."'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message WARN "Wait timed out. Timeout action: $action."'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" "rootpxe_console_message INFO 'Retry requested. Resuming task.'"
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" "rootpxe_console_message INFO 'Task deleted or aborted. Stopping PXEOS.'"
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[ERROR] Operation failed.'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  Operation warning.'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  System will reboot in 60s.'
@@ -1488,6 +1517,38 @@ must_have "$overlay/etc/init.d/K40network" "printf '%-7s %s\\n' '[INFO]' \"Stopp
 must_have "$overlay/bin/pxeos.sysinfo" "rootpxe_console_message WARN 'Hardware compatibility checks failed.'"
 must_not_have "$overlay/bin/pxeos.sysinfo" 'FOG'
 must_not_have "$overlay/bin/pxeos.sysinfo" '####'
+must_not_have "$overlay/bin/pxeos.inventory" '+---------------------------+'
+must_not_have "$overlay/bin/pxeos.sysinfo" '=================================================='
+must_not_have "$overlay/bin/pxeos.sysinfo" "System MAC Address'"
+must_have "$overlay/bin/pxeos.inventory" "inventory_section 'System information'"
+must_have "$overlay/bin/pxeos.inventory" 'rootpxe_console_message INFO "$label: $value"'
+must_have "$overlay/bin/pxeos.sysinfo" "rootpxe_console_message INFO 'Network information:'"
+must_have "$overlay/bin/pxeos.sysinfo" 'rootpxe_console_message INFO "Network: $blNicOk."'
+must_have "$overlay/bin/pxeos.sysinfo" 'rootpxe_console_message INFO "Disk device: $blHddOk."'
+must_have "$overlay/bin/pxeos.sysinfo" 'rootpxe_console_message INFO "System MAC address: $mac"'
+must_have "$overlay/bin/pxeos.auto.reg" 'rootpxe_console_message INFO "Server response: $response_line"'
+must_have "$overlay/bin/pxeos.man.reg" 'rootpxe_console_message "$level" "Server response: $response_line"'
+must_have "$overlay/bin/pxeos.man.reg" 'display_registration_response WARN "$res"'
+must_have "$overlay/bin/pxeos.man.reg" 'display_registration_response INFO "$res"'
+must_have "$overlay/bin/pxeos.man.reg" 'rootpxe_console_message INFO "$line"'
+must_not_have "$overlay/bin/pxeos.auto.reg" 'echo "$res"'
+must_not_have "$overlay/bin/pxeos.man.reg" 'echo "$res"'
+must_not_have "$overlay/bin/pxeos.man.reg" 'echo $line'
+must_not_have "$overlay/bin/pxeos.auto.reg" 'Host registration completed.'
+must_not_have "$overlay/bin/pxeos.man.reg" 'Host registration completed.'
+must_have "$overlay/bin/pxeos.surfacetest" 'dots "Locating disk devices"'
+must_have "$overlay/bin/pxeos.surfacetest" 'dots "Checking in"'
+must_have "$overlay/bin/pxeos.photorec" 'dots "Creating file system mount point"'
+must_have "$overlay/bin/pxeos.checkmount" 'dots "Checking mounted file system"'
+must_have "$overlay/bin/pxeos.checkmountdrivesize" 'dots "Checking server disk space"'
+must_have "$overlay/bin/pxeos.chntpw" 'dots "Mounting Windows file system"'
+must_have "$overlay/bin/pxeos.chpass" 'dots "Creating chntpw mount point"'
+must_have "$overlay/bin/pxeos.chpass" 'dots "Using disk device"'
+must_not_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'ROOTPXE'
+must_not_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'Hard Disk'
+must_not_have "$overlay/bin/pxeos.upload" 'Using Image'
+must_not_have "$overlay/bin/pxeos.download" 'Using Image'
+must_not_have "$overlay/bin/pxeos.download" 'Preparing Partition layout'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_prompt INFO "${*:-Press Enter to continue.}"'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" "rootpxe_console_message WARN 'XFS partition cannot be expanded.'"
 must_not_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'Failed, XFS partition cannot be expanded'

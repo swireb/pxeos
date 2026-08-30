@@ -25,13 +25,10 @@ oIFS=$IFS
 IFS=$'\n'
 choices=$(echo -e $choices)
 wait_enter() {
-    echo -e "\n\n\n"
     rootpxe_console_prompt INFO 'Press Enter to continue.'
     read -s tmp
-    echo -e "\n\n\n"
 }
 while :; do
-    echo -e "\n\n\n"
     select choice in $choices; do
         case $REPLY in
             1)
@@ -46,29 +43,21 @@ while :; do
                 ;;
             2)
                 clearScreen
-                echo "   ==================================================="
-                echo "   =                Network Information              ="
-                echo "   ==================================================="
+                rootpxe_console_message INFO 'Network information:'
                 ip addr 2>/dev/null
-                echo "   ==================================================="
-                echo "   =                  DNS Information                ="
-                echo "   ==================================================="
+                rootpxe_console_message INFO 'DNS information:'
                 cat /etc/resolv.conf 2>/dev/null
                 wait_enter
                 ;;
             3)
                 clearScreen
-                echo "   ==================================================="
-                echo "   =             Partition Information               ="
-                echo "   ==================================================="
+                rootpxe_console_message INFO 'Partition information:'
                 parted --list 2>/dev/null
                 wait_enter
                 ;;
             4)
                 clearScreen
-                echo "   ==================================================="
-                echo "   =            PXEOS Compatibility Check           ="
-                echo "   ==================================================="
+                rootpxe_console_message INFO 'PXEOS compatibility check:'
                 tmpDisk=$(parted --list 2>/dev/null | grep "Disk")
                 tmpNic=$(ip addr | grep "link/ether")
                 [[ -n $tmpDisk ]] && blHddOk="Pass" || blHddOk="Fail"
@@ -78,12 +67,9 @@ while :; do
                 else
                     rootpxe_console_message WARN 'Hardware compatibility checks failed.'
                 fi
-                echo "   ==================================================="
-                echo "   =                      Results                    ="
-                echo "   ==================================================="
-                echo "   = Network..................................[$blNicOk] ="
-                echo "   = Disk.....................................[$blHddOk] ="
-                echo "   ==================================================="
+                rootpxe_console_message INFO 'Compatibility results:'
+                rootpxe_console_message INFO "Network: $blNicOk."
+                rootpxe_console_message INFO "Disk device: $blHddOk."
                 if [[ $blNicOk == Fail || $blHddOk == Fail ]]; then
                     rootpxe_console_message WARN 'Try a newer PXEOS kernel if this device is unsupported.'
                     rootpxe_console_message INFO 'Collect the following data for PXEOS support.'
@@ -96,9 +82,7 @@ while :; do
                 ;;
             5)
                 clearScreen
-                echo "   ==================================================="
-                echo "   =                   Ping a Host                   ="
-                echo "   ==================================================="
+                rootpxe_console_message INFO 'Ping a host:'
                 regex='(https?|ftp|file)://[-A-Za-z0-9\+&@#/%?=~_|!:,.;]*[-A-Za-z0-9\+&@#/%=~_|]'
                 while [[ -z $phost ]]; do
                     rootpxe_console_prompt INFO 'Enter host to ping: '
@@ -115,10 +99,7 @@ while :; do
                 ;;
             6)
                 clearScreen
-                echo "   ==================================================="
-                echo "   =               System MAC Address'               ="
-                echo "   ==================================================="
-                echo $mac
+                rootpxe_console_message INFO "System MAC address: $mac"
                 wait_enter
                 ;;
             7)
@@ -127,9 +108,8 @@ while :; do
                 i=0
                 IFS=$oIFS
                 for t in $test; do
-                    str="DMI String: $t\n"
                     v=$(dmidecode --string $t)
-                    echo -e "$str   $v\n\n"
+                    rootpxe_console_message INFO "DMI $t: $v"
                     let i+=1
                     if [[ $i == 5 ]]; then
                         rootpxe_console_prompt INFO 'Press Enter to proceed.'

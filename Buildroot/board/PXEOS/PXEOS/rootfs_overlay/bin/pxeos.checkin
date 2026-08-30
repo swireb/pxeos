@@ -194,7 +194,7 @@ rootpxe_apply_json_checkin() {
 }
 
 checkin_rootpxe() {
-    printf '%s\n' '[INFO]  Checking in with RootPXE.'
+    rootpxe_console_message INFO 'Checking in with RootPXE.'
     rootpxe_require_identity || handleError "RootPXE: invalid task identity ($0)"
     case $mc in
         [Yy][Ee][Ss]|[Bb][Tt])
@@ -233,9 +233,8 @@ checkin_rootpxe() {
             -w $'\n%{http_code}' "${rootpxe_api}checkin" 2>/dev/null)
         curl_status=$?
         if [[ $curl_status -ne 0 ]]; then
-            printf '%s\n' \
-                "[WARN]  Check-in not confirmed. Retrying in 5s." \
-                "[INFO]  SSH is available for troubleshooting."
+            rootpxe_console_message WARN 'Check-in not confirmed. Retrying in 5s.'
+            rootpxe_console_message INFO 'SSH is available for troubleshooting.'
             sleep 5
             continue
         fi
@@ -244,16 +243,15 @@ checkin_rootpxe() {
         if [[ $http_code =~ ^4[0-9][0-9]$ ]]; then
             # The task may have been aborted after the kernel started but
             # before checkin.  No task callback is allowed after this point.
-            echo "[INFO]  Task aborted or withdrawn. Stopping PXEOS."
+            rootpxe_console_message INFO 'Task aborted or withdrawn. Stopping PXEOS.'
             printf '%s\n' reboot > /tmp/pxeos.failure_action
             return 2
         fi
         # A 5xx, malformed status, or empty 2xx response is uncertain. Keep
         # SSH available and retry checkin; never mount storage or start imaging.
         if [[ ! $http_code =~ ^2[0-9][0-9]$ || -z $body ]]; then
-            printf '%s\n' \
-                "[WARN]  Check-in not confirmed. Retrying in 5s." \
-                "[INFO]  SSH is available for troubleshooting."
+            rootpxe_console_message WARN 'Check-in not confirmed. Retrying in 5s.'
+            rootpxe_console_message INFO 'SSH is available for troubleshooting.'
             sleep 5
             continue
         fi
@@ -359,7 +357,7 @@ checkin_rootpxe() {
     fi
     rootpxe_console_message INFO "Storage protocol: ${protocol^^}"
     rootpxe_safe_relative_path "$img" >/dev/null || handleError "Invalid image path ($0)"
-    echo "[INFO]  Check-in completed."
+    rootpxe_console_message INFO 'Check-in completed.'
     debugPause
 }
 

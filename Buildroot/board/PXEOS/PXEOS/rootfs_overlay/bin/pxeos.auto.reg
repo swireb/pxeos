@@ -2,6 +2,13 @@
 . /usr/share/pxeos/lib/funcs.sh
 clearScreen
 displayBanner
+display_registration_response() {
+    local response="$1" response_line=""
+    while IFS= read -r response_line || [[ -n $response_line ]]; do
+        [[ -n $response_line ]] || continue
+        rootpxe_console_message INFO "Server response: $response_line"
+    done <<< "$response"
+}
 disks=""
 disk=""
 hd=""
@@ -56,7 +63,7 @@ caseasset64=""
 dots "Using disk device"
 getHardDisk
 echo 'Done'
-rootpxe_console_message INFO "Using disk device: $hd"
+rootpxe_console_message INFO "Using disk device: $hd."
 rootpxe_console_message INFO 'Starting host registration.'
 debugPause
 mac=$(getMACAddresses | base64)
@@ -87,7 +94,8 @@ while [[ -z $res ]]; do
             ;;
     esac
 done
-echo "$res"
+echo 'Done'
+display_registration_response "$res"
 debugPause
 . /bin/pxeos.inventory
 count=0

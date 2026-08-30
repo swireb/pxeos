@@ -15,6 +15,15 @@
 [[ ! -h /dev/stdout ]] && ln -s /proc/self/fd/1 /dev/stdout
 [[ ! -h /dev/stderr ]] && ln -s /proc/self/fd/2 /dev/stderr
 
+pxeos_init_message() {
+    local level="$1" message="${2-}"
+    case $level in
+        INFO|WARN|ERROR) ;;
+        *) return 1 ;;
+    esac
+    printf '%-7s %s\n' "[$level]" "$message"
+}
+
 # SSH 调试模式只保留网络初始化后的登录入口，不能触发 RAID 组装、任务或电源操作。
 case $isdebug in
     [Yy][Ee][Ss]|[Yy])
@@ -40,17 +49,17 @@ if [[ $rc -eq 0 ]]; then
         shutdown_local="$(tr -d '\r\n\0' </tmp/pxeos.shutdown)"
     fi
     if [[ "$shutdown_local" == "1" ]]; then
-        echo "[INFO]  Task completed. Powering off."
+        pxeos_init_message INFO 'Task completed. Powering off.'
         poweroff >/dev/null 2>&1
     else
-        echo "[INFO]  Task completed. Rebooting."
+        pxeos_init_message INFO 'Task completed. Rebooting.'
         reboot -f >/dev/null 2>&1
     fi
 else
-    echo "[WARN]  Task exited with code: $rc."
+    pxeos_init_message WARN "Task exited with code: $rc."
     failure_action="reboot"
     [[ -f /tmp/pxeos.failure_action ]] && failure_action="$(tr -d '\r\n\0' </tmp/pxeos.failure_action)"
-    echo "[INFO]  Running configured failure action: $failure_action."
+    pxeos_init_message INFO "Running configured failure action: $failure_action."
     if [[ "$failure_action" == "shutdown" ]]; then
         poweroff >/dev/null 2>&1
     else

@@ -12,14 +12,14 @@ part=""
 disks=""
 disk=""
 hd=""
-rootpxe_console_message INFO 'Preparing to send image file to server'
+rootpxe_console_message INFO 'Preparing to send image file to server.'
 percent="$pct"
 [[ $pct -lt 5 || $pct -ge 100 ]] && percent=5
 pxeos.statusreporter "$mac" "${pxeapi:-$web}" "$taskid" & disown
 statusReporter="$!"
 prepareUploadLocation "$imagePath"
 printf '%s\n' "$taskid" > "$imagePath/.rootpxe-capture-taskid" || handleError "Could not initialize capture task marker ($0)"
-rootpxe_console_message INFO "Using Image: $img"
+rootpxe_console_message INFO "Using image: $img."
 # resizable image type
 #  discover windows partitions
 #  remove pagefile and hibernate file
@@ -157,7 +157,7 @@ beginUpload() {
             local hasgpt=0
             hasGPT "$hd"
             if [[ $hasgpt -eq 1 ]]; then
-                rootpxe_console_message INFO "Moving partitions on disk $hd."
+                rootpxe_console_message INFO "Moving partitions on disk device $hd."
                 debugPause
                 saveSfdiskPartitions "$hd" "$imagePath/d1.shrunken.partitions"
                 prevPart=""
@@ -172,11 +172,11 @@ beginUpload() {
             sfdiskMinimumPartitionFileName "$imagePath" 1
             savePartitionTablesAndBootLoaders "$hd" 1 "$imagePath" "$osid" "$imgPartitionType" "$sfdiskminimumpartitionfilename"
             if [[ $hasgpt -eq 1 ]]; then
-                rootpxe_console_message INFO "Moving partitions back on disk $hd."
+                rootpxe_console_message INFO "Moving partitions back on disk device $hd."
                 debugPause
                 applySfdiskPartitions "$hd" "$imagePath/d1.shrunken.partitions"
             fi
-            rootpxe_console_message INFO "Processing hard disk: $hd."
+            rootpxe_console_message INFO "Processing disk device: $hd."
             for part in $parts; do
                 rootpxe_lvm_is_pv_partition "$part" && continue
                 savePartition "$part" 1 "$imagePath" "$imgPartitionType"
@@ -198,7 +198,7 @@ beginUpload() {
             parts=""
             getPartitions "$hd"
             [[ ${#parts} -lt 1 ]] && handleError "No partitions found ($0)\n   Args Passed: $*"
-            rootpxe_console_message INFO "Processing hard disk: $hd."
+            rootpxe_console_message INFO "Processing disk device: $hd."
             debugPause
             savePartitionTablesAndBootLoaders "$hd" 1 "$imagePath" "$osid" "$imgPartitionType"
             getPartitions "$hd"
@@ -215,7 +215,7 @@ beginUpload() {
                 getPartitions "$disk"
                 [[ ${#parts} -lt 1 ]] && continue
                 debugPause
-                rootpxe_console_message INFO "Processing hard disk: $disk."
+                rootpxe_console_message INFO "Processing disk device: $disk."
                 debugPause
                 rootpxe_console_message INFO 'Saving disk size, partition table, and boot loader information.'
                 debugPause
@@ -228,7 +228,7 @@ beginUpload() {
                     isBitlockedPartition "$part"
                     savePartition "$part" "$disk_number" "$imagePath" "$imgPartitionType"
                 done
-                rootpxe_console_message INFO "Disk $disk is complete."
+                rootpxe_console_message INFO "Disk device $disk is complete."
                 let disk_number+=1
             done
             ;;
@@ -280,7 +280,7 @@ while :; do
         10) printf '%s\n' reboot > /tmp/pxeos.failure_action; exit 2 ;;
         20) exit 2 ;;
         *)
-            printf '%s\n' '[WARN]  Disk permit wait was interrupted. Retrying in 5s.'
+            rootpxe_console_message WARN 'Disk permit wait was interrupted. Retrying in 5s.'
             sleep 5
             ;;
     esac

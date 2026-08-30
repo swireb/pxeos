@@ -1251,26 +1251,25 @@ rootpxe_error_wait_for_retry() {
     [[ $action == shutdown ]] || action=reboot
     printf '%s\n' "$action" > /tmp/pxeos.failure_action
     deadline=$(( $(date +%s) + wait ))
-    printf '%s\n' \
-        "[ERROR] Task paused. Error reported to RootPXE." \
-        "[INFO]  SSH is available for troubleshooting." \
-        "[INFO]  Select Retry in the web UI to resume." \
-        "[INFO]  Timeout: ${wait}s. Timeout action: $action."
+    rootpxe_console_message ERROR 'Task paused. Error reported to RootPXE.'
+    rootpxe_console_message INFO 'SSH is available for troubleshooting.'
+    rootpxe_console_message INFO 'Select Retry in the web UI to resume.'
+    rootpxe_console_message INFO "Timeout: ${wait}s. Timeout action: $action."
     while :; do
         now=$(date +%s)
         if [[ $now -ge $deadline ]]; then
-            echo "[WARN]  Wait timed out. Timeout action: $action."
+            rootpxe_console_message WARN "Wait timed out. Timeout action: $action."
             return 2
         fi
         status=$(curl -Lks --connect-timeout 10 --max-time 20 \
             --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
             --data-urlencode "mac=$mac" "${api}task-status" 2>/dev/null)
         if [[ $status == *'"status":"queued"'* ]]; then
-            echo "[INFO]  Retry requested. Resuming task."
+            rootpxe_console_message INFO 'Retry requested. Resuming task.'
             exec /bin/pxeos
         fi
         if [[ $status == *'"status":"deleted"'* || $status == *'"status":"cancelled"'* || $status == *'"status":"superseded"'* ]]; then
-            echo "[INFO]  Task deleted or aborted. Stopping PXEOS."
+            rootpxe_console_message INFO 'Task deleted or aborted. Stopping PXEOS.'
             return 2
         fi
         sleep 5
@@ -3644,7 +3643,7 @@ getHardDisk() {
 
 # Finds the hard drive info and set's up the type
 findHDDInfo() {
-    dots "Looking for Hard Disk(s)"
+    dots "Looking for disk device(s)"
     getHardDisk
     if [[ -z $hd || -z $disks ]]; then
         echo "Failed"
@@ -3659,7 +3658,7 @@ findHDDInfo() {
                 down)
                     diskSize=$(lsblk --bytes -dplno SIZE -I 3,8,9,179,259 $hd)
                     [[ $diskSize -gt 2199023255552 ]] && layPartSize="2tB"
-                    rootpxe_console_message INFO "Using Disk: $hd"
+                    rootpxe_console_message INFO "Using disk device: $hd."
                     [[ $imgType == +([nN]) ]] && validResizeOS
                     enableWriteCache "$hd"
                     ;;
@@ -3680,18 +3679,18 @@ findHDDInfo() {
                     debugPause
                     ;;
             esac
-            rootpxe_console_message INFO "Using Hard Disk: $hd"
+            rootpxe_console_message INFO "Using disk device: $hd."
             ;;
         mpa)
             case $type in
                 up)
                     for disk in $disks; do
-                        dots "Reading Partition Tables on $disk"
+                        dots "Reading partition tables on disk device $disk"
                         getPartitions "$disk"
                         if [[ -z $parts ]]; then
                             echo "Failed"
                             debugPause
-                            rootpxe_console_message WARN "No partitions for disk $disk"
+                            rootpxe_console_message WARN "No partitions found for disk device: $disk."
                             debugPause
                             continue
                         fi
@@ -3700,7 +3699,7 @@ findHDDInfo() {
                     done
                     ;;
             esac
-            rootpxe_console_message INFO "Using Hard Disks: $disks"
+            rootpxe_console_message INFO "Using disk devices: $disks."
             ;;
     esac
 }
@@ -4630,7 +4629,7 @@ runFixparts() {
 }
 killStatusReporter() {
     [[ -z ${statusReporter:-} ]] && return
-    dots "Stopping ROOTPXE Status Reporter"
+    dots "Stopping RootPXE status reporter"
     kill -9 "$statusReporter" >/dev/null 2>&1 || true
     echo "Done"
     debugPause

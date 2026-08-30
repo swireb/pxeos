@@ -8,7 +8,7 @@ hd=""
 parts=""
 part=""
 getHardDisk "true"
-dots "Creating File System Mount point"
+dots "Creating file system mount point"
 [[ ! -d /storage ]] && mkdir -p /storage >/dev/null 2>&1
 if [[ ! -d /storage ]]; then
     echo "Failed"
@@ -17,7 +17,7 @@ if [[ ! -d /storage ]]; then
 fi
 echo "Done"
 debugPause
-dots "Mounting File System"
+dots "Mounting file system"
 mount -o nolock $storage /storage >/tmp/mount-output 2>&1
 case $? in
     0)

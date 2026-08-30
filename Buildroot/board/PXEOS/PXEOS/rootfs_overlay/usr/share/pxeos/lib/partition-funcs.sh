@@ -39,12 +39,12 @@ restoreUUIDInformation() {
     hasGPT "$disk"
     [[ $hasgpt -eq 0 ]] && return
     diskuuid=$(awk '/^label-id: / {print tolower($2)}' $file)
-    dots "Disk UUID being set to"
+    dots "Setting disk UUID"
     echo $diskuuid
     debugPause
     if [[ -n $diskuuid ]]; then
         sgdisk -U $diskuuid $disk >/dev/null 2>&1
-        [[ ! $? -eq 0 ]] && handleWarning "Failed to set disk guid (sgdisk -U) (${FUNCNAME[0]})\n   Args Passed: $*"
+        [[ ! $? -eq 0 ]] && handleWarning "Failed to set disk GUID (sgdisk -U) (${FUNCNAME[0]})\n   Args Passed: $*"
     fi
     getPartitions "$disk"
     for part in $parts; do
@@ -54,7 +54,7 @@ restoreUUIDInformation() {
         # Do not let partition 1 match the prefix of partition 10, 11, ... .
         partuuid=$(awk -F[,\ ] "match(\$0, /[^0-9]${part_number} : start=.*uuid=([A-Za-z0-9-]+)[,]?.*$/, type){printf(\"%s:%s\", $part_number, tolower(type[1]))}" "$file")
         parttype=$(awk -F[,\ ] "match(\$0, /[^0-9]${part_number} : start=.*type=([A-Za-z0-9-]+)[,]?.*$/, type){printf(\"%s:%s\", $part_number, tolower(type[1]))}" "$file")
-        dots "Partition type being set to"
+        dots "Setting partition type"
         echo $parttype
         debugPause
         if [[ -n $parttype ]]; then
@@ -63,7 +63,7 @@ restoreUUIDInformation() {
             true
         fi
         [[ ! $? -eq 0 ]] && handleWarning " Failed to set partition type (sgdisk -t) (${FUNCNAME[0]})\n   Args Passed: $*"
-        dots "Partition uuid being set to"
+        dots "Setting partition UUID"
         echo $partuuid
         debugPause
         if [[ -n $partuuid ]]; then
@@ -71,7 +71,7 @@ restoreUUIDInformation() {
         else 
             true
         fi
-        [[ ! $? -eq 0 ]] && handleWarning "Failed to set partition guid (sgdisk -u) (${FUNCNAME[0]})\n   Args Passed: $*"
+        [[ ! $? -eq 0 ]] && handleWarning "Failed to set partition GUID (sgdisk -u) (${FUNCNAME[0]})\n   Args Passed: $*"
     done
 }
 # $1 is the name of the disk drive

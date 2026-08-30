@@ -19,15 +19,15 @@ layPartSize="-1s"
 pxeos.statusreporter "$mac" "${pxeapi:-$web}" "$taskid" & disown
 statusReporter="$!"
 fixed_size_partitions=""
-rootpxe_console_message INFO "Using Image: $img"
+rootpxe_console_message INFO "Using image: $img."
 preparePartitions() {
-    rootpxe_console_message INFO 'Preparing Partition layout'
+    rootpxe_console_message INFO 'Preparing partition layout.'
     # n images now always use the validated layout snapshot below.  Do not
     # restore the captured table and then run the historical fill path first:
     # that performs a second, competing partition-table write before the final
     # target-specific table is applied.
     if [[ ${imgType:-} == [Nn] ]]; then
-        rootpxe_console_message INFO 'Using validated single-disk deployment layout'
+        rootpxe_console_message INFO 'Using validated single-disk deployment layout.'
         return 0
     fi
     case $imgType in
@@ -96,13 +96,13 @@ if [[ ${resumeStage:-} == customizing_hostname ]]; then
         case $permit_result in
             0) break ;;
             10)
-                echo "[INFO]  Task aborted or deleted. Stopping PXEOS."
+                rootpxe_console_message INFO 'Task aborted or deleted. Stopping PXEOS.'
                 printf '%s\n' reboot > /tmp/pxeos.failure_action
                 exit 2
                 ;;
             20) exit 2 ;;
             *)
-                printf '%s\n' '[WARN]  Disk permit wait was interrupted. Retrying in 5s.'
+                rootpxe_console_message WARN 'Disk permit wait was interrupted. Retrying in 5s.'
                 sleep 5
                 ;;
         esac
@@ -130,13 +130,13 @@ while :; do
     case $permit_result in
         0) break ;;
         10)
-            echo "[INFO]  Task aborted or deleted. Stopping PXEOS."
+            rootpxe_console_message INFO 'Task aborted or deleted. Stopping PXEOS.'
             printf '%s\n' reboot > /tmp/pxeos.failure_action
             exit 2
             ;;
         20) exit 2 ;;
         *)
-            printf '%s\n' '[WARN]  Disk permit wait was interrupted. Retrying in 5s.'
+            rootpxe_console_message WARN 'Disk permit wait was interrupted. Retrying in 5s.'
             sleep 5
             ;;
     esac

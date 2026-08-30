@@ -27,7 +27,7 @@ for part in $parts; do
 rootpxe_console_message WARN 'Unable to locate the SAM file.'
         continue
     fi
-    dots "Mounting Windows File System"
+    dots "Mounting Windows file system"
     mount -o rw "$part" /ntfs >/tmp/mount-output 2>&1
     if [[ ! $? -eq 0 ]]; then
         echo "Failed"

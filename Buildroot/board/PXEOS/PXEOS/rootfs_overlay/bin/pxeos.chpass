@@ -7,7 +7,7 @@ disk=""
 hd=""
 parts=""
 part=""
-dots "Creating chntpw partition"
+dots "Creating chntpw mount point"
 [[ ! -d /chntpw ]] && mkdir -p /chntpw >/dev/null 2>&1
 if [[ ! -d /chntpw ]]; then
     echo "Failed"
@@ -16,7 +16,7 @@ if [[ ! -d /chntpw ]]; then
 fi
 echo "Done"
 debugPause
-dots "Using disk"
+dots "Using disk device"
 getHardDisk
 if [[ -z $hd ]]; then
     echo "Failed"
@@ -24,7 +24,7 @@ if [[ -z $hd ]]; then
     handleError "Could not locate disk to work from ($0)\n   Args Passed: $*"
 fi
 echo 'Done'
-rootpxe_console_message INFO "Using disk device: $hd"
+rootpxe_console_message INFO "Using disk device: $hd."
 debugPause
 sam=""
 getSAMLoc
