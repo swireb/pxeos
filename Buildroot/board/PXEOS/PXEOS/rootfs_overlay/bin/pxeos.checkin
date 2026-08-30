@@ -71,6 +71,72 @@ rootpxe_json_assign_text() {
     printf -v "$name" '%s' "$value"
 }
 
+rootpxe_clear_json_deploy_scripts() {
+    rm -f -- "${preDeployScriptFile:-}" "${postDeployScriptFile:-}"
+    unset preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256
+}
+
+rootpxe_apply_json_deploy_script() {
+    local document="$1" script_field="$2" hash_field="$3" file_var="$4" hash_var="$5" temp_prefix="$6"
+    local has_script has_hash script_bytes script_hash script_file actual_hash
+    has_script=$(jq -r --arg field "$script_field" 'has($field)' <<<"$document" 2>/dev/null) || return 1
+    has_hash=$(jq -r --arg field "$hash_field" 'has($field)' <<<"$document" 2>/dev/null) || return 1
+    [[ $has_script == true || $has_script == false ]] || return 1
+    [[ $has_hash == true || $has_hash == false ]] || return 1
+    if [[ $has_script == false && $has_hash == false ]]; then
+        return 0
+    fi
+    [[ $has_script == true && $has_hash == true ]] || return 1
+    jq -e --arg script "$script_field" --arg hash "$hash_field" '(.[$script] | type == "string") and (.[$hash] | type == "string")' >/dev/null 2>&1 <<<"$document" || return 1
+    script_bytes=$(jq -r --arg field "$script_field" '.[$field] | utf8bytelength' <<<"$document" 2>/dev/null) || return 1
+    script_hash=$(jq -r --arg field "$hash_field" '.[$field]' <<<"$document" 2>/dev/null) || return 1
+    [[ $script_bytes =~ ^[0-9]+$ && $script_bytes -le 65536 ]] || return 1
+    if [[ $script_bytes -eq 0 ]]; then
+        [[ -z $script_hash ]] || return 1
+        return 0
+    fi
+    [[ $script_hash =~ ^[0-9a-f]{64}$ ]] || return 1
+    script_file=$(mktemp "/tmp/rootpxe-${temp_prefix}.XXXXXX") || return 1
+    umask 077
+    if ! jq -j --arg field "$script_field" '.[$field]' <<<"$document" >"$script_file"; then
+        rm -f -- "$script_file"
+        return 1
+    fi
+    chmod 700 "$script_file" || { rm -f -- "$script_file"; return 1; }
+    actual_hash=$(sha256sum "$script_file" 2>/dev/null) || actual_hash=""
+    actual_hash=${actual_hash%%[[:space:]]*}
+    if [[ $actual_hash != "$script_hash" ]]; then
+        rm -f -- "$script_file"
+        return 1
+    fi
+    printf -v "$file_var" '%s' "$script_file"
+    printf -v "$hash_var" '%s' "$script_hash"
+}
+
+rootpxe_apply_json_deploy_scripts() {
+    local document="$1"
+    rootpxe_clear_json_deploy_scripts
+    rootpxe_apply_json_deploy_script "$document" preDeployScript preDeployScriptSha256 preDeployScriptFile preDeployScriptSha256 pre-deploy || {
+        rootpxe_clear_json_deploy_scripts
+        return 1
+    }
+    rootpxe_apply_json_deploy_script "$document" postDeployScript postDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 post-deploy || {
+        rootpxe_clear_json_deploy_scripts
+        return 1
+    }
+}
+
+rootpxe_apply_json_capture_backup_name() {
+    local document="$1" name
+    captureBackupName=""
+    [[ ${taskType:-} == capture ]] || return 0
+    jq -e 'has("captureBackupName")' >/dev/null 2>&1 <<<"$document" || return 0
+    jq -e '(.captureBackupName | type == "string")' >/dev/null 2>&1 <<<"$document" || return 1
+    name=$(jq -r '.captureBackupName' <<<"$document" 2>/dev/null) || return 1
+    rootpxe_validate_capture_backup_name "$name" || return 1
+    captureBackupName="$name"
+}
+
 rootpxe_validate_json_storage() {
     protocol=${protocol,,}
     [[ -n ${storage_server:-} && $storage_server != *$'\n'* && $storage_server != *$'\r'* ]] || return 1
@@ -128,6 +194,7 @@ rootpxe_apply_json_checkin() {
         # protocol, path, or SMB credentials.
         protocol="" storage_server="" storage_export=""
         smb_username="" smb_password="" smb_domain=""
+        rootpxe_clear_json_deploy_scripts
         export protocol storage_server storage_export
         return 0
     fi
@@ -176,6 +243,7 @@ rootpxe_apply_json_checkin() {
     rootpxe_json_assign_text "$document" resumeStage '.resumeStage // .resume_stage' || return 1
     rootpxe_json_assign "$document" schemaRevision '.schemaRevision // .schema_revision' || return 1
     rootpxe_json_assign_text "$document" schemaHash '.schemaHash // .schema_hash' || return 1
+    rootpxe_apply_json_capture_backup_name "$document" || return 1
     rootpxe_validate_json_storage || return 1
     # Layout/schema are untrusted JSON data. Store canonical form in 0600 files;
     # they are never printed or made kernel arguments.
@@ -190,10 +258,20 @@ rootpxe_apply_json_checkin() {
         jq -cS '.originalSchema' <<<"$document" >"$originalSchemaFile" || return 1
         chmod 600 "$originalSchemaFile"
     fi
-    export taskid execution_token taskType pxe_type img img_type img_partition_type osid img_format pigz_comp shutdown protocol storage_server storage_export hostName changeHostname resumeStage schemaRevision schemaHash deploymentLayoutFile originalSchemaFile
+    if [[ ${taskType:-} == deploy ]]; then
+        rootpxe_apply_json_deploy_scripts "$document" || return 1
+    else
+        rootpxe_clear_json_deploy_scripts
+        jq -e 'has("preDeployScript") or has("preDeployScriptSha256") or has("postDeployScript") or has("postDeployScriptSha256")' >/dev/null 2>&1 <<<"$document" && return 1
+    fi
+    export taskid execution_token taskType pxe_type img img_type img_partition_type osid img_format pigz_comp shutdown protocol storage_server storage_export hostName changeHostname resumeStage schemaRevision schemaHash captureBackupName preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 deploymentLayoutFile originalSchemaFile
 }
 
 checkin_rootpxe() {
+    # Only authenticated JSON can define deploy scripts or a
+    # capture backup name. A legacy response must never inherit either value.
+    rootpxe_clear_json_deploy_scripts
+    captureBackupName=""
     rootpxe_console_message INFO 'Checking in with RootPXE.'
     rootpxe_require_identity || handleError "RootPXE: invalid task identity ($0)"
     case $mc in
@@ -340,7 +418,7 @@ checkin_rootpxe() {
     imgType=${img_type:-${imgType:-}}; imgPartitionType=${img_partition_type:-${imgPartitionType:-}}
     imgFormat=${img_format:-${imgFormat:-}}; PIGZ_COMP=${pigz_comp:-${PIGZ_COMP:-}}; hostName=${hostName:-${host_name:-}}
     [[ -z ${changeHostname:-} || ${changeHostname:-} == true || ${changeHostname:-} == false ]] || handleError "Invalid changeHostname ($0)"
-    export taskType type pxeType imgType imgPartitionType imgFormat PIGZ_COMP hostName changeHostname resumeStage schemaRevision schemaHash
+    export taskType type pxeType imgType imgPartitionType imgFormat PIGZ_COMP hostName changeHostname resumeStage schemaRevision schemaHash captureBackupName preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256
     protocol=${protocol,,}
     [[ $protocol == nfs || $protocol == smb ]] || handleError "Invalid storage protocol ($0)"
     storage_server=${storage_server:-$storageip}

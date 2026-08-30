@@ -93,12 +93,60 @@ rootpxe_storage_path() {
 rootpxe_prepare_storage_layout() {
     local path probe
     [[ -d /storage && ! -L /storage ]] || return 1
-    for path in /storage/dev /storage/postinitscripts /storage/postdeployscripts; do
+    for path in /storage/dev /storage/backup; do
         [[ ! -e $path || ( -d $path && ! -L $path ) ]] || return 1
         mkdir -p "$path" || return 1
     done
     probe=/storage/.rootpxe-write-probe.$$
     : > "$probe" && rm -f "$probe"
+}
+
+rootpxe_run_deploy_script() {
+    local stage="$1" file_var="$2" hash_var="$3" label="$4" script expected_hash actual_hash script_rc=0
+    script="${!file_var:-}"
+    expected_hash="${!hash_var:-}"
+    rootpxe_deploy_script_error=""
+    [[ -z $script && -z $expected_hash ]] && return 0
+    if [[ -z $script || -z $expected_hash || ! -f $script || -L $script ]]; then
+        rootpxe_deploy_script_error=script_file_invalid
+        rm -f -- "$script"
+        unset "$file_var" "$hash_var"
+        return 1
+    fi
+    actual_hash=$(sha256sum "$script" 2>/dev/null) || actual_hash=""
+    actual_hash=${actual_hash%%[[:space:]]*}
+    if [[ ! $expected_hash =~ ^[0-9a-f]{64}$ || $actual_hash != "$expected_hash" ]]; then
+        rootpxe_deploy_script_error=script_hash_mismatch
+        rm -f -- "$script"
+        unset "$file_var" "$hash_var"
+        return 1
+    fi
+    rootpxe_stage "$stage" "running $label" || true
+    rootpxe_console_message INFO "Running $label."
+    env -i \
+        PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+        ROOTPXE_TASK_ID="$taskid" \
+        ROOTPXE_IMAGE_PATH="${imagePath:-}" \
+        ROOTPXE_TARGET_DISK="${hd:-}" \
+        ROOTPXE_HOSTNAME="${hostName:-}" \
+        ROOTPXE_OS_ID="${osid:-}" \
+        /bin/bash "$script" || script_rc=$?
+    rm -f -- "$script"
+    unset "$file_var" "$hash_var"
+    if [[ $script_rc -ne 0 ]]; then
+        rootpxe_deploy_script_error=script_execution_failed
+        rootpxe_console_message ERROR "$label failed."
+        return 1
+    fi
+    rootpxe_console_message INFO "$label completed."
+}
+
+rootpxe_run_pre_deploy_script() {
+    rootpxe_run_deploy_script pre_deploy_script preDeployScriptFile preDeployScriptSha256 'pre-deploy script'
+}
+
+rootpxe_run_post_deploy_script() {
+    rootpxe_run_deploy_script post_deploy_script postDeployScriptFile postDeployScriptSha256 'post-deploy script'
 }
 
 # LVM v2 is deliberately narrow.  It is not a fallback for arbitrary device
@@ -523,8 +571,8 @@ rootpxe_build_partition_inventory() {
 }
 
 rootpxe_cleanup_task_json() {
-    rm -f -- "${deploymentLayoutFile:-}" "${originalSchemaFile:-}" "${rootpxe_original_schema_file:-}" "${rootpxe_partition_inventory_file:-}"
-    unset deploymentLayoutFile originalSchemaFile rootpxe_original_schema_file rootpxe_partition_inventory_file
+    rm -f -- "${deploymentLayoutFile:-}" "${originalSchemaFile:-}" "${preDeployScriptFile:-}" "${postDeployScriptFile:-}" "${rootpxe_original_schema_file:-}" "${rootpxe_partition_inventory_file:-}"
+    unset deploymentLayoutFile originalSchemaFile preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 rootpxe_original_schema_file rootpxe_partition_inventory_file
 }
 
 rootpxe_cleanup_session() {
@@ -1009,18 +1057,8 @@ rootpxe_prepare_smb_credentials() {
     trap rootpxe_cleanup_smb_credentials EXIT INT TERM
 }
 
-rootpxe_run_postinit() {
-    [[ ${rootpxe_postinit_ran:-0} == 1 ]] && return 0
-    local script=/storage/postinitscripts/hook.sh
-    if [[ -f "$script" ]]; then
-        . "$script" || return 1
-    fi
-    rootpxe_postinit_ran=1
-    export rootpxe_postinit_ran
-}
-
-# The server owns the cancellation fence.  This must run before any hook or
-# imaging action because a custom hook may itself write a local disk.
+# The server owns the cancellation fence. This must run before any image
+# operation because an authorized task may write a local disk.
 rootpxe_request_disk_permit() {
     rootpxe_request_disk_permit_for_target "${1:-}" "${2:-capture_read_write}"
 }
@@ -1224,15 +1262,36 @@ rootpxe_wait_for_disk_permit() {
 }
 
 rootpxe_error_wait_for_retry() {
-    local message="$1" code="${2:-PXEOS_ERROR}" api="${pxeapi:-$web}" response wait action deadline now status
+    local message="$1" code="${2:-PXEOS_ERROR}" api="${pxeapi:-$web}" response wait action deadline now status stage="" stage_count=0 stage_invalid=0 stage_match stage_remainder stage_value
+    local -a error_args
     rootpxe_require_task_context || return 1
     [[ -n $api ]] || return 1
+    # Only resume-safe stages may be persisted independently of the diagnostic
+    # message. A malformed, repeated, or arbitrary marker is intentionally not
+    # sent, so the service cannot resume a disk-writing phase by inference.
+    stage_remainder="$message"
+    while [[ $stage_remainder =~ (^|[[:space:]])PXEOS_STAGE=([^[:space:]]+) ]]; do
+        stage_match="${BASH_REMATCH[0]}"
+        stage_value="${BASH_REMATCH[2]}"
+        case $stage_value in
+            customizing_hostname|post_deploy_script)
+                stage_count=$((stage_count + 1))
+                stage="$stage_value"
+                ;;
+            *) stage_invalid=1 ;;
+        esac
+        stage_remainder=${stage_remainder#*"$stage_match"}
+    done
+    error_args=(
+        --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token"
+        --data-urlencode "mac=$mac" --data-urlencode "errorCode=$code"
+        --data-urlencode "message=$message"
+    )
+    [[ $stage_count -eq 1 && $stage_invalid -eq 0 ]] && error_args+=(--data-urlencode "stage=$stage")
     # Do not arm the local timeout until the service confirms persistence.
     while :; do
         response=$(curl -Lks --connect-timeout 10 --max-time 30 \
-            --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
-            --data-urlencode "mac=$mac" --data-urlencode "errorCode=$code" \
-            --data-urlencode "message=$message" "${api}error" 2>/dev/null) || {
+            "${error_args[@]}" "${api}error" 2>/dev/null) || {
                 printf '%s\n' \
                     "[WARN]  Error report failed. Retrying in 5s." \
                     "[INFO]  SSH is available for troubleshooting."
@@ -1318,6 +1377,14 @@ rootpxe_capture_paths_same_device() {
     fi
 }
 
+rootpxe_validate_capture_backup_name() {
+    local name="$1" byte_count
+    [[ -n $name && $name != . && $name != .. && $name != .* ]] || return 1
+    [[ $name != */* && $name != *\\* && $name != *[[:cntrl:]]* ]] || return 1
+    byte_count=$(LC_ALL=C printf '%s' "$name" | wc -c) || return 1
+    [[ $byte_count =~ ^[1-9][0-9]*$ && $byte_count -le 255 ]]
+}
+
 rootpxe_capture_paths_overlap() {
     local first="$1" second="$2"
     [[ $first == "$second" || $first == "$second"/* || $second == "$first"/* ]]
@@ -1339,12 +1406,12 @@ rootpxe_finalize_capture() {
     rootpxe_finalize_capture_error_code=CAPTURE_FINALIZE_FAILED
     rootpxe_finalize_capture_error_reason=unsafe_finalize_state
     rootpxe_require_task_context || { rootpxe_capture_finalize_fail invalid_task_context; return 1; }
-    local storage_root="/storage" source="/storage/dev/$macWinSafe" relative target target_parent source_parent lock backup target_marker source_marker
+    local storage_root="/storage" backup_root="/storage/backup" source="/storage/dev/$macWinSafe" relative target target_parent source_parent lock backup target_marker source_marker source_dev backup_dev
     relative=$(rootpxe_safe_relative_path "${img:-}") || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
     target=$(rootpxe_storage_path "$relative") || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
     target_parent=$(dirname "$target") || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
     source_parent=$(dirname "$source") || { rootpxe_capture_finalize_fail unsafe_source_path; return 1; }
-    [[ -d $storage_root && ! -L $storage_root && -d $source_parent && ! -L $source_parent && ! -L $source ]] || { rootpxe_capture_finalize_fail unsafe_source_path; return 1; }
+    [[ -d $storage_root && ! -L $storage_root && -d $backup_root && ! -L $backup_root && -d $source_parent && ! -L $source_parent && ! -L $source ]] || { rootpxe_capture_finalize_fail unsafe_source_path; return 1; }
     rootpxe_capture_paths_overlap "$source" "$target" && { rootpxe_capture_finalize_fail source_target_overlap; return 1; }
     [[ ! -e $target || -d $target ]] || { rootpxe_capture_finalize_fail target_not_directory; return 1; }
     mkdir -p "$target_parent" || { rootpxe_capture_finalize_fail target_parent_unavailable; return 1; }
@@ -1354,18 +1421,22 @@ rootpxe_finalize_capture() {
     # identity is required only before a capture source can be moved.
     if [[ -d $source ]]; then
         rootpxe_capture_paths_same_device "$source" "$target_parent" "$target" || { rootpxe_capture_finalize_fail cross_device_capture_paths; return 1; }
+        source_dev=$(stat -c %d "$source" 2>/dev/null) || { rootpxe_capture_finalize_fail cross_device_capture_paths; return 1; }
+        backup_dev=$(stat -c %d "$backup_root" 2>/dev/null) || { rootpxe_capture_finalize_fail cross_device_capture_paths; return 1; }
+        [[ $source_dev =~ ^[0-9]+$ && $backup_dev =~ ^[0-9]+$ && $source_dev == "$backup_dev" ]] || { rootpxe_capture_finalize_fail cross_device_capture_paths; return 1; }
     fi
     lock=$(rootpxe_capture_finalize_lock_path "$target") || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
     mkdir "$lock" 2>/dev/null || { rootpxe_capture_finalize_fail finalize_lock_unavailable; return 1; }
 
     target_marker="$target/.rootpxe-capture-taskid"
     source_marker="$source/.rootpxe-capture-taskid"
-    backup="$target_parent/.$(basename "$target").rootpxe-capture-backup-$taskid"
     if [[ -d $source && -d $target ]]; then
         rootpxe_capture_marker_matches_task "$source_marker" "$taskid" || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail source_marker_invalid; return 1; }
         capture_size_bytes=$(rootpxe_directory_size_bytes "$source") || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail source_payload_invalid; return 1; }
         [[ $capture_size_bytes =~ ^[1-9][0-9]*$ ]] || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail source_payload_invalid; return 1; }
         [[ ! -e $target_marker && ! -L $target_marker ]] || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail target_marker_present; return 1; }
+        rootpxe_validate_capture_backup_name "${captureBackupName:-}" || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail invalid_backup_name; return 1; }
+        backup="$backup_root/$captureBackupName"
         [[ ! -e $backup && ! -L $backup ]] || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail backup_already_exists; return 1; }
         if ! mv -T "$target" "$backup"; then
             rmdir "$lock" >/dev/null 2>&1 || true
@@ -1388,7 +1459,11 @@ rootpxe_finalize_capture() {
         rootpxe_capture_marker_matches_task "$source_marker" "$taskid" || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail source_marker_invalid; return 1; }
         capture_size_bytes=$(rootpxe_directory_size_bytes "$source") || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail source_payload_invalid; return 1; }
         [[ $capture_size_bytes =~ ^[1-9][0-9]*$ ]] || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail source_payload_invalid; return 1; }
-        [[ ! -e $backup && ! -L $backup ]] || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail backup_already_exists; return 1; }
+        if [[ -n ${captureBackupName:-} ]]; then
+            rootpxe_validate_capture_backup_name "$captureBackupName" || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail invalid_backup_name; return 1; }
+            backup="$backup_root/$captureBackupName"
+            [[ ! -e $backup && ! -L $backup ]] || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail backup_already_exists; return 1; }
+        fi
         if ! mv -T "$source" "$target"; then
             rmdir "$lock" >/dev/null 2>&1 || true
             rootpxe_capture_finalize_fail publish_failed_source_retained
@@ -2970,7 +3045,7 @@ rootpxe_apply_windows_hostname_for_disk() {
     esac
 }
 
-# Changes Windows hostname after restore and before postdeploy hook.  The fixed
+# Changes Windows hostname after restore and before the post-deploy script. The fixed
 # Sysprep path is authoritative; registry fallback is allowed only if it does
 # not exist, never after malformed/ambiguous XML.
 rootpxe_apply_windows_hostname() {
@@ -3718,9 +3793,7 @@ completeTasking() {
             killStatusReporter
             [[ $capone -eq 1 ]] && exit 0
             [[ ${changeHostname:-false} == true ]] && rootpxe_apply_hostname_for_disk "$hd"
-            if [[ -f /storage/postdeployscripts/hook.sh ]]; then
-                . /storage/postdeployscripts/hook.sh || handleError "Post-deploy script failed"
-            fi
+            rootpxe_run_post_deploy_script || handleError "PXEOS_STAGE=post_deploy_script CODE=POST_DEPLOY_SCRIPT_FAILED REASON=${rootpxe_deploy_script_error:-unknown}"
             . /bin/pxeos.imgcomplete
             ;;
     esac

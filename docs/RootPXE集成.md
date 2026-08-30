@@ -21,7 +21,8 @@
 - Windows 改名仅在 `deploy` 且 `changeHostname=true` 时运行。PXEOS 先从唯一含 `Windows/System32/config/SYSTEM` 的 NTFS 分区识别系统卷；没有或有多个候选都会进入 attention，绝不猜测第一块 NTFS。随后仅检查固定路径 `Windows/System32/Sysprep/unattend.xml`：存在时使用 `xmlstarlet` 修改或安全插入 `specialize/Microsoft-Windows-Shell-Setup/ComputerName`，XML 异常、非唯一或回读失败均进入 attention，不回退注册表；该文件不存在时才离线修改 `SYSTEM` 注册表。
 - Linux 改名仅支持 `osid=50` 的 `deploy` 任务，和 Windows 共用 `rootpxe_apply_hostname_for_disk` 分派入口。PXEOS 只探测 `ext2`、`ext3`、`ext4`、`xfs`、`btrfs`、`f2fs` 白名单中的唯一本地根文件系统：普通目标盘分区，或全部 PV 均属于该目标盘且以 VG UUID 选择的 LVM LV；无根、多根、跨盘 VG、混合 LV 激活状态都会进入 attention，绝不按最大分区、首个 LV 或同名 VG 猜测。LUKS、mdraid、跨盘 VG 及其他未列文件系统当前不支持，均按无法安全识别根卷处理。XFS 只以 `nouuid` 挂载，探测和写入后均清理挂载；PXEOS 自行激活的目标 VG 会在探测后及最终写入卸载后停用，原本已激活的 VG 不会被停用。
 - Linux 主机名仅允许 1–63 位字母、数字、连字符，且首尾不能是连字符。PXEOS 写入并回读 `/etc/hostname`；已有文件通过原 inode 覆盖以保留其权限和属主，缺失时新建为 `root:root`、`0644`。有旧主机名且存在 `/etc/hosts` 时，只替换非注释行中的完整字段，不替换子串，仍通过原 inode 覆盖。`/etc` 必须是真实目录，`hostname`、`hosts` 不能是符号链接，避免离线镜像的绝对/越界链接写入 PXEOS 自身；`os-release` 的相对内链（例如 `../usr/lib/os-release`）在解析后仍位于目标根内时允许。
-- 主机名定制失败后重试使用 `resumeStage=customizing_hostname`：PXEOS 为同一稳定目标盘重放 `operation=deploy_write` 的 disk permit，随后只执行系统卷识别、改名和 `postdeployscripts/hook.sh`，不运行 postinit、不重新验证/应用布局、不计划 NVMe format，也不重新写镜像。
+- 部署可使用两套认证 JSON 脚本：`preDeployScript`/`preDeployScriptSha256` 在目标盘身份确认并取得 `deploy_write` permit 后、任何 NVMe format、分区布局或镜像恢复前执行；`postDeployScript`/`postDeployScriptSha256` 在恢复、扩容和主机名定制后执行。每套脚本独立限制为 64 KiB UTF-8 字节、独立校验 SHA-256，并通过受限环境的独立 Bash 子进程运行，临时文件不会写入镜像存储。捕获任务携带任一脚本字段会被拒绝。主机名失败以 `resumeStage=customizing_hostname` 恢复时仅重放 permit、定制主机名并执行后置脚本；后置脚本失败以 `resumeStage=post_deploy_script` 恢复时仅重放 permit 和后置脚本。两种恢复路径均不重新验证/应用布局、不计划 NVMe format，也不重新写镜像。前置脚本失败不属于安全恢复点，重试必须回到完整部署路径。
+- 重捕获时，PXEOS 仅接受 RootPXE 下发的安全 `captureBackupName`，将旧正式镜像原子移动到 `/storage/backup/<captureBackupName>`。该目录可见、不得覆盖同名目录，并且必须与正式镜像和捕获暂存目录处于同一文件系统；首次捕获没有旧正式镜像时不会创建备份。
 
 ## NVMe、permit 与验证边界
 

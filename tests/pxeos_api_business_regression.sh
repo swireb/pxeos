@@ -25,6 +25,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 awk '/^rootpxe_json_get_string\(\)/ { on=1 } /^checkin_rootpxe\(\)/ { on=0 } on { print }' "$checkin" >"$tmp/checkin-json.sh"
 awk '/^rootpxe_validate_smb_export\(\)/ { on=1 } /^rootpxe_storage_path\(\)/ { on=0 } on { print }' "$funcs" >"$tmp/smb-validation.sh"
+awk '/^rootpxe_validate_capture_backup_name\(\)/ { on=1 } /^rootpxe_capture_paths_overlap\(\)/ { on=0 } on { print }' "$funcs" >"$tmp/capture-backup-name.sh"
 
 # The production script resolves jq through PATH.  This test provides a
 # one-command PATH wrapper without replacing jq's behavior.
@@ -40,9 +41,11 @@ export PATH
 # shellcheck source=/dev/null
 . "$tmp/smb-validation.sh"
 # shellcheck source=/dev/null
+. "$tmp/capture-backup-name.sh"
+# shellcheck source=/dev/null
 . "$tmp/checkin-json.sh"
 
-flat_smb='{"taskId":42,"type":"capture","pxeType":"up","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"changeHostname":false,"storage":"192.0.2.10:share/images","protocol":"smb","storageip":"192.0.2.10","exportPath":"share/images","smbUsername":"test-user","smbPassword":"pa%ss\\word","smbDomain":"WORKGROUP"}'
+flat_smb='{"taskId":42,"type":"capture","pxeType":"up","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"changeHostname":false,"captureBackupName":"demo-backup-20260830T104527123Z","storage":"192.0.2.10:share/images","protocol":"smb","storageip":"192.0.2.10","exportPath":"share/images","smbUsername":"test-user","smbPassword":"pa%ss\\word","smbDomain":"WORKGROUP"}'
 rootpxe_apply_json_checkin "$flat_smb" || fail '平铺 SMB JSON 被拒绝'
 [[ $protocol == smb ]] || fail "平铺 protocol 解析错误: ${protocol@Q}"
 [[ $storage_server == 192.0.2.10 ]] || fail "平铺 server 解析错误: ${storage_server@Q}"
@@ -50,6 +53,97 @@ rootpxe_apply_json_checkin "$flat_smb" || fail '平铺 SMB JSON 被拒绝'
 [[ $smb_password == 'pa%ss\word' ]] || fail 'SMB 密码中的 % 或反斜线被改变'
 [[ $shutdown == false && $changeHostname == false ]] || fail 'JSON false 被当作缺失'
 export -p | grep -q 'smb_\(username\|password\|domain\)' && fail 'SMB 凭据不得导出到子进程环境'
+[[ $captureBackupName == demo-backup-20260830T104527123Z ]] || fail 'capture backup name 未从认证 JSON 保留'
+unicode_backup_name='Rocky中文-backup-20260830T104527123Z'
+unicode_capture=$(jq --arg name "$unicode_backup_name" '.captureBackupName=$name' <<<"$flat_smb")
+rootpxe_apply_json_checkin "$unicode_capture" || fail 'UTF-8 capture backup name 被认证 JSON 拒绝'
+[[ $captureBackupName == "$unicode_backup_name" ]] || fail 'UTF-8 capture backup name 未原样保留'
+too_long_backup_name=$(printf 'a%.0s' {1..256})
+too_long_capture=$(jq --arg name "$too_long_backup_name" '.captureBackupName=$name' <<<"$flat_smb")
+rootpxe_apply_json_checkin "$too_long_capture" && fail '超过 255 UTF-8 字节的备份名称被接受'
+unset unicode_backup_name unicode_capture too_long_backup_name too_long_capture
+
+# Two deploy scripts are authenticated independently. Both must retain exact
+# multiline bytes in separate 0700 files; capture and legacy never receive
+# either field.
+pre_script=$'printf "%s\\n" pre\n'
+post_script=$'printf "%s\\n" post\n'
+pre_expected_file="$tmp/pre.expected"; post_expected_file="$tmp/post.expected"
+jq -nj --arg script "$pre_script" '$script' >"$pre_expected_file"
+jq -nj --arg script "$post_script" '$script' >"$post_expected_file"
+pre_hash=$(sha256sum "$pre_expected_file" | awk '{print $1}')
+post_hash=$(sha256sum "$post_expected_file" | awk '{print $1}')
+deploy_with_scripts=$(jq -cn --arg pre "$pre_script" --arg pre_hash "$pre_hash" --arg post "$post_script" --arg post_hash "$post_hash" '{taskId:45,type:"deploy",pxeType:"down",img:"images/demo",imgType:"raw",imgPartitionType:"all",osid:50,imgFormat:5,compressionLevel:6,shutdown:false,protocol:"nfs",storageip:"192.0.2.13",exportPath:"/dept/images",preDeployScript:$pre,preDeployScriptSha256:$pre_hash,postDeployScript:$post,postDeployScriptSha256:$post_hash}')
+rootpxe_apply_json_checkin "$deploy_with_scripts" || fail '认证部署双脚本 JSON 被拒绝'
+[[ -f ${preDeployScriptFile:-} && ! -L $preDeployScriptFile && -f ${postDeployScriptFile:-} && ! -L $postDeployScriptFile ]] || fail '部署脚本未保存到独立临时文件'
+cmp -s "$pre_expected_file" "$preDeployScriptFile" && [[ $preDeployScriptSha256 == "$pre_hash" ]] || fail '部署前脚本正文或 SHA256 被改变'
+cmp -s "$post_expected_file" "$postDeployScriptFile" && [[ $postDeployScriptSha256 == "$post_hash" ]] || fail '部署后脚本正文或 SHA256 被改变'
+rm -f -- "$preDeployScriptFile" "$postDeployScriptFile"; unset preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256
+missing_pre_hash=$(jq 'del(.preDeployScriptSha256)' <<<"$deploy_with_scripts")
+missing_post_hash=$(jq 'del(.postDeployScriptSha256)' <<<"$deploy_with_scripts")
+nonstring_pre=$(jq '.preDeployScript=42' <<<"$deploy_with_scripts")
+nonstring_post_hash=$(jq '.postDeployScriptSha256=42' <<<"$deploy_with_scripts")
+empty_both=$(jq '.preDeployScript="" | .preDeployScriptSha256="" | .postDeployScript="" | .postDeployScriptSha256=""' <<<"$deploy_with_scripts")
+rootpxe_apply_json_checkin "$missing_pre_hash" && fail '缺少部署前脚本摘要被接受'
+rootpxe_apply_json_checkin "$missing_post_hash" && fail '缺少部署后脚本摘要被接受'
+rootpxe_apply_json_checkin "$nonstring_pre" && fail '非文本部署前脚本被接受'
+rootpxe_apply_json_checkin "$nonstring_post_hash" && fail '非文本部署后脚本摘要被接受'
+rootpxe_apply_json_checkin "$empty_both" || fail '空部署脚本对被拒绝'
+[[ -z ${preDeployScriptFile:-} && -z ${postDeployScriptFile:-} ]] || fail '空部署脚本仍创建临时文件'
+bad_hash=$(printf '0%.0s' {1..64})
+bad_pre_hash=$(jq --arg hash "$bad_hash" '.preDeployScriptSha256=$hash' <<<"$deploy_with_scripts")
+bad_post_hash=$(jq --arg hash "$bad_hash" '.postDeployScriptSha256=$hash' <<<"$deploy_with_scripts")
+rootpxe_apply_json_checkin "$bad_pre_hash" && fail '错误部署前脚本摘要被接受'
+rootpxe_apply_json_checkin "$bad_post_hash" && fail '错误部署后脚本摘要被接受'
+jq() {
+    case "$*" in
+        *'has($field)'*) printf 'true\n' ;;
+        *'type == "string"'*) return 0 ;;
+        *utf8bytelength*) printf '65537\n' ;;
+        *) return 1 ;;
+    esac
+}
+rootpxe_apply_json_deploy_script '{}' preDeployScript preDeployScriptSha256 preDeployScriptFile preDeployScriptSha256 pre-deploy && fail '超过 64 KiB 的部署前脚本被接受'
+rootpxe_apply_json_deploy_script '{}' postDeployScript postDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 post-deploy && fail '超过 64 KiB 的部署后脚本被接受'
+unset -f jq
+capture_with_script=$(jq '.preDeployScript="echo unsafe" | .preDeployScriptSha256="0000000000000000000000000000000000000000000000000000000000000000"' <<<"$flat_smb")
+rootpxe_apply_json_checkin "$capture_with_script" && fail 'capture JSON 部署前脚本字段被接受'
+capture_with_script=$(jq '.postDeployScript="echo unsafe" | .postDeployScriptSha256="0000000000000000000000000000000000000000000000000000000000000000"' <<<"$flat_smb")
+rootpxe_apply_json_checkin "$capture_with_script" && fail 'capture JSON 部署后脚本字段被接受'
+unset pre_expected_file post_expected_file missing_pre_hash missing_post_hash nonstring_pre nonstring_post_hash empty_both bad_hash bad_pre_hash bad_post_hash capture_with_script
+
+# Both scripts run only in clean child environments and always delete their
+# independent temporary files.
+(
+awk '/^rootpxe_run_deploy_script\(\)/ { on=1 } /^# LVM v2/ { on=0 } on { print }' "$funcs" >"$tmp/deploy-scripts-run.sh"
+. "$tmp/deploy-scripts-run.sh"
+mkdir -p "$tmp/deploy-script-image"
+pre_exec="$tmp/pre-exec.sh"; post_exec="$tmp/post-exec.sh"
+cat >"$pre_exec" <<'EOF'
+printf '%s|%s|%s|%s|%s\n' "$ROOTPXE_TASK_ID" "$ROOTPXE_IMAGE_PATH" "$ROOTPXE_TARGET_DISK" "$ROOTPXE_HOSTNAME" "$ROOTPXE_OS_ID" >"$ROOTPXE_IMAGE_PATH/pre.trace"
+[[ -z ${task_token+x} ]]
+EOF
+cat >"$post_exec" <<'EOF'
+printf '%s|%s|%s|%s|%s\n' "$ROOTPXE_TASK_ID" "$ROOTPXE_IMAGE_PATH" "$ROOTPXE_TARGET_DISK" "$ROOTPXE_HOSTNAME" "$ROOTPXE_OS_ID" >"$ROOTPXE_IMAGE_PATH/post.trace"
+[[ -z ${task_token+x} ]]
+EOF
+taskid=45; task_token=must-not-reach-script; imagePath="$tmp/deploy-script-image"; hd=/dev/mockdisk; hostName=demo-host; osid=50
+preDeployScriptFile="$pre_exec"; preDeployScriptSha256=$(sha256sum "$pre_exec" | awk '{print $1}')
+postDeployScriptFile="$post_exec"; postDeployScriptSha256=$(sha256sum "$post_exec" | awk '{print $1}')
+rootpxe_stage() { :; }
+rootpxe_console_message() { :; }
+rootpxe_run_pre_deploy_script || fail '部署前脚本执行失败'
+rootpxe_run_post_deploy_script || fail '部署后脚本执行失败'
+[[ $(<"$tmp/deploy-script-image/pre.trace") == "45|$tmp/deploy-script-image|/dev/mockdisk|demo-host|50" ]] || fail '部署前脚本未获得受限环境变量'
+[[ $(<"$tmp/deploy-script-image/post.trace") == "45|$tmp/deploy-script-image|/dev/mockdisk|demo-host|50" ]] || fail '部署后脚本未获得受限环境变量'
+[[ ! -e $pre_exec && ! -e $post_exec && -z ${preDeployScriptFile:-} && -z ${postDeployScriptFile:-} ]] || fail '部署脚本成功后未清理临时文件'
+post_fail="$tmp/post-fail.sh"
+printf 'exit 7\n' >"$post_fail"
+postDeployScriptFile="$post_fail"; postDeployScriptSha256=$(sha256sum "$post_fail" | awk '{print $1}')
+rootpxe_run_post_deploy_script && fail '失败的部署后脚本被误报成功'
+[[ ${rootpxe_deploy_script_error:-} == script_execution_failed && ! -e $post_fail ]] || fail '失败的部署后脚本未清理或未标记失败'
+unset pre_exec post_exec post_fail
+)
 
 for smb_export in _share share-name; do
     allowed_smb="{\"protocol\":\"smb\",\"storageip\":\"192.0.2.10\",\"exportPath\":\"$smb_export\",\"smbUsername\":\"test-user\",\"smbPassword\":\"test-pass\"}"
@@ -193,7 +287,7 @@ rootpxe_prepare_smb_credentials() {
     return 0
 }
 
-json_checkin_body='{"taskId":49,"executionToken":"0123456789abcdef","type":"capture","pxeType":"up","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"storage":"192.0.2.20:share/images","protocol":"smb","storageip":"192.0.2.20","exportPath":"share/images","smbUsername":"json-user","smbPassword":"json-pass"}'
+json_checkin_body='{"taskId":49,"executionToken":"0123456789abcdef","type":"capture","pxeType":"up","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"captureBackupName":"demo-backup-20260830T104527123Z","storage":"192.0.2.20:share/images","protocol":"smb","storageip":"192.0.2.20","exportPath":"share/images","smbUsername":"json-user","smbPassword":"json-pass"}'
 protocol=''; storage_server=''; storage_export=''; storageip=''; export_path=''; smb_username=''; smb_password=''; smb_domain=''
 rm -f "$tmp/legacy-smb-credential-attempt" "$tmp/json.credentials"
 MOCK_CHECKIN_BODY="$json_checkin_body"
@@ -209,6 +303,8 @@ export MOCK_CHECKIN_BODY
 
 protocol=''; storage_server=''; storage_export=''; storage_share=''; storageip=''; export_path=''
 smb_username=''; smb_password=''; smb_domain=''
+preDeployScriptFile="$tmp/inherited-pre-script"; preDeployScriptSha256=$(printf '0%.0s' {1..64})
+postDeployScriptFile="$tmp/inherited-post-script"; postDeployScriptSha256=$(printf '1%.0s' {1..64})
 legacy_checkin_rc=0
 checkin_rootpxe || legacy_checkin_rc=$?
 # checkin_rootpxe installs its runtime session-cleanup trap.  Restore the
@@ -216,6 +312,7 @@ checkin_rootpxe || legacy_checkin_rc=$?
 trap 'rm -rf "$tmp"' EXIT INT TERM
 [[ $legacy_checkin_rc -eq 0 ]] || fail 'legacy checkin 响应被拒绝'
 [[ $protocol == nfs && $storage_server == 192.0.2.20 && $storage_export == /legacy ]] || fail 'legacy NFS 协议或 export 解析错误'
+[[ -z ${preDeployScriptFile:-} && -z ${preDeployScriptSha256:-} && -z ${postDeployScriptFile:-} && -z ${postDeployScriptSha256:-} ]] || fail 'legacy checkin must not retain deploy scripts'
 [[ ! -e $tmp/legacy-smb-credential-attempt ]] || fail 'legacy NFS 不得创建 SMB 凭据'
 
 legacy_smb_body=$(cat <<'EOF'
@@ -305,6 +402,43 @@ PATH="$tmp/mount-bin:$PATH" MOCK_CIFS_ARGS="$tmp/cifs-capone.args" MOCK_NFS_ARGS
 protocol='' storage_server=192.0.2.22 storage_export=/legacy type=up capone=1 bash "$tmp/pxeos.mount" || fail 'Capone NFS 兼容分支失败'
 mapfile -d '' -t nfs_args <"$tmp/nfs-capone.args"
 [[ ${nfs_args[2]} == '192.0.2.22:/legacy' && ${nfs_args[3]} == "$tmp/storage" ]] || fail 'Capone NFS 未使用显式 server/export'
+
+awk '/^rootpxe_error_wait_for_retry\(\)/ { on=1 } /^rootpxe_directory_size_bytes\(\)/ { on=0 } on { print }' "$funcs" \
+    | sed "s|/tmp/pxeos.failure_action|$tmp/pxeos.failure_action|g" >"$tmp/error-stage.sh"
+rootpxe_require_task_context() { return 0; }
+rootpxe_console_message() { :; }
+sleep() { :; }
+test_error_stage_field() {
+    local message="$1" expected_stage="${2:-}" trace="$tmp/error-stage.trace" calls_file="$tmp/error-stage.calls" calls
+    : >"$trace"
+    printf '0\n' >"$calls_file"
+    curl() {
+        calls=$(<"$calls_file")
+        calls=$((calls + 1))
+        printf '%s\n' "$calls" >"$calls_file"
+        printf '%s\n' "$@" >>"$trace"
+        if [[ $calls -eq 1 ]]; then
+            printf '%s\n' '{"accepted":true,"waitSec":60,"failureAction":"reboot"}'
+        else
+            printf '%s\n' '{"status":"deleted"}'
+        fi
+    }
+    taskid=77; task_token=0123456789abcdef; mac=001122334455; pxeapi='http://mock/service/'
+    rootpxe_error_wait_for_retry "$message" TEST_ERROR || [[ $? -eq 2 ]] || fail 'error retry fixture did not pause safely'
+    if [[ -n $expected_stage ]]; then
+        grep -Fqx "stage=$expected_stage" "$trace" || fail 'safe resume stage was not submitted as an independent form field'
+    else
+        ! grep -Fq 'stage=' "$trace" || fail 'unsafe or ambiguous resume stage was submitted'
+    fi
+}
+. "$tmp/error-stage.sh"
+test_error_stage_field 'PXEOS_STAGE=post_deploy_script CODE=POST_DEPLOY_SCRIPT_FAILED' post_deploy_script
+test_error_stage_field 'PXEOS_STAGE=customizing_hostname CODE=HOSTNAME_FAILED' customizing_hostname
+test_error_stage_field 'PXEOS_STAGE=untrusted CODE=FAIL' ''
+test_error_stage_field 'PXEOS_STAGE=pre_deploy_script CODE=PRE_DEPLOY_SCRIPT_FAILED' ''
+test_error_stage_field 'PXEOS_STAGE=post_deploy_script PXEOS_STAGE=untrusted CODE=FAIL' ''
+test_error_stage_field $'PXEOS_STAGE=post_deploy_script\nPXEOS_STAGE=customizing_hostname CODE=FAIL' ''
+unset -f curl sleep rootpxe_require_task_context rootpxe_console_message test_error_stage_field
 
 printf 'PASS: PXEOS real-jq JSON checkin regression\n'
 )
@@ -1145,18 +1279,15 @@ performRestore /dev/mock $tmp all 0 || fail legacy-restore
 grep -Fqx '/dev/mock1|1:2:3' $EXPAND_TRACE || fail legacy-first-fixed-list-must-remain
 grep -Fqx '/dev/mock2|1:2:3' $EXPAND_TRACE || fail legacy-second-fixed-list-must-remain
 
-# Resume is deliberately before layout validation and postinit, and must not
-# reinvoke image restoration after a hostname attention retry.  Execute the
+# Resume is deliberately before layout validation and must not reinvoke image
+# restoration after a hostname or post-deploy-script attention retry. Execute the
 # tail with failing mocks for all prohibited operations, not merely a grep.
 resume_script=$tmp/resume.sh
-awk '/^findHDDInfo$/{on=1} on' $download | sed -e "s|/bin/pxeos.imgcomplete|$tmp/pxeos.imgcomplete|g" -e "s|/storage/postdeployscripts/hook.sh|$tmp/postdeploy-hook|g" >$resume_script
+awk '/^findHDDInfo$/{on=1} on' $download | sed -e "s|/bin/pxeos.imgcomplete|$tmp/pxeos.imgcomplete|g" >$resume_script
 cat >$tmp/pxeos.imgcomplete <<'EOF'
 printf '%s\n' complete >>$RESUME_TRACE
 EOF
-cat >$tmp/postdeploy-hook <<'EOF'
-printf '%s\n' hook >>$RESUME_TRACE
-EOF
-chmod +x $tmp/pxeos.imgcomplete $tmp/postdeploy-hook
+chmod +x $tmp/pxeos.imgcomplete
 : >$tmp/resume-trace
 RESUME_TRACE=$tmp/resume-trace; export RESUME_TRACE
 findHDDInfo() { hd=/dev/mock2; printf '%s\n' find >>$RESUME_TRACE; }
@@ -1164,7 +1295,8 @@ rootpxe_disk_stable_identity() { echo resume-disk-id; }
 rootpxe_wait_for_disk_permit() { printf 'permit:%s:%s\n' "$1" "$2" >>$RESUME_TRACE; }
 rootpxe_stage() { printf 'stage:%s\n' "$*" >>$RESUME_TRACE; }
 rootpxe_apply_hostname_for_disk() { printf 'hostname:%s:%s\n' "$osid" "$1" >>$RESUME_TRACE; }
-rootpxe_run_postinit() { fail resume-postinit; }
+rootpxe_run_pre_deploy_script() { printf '%s\n' UNEXPECTED:pre >>$RESUME_TRACE; return 1; }
+rootpxe_run_post_deploy_script() { printf '%s\n' post >>$RESUME_TRACE; }
 rootpxe_validate_deployment_layout() { fail resume-layout; }
 rootpxe_apply_deployment_layout() { fail resume-layout-apply; }
 rootpxe_plan_deploy_disk_operation() { fail resume-nvme-plan; }
@@ -1182,15 +1314,33 @@ nombr=0
 ) || fail resume-execution
 grep -Fqx permit:resume-disk-id:deploy_write $tmp/resume-trace || fail resume-permit
 grep -Fqx hostname:50:/dev/mock2 $tmp/resume-trace || fail resume-hostname
-grep -Fqx hook $tmp/resume-trace || fail resume-hook
+grep -Fqx post $tmp/resume-trace || fail resume-post
 grep -Fqx complete $tmp/resume-trace || fail resume-complete
+
+: >$tmp/resume-post-trace
+RESUME_TRACE=$tmp/resume-post-trace; export RESUME_TRACE
+rootpxe_apply_hostname_for_disk() { fail resume-post-must-not-repeat-hostname; }
+resumeStage=post_deploy_script
+changeHostname=false
+(
+    . $resume_script
+) || fail resume-post-execution
+grep -Fqx permit:resume-disk-id:deploy_write $tmp/resume-post-trace || fail resume-post-permit
+grep -Fqx post $tmp/resume-post-trace || fail resume-post-script
+grep -Fqx complete $tmp/resume-post-trace || fail resume-post-complete
+! grep -Fq UNEXPECTED:pre $tmp/resume-post-trace || fail resume-post-ran-pre
 
 # Keep the ordering assertion as a cheap guard against accidental future
 # movement of the early resume branch.
 resume=$(grep -n RESUME_TARGET_IDENTITY_UNAVAILABLE $download | cut -d: -f1)
 layout=$(grep -n pre_permit_validation_failed $download | cut -d: -f1)
-postinit=$(grep -n rootpxe_run_postinit $download | cut -d: -f1)
-[[ $resume -lt $layout && $resume -lt $postinit ]] || fail resume-order
+[[ $resume -lt $layout ]] || fail resume-order
+pre_safe=$(grep -n "resumeStage:-} == pre_deploy_script" $download || true)
+[[ -z $pre_safe ]] || fail pre-deploy-stage-must-not-bypass-imaging
+permit=$(grep -n "rootpxe_wait_for_disk_permit \"\$rootpxe_planned_target_id\"" $download | cut -d: -f1)
+pre=$(grep -n "rootpxe_run_pre_deploy_script" $download | tail -n1 | cut -d: -f1)
+prepare=$(grep -n "preparePartitions" $download | tail -n1 | cut -d: -f1)
+[[ $permit -lt $pre && $pre -lt $prepare ]] || fail pre-deploy-script-order
 echo 'PASS: PXEOS business regression contract'
 )
 # ===== 原脚本结束：tests/pxeos_business_regression.sh =====
@@ -1544,7 +1694,8 @@ must_have "$overlay/bin/pxeos.checkmountdrivesize" 'dots "Checking server disk s
 must_have "$overlay/bin/pxeos.chntpw" 'dots "Mounting Windows file system"'
 must_have "$overlay/bin/pxeos.chpass" 'dots "Creating chntpw mount point"'
 must_have "$overlay/bin/pxeos.chpass" 'dots "Using disk device"'
-must_not_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'ROOTPXE'
+! grep -F 'rootpxe_console_message' "$overlay/usr/share/pxeos/lib/funcs.sh" | grep -Fq 'ROOTPXE' \
+    || fail 'script environment variable leaked into console output'
 must_not_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'Hard Disk'
 must_not_have "$overlay/bin/pxeos.upload" 'Using Image'
 must_not_have "$overlay/bin/pxeos.download" 'Using Image'

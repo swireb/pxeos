@@ -81,12 +81,13 @@ putDataBack() {
 }
 findHDDInfo
 sector_metadata="$imagePath/d1.partitions"
-if [[ ${resumeStage:-} == customizing_hostname ]]; then
+if [[ ${resumeStage:-} == customizing_hostname || ${resumeStage:-} == post_deploy_script ]]; then
     # A retry after disk writes only replays the existing deploy-write permit
-    # for the same stable disk, then customizes the deployed OS hostname and runs postdeploy.
+    # for the same stable disk, then continues hostname customization or the
+    # post-deploy script without restoring partitions again.
     # It must not plan NVMe formatting, validate/apply a new layout, or rerun
-    # postinit before the safe resume point.
-    resume_target_id=$(rootpxe_disk_stable_identity "$hd") || handleError "PXEOS_STAGE=customizing_hostname CODE=RESUME_TARGET_IDENTITY_UNAVAILABLE"
+    # any pre-write step before the safe resume point.
+    resume_target_id=$(rootpxe_disk_stable_identity "$hd") || handleError "PXEOS_STAGE=${resumeStage} CODE=RESUME_TARGET_IDENTITY_UNAVAILABLE"
     while :; do
         if rootpxe_wait_for_disk_permit "$resume_target_id" deploy_write; then
             permit_result=0
@@ -107,12 +108,12 @@ if [[ ${resumeStage:-} == customizing_hostname ]]; then
                 ;;
         esac
     done
-    [[ ${changeHostname:-false} == true ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=RESUME_CONTRACT_INVALID REASON=hostname_change_not_enabled"
-    rootpxe_stage customizing_hostname "resume permit confirmed"
-    rootpxe_apply_hostname_for_disk "$hd"
-    if [[ -f /storage/postdeployscripts/hook.sh ]]; then
-        . /storage/postdeployscripts/hook.sh || handleError "Post-deploy script failed"
+    if [[ ${resumeStage:-} == customizing_hostname ]]; then
+        [[ ${changeHostname:-false} == true ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=RESUME_CONTRACT_INVALID REASON=hostname_change_not_enabled"
+        rootpxe_stage customizing_hostname "resume permit confirmed"
+        rootpxe_apply_hostname_for_disk "$hd"
     fi
+    rootpxe_run_post_deploy_script || handleError "PXEOS_STAGE=post_deploy_script CODE=POST_DEPLOY_SCRIPT_FAILED REASON=${rootpxe_deploy_script_error:-unknown}"
     . /bin/pxeos.imgcomplete
     exit 0
 fi
@@ -141,7 +142,7 @@ while :; do
             ;;
     esac
 done
-rootpxe_run_postinit || handleError "Post-init script failed ($0)"
+rootpxe_run_pre_deploy_script || handleError "PXEOS_STAGE=pre_deploy_script CODE=PRE_DEPLOY_SCRIPT_FAILED REASON=${rootpxe_deploy_script_error:-unknown}"
 rootpxe_stage init "pxeos download started, storage mounted"
 [[ $nombr -eq 1 ]] && rootpxe_console_message INFO 'Skipping partition layout: single-partition restore.' || preparePartitions
 if [[ ${imgType:-} == [Nn] ]]; then

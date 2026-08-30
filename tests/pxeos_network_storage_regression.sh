@@ -129,8 +129,26 @@ for export_path in '' /share share/ share//images share/../images //server/share
 done
 [[ /storage == /* ]] || fail 'NFS export path 必须接受绝对路径'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_prepare_storage_layout'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '/storage/postinitscripts/hook.sh'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '/storage/postdeployscripts/hook.sh'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '/storage/backup'
+must_not_have_literal "$overlay" '/storage/postinitscripts'
+must_not_have_literal "$overlay" '/storage/postdeployscripts'
+must_not_have_literal "$overlay" 'rootpxe_run_postinit'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_run_pre_deploy_script'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_run_post_deploy_script'
+must_have "$overlay/bin/pxeos.checkin" 'preDeployScript'
+must_have "$overlay/bin/pxeos.checkin" 'preDeployScriptSha256'
+must_have "$overlay/bin/pxeos.checkin" 'postDeployScript'
+must_have "$overlay/bin/pxeos.checkin" 'postDeployScriptSha256'
+must_have "$overlay/bin/pxeos.checkin" 'captureBackupName'
+must_have "$overlay/bin/pxeos.checkin" 'chmod 700 "$script_file"'
+awk '/^rootpxe_run_deploy_script\(\)/ { on=1 } /^# LVM v2/ { on=0 } on { print }' "$overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp.deploy-scripts.sh"
+must_not_have "$tmp.deploy-scripts.sh" 'source[[:space:]]'
+must_not_have "$tmp.deploy-scripts.sh" 'eval[[:space:]]'
+rm -f "$tmp.deploy-scripts.sh"
+legacy_field='inject'"Script"
+legacy_stage='injecting'"_script"
+must_not_have_literal "$overlay" "$legacy_field"
+must_not_have_literal "$overlay" "$legacy_stage"
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'for pid in "${writer_pids[@]}"'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_wait_for_writer'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '( set -o pipefail;'

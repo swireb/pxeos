@@ -1099,12 +1099,12 @@ done
 ! grep -Fq '*) printf '\''%s\n'\'' reboot' "$upload" "$download" || fail 'permit callers retain an immediate-reboot catch-all'
 
 # Run only the three permit gates extracted from the top-level scripts.  A
-# completed attention wait (20) must stop before postinit, image work, or the
-# resume postdeploy hook.  The snippets never receive a grant and therefore do
+# completed attention wait (20) must stop before image work, hostname
+# customization, or the resume post-deploy script. The snippets never receive a grant and therefore do
 # not write /tmp state, mount storage, or touch a disk.
 awk '/^capture_target_id=/ { armed = 1 } armed && /^while :; do/ { copy = 1 } copy { print } copy && /^done$/ { getline; print; exit }' "$upload" >"$tmp/upload-gate.sh"
 awk '/^rootpxe_plan_deploy_disk_operation/ { armed = 1 } armed && /^while :; do/ { copy = 1 } copy { print } copy && /^done$/ { getline; print; exit }' "$download" >"$tmp/download-gate.sh"
-awk '/^if \[\[ \$\{resumeStage:-\} == customizing_hostname \]\]/ { copy = 1 } /^if \[\[ \$\{imgType:-\}/ { exit } copy' "$download" >"$tmp/resume-gate.sh"
+awk '/^if \[\[ \$\{resumeStage:-\} == customizing_hostname \|\| \$\{resumeStage:-\} == post_deploy_script \]\]/ { copy = 1 } /^if \[\[ \$\{imgType:-\}/ { exit } copy' "$download" >"$tmp/resume-gate.sh"
 for snippet in "$tmp/upload-gate.sh" "$tmp/download-gate.sh" "$tmp/resume-gate.sh"; do
     [[ -s $snippet ]] || fail "empty dynamic permit gate: $snippet"
     bash -n "$snippet" || fail "invalid dynamic permit gate: $snippet"
@@ -1129,7 +1129,8 @@ expect_terminal_gate() {
             return 20
         }
         sleep() { printf 'sleep:%s\n' "$1"; }
-        rootpxe_run_postinit() { printf 'UNEXPECTED:postinit\n'; return 0; }
+        rootpxe_run_pre_deploy_script() { printf 'UNEXPECTED:pre-deploy\n'; return 0; }
+        rootpxe_run_post_deploy_script() { printf 'UNEXPECTED:post-deploy\n'; return 0; }
         rootpxe_stage() { printf 'UNEXPECTED:stage\n'; return 0; }
         rootpxe_apply_hostname_for_disk() { printf 'UNEXPECTED:hostname\n'; return 0; }
         . "$snippet"

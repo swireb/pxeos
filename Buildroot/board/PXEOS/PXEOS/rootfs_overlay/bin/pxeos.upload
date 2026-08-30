@@ -285,7 +285,6 @@ while :; do
             ;;
     esac
 done
-rootpxe_run_postinit || handleError "Post-init script failed ($0)"
 rootpxe_stage init "pxeos upload started, storage mounted"
 rootpxe_console_message INFO 'Capturing image with Partclone.'
 debugPause

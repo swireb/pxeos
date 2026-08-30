@@ -30,8 +30,8 @@ setup_fixture() {
     rm -rf "$ROOTPXE_TEST_STORAGE"
     source="$ROOTPXE_TEST_STORAGE/dev/001122334455"
     target="$ROOTPXE_TEST_STORAGE/images/repeat"
-    backup="$ROOTPXE_TEST_STORAGE/images/.repeat.rootpxe-capture-backup-3"
-    mkdir -p "$source" "$(dirname "$target")"
+    backup="$ROOTPXE_TEST_STORAGE/backup/repeat-backup-20260830T104527123Z"
+    mkdir -p "$source" "$(dirname "$target")" "$ROOTPXE_TEST_STORAGE/backup"
     printf 'new-image\n' >"$source/d1p1.img"
     printf '3\n' >"$source/.rootpxe-capture-taskid"
     type=up
@@ -40,6 +40,7 @@ setup_fixture() {
     mac='00:11:22:33:44:55'
     macWinSafe=001122334455
     img='images/repeat'
+    captureBackupName='repeat-backup-20260830T104527123Z'
     unset rootpxe_finalize_capture_error_reason rootpxe_finalize_capture_error_code
 }
 
@@ -57,16 +58,50 @@ assert_file_text "$target/d1p1.img" 'new-image' '首次 capture 未发布新镜�
 [[ ! -e $backup ]] || fail '首次 capture 不应创建旧镜像备份'
 pass 'first capture publishes without backup'
 
-# 红测：合法重捕获必须将旧版本完整保留在同父级备份，并发布新版本。
+# 红测：合法重捕获必须将旧版本完整保留到可见的统一备份目录，并发布新版本。
 setup_fixture
 mkdir -p "$target"
 printf 'old-image\n' >"$target/d1p1.img"
 rootpxe_finalize_capture || fail '合法重复 capture 被安全收尾拒绝'
 assert_file_text "$target/d1p1.img" 'new-image' '新 capture 未发布为正式镜像'
-assert_file_text "$backup/d1p1.img" 'old-image' '旧镜像未保留为同父级备份'
+assert_file_text "$backup/d1p1.img" 'old-image' '旧镜像未保留到统一备份目录'
 assert_file_text "$target/.rootpxe-capture-taskid" '3' '已发布镜像未保留当前任务标记'
 [[ ! -e $source ]] || fail '发布成功后 staging source 仍存在'
 pass 'recapture replaces by backup and publish'
+
+# 服务端允许 UTF-8 镜像名称；PXEOS 必须将可见中文备份名原样作为单层目录。
+setup_fixture
+mkdir -p "$target"
+printf 'old-image\n' >"$target/d1p1.img"
+captureBackupName='Rocky中文-backup-20260830T104527123Z'
+backup="$ROOTPXE_TEST_STORAGE/backup/$captureBackupName"
+rootpxe_finalize_capture || fail 'UTF-8 备份名称被安全收尾拒绝'
+assert_file_text "$backup/d1p1.img" 'old-image' 'UTF-8 备份名称未保留旧镜像'
+pass 'UTF-8 visible backup name is accepted'
+
+# 备份名称由服务端固化为单级目录名。PXEOS 不得拼接任务 ID、接受隐藏
+# 目录或路径穿越，也不得在没有旧镜像的首次捕获中创建备份目录。
+setup_fixture
+long_backup_name=$(printf 'a%.0s' {1..256})
+[[ $backup == "$ROOTPXE_TEST_STORAGE/backup/repeat-backup-20260830T104527123Z" ]] || fail '备份名称不是服务端下发的可见名称'
+[[ ! -e "$ROOTPXE_TEST_STORAGE/images/.repeat.rootpxe-capture-backup-3" ]] || fail '旧隐藏备份目录不应出现'
+for invalid_backup_name in '' . .. '.hidden-backup' '../escape' 'nested/name' 'nested\\name' $'line\nbreak' "$long_backup_name"; do
+    setup_fixture
+    mkdir -p "$target"
+    printf 'old-image\n' >"$target/d1p1.img"
+    captureBackupName="$invalid_backup_name"
+    rootpxe_finalize_capture && fail "危险备份名称被接受: $invalid_backup_name"
+    [[ ${rootpxe_finalize_capture_error_reason:-} == invalid_backup_name ]] || fail '危险备份名称未返回稳定原因'
+done
+unset long_backup_name
+pass 'server-provided visible backup name is fail-closed'
+
+# Rebuild the published state after the invalid-name cases, which deliberately
+# leave their staging directories untouched.
+setup_fixture
+mkdir -p "$target"
+printf 'old-image\n' >"$target/d1p1.img"
+rootpxe_finalize_capture || fail '回归幂等状态未能建立'
 
 # 发布已经完成时，仅同任务 marker 可幂等确认；不允许再触碰备份。
 rootpxe_finalize_capture || fail '同任务已发布镜像未能幂等确认'
