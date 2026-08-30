@@ -1261,8 +1261,43 @@ rootpxe_wait_for_disk_permit() {
     done
 }
 
+rootpxe_e2fsck_preflight() {
+    local part="$1" output_file="$2" status
+    [[ -n $part && -n $output_file ]] || return 16
+    e2fsck -fp "$part" >"$output_file" 2>&1
+    status=$?
+    case $status in
+        0)
+            return 0
+            ;;
+        1)
+            # A journal replay can legitimately return 1.  Re-run the safe
+            # preen check and continue only when the filesystem is clean.
+            e2fsck -fp "$part" >>"$output_file" 2>&1
+            return $?
+            ;;
+        *)
+            return "$status"
+            ;;
+    esac
+}
+
+# Capture overrides this no-op after the original partition table is saved.
+# Keeping the hook here lets shrinkPartition record filesystems that were
+# reduced and need expansion without coupling it to the upload entry point.
+rootpxe_capture_note_partition_shrunk() {
+    :
+}
+
+rootpxe_error_response_reason() {
+    local response="$1" reason
+    reason=$(printf '%s' "$response" | sed -n 's/.*"error"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    reason=$(printf '%s' "$reason" | tr -cd '[:print:] ' | cut -c1-160)
+    printf '%s' "$reason"
+}
+
 rootpxe_error_wait_for_retry() {
-    local message="$1" code="${2:-PXEOS_ERROR}" api="${pxeapi:-$web}" response wait action deadline now status stage="" stage_count=0 stage_invalid=0 stage_match stage_remainder stage_value
+    local message="$1" code="${2:-PXEOS_ERROR}" api="${pxeapi:-$web}" response raw_response http_status response_reason wait action deadline now status stage="" stage_count=0 stage_invalid=0 stage_match stage_remainder stage_value
     local -a error_args
     rootpxe_require_task_context || return 1
     [[ -n $api ]] || return 1
@@ -1290,7 +1325,7 @@ rootpxe_error_wait_for_retry() {
     [[ $stage_count -eq 1 && $stage_invalid -eq 0 ]] && error_args+=(--data-urlencode "stage=$stage")
     # Do not arm the local timeout until the service confirms persistence.
     while :; do
-        response=$(curl -Lks --connect-timeout 10 --max-time 30 \
+        raw_response=$(curl -Lks --connect-timeout 10 --max-time 30 -w '\n%{http_code}' \
             "${error_args[@]}" "${api}error" 2>/dev/null) || {
                 printf '%s\n' \
                     "[WARN]  Error report failed. Retrying in 5s." \
@@ -1298,10 +1333,20 @@ rootpxe_error_wait_for_retry() {
                 sleep 5
                 continue
             }
-        [[ $response == *'"accepted":true'* ]] && break
-        printf '%s\n' \
-            "[WARN]  Error report not confirmed. Retrying in 5s." \
-            "[INFO]  SSH is available for troubleshooting."
+        http_status=${raw_response##*$'\n'}
+        response=${raw_response%$'\n'*}
+        [[ $http_status =~ ^[0-9]{3}$ ]] || { http_status=000; response=$raw_response; }
+        [[ $http_status =~ ^2 && $response == *'"accepted":true'* ]] && break
+        response_reason=$(rootpxe_error_response_reason "$response")
+        if [[ -n $response_reason ]]; then
+            printf '%s\n' \
+                "[WARN]  Error report rejected (HTTP $http_status): $response_reason. Retrying in 5s." \
+                "[INFO]  SSH is available for troubleshooting."
+        else
+            printf '%s\n' \
+                "[WARN]  Error report not confirmed (HTTP $http_status). Retrying in 5s." \
+                "[INFO]  SSH is available for troubleshooting."
+        fi
         sleep 5
     done
     wait=$(printf '%s' "$response" | sed -n 's/.*"waitSec":\([0-9][0-9]*\).*/\1/p')
@@ -1683,9 +1728,17 @@ displayBanner() {
     [[ -z $version ]] && version=$(curl -Lks "${pxeapi:-$web}health" 2>/dev/null)
 
     cat << 'EOF'
-+------------------------------------------------------------------------------+
-|                                PXEOS Runtime                                 |
-+------------------------------------------------------------------------------+
+   ========================================================
+   ===                                                  ===
+   ===  ██████╗  ██╗  ██╗ ███████╗  ██████╗  ███████╗   ===
+   ===  ██╔══██╗ ╚██╗██╔╝ ██╔════╝ ██╔═══██╗ ██╔════╝   ===
+   ===  ██████╔╝  ╚███╔╝  █████╗   ██║   ██║ ███████╗   ===
+   ===  ██╔═══╝   ██╔██╗  ██╔══╝   ██║   ██║ ╚════██║   ===
+   ===  ██║      ██╔╝ ██╗ ███████╗ ╚██████╔╝ ███████║   ===
+   ===  ╚═╝      ╚═╝  ╚═╝ ╚══════╝  ╚═════╝  ╚══════╝   ===
+   ===                                                  ===
+   ==================== PXEOS Runtime =====================
+   ========================================================
 EOF
 
     rootpxe_console_message INFO "Version: $version"
@@ -1888,6 +1941,7 @@ expandPartition() {
     [[ -z $part ]] && handleError "No partition passed (${FUNCNAME[0]})\n   Args Passed: $*"
     local disk=""
     local part_number=0
+    local e2fsck_status=0
     getDiskFromPartition "$part"
     getPartitionNumber "$part"
     local is_fixed=$(echo $fixed | awk "/(^$part_number:|:$part_number:|:$part_number$|^$part_number$)/{print 1}")
@@ -1917,20 +1971,14 @@ expandPartition() {
             ;;
         extfs)
             dots "Resizing $fstype volume ($part)"
-            e2fsck -fp $part >/tmp/e2fsck.txt 2>&1
-            case $? in
-                0)
-                    ;;
-                *)
-                    e2fsck -fy $part >>/tmp/e2fsck.txt 2>&1
-                    if [[ $? -gt 0 ]]; then
-                        echo "Failed"
-                        debugPause
-                        handleError "Could not check before resize (${FUNCNAME[0]})\n   Info: $(cat /tmp/e2fsck.txt)\n   Args Passed: $*"
-                    fi
-                    ;;
-            esac
-            resize2fs $part >/tmp/resize2fs.txt 2>&1
+            rootpxe_e2fsck_preflight "$part" /tmp/e2fsck.txt
+            e2fsck_status=$?
+            if [[ $e2fsck_status -ne 0 ]]; then
+                echo "Failed"
+                debugPause
+                handleError "Could not check before resize (${FUNCNAME[0]})\n   Exit code: $e2fsck_status\n   Info: $(cat /tmp/e2fsck.txt)\n   Args Passed: $*"
+            fi
+            resize2fs "$part" >/tmp/resize2fs.txt 2>&1
             case $? in
                 0)
                     ;;
@@ -1940,21 +1988,14 @@ expandPartition() {
                     handleError "Could not resize $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/resize2fs.txt)\n   Args Passed: $*"
                     ;;
             esac
-            e2fsck -fp $part >/tmp/e2fsck.txt 2>&1
-            case $? in
-                0)
-                    echo "Done"
-                    ;;
-                *)
-                    e2fsck -fy $part >>/tmp/e2fsck.txt 2>&1
-                    if [[ $? -gt 0 ]]; then
-                        echo "Failed"
-                        debugPause
-                        handleError "Could not check after resize (${FUNCNAME[0]})\n   Info: $(cat /tmp/e2fsck.txt)\n   Args Passed: $*"
-                    fi
-                    echo "Done"
-                    ;;
-            esac
+            rootpxe_e2fsck_preflight "$part" /tmp/e2fsck.txt
+            e2fsck_status=$?
+            if [[ $e2fsck_status -ne 0 ]]; then
+                echo "Failed"
+                debugPause
+                handleError "Could not check after resize (${FUNCNAME[0]})\n   Exit code: $e2fsck_status\n   Info: $(cat /tmp/e2fsck.txt)\n   Args Passed: $*"
+            fi
+            echo "Done"
             ;;
         btrfs)
             # Based on community discussion from @mstabrin
@@ -2301,6 +2342,7 @@ shrinkPartition() {
     local sizeextresize=0
     local adjustedfdsize=0
     local part_block_size=0
+    local e2fsck_status=0
     case $fstype in
         ntfs)
             ntfsresize -fivP $part >/tmp/tmpoutput.txt 2>&1
@@ -2370,6 +2412,7 @@ shrinkPartition() {
                 case $? in
                     0)
                         echo "Done"
+                        rootpxe_capture_note_partition_shrunk "$part" "$fstype"
                         ;;
                     *)
                         echo "Failed"
@@ -2385,6 +2428,7 @@ shrinkPartition() {
                 case $osid in
                     [1-2]|4)
                         resizePartition "$part" "$(calculate "$sizentfsresize*1024")" "$imagePath"
+                        rootpxe_capture_note_partition_shrunk "$part" "$fstype"
                         [[ $osid -eq 2 ]] && correctVistaMBR "$disk"
                         ;;
                     [5-7]|9|10|11)
@@ -2396,6 +2440,7 @@ shrinkPartition() {
                         fi
                         adjustedfdsize=$(calculate "${sizentfsresize}*1024")
                         resizePartition "$part" "$adjustedfdsize" "$imagePath"
+                        rootpxe_capture_note_partition_shrunk "$part" "$fstype"
                         ;;
                 esac
                 echo "Done"
@@ -2404,17 +2449,14 @@ shrinkPartition() {
             ;;
         extfs)
             dots "Checking $fstype volume ($part)"
-            e2fsck -fp $part >/tmp/e2fsck.txt 2>&1
-            case $? in
-                0)
-                    echo "Done"
-                    ;;
-                *)
-                    echo "Failed"
-                    debugPause
-                    handleError "e2fsck failed to check $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/e2fsck.txt)\n   Args Passed: $*"
-                    ;;
-            esac
+            rootpxe_e2fsck_preflight "$part" /tmp/e2fsck.txt
+            e2fsck_status=$?
+            if [[ $e2fsck_status -ne 0 ]]; then
+                echo "Failed"
+                debugPause
+                handleError "e2fsck failed to check $part (${FUNCNAME[0]})\n   Exit code: $e2fsck_status\n   Info: $(cat /tmp/e2fsck.txt)\n   Args Passed: $*"
+            fi
+            echo "Done"
             debugPause
             extminsize=$(resize2fs -P $part 2>/dev/null | awk -F': ' '{print $2}')
             block_size=$(dumpe2fs -h $part 2>/dev/null | awk '/^Block[ ]size:/{print $3}')
@@ -2423,10 +2465,11 @@ shrinkPartition() {
             sizeextresize=$(calculate "${size}+${sizeadd}")
             [[ -z $sizeextresize || $sizeextresize -lt 1 ]] && handleError "Error calculating the new size of extfs ($part) (${FUNCNAME[0]})\n   Args Passed: $*"
             dots "Shrinking $fstype volume ($part)"
-            resize2fs $part -M >/tmp/resize2fs.txt 2>&1
+            resize2fs "$part" -M >/tmp/resize2fs.txt 2>&1
             case $? in
                 0)
                     echo "Done"
+                    rootpxe_capture_note_partition_shrunk "$part" "$fstype"
                     ;;
                 *)
                     echo "Failed"
@@ -2437,24 +2480,18 @@ shrinkPartition() {
             debugPause
             dots "Shrinking $part partition"
             resizePartition "$part" "$sizeextresize" "$imagePath"
+            rootpxe_capture_note_partition_shrunk "$part" "$fstype"
             echo "Done"
             debugPause
             dots "Checking $fstype volume ($part)"
-            e2fsck -fp $part >/tmp/e2fsck.txt 2>&1
-            case $? in
-                0)
-                    echo "Done"
-                    ;;
-                *)
-                    e2fsck -fy $part >>/tmp/e2fsck.txt 2>&1
-                    if [[ $? -gt 0 ]]; then
-                        echo "Failed"
-                        debugPause
-                        handleError "Could not check expanded volume ($part) (${FUNCNAME[0]})\n   Info: $(cat /tmp/e2fsck.txt)\n   Args Passed: $*"
-                    fi
-                    echo "Done"
-                    ;;
-            esac
+            rootpxe_e2fsck_preflight "$part" /tmp/e2fsck.txt
+            e2fsck_status=$?
+            if [[ $e2fsck_status -ne 0 ]]; then
+                echo "Failed"
+                debugPause
+                handleError "Could not check expanded volume ($part) (${FUNCNAME[0]})\n   Exit code: $e2fsck_status\n   Info: $(cat /tmp/e2fsck.txt)\n   Args Passed: $*"
+            fi
+            echo "Done"
             ;;
         btrfs)
             # Based on community discussion from @mstabrin
@@ -2478,10 +2515,24 @@ shrinkPartition() {
             local fsize_pct=$(calculate_float "${percent}/100")
             local mult_val=$(calculate_float "1-${fsize_pct}")
             local free_size=$(calculate "${mult_val}*${free_size_original}")
-            while ! btrfs filesystem resize -${free_size} /tmp/btrfs >>/tmp/btrfslog.txt; do
-                [[ $(echo "${mult_val} <= 0" | bc -l) -gt 0 ]] && break || mult_val=$(calculate_float "${mult_val} - 0.05")
+            local btrfs_resize_status=1
+            while :; do
+                if btrfs filesystem resize -${free_size} /tmp/btrfs >>/tmp/btrfslog.txt 2>&1; then
+                    btrfs_resize_status=0
+                    break
+                fi
+                if [[ $(echo "${mult_val} <= 0" | bc -l) -gt 0 ]]; then
+                    break
+                fi
+                mult_val=$(calculate_float "${mult_val} - 0.05")
                 free_size=$(calculate "${mult_val}*${free_size_original}")
             done
+            if [[ $btrfs_resize_status -ne 0 ]]; then
+                echo "Failed"
+                debugPause
+                handleError "Could not shrink btrfs volume ($part) (${FUNCNAME[0]})\n   Info: $(cat /tmp/btrfslog.txt)\n   Args Passed: $*"
+            fi
+            rootpxe_capture_note_partition_shrunk "$part" "$fstype"
             umount /tmp/btrfs >>/tmp/btrfslog.txt 2>&1
             if [[ $? -gt 0 ]]; then
                 echo "Failed"
@@ -3895,6 +3946,9 @@ handleError() {
     local str="$1"
     local parts=""
     local part=""
+    if declare -F rootpxe_capture_recover_source >/dev/null 2>&1; then
+        rootpxe_capture_recover_source || str+=$'\nPXEOS_STAGE=capture CODE=SOURCE_LAYOUT_RECOVERY_FAILED REASON=rollback_failed'
+    fi
     printf '\n[ERROR] Operation failed.\n'
     printf '[INFO]  Init version: %s\n' "$initversion"
     printf '\n[INFO]  Error details:\n'

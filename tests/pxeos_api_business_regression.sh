@@ -403,7 +403,7 @@ protocol='' storage_server=192.0.2.22 storage_export=/legacy type=up capone=1 ba
 mapfile -d '' -t nfs_args <"$tmp/nfs-capone.args"
 [[ ${nfs_args[2]} == '192.0.2.22:/legacy' && ${nfs_args[3]} == "$tmp/storage" ]] || fail 'Capone NFS 未使用显式 server/export'
 
-awk '/^rootpxe_error_wait_for_retry\(\)/ { on=1 } /^rootpxe_directory_size_bytes\(\)/ { on=0 } on { print }' "$funcs" \
+awk '/^rootpxe_error_response_reason\(\)/ { on=1 } /^rootpxe_directory_size_bytes\(\)/ { on=0 } on { print }' "$funcs" \
     | sed "s|/tmp/pxeos.failure_action|$tmp/pxeos.failure_action|g" >"$tmp/error-stage.sh"
 rootpxe_require_task_context() { return 0; }
 rootpxe_console_message() { :; }
@@ -418,7 +418,7 @@ test_error_stage_field() {
         printf '%s\n' "$calls" >"$calls_file"
         printf '%s\n' "$@" >>"$trace"
         if [[ $calls -eq 1 ]]; then
-            printf '%s\n' '{"accepted":true,"waitSec":60,"failureAction":"reboot"}'
+            printf '%s\n' '{"accepted":true,"waitSec":60,"failureAction":"reboot"}' 200
         else
             printf '%s\n' '{"status":"deleted"}'
         fi
@@ -438,6 +438,35 @@ test_error_stage_field 'PXEOS_STAGE=untrusted CODE=FAIL' ''
 test_error_stage_field 'PXEOS_STAGE=pre_deploy_script CODE=PRE_DEPLOY_SCRIPT_FAILED' ''
 test_error_stage_field 'PXEOS_STAGE=post_deploy_script PXEOS_STAGE=untrusted CODE=FAIL' ''
 test_error_stage_field $'PXEOS_STAGE=post_deploy_script\nPXEOS_STAGE=customizing_hostname CODE=FAIL' ''
+
+# A server rejection must expose only the HTTP status and its controlled error
+# field.  Full payloads can contain request correlation data and must never be
+# rendered on the PXEOS console.
+error_report_output="$tmp/error-report-diagnostic.out"
+error_report_calls="$tmp/error-report-diagnostic.calls"
+printf '0\n' >"$error_report_calls"
+rootpxe_console_message() { printf '[%s]  %s\n' "$1" "$2" >>"$error_report_output"; }
+curl() {
+    calls=$(<"$error_report_calls")
+    calls=$((calls + 1))
+    printf '%s\n' "$calls" >"$error_report_calls"
+    case $calls in
+        1) printf '%s\n' '{"accepted":false,"error":"server rejected","token":"server-secret","detail":"hidden"}' 409 ;;
+        2) printf '%s\n' '{"accepted":true,"waitSec":60,"failureAction":"reboot"}' 200 ;;
+        *) printf '%s\n' '{"status":"deleted"}' ;;
+    esac
+}
+taskid=77; task_token=0123456789abcdef; mac=001122334455; pxeapi='http://mock/service/'
+set +e
+rootpxe_error_wait_for_retry 'capture failed' TEST_ERROR >>"$error_report_output" 2>&1
+error_report_status=$?
+set -e
+[[ $error_report_status -eq 2 ]] || fail 'error diagnostic fixture did not pause safely'
+grep -Fqx '[WARN]  Error report rejected (HTTP 409): server rejected. Retrying in 5s.' "$error_report_output" \
+    || fail 'error report rejection must include the HTTP status and controlled error'
+! grep -Fq 'server-secret' "$error_report_output" || fail 'error report response leaked a sensitive server field'
+! grep -Fq 'hidden' "$error_report_output" || fail 'error report response leaked an uncontrolled server field'
+unset -f curl
 unset -f curl sleep rootpxe_require_task_context rootpxe_console_message test_error_stage_field
 
 printf 'PASS: PXEOS real-jq JSON checkin regression\n'
@@ -1482,10 +1511,10 @@ must_fit "$(cat "$tmp/prompt.out")"
     . "$tmp/banner.sh"
     displayBanner
 ) >"$tmp/banner.out"
-head -n 3 "$tmp/banner.out" >"$tmp/normal-banner.out"
-expected_banner=$'+------------------------------------------------------------------------------+\n|                                PXEOS Runtime                                 |\n+------------------------------------------------------------------------------+'
-[[ $(cat "$tmp/normal-banner.out") == "$expected_banner" ]] || fail 'normal banner layout changed'
-LC_ALL=C grep -Eq '[^ -~]' "$tmp/banner.out" && fail 'normal banner must be ASCII only'
+grep -Fqx '   ===  ██████╗  ██╗  ██╗ ███████╗  ██████╗  ███████╗   ===' "$tmp/banner.out" \
+    || fail 'normal banner is missing the PXEOS logo'
+grep -Fqx '   ==================== PXEOS Runtime =====================' "$tmp/banner.out" \
+    || fail 'normal banner is missing the PXEOS runtime title'
 while IFS= read -r line; do
     must_fit "$line"
 done <"$tmp/banner.out"
@@ -1645,7 +1674,8 @@ must_have "$overlay/etc/init.d/S99pxeos" 'pxeos_init_message WARN "Task exited w
 must_have "$overlay/etc/init.d/S99pxeos" 'pxeos_init_message INFO "Running configured failure action: $failure_action."'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  Disk permission not confirmed. Retrying in 5s.'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  Error report failed. Retrying in 5s.'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  Error report not confirmed. Retrying in 5s.'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  Error report not confirmed (HTTP $http_status). Retrying in 5s.'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  Error report rejected (HTTP $http_status): $response_reason. Retrying in 5s.'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" "rootpxe_console_message ERROR 'Task paused. Error reported to RootPXE.'"
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" "rootpxe_console_message INFO 'Select Retry in the web UI to resume.'"
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message INFO "Timeout: ${wait}s. Timeout action: $action."'
@@ -1728,7 +1758,8 @@ for line in \
     '[INFO]  Running configured failure action: shutdown.' \
     '[WARN]  Disk permission not confirmed. Retrying in 5s.' \
     '[WARN]  Error report failed. Retrying in 5s.' \
-    '[WARN]  Error report not confirmed. Retrying in 5s.' \
+    '[WARN]  Error report not confirmed (HTTP 500). Retrying in 5s.' \
+    '[WARN]  Error report rejected (HTTP 409): server rejected. Retrying in 5s.' \
     '[ERROR] Task paused. Error reported to RootPXE.' \
     '[ERROR] Operation failed.' \
     '[WARN]  Operation warning.' \

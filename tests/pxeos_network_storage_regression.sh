@@ -85,6 +85,251 @@ printf 'PASS: PXEOS network diagnostics regression\n'
 )
 # ===== 原脚本结束：tests/pxeos_network_regression.sh =====
 
+# ===== PXEOS 运行时英文控制台文本回归 =====
+(
+# 该检查只在开发回归中运行。它枚举 overlay 内的实际 Shell 入口，保留
+# heredoc 内容、剥离真实 Shell 注释，并拒绝所有剩余的中日韩统一表意文字。
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+while IFS= read -r -d '' file; do
+    case "$file" in
+        *.sh|*/bin/pxeos*|*/etc/init.d/S*|*/etc/init.d/K*) printf '%s\n' "$file" ;;
+        *)
+            if LC_ALL=C grep -Iq . "$file"; then
+                first_line=$(head -n 1 "$file" 2>/dev/null || :)
+                [[ $first_line == \#!*sh* || $first_line == \#!*bash* ]] && printf '%s\n' "$file"
+            fi
+            ;;
+    esac
+done < <(find "$overlay" -type f -print0) >"$tmp/runtime-files"
+[[ -s $tmp/runtime-files ]] || fail '未找到 PXEOS 运行时 Shell 脚本'
+
+# AWK keeps heredoc bodies intact because they may be printed at runtime. For
+# ordinary code it removes only # comments outside single/double quotes, so
+# translated comments remain allowed while quoted runtime text is inspected.
+xargs -d '\n' awk '
+function emit_code(line,    i,ch,out,single,double,escaped) {
+    out = ""; single = 0; double = 0; escaped = 0
+    for (i = 1; i <= length(line); i++) {
+        ch = substr(line, i, 1)
+        if (escaped) { out = out ch; escaped = 0; continue }
+        if (ch == "\\" && !single) { out = out ch; escaped = 1; continue }
+        if (ch == "\x27" && !double) { single = !single; out = out ch; continue }
+        if (ch == "\"") { if (!single) double = !double; out = out ch; continue }
+        if (ch == "#" && !single && !double) break
+        out = out ch
+    }
+    print FILENAME ":" FNR ":" out
+}
+function begin_heredoc(line,    token) {
+    if (!match(line, /<<-?[[:space:]]*[\x27"]?[A-Za-z_][A-Za-z0-9_]*[\x27"]?/)) return
+    token = substr(line, RSTART, RLENGTH)
+    heredoc_tabs = (substr(token, 3, 1) == "-")
+    sub(/^<<-?[[:space:]]*/, "", token)
+    gsub(/[\x27"]/, "", token)
+    heredoc = token
+}
+{
+    if (heredoc != "") {
+        compare = $0
+        if (heredoc_tabs) sub(/^\t+/, "", compare)
+        print FILENAME ":" FNR ":" $0
+        if (compare == heredoc) heredoc = ""
+        next
+    }
+    emit_code($0)
+    begin_heredoc($0)
+}
+' <"$tmp/runtime-files" >"$tmp/runtime-code"
+
+set +e
+LC_ALL=C grep -nP '\p{Han}' "$tmp/runtime-code"
+cjk_status=$?
+set -e
+case $cjk_status in
+    1) ;;
+    0) fail 'PXEOS 运行时 Shell 文本包含非英文 CJK 字符' ;;
+    *) fail "PXEOS 运行时文本扫描失败（grep exit $cjk_status）" ;;
+esac
+printf 'PASS: PXEOS runtime console text is English\n'
+)
+# ===== PXEOS 运行时英文控制台文本回归结束 =====
+
+# ===== PXEOS 启动网络与 SSH 服务控制台回归 =====
+(
+# 启动脚本测试只替换 PATH 中的命令，并在临时目录中保存 DHCP/服务日志；
+# 不会操作宿主机网络、守护进程或 SSH 主机密钥。
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
+network="$overlay/etc/init.d/S40network"
+cron="$overlay/etc/init.d/S50crond"
+sshd="$overlay/etc/init.d/S50sshd"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+mkdir -p "$tmp/mock" "$tmp/etc/network" "$tmp/ssh"
+
+cat >"$tmp/mock/ip" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'link show eth0'*) printf '2: eth0: <BROADCAST,UP> mtu 1500\n    link/ether aa:bb:cc:dd:ee:ff\n' ;;
+  *'-4 -o addr show dev eth0 scope global'*) printf '2: eth0    inet 192.0.2.10/24 brd 192.0.2.255 scope global eth0\n' ;;
+  *) exit 0 ;;
+esac
+EOF
+cat >"$tmp/mock/udhcpc" <<'EOF'
+#!/usr/bin/env bash
+printf 'udhcpc: started, v1.37.0\nudhcpc: broadcasting discover\n'
+exit "${PXEOS_DHCP_RC:-0}"
+EOF
+cat >"$tmp/mock/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$tmp/mock/ssh-keygen" <<'EOF'
+#!/usr/bin/env bash
+[[ ${PXEOS_KEYGEN_SILENT:-0} == 1 ]] || printf 'ssh-keygen: generating new host keys\n'
+exit "${PXEOS_KEYGEN_RC:-0}"
+EOF
+cat >"$tmp/mock/start-stop-daemon" <<'EOF'
+#!/usr/bin/env bash
+printf 'Starting service: raw daemon output\n'
+[[ -n ${PXEOS_SERVICE_CALLS:-} ]] && printf '%s\n' "$*" >>"$PXEOS_SERVICE_CALLS"
+case " $* " in
+  *' --stop '*) exit "${PXEOS_STOP_RC:-${PXEOS_SERVICE_RC:-0}}" ;;
+esac
+exit "${PXEOS_SERVICE_RC:-0}"
+EOF
+chmod +x "$tmp/mock"/*
+
+printf 'mac=aa:bb:cc:dd:ee:ff pxeapi=https://example.invalid/service/\n' >"$tmp/cmdline"
+sed \
+  -e "s|</proc/cmdline|<\"$tmp/cmdline\"|" \
+  -e "s|/etc/network/interfaces|$tmp/etc/network/interfaces|g" \
+  -e "s|/sbin/ip|$tmp/mock/ip|g" \
+  -e "s|/sbin/udhcpc|$tmp/mock/udhcpc|g" \
+  -e "s|/tmp/pxeos-dhcp-|$tmp/dhcp-|g" \
+  -e 's|read p_ifaces <<< .*|p_ifaces=eth0|' \
+  -e 's|read o_ifaces <<< .*|o_ifaces=|' \
+  -e 's|linkstate=$(/bin/cat /sys/class/net/$iface/carrier)|linkstate=1|' \
+  -e 's|sleep [0-9][0-9]*|:|g' \
+  -e 's|read -r -t 60|:|' \
+  "$network" >"$tmp/S40network"
+
+PATH="$tmp/mock:$PATH" bash "$tmp/S40network" >"$tmp/network-success.out" 2>&1
+grep -Eq '^\[INFO\]  Starting interface eth0 and waiting for link\.+Done$' "$tmp/network-success.out" || fail '网络启动缺少统一接口状态行'
+grep -Eq '^\[INFO\]  Acquiring DHCP lease on eth0\.+Done$' "$tmp/network-success.out" || fail 'DHCP 缺少统一完成状态行'
+grep -Fqx '[INFO]  IPv4 address: 192.0.2.10/24.' "$tmp/network-success.out" || fail 'DHCP 缺少 IPv4 结果行'
+! grep -Fq 'udhcpc: started' "$tmp/network-success.out" || fail '控制台泄露原始 udhcpc 输出'
+! grep -Fq 'broadcasting discover' "$tmp/network-success.out" || fail '控制台泄露 DHCP 协商噪声'
+grep -Fq 'udhcpc: started' "$tmp/dhcp-eth0.log" || fail 'DHCP 原始日志未保存'
+
+set +e
+PXEOS_DHCP_RC=42 PATH="$tmp/mock:$PATH" bash "$tmp/S40network" >"$tmp/network-failure.out" 2>&1
+rc=$?
+set -e
+[[ $rc -eq 1 ]] || fail "DHCP 失败路径退出码: $rc"
+grep -Eq '^\[INFO\]  Acquiring DHCP lease on eth0\.+Failed \(exit 42\)$' "$tmp/network-failure.out" || fail 'DHCP 失败未保留原始返回码'
+grep -Fq 'Details: ' "$tmp/network-failure.out" || fail 'DHCP 失败未指向诊断日志'
+grep -Fq 'udhcpc: started' "$tmp/dhcp-eth0.log" || fail 'DHCP 失败日志未保存'
+
+for script in "$cron" "$sshd"; do
+    [[ -f $script ]] || fail "缺少启动服务覆盖脚本: $script"
+done
+sed \
+  -e "s|/usr/bin/ssh-keygen|$tmp/mock/ssh-keygen|g" \
+  -e "s|/etc/ssh|$tmp/ssh|g" \
+  -e "s|/var/run|$tmp/run|g" \
+  -e "s|/tmp/pxeos-sshd-|$tmp/sshd-|g" \
+  "$sshd" >"$tmp/S50sshd"
+sed \
+  -e "s|/var/run|$tmp/run|g" \
+  -e "s|/tmp/pxeos-crond-|$tmp/crond-|g" \
+  "$cron" >"$tmp/S50crond"
+chmod +x "$tmp/S50sshd" "$tmp/S50crond"
+mkdir -p "$tmp/run"
+
+PATH="$tmp/mock:$PATH" bash "$tmp/S50crond" start >"$tmp/cron-success.out" 2>&1
+grep -Eq '^\[INFO\]  Starting cron service\.+Done$' "$tmp/cron-success.out" || fail 'Cron 缺少统一完成状态行'
+! grep -Fq 'Starting service: raw daemon output' "$tmp/cron-success.out" || fail 'Cron 控制台泄露服务原始输出'
+grep -Fq 'Starting service: raw daemon output' "$tmp/crond-start.log" || fail 'Cron 服务日志未保存'
+
+PATH="$tmp/mock:$PATH" bash "$tmp/S50sshd" start >"$tmp/sshd-success.out" 2>&1
+grep -Eq '^\[INFO\]  Generating SSH host keys\.+Done$' "$tmp/sshd-success.out" || fail 'SSH 缺少统一密钥生成状态行'
+grep -Eq '^\[INFO\]  Starting SSH service\.+Done$' "$tmp/sshd-success.out" || fail 'SSH 缺少统一服务完成状态行'
+! grep -Fq 'ssh-keygen: generating' "$tmp/sshd-success.out" || fail 'SSH 控制台泄露密钥生成原始输出'
+! grep -Fq 'Starting service: raw daemon output' "$tmp/sshd-success.out" || fail 'SSH 控制台泄露服务原始输出'
+grep -Fq 'ssh-keygen: generating' "$tmp/sshd-keygen.log" || fail 'SSH 密钥生成日志未保存'
+grep -Fq 'Starting service: raw daemon output' "$tmp/sshd-start.log" || fail 'SSH 服务日志未保存'
+
+PXEOS_KEYGEN_SILENT=1 PATH="$tmp/mock:$PATH" bash "$tmp/S50sshd" start >"$tmp/sshd-existing-keys.out" 2>&1
+! grep -Fq 'Generating SSH host keys' "$tmp/sshd-existing-keys.out" || fail '已有 SSH 主机密钥仍显示生成状态'
+grep -Eq '^\[INFO\]  Starting SSH service\.+Done$' "$tmp/sshd-existing-keys.out" || fail '已有 SSH 主机密钥时 SSH 服务未启动'
+
+set +e
+PXEOS_SERVICE_RC=23 PATH="$tmp/mock:$PATH" bash "$tmp/S50crond" start >"$tmp/cron-failure.out" 2>&1
+rc=$?
+set -e
+[[ $rc -eq 23 ]] || fail "Cron 失败返回码被吞掉: $rc"
+grep -Eq '^\[INFO\]  Starting cron service\.+Failed \(exit 23\)$' "$tmp/cron-failure.out" || fail 'Cron 失败未保留服务返回码'
+
+set +e
+PXEOS_SERVICE_RC=255 PATH="$tmp/mock:$PATH" bash "$tmp/S50crond" start >"$tmp/cron-failure-255.out" 2>&1
+rc=$?
+set -e
+[[ $rc -eq 255 ]] || fail "Cron 最大失败码被吞掉: $rc"
+grep -Eq '^\[INFO\]  Starting cron service\.+Failed \(exit 255\)$' "$tmp/cron-failure-255.out" || fail 'Cron 最大失败码未按单行显示'
+
+printf 'stale pid\n' >"$tmp/run/crond.pid"
+set +e
+PXEOS_STOP_RC=27 PATH="$tmp/mock:$PATH" bash "$tmp/S50crond" stop >"$tmp/cron-stop-failure.out" 2>&1
+rc=$?
+set -e
+[[ $rc -eq 27 ]] || fail "Cron stop 未保留原返回码: $rc"
+[[ ! -e $tmp/run/crond.pid ]] || fail 'Cron stop 失败后未清理 PID 文件'
+grep -Eq '^\[INFO\]  Stopping cron service\.+Failed \(exit 27\)$' "$tmp/cron-stop-failure.out" || fail 'Cron stop 失败未按单行显示'
+
+: >"$tmp/service-calls.log"
+PXEOS_STOP_RC=27 PXEOS_SERVICE_CALLS="$tmp/service-calls.log" PATH="$tmp/mock:$PATH" \
+    bash "$tmp/S50crond" restart >"$tmp/cron-restart.out" 2>&1
+grep -Fq -- '--stop' "$tmp/service-calls.log" || fail 'Cron restart 未调用 stop'
+grep -Fq -- '--start' "$tmp/service-calls.log" || fail 'Cron restart 在 stop 失败后未调用 start'
+
+: >"$tmp/service-calls.log"
+PXEOS_STOP_RC=27 PXEOS_SERVICE_CALLS="$tmp/service-calls.log" PATH="$tmp/mock:$PATH" \
+    bash "$tmp/S50sshd" restart >"$tmp/sshd-restart.out" 2>&1
+grep -Fq -- '--stop' "$tmp/service-calls.log" || fail 'SSH restart 未调用 stop'
+grep -Fq -- '--start' "$tmp/service-calls.log" || fail 'SSH restart 在 stop 失败后未调用 start'
+
+set +e
+PXEOS_KEYGEN_RC=31 PATH="$tmp/mock:$PATH" bash "$tmp/S50sshd" start >"$tmp/sshd-keygen-failure.out" 2>&1
+rc=$?
+set -e
+[[ $rc -eq 31 ]] || fail "SSH 密钥生成失败返回码被吞掉: $rc"
+grep -Eq '^\[INFO\]  Generating SSH host keys\.+Failed \(exit 31\)$' "$tmp/sshd-keygen-failure.out" || fail 'SSH 密钥失败未保留返回码'
+
+set +e
+PXEOS_SERVICE_RC=24 PATH="$tmp/mock:$PATH" bash "$tmp/S50sshd" start >"$tmp/sshd-service-failure.out" 2>&1
+rc=$?
+set -e
+[[ $rc -eq 24 ]] || fail "SSH 服务失败返回码被吞掉: $rc"
+grep -Eq '^\[INFO\]  Starting SSH service\.+Failed \(exit 24\)$' "$tmp/sshd-service-failure.out" || fail 'SSH 服务失败未保留返回码'
+
+for output in "$tmp/network-success.out" "$tmp/network-failure.out" "$tmp/cron-success.out" "$tmp/sshd-success.out" "$tmp/sshd-existing-keys.out" "$tmp/cron-failure.out" "$tmp/cron-failure-255.out" "$tmp/cron-stop-failure.out" "$tmp/cron-restart.out" "$tmp/sshd-restart.out" "$tmp/sshd-keygen-failure.out" "$tmp/sshd-service-failure.out"; do
+    LC_ALL=C grep -Eq '[^ -~]' "$output" && fail "启动控制台输出包含非 ASCII 文本: $output"
+    while IFS= read -r line; do
+        [[ ${#line} -le 80 ]] || fail "启动控制台输出超过 80 列: $line"
+    done <"$output"
+done
+printf 'PASS: PXEOS startup console regression\n'
+)
+# ===== PXEOS 启动网络与 SSH 服务控制台回归结束 =====
+
 # ===== 原脚本：tests/pxeos_storage_regression.sh =====
 (
 # 静态回归契约：不依赖真实存储，防止 PXEOS 重新引入已修复的危险模式。

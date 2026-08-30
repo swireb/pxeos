@@ -21,6 +21,32 @@ pxeos_network_prompt() {
     case $level in INFO|WARN|ERROR) ;; *) return 1;; esac
     printf '%-7s %s' "[$level]" "$message"
 }
+pxeos_network_status_begin() {
+    local message="$1" dots padding
+    dots=$(printf '%0.1s' .{1..55})
+    padding=$((55-${#message}))
+    (( padding < 1 )) && padding=1
+    printf '%-7s %s%*.*s' '[INFO]' "$message" 0 "$padding" "$dots"
+}
+pxeos_network_status_finish() {
+    printf '%s\n' "$1"
+}
+pxeos_network_acquire_dhcp() {
+    local iface="$1" logfile rc address
+    logfile="/tmp/pxeos-dhcp-${iface}.log"
+    pxeos_network_status_begin "Acquiring DHCP lease on $iface"
+    if /sbin/udhcpc -i "$iface" --now >"$logfile" 2>&1; then
+        pxeos_network_status_finish 'Done'
+        address=$(/sbin/ip -4 -o addr show dev "$iface" scope global 2>/dev/null | awk 'NR == 1 { print $4 }')
+        [[ -n $address ]] && pxeos_network_message INFO "IPv4 address: $address."
+        return 0
+    else
+        rc=$?
+    fi
+    pxeos_network_status_finish "Failed (exit $rc)"
+    pxeos_network_message INFO "Details: $logfile"
+    return "$rc"
+}
 if [[ -n $has_usb_nic ]]; then
     pxeos_network_message INFO "Please unplug and reconnect the USB network device."
     pxeos_network_prompt INFO "Press Enter to connect the USB network device."
@@ -82,7 +108,7 @@ read p_ifaces <<< $(/sbin/ip -0 addr show | awk 'ORS=NR%2?FS:RS' | awk -F'[: ]+'
 read o_ifaces <<< $(/sbin/ip -0 addr show | awk 'ORS=NR%2?FS:RS' | awk -F'[: ]+' 'tolower($0) ~ /link[/]?ether/ && tolower($0) !~ /'$mac'/ {print $2}' | tr '\n' ' ')
 ifaces="$p_ifaces $o_ifaces"
 for iface in $ifaces; do
-    pxeos_network_message INFO "Starting interface $iface and waiting for link."
+    pxeos_network_status_begin "Starting interface $iface and waiting for link"
     echo -e "auto $iface\niface $iface inet dhcp\n\n" >> /etc/network/interfaces
     /sbin/ip link set $iface up
 
@@ -94,9 +120,14 @@ for iface in $ifaces; do
         linkstate=$(/bin/cat /sys/class/net/$iface/carrier)
         [[ $linkstate -eq 0 ]] && sleep 1 || break
     done
-    [[ $linkstate -eq 0 ]] && pxeos_network_message WARN "No link on $iface after ${timeout}s; skipping." && continue
+    if [[ $linkstate -eq 0 ]]; then
+        pxeos_network_status_finish 'Failed (no link)'
+        pxeos_network_message WARN "No link on $iface after ${timeout}s; skipping."
+        continue
+    fi
+    pxeos_network_status_finish 'Done'
     for retry in $(seq 3); do
-        /sbin/udhcpc -i $iface --now
+        pxeos_network_acquire_dhcp "$iface"
         ustat="$?"
         # RootPXE/PXEOS 连通性统一探测 /health（不再兼容 index.php）
         cstat=1
@@ -119,7 +150,7 @@ for iface in $ifaces; do
                     ip link set dev $iface down
                     ip link set dev $iface address $mac_sett
                     ip link set dev $iface up
-                    /sbin/udhcpc -i $iface --now
+                    pxeos_network_acquire_dhcp "$iface"
                     ustat="$?"
                     cstat=1
                     if [[ -n $pxeapi ]]; then

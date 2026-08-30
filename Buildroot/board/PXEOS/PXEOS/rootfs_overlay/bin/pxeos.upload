@@ -32,6 +32,133 @@ rootpxe_console_message INFO "Using image: $img."
 #  clone filesystems
 #  restore original MBR and partition table
 #  expand filesystems
+rootpxe_capture_recovery_disarm() {
+    local local_table="${rootpxe_capture_recovery_local_table:-}"
+    if [[ $local_table == /tmp/pxeos-capture-recovery/* && -f $local_table ]]; then
+        rm -f -- "$local_table" >/dev/null 2>&1 || true
+    fi
+    rootpxe_capture_recovery_armed=0
+    rootpxe_capture_recovery_running=0
+    rootpxe_capture_recovery_entries=""
+    rootpxe_capture_recovery_local_table=""
+}
+
+rootpxe_capture_recovery_arm() {
+    local disk="$1" image_path="$2" fixed_partitions="$3"
+    local source_table="$image_path/d1.original.partitions"
+    local recovery_dir=/tmp/pxeos-capture-recovery local_table temporary_table
+    local task_label="${taskid:-task}"
+    task_label=$(printf '%s' "$task_label" | tr -c 'A-Za-z0-9_.-' '_')
+
+    rootpxe_capture_recovery_disarm
+    [[ -r $source_table ]] || return 1
+    (umask 077 && mkdir -p "$recovery_dir") || return 1
+    chmod 700 "$recovery_dir" >/dev/null 2>&1 || return 1
+    local_table="$recovery_dir/${task_label}.$$.original.partitions"
+    temporary_table="$local_table.tmp"
+    (umask 077 && cat "$source_table" >"$temporary_table") \
+        && chmod 600 "$temporary_table" >/dev/null 2>&1 \
+        && mv -f -- "$temporary_table" "$local_table" || {
+            rm -f -- "$temporary_table" "$local_table" >/dev/null 2>&1 || true
+            return 1
+        }
+
+    rootpxe_capture_recovery_disk="$disk"
+    rootpxe_capture_recovery_image_path="$image_path"
+    rootpxe_capture_recovery_fixed_partitions="$fixed_partitions"
+    rootpxe_capture_recovery_local_table="$local_table"
+    rootpxe_capture_recovery_entries=""
+    rootpxe_capture_recovery_running=0
+    rootpxe_capture_recovery_armed=1
+}
+
+rootpxe_capture_note_partition_shrunk() {
+    local part="$1" fstype="$2" entry
+    [[ ${rootpxe_capture_recovery_armed:-0} -eq 1 ]] || return 0
+    [[ ${rootpxe_capture_recovery_running:-0} -eq 0 ]] || return 0
+    [[ -n $part && -n $fstype ]] || return 0
+    entry="$part|$fstype"
+    case "|${rootpxe_capture_recovery_entries:-}|" in
+        *"|$entry|"*) return 0 ;;
+    esac
+    if [[ -n ${rootpxe_capture_recovery_entries:-} ]]; then
+        rootpxe_capture_recovery_entries+=$'\n'
+    fi
+    rootpxe_capture_recovery_entries+="$entry"
+}
+
+rootpxe_capture_expand_recovered_filesystem() {
+    local part="$1" fstype="$2" status=0 mount_dir=""
+    case $fstype in
+        extfs)
+            rootpxe_e2fsck_preflight "$part" /tmp/e2fsck.txt || return $?
+            resize2fs "$part" >/tmp/resize2fs.txt 2>&1 || return $?
+            rootpxe_e2fsck_preflight "$part" /tmp/e2fsck.txt || return $?
+            ;;
+        ntfs)
+            yes | ntfsresize -fbP "$part" >/tmp/tmpoutput.txt 2>&1
+            status=${PIPESTATUS[1]}
+            [[ $status -eq 0 ]] || return "$status"
+            ntfsfix -b -d "$part" >/tmp/tmpoutput.txt 2>&1 || return $?
+            ;;
+        btrfs)
+            mount_dir=$(umask 077; mktemp -d /tmp/pxeos-capture-btrfs.XXXXXX) || return 1
+            if ! mount -t btrfs "$part" "$mount_dir" >/tmp/btrfs-recovery.txt 2>&1; then
+                rmdir "$mount_dir" >/dev/null 2>&1 || true
+                return 1
+            fi
+            btrfs filesystem resize max "$mount_dir" >>/tmp/btrfs-recovery.txt 2>&1 || status=1
+            umount "$mount_dir" >>/tmp/btrfs-recovery.txt 2>&1 || status=1
+            rmdir "$mount_dir" >/dev/null 2>&1 || status=1
+            return "$status"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+rootpxe_capture_recover_source() {
+    local original_table entry part fstype status=0
+    [[ ${rootpxe_capture_recovery_armed:-0} -eq 1 ]] || return 0
+    [[ ${rootpxe_capture_recovery_running:-0} -eq 0 ]] || return 0
+
+    # Disarm first: handleError can wait for a web retry and must never cause
+    # another write attempt while this best-effort source recovery is running.
+    rootpxe_capture_recovery_armed=0
+    rootpxe_capture_recovery_running=1
+    original_table="${rootpxe_capture_recovery_local_table:-}"
+    [[ -r $original_table ]] || original_table="$rootpxe_capture_recovery_image_path/d1.original.partitions"
+    rootpxe_console_message WARN 'Capture failed. Restoring the source partition layout.'
+
+    if [[ ! -r $original_table ]] \
+        || ! flock "$rootpxe_capture_recovery_disk" sfdisk "$rootpxe_capture_recovery_disk" <"$original_table" >/dev/null 2>&1; then
+        status=1
+    fi
+    if [[ $status -eq 0 && -r /usr/share/pxeos/lib/EOFRESTOREPART ]]; then
+        flock "$rootpxe_capture_recovery_disk" fdisk "$rootpxe_capture_recovery_disk" \
+            </usr/share/pxeos/lib/EOFRESTOREPART >/dev/null 2>&1 || status=1
+    fi
+    if [[ $status -eq 0 ]]; then
+        udevadm settle >/dev/null 2>&1 || status=1
+        blockdev --rereadpt "$rootpxe_capture_recovery_disk" >/dev/null 2>&1 || status=1
+    fi
+    if [[ $status -eq 0 ]]; then
+        while IFS='|' read -r part fstype; do
+            [[ -n $part && -n $fstype ]] || continue
+            rootpxe_capture_expand_recovered_filesystem "$part" "$fstype" || status=1
+        done <<< "${rootpxe_capture_recovery_entries:-}"
+    fi
+
+    rootpxe_capture_recovery_disarm
+    if [[ $status -eq 0 ]]; then
+        rootpxe_console_message INFO 'Source partition layout restored.'
+        return 0
+    fi
+    rootpxe_console_message ERROR 'Source partition recovery failed.'
+    return 1
+}
+
 beginUpload() {
     local capture_exitcode=0
     local writer_exitcode=0
@@ -140,6 +267,8 @@ beginUpload() {
             #  Start filesytem type record
             dots "Saving original partition table"
             saveOriginalPartitions "$hd" "$imagePath" 1
+            rootpxe_capture_recovery_arm "$hd" "$imagePath" "$fixed_size_partitions" \
+                || handleError "PXEOS_STAGE=capture CODE=SOURCE_LAYOUT_STAGING_FAILED REASON=unable_to_stage_original_partition_table"
             swapuuidfilename=""
             swapUUIDFileName "$imagePath" 1
             echo -n "" > "$imagePath/d1.original.fstypes"
@@ -193,6 +322,7 @@ beginUpload() {
                 rootpxe_lvm_is_pv_partition "$part" && continue
                 expandPartition "$part" "$fixed_size_partitions"
             done
+            rootpxe_capture_recovery_disarm
             ;;
         mps)
             parts=""

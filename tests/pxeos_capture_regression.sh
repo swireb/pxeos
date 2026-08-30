@@ -670,3 +670,214 @@ pass 'restore source failure is not masked by downstream success'
 printf 'PASS: PXEOS pipeline regression\n'
 )
 # ===== 原脚本结束：tests/pxeos_pipeline_regression.sh =====
+
+# ===== 单盘可调整镜像的源盘恢复与 extfs 检查 =====
+(
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
+funcs="$overlay/usr/share/pxeos/lib/funcs.sh"
+upload="$overlay/bin/pxeos.upload"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+pass() { printf 'PASS: %s\n' "$*"; }
+
+awk '/^rootpxe_e2fsck_preflight\(\)/ { copy = 1 } /^rootpxe_error_wait_for_retry\(\)/ { copy = 0 } copy' "$funcs" >"$tmp/e2fsck-helper.sh"
+[[ -s $tmp/e2fsck-helper.sh ]] || fail 'extfs preflight helper was not extracted'
+
+e2fsck_trace="$tmp/e2fsck.trace"
+e2fsck() {
+    local result
+    result=${E2FSCK_RESULTS%%,*}
+    if [[ $E2FSCK_RESULTS == *,* ]]; then
+        E2FSCK_RESULTS=${E2FSCK_RESULTS#*,}
+    else
+        E2FSCK_RESULTS=''
+    fi
+    printf '%s\n' "$result" >>"$e2fsck_trace"
+    printf 'mock e2fsck exit %s\n' "$result"
+    return "$result"
+}
+. "$tmp/e2fsck-helper.sh"
+
+: >"$e2fsck_trace"
+E2FSCK_RESULTS=0
+rootpxe_e2fsck_preflight /dev/mockp1 "$tmp/e2fsck.out" || fail 'clean extfs preflight failed'
+[[ $(cat "$e2fsck_trace") == 0 ]] || fail 'clean extfs preflight should run once'
+
+: >"$e2fsck_trace"
+E2FSCK_RESULTS=1,0
+rootpxe_e2fsck_preflight /dev/mockp1 "$tmp/e2fsck.out" || fail 'journal recovery followed by a clean preflight failed'
+[[ $(tr '\n' ',' <"$e2fsck_trace") == '1,0,' ]] || fail 'journal recovery must be rechecked exactly once'
+
+: >"$e2fsck_trace"
+E2FSCK_RESULTS=1,4
+set +e
+rootpxe_e2fsck_preflight /dev/mockp1 "$tmp/e2fsck.out"
+preflight_status=$?
+set -e
+[[ $preflight_status -eq 4 ]] || fail 'uncorrected extfs must retain its e2fsck exit code'
+[[ $(tr '\n' ',' <"$e2fsck_trace") == '1,4,' ]] || fail 'failed journal recheck must not be retried indefinitely'
+
+: >"$e2fsck_trace"
+E2FSCK_RESULTS=8
+set +e
+rootpxe_e2fsck_preflight /dev/mockp1 "$tmp/e2fsck.out"
+preflight_status=$?
+set -e
+[[ $preflight_status -eq 8 ]] || fail 'serious extfs errors must not be accepted'
+[[ $(cat "$e2fsck_trace") == 8 ]] || fail 'serious extfs errors must not be rechecked as corrected'
+pass 'extfs preflight only accepts a clean recheck after journal recovery'
+
+awk '/^rootpxe_capture_recovery_disarm\(\)/ { copy = 1 } /^beginUpload\(\)/ { copy = 0 } copy' "$upload" >"$tmp/capture-recovery.sh"
+[[ -s $tmp/capture-recovery.sh ]] || fail 'capture source recovery helpers were not extracted'
+
+recovery_trace="$tmp/capture-recovery.trace"
+rootpxe_e2fsck_preflight() { printf 'e2fsck:%s\n' "$1" >>"$recovery_trace"; return 0; }
+resize2fs() { printf 'resize2fs:%s\n' "$1" >>"$recovery_trace"; return 0; }
+ntfsresize() { printf 'ntfsresize:%s\n' "${*: -1}" >>"$recovery_trace"; return 0; }
+ntfsfix() { printf 'ntfsfix:%s\n' "${*: -1}" >>"$recovery_trace"; return 0; }
+mount() { printf 'mount:%s\n' "$*" >>"$recovery_trace"; return 0; }
+umount() { printf 'umount:%s\n' "$*" >>"$recovery_trace"; return 0; }
+btrfs() {
+    printf 'btrfs:%s\n' "$*" >>"$recovery_trace"
+    [[ ${RECOVERY_BTRFS_FAIL:-0} -eq 0 ]]
+}
+flock() { printf 'flock:%s\n' "$*" >>"$recovery_trace"; [[ ${RECOVERY_FLOCK_FAIL:-0} -eq 0 ]]; }
+udevadm() { printf 'udevadm:%s\n' "$*" >>"$recovery_trace"; return 0; }
+blockdev() { printf 'blockdev:%s\n' "$*" >>"$recovery_trace"; return 0; }
+fdisk() { printf 'fdisk:%s\n' "$*" >>"$recovery_trace"; return 0; }
+rootpxe_console_message() { printf 'console:%s:%s\n' "$1" "$2" >>"$recovery_trace"; }
+. "$tmp/capture-recovery.sh"
+
+mkdir -p "$tmp/image"
+printf 'label: gpt\n' >"$tmp/image/d1.original.partitions"
+: >"$recovery_trace"
+rootpxe_capture_recovery_arm /dev/mock "$tmp/image" ''
+[[ -r ${rootpxe_capture_recovery_local_table:-} ]] || fail 'capture recovery did not stage a local original partition table'
+rm -f "$tmp/image/d1.original.partitions"
+rootpxe_capture_note_partition_shrunk /dev/mockp2 extfs
+rootpxe_capture_recover_source || fail 'local partition-table copy did not recover an unavailable image-path table'
+[[ -z ${rootpxe_capture_recovery_local_table:-} ]] || fail 'successful source recovery did not clean the local partition-table copy'
+pass 'capture rollback uses and cleans a local original partition table copy'
+
+printf 'label: gpt\n' >"$tmp/image/d1.original.partitions"
+: >"$recovery_trace"
+rootpxe_capture_recovery_arm /dev/mock "$tmp/image" ''
+rootpxe_capture_note_partition_shrunk /dev/mockp2 extfs
+rootpxe_capture_note_partition_shrunk /dev/mockp4 ntfs
+rootpxe_capture_recover_source || fail 'capture failure did not restore the source disk'
+grep -Fqx 'resize2fs:/dev/mockp2' "$recovery_trace" || fail 'shrunk extfs was not expanded during source recovery'
+grep -Fqx 'ntfsresize:/dev/mockp4' "$recovery_trace" || fail 'shrunk NTFS was not expanded during source recovery'
+before_recovery_calls=$(wc -l <"$recovery_trace")
+rootpxe_capture_recover_source || fail 'disarmed source recovery must be a no-op success'
+after_recovery_calls=$(wc -l <"$recovery_trace")
+[[ $before_recovery_calls -eq $after_recovery_calls ]] || fail 'source recovery ran more than once'
+
+printf 'label: gpt\n' >"$tmp/image/d1.original.partitions"
+rootpxe_capture_recovery_arm /dev/mock "$tmp/image" ''
+[[ -r ${rootpxe_capture_recovery_local_table:-} ]] || fail 'normal capture cleanup test did not stage a local table'
+rootpxe_capture_recovery_disarm
+[[ -z ${rootpxe_capture_recovery_local_table:-} ]] || fail 'normal capture cleanup did not remove the local table'
+
+: >"$recovery_trace"
+RECOVERY_FLOCK_FAIL=1
+printf 'label: gpt\n' >"$tmp/image/d1.original.partitions"
+rootpxe_capture_recovery_arm /dev/mock "$tmp/image" ''
+rootpxe_capture_note_partition_shrunk /dev/mockp2 extfs
+set +e
+rootpxe_capture_recover_source
+rollback_status=$?
+set -e
+[[ $rollback_status -ne 0 ]] || fail 'partition-table restore failure must remain visible'
+! grep -Fq 'resize2fs:/dev/mockp2' "$recovery_trace" || fail 'filesystem expansion must not run after failed table recovery'
+[[ -z ${rootpxe_capture_recovery_local_table:-} ]] || fail 'failed source recovery did not clean the local partition-table copy'
+before_recovery_calls=$(wc -l <"$recovery_trace")
+rootpxe_capture_recover_source || fail 'failed rollback must still disarm recursive recovery'
+after_recovery_calls=$(wc -l <"$recovery_trace")
+[[ $before_recovery_calls -eq $after_recovery_calls ]] || fail 'failed rollback retried recursively'
+pass 'capture failures restore shrunk source partitions once and fail closed'
+
+printf 'label: gpt\n' >"$tmp/image/d1.original.partitions"
+: >"$recovery_trace"
+RECOVERY_FLOCK_FAIL=0
+RECOVERY_BTRFS_FAIL=0
+rootpxe_capture_recovery_arm /dev/mock "$tmp/image" ''
+rootpxe_capture_note_partition_shrunk /dev/mockp5 btrfs
+rootpxe_capture_recover_source || fail 'btrfs source recovery failed'
+grep -Fq 'mount:-t btrfs /dev/mockp5 ' "$recovery_trace" || fail 'btrfs source recovery did not mount a private recovery directory'
+grep -Fq 'btrfs:filesystem resize max ' "$recovery_trace" || fail 'btrfs source recovery did not expand the filesystem'
+grep -Fq 'umount:' "$recovery_trace" || fail 'btrfs source recovery did not unmount its recovery directory'
+
+printf 'label: gpt\n' >"$tmp/image/d1.original.partitions"
+: >"$recovery_trace"
+RECOVERY_BTRFS_FAIL=1
+rootpxe_capture_recovery_arm /dev/mock "$tmp/image" ''
+rootpxe_capture_note_partition_shrunk /dev/mockp5 btrfs
+rootpxe_capture_note_partition_shrunk /dev/mockp4 ntfs
+set +e
+rootpxe_capture_recover_source
+btrfs_recovery_status=$?
+set -e
+[[ $btrfs_recovery_status -ne 0 ]] || fail 'btrfs expansion failure must fail the overall source recovery'
+grep -Fq 'umount:' "$recovery_trace" || fail 'btrfs recovery failure did not unmount the private directory'
+grep -Fqx 'ntfsresize:/dev/mockp4' "$recovery_trace" || fail 'source recovery stopped before attempting later partitions'
+[[ -z ${rootpxe_capture_recovery_local_table:-} ]] || fail 'btrfs recovery failure did not clean the local partition-table copy'
+before_recovery_calls=$(wc -l <"$recovery_trace")
+rootpxe_capture_recover_source || fail 'btrfs recovery must disarm after a failure'
+after_recovery_calls=$(wc -l <"$recovery_trace")
+[[ $before_recovery_calls -eq $after_recovery_calls ]] || fail 'btrfs recovery retried recursively'
+pass 'btrfs rollback expands safely and continues after individual failures'
+
+shrink_source="$tmp/shrink-partition.sh"
+awk '/^shrinkPartition\(\)/ { copy = 1 } /^# Resets the dirty bits/ { copy = 0 } copy' "$funcs" >"$shrink_source"
+expand_source="$tmp/expand-partition.sh"
+awk '/^expandPartition\(\)/ { copy = 1 } /^# Shrinks partitions for upload/ { copy = 0 } copy' "$funcs" >"$expand_source"
+! grep -Fq 'rootpxe_capture_note_partition_shrunk' "$expand_source" \
+    || fail 'normal partition expansion must not register a capture rollback entry'
+awk '/^[[:space:]]*btrfs\)/ { btrfs = 1 } btrfs && /rootpxe_capture_note_partition_shrunk/ { found = 1 } END { exit found ? 0 : 1 }' "$shrink_source" \
+    || fail 'successful btrfs shrink must register a capture rollback entry'
+extfs_shrink_line=$(grep -n 'resize2fs "\$part" -M' "$shrink_source" | head -n 1 | cut -d: -f1)
+extfs_note_line=$(awk -v start="$extfs_shrink_line" 'NR > start && /rootpxe_capture_note_partition_shrunk "\$part" "\$fstype"/ { print NR; exit }' "$shrink_source")
+extfs_partition_line=$(awk -v start="$extfs_shrink_line" 'NR > start && /resizePartition "\$part" "\$sizeextresize"/ { print NR; exit }' "$shrink_source")
+[[ $extfs_shrink_line =~ ^[1-9][0-9]*$ && $extfs_note_line =~ ^[1-9][0-9]*$ && $extfs_partition_line =~ ^[1-9][0-9]*$ \
+    && $extfs_shrink_line -lt $extfs_note_line && $extfs_note_line -lt $extfs_partition_line ]] \
+    || fail 'extfs source recovery must be armed before partition resize can fail'
+ntfs_shrink_line=$(grep -n 'yes | ntfsresize -fs' "$shrink_source" | head -n 1 | cut -d: -f1)
+ntfs_note_line=$(awk -v start="$ntfs_shrink_line" 'NR > start && /rootpxe_capture_note_partition_shrunk "\$part" "\$fstype"/ { print NR; exit }' "$shrink_source")
+ntfs_partition_line=$(awk -v start="$ntfs_shrink_line" 'NR > start && /resizePartition "\$part"/ { print NR; exit }' "$shrink_source")
+[[ $ntfs_shrink_line =~ ^[1-9][0-9]*$ && $ntfs_note_line =~ ^[1-9][0-9]*$ && $ntfs_partition_line =~ ^[1-9][0-9]*$ \
+    && $ntfs_shrink_line -lt $ntfs_note_line && $ntfs_note_line -lt $ntfs_partition_line ]] \
+    || fail 'NTFS source recovery must be armed before partition resize can fail'
+pass 'filesystem shrink failures before partition resize remain recoverable'
+
+awk '/^handleError\(\)/ { copy = 1 } /^# Prints a visible banner describing an issue/ { copy = 0 } copy' "$funcs" >"$tmp/handlers.sh"
+recovery_hook_trace="$tmp/recovery-hook.trace"
+set +e
+(
+    initversion=test-init
+    isdebug=yes
+    rootpxe_capture_recover_source() { printf 'recovery-called\n' >"$recovery_hook_trace"; return 1; }
+    rootpxe_require_task_context() { return 1; }
+    cat() { [[ $1 == /proc/cmdline ]] && { printf 'mock_cmdline=1\n'; return; }; command cat "$@"; }
+    debugPause() { :; }
+    . "$tmp/handlers.sh"
+    handleError 'ORIGINAL_CAPTURE_FAILURE'
+) >"$tmp/handler-recovery.out" 2>&1
+handler_status=$?
+set -e
+[[ $handler_status -eq 1 ]] || fail 'capture error handler exit policy changed'
+grep -Fqx 'recovery-called' "$recovery_hook_trace" || fail 'capture recovery was not invoked before error reporting'
+grep -Fqx '        ORIGINAL_CAPTURE_FAILURE' "$tmp/handler-recovery.out" || fail 'capture recovery overwrote the original error'
+grep -Fqx '        PXEOS_STAGE=capture CODE=SOURCE_LAYOUT_RECOVERY_FAILED REASON=rollback_failed' "$tmp/handler-recovery.out" \
+    || fail 'capture recovery failure lacks a stable secondary error'
+pass 'capture error handling preserves the original failure after one rollback attempt'
+
+grep -Fq 'rootpxe_capture_recover_source ||' "$funcs" || fail 'handleError must invoke capture source recovery before pausing'
+grep -Fq 'SOURCE_LAYOUT_RECOVERY_FAILED' "$funcs" || fail 'source recovery failure must preserve the original error with a stable secondary code'
+grep -Fq 'rootpxe_capture_recovery_disarm' "$upload" || fail 'successful capture must disarm source recovery'
+)
+# ===== 单盘可调整镜像的源盘恢复与 extfs 检查结束 =====
