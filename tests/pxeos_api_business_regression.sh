@@ -516,7 +516,7 @@ case "$*" in
     exit 0 ;;
   *'--rawfile rows'*)
     if [[ ${SCHEMA_KIND:-} == mbr-v2 ]]; then
-      echo '{"version":2,"partitionTable":"mbr","originalDiskBytes":102400000,"logicalSectorBytes":512,"physicalSectorBytes":512,"minDeployBytes":3145728,"partitions":[{"number":1,"startSectors":2048,"originalSectors":8192,"minSectors":3976,"typeGuid":"0x5","flags":[],"role":"extended_container","resizable":false,"fs":"","uuid":"","partuuid":"","artifact":"","kind":"extended","logicalNumbers":[5,6],"ebrReservedSectors":2},{"number":5,"startSectors":2050,"originalSectors":2048,"minSectors":2048,"typeGuid":"0x83","flags":[],"role":"data","resizable":true,"fs":"ntfs","uuid":"swap-uuid","partuuid":"swap-partuuid","artifact":"d1p5.img","kind":"logical","parentNumber":1},{"number":6,"startSectors":5000,"originalSectors":1024,"minSectors":1024,"typeGuid":"0x82","flags":[],"role":"swap","resizable":false,"fs":"swap","uuid":"swap-uuid","partuuid":"swap-partuuid","artifact":"","kind":"logical","parentNumber":1}]}'
+      echo '{"version":2,"partitionTable":"mbr","originalDiskBytes":102400000,"logicalSectorBytes":512,"physicalSectorBytes":512,"minDeployBytes":102400000,"partitions":[{"number":1,"startSectors":2048,"originalSectors":8192,"minSectors":8192,"typeGuid":"0x5","flags":[],"role":"extended_container","resizable":false,"fs":"","uuid":"","partuuid":"","artifact":"","kind":"extended","logicalNumbers":[5,6],"ebrReservedSectors":2},{"number":5,"startSectors":2050,"originalSectors":2048,"minSectors":2048,"typeGuid":"0x83","flags":[],"role":"data","resizable":true,"fs":"ntfs","uuid":"swap-uuid","partuuid":"swap-partuuid","artifact":"d1p5.img","kind":"logical","parentNumber":1},{"number":6,"startSectors":5000,"originalSectors":1024,"minSectors":1024,"typeGuid":"0x82","flags":[],"role":"swap","resizable":false,"fs":"swap","uuid":"swap-uuid","partuuid":"swap-partuuid","artifact":"","kind":"logical","parentNumber":1}]}'
     elif [[ $BLKTYPE == swap ]]; then echo '{"version":1,"partitionTable":"mbr","originalDiskBytes":102400000,"logicalSectorBytes":512,"physicalSectorBytes":512,"minDeployBytes":1572864,"partitions":[{"number":2,"startSectors":2048,"originalSectors":1024,"minSectors":1024,"typeGuid":"82","flags":[],"role":"swap","resizable":false,"fs":"swap","uuid":"swap-uuid","partuuid":"swap-partuuid","artifact":""}]}' ; else echo '{}' ; fi
     exit 0 ;;
   *'-n '*) echo "$*" >>$JQ_ARGS_LOG; echo '[]'; exit 0 ;;
@@ -1036,9 +1036,8 @@ grep -Fq '"ebrReservedSectors":2' $rootpxe_original_schema_file || fail mbr-ebr-
 grep -Fq '"typeGuid":"0x5"' $rootpxe_original_schema_file || fail mbr-type-normalization
 grep -Fq '"typeGuid":"0x83"' $rootpxe_original_schema_file || fail mbr-logical-type-normalization
 grep -Fq '"artifact":""' $rootpxe_original_schema_file || fail mbr-container-artifact
-grep -Fq '"minSectors":3976' $rootpxe_original_schema_file || fail mbr-container-minimum
-node -e 'const e=2048,l=[{s:2050,m:2048},{s:5000,m:1024}];if(Math.max(...l.map(p=>p.s+p.m-e))!==3976)process.exit(1)' || fail mbr-container-minimum-oracle
-grep -Fq '(.startSectors + .minSectors - $part.startSectors)' $funcs || fail mbr-container-minimum-builder
+grep -Fq '"originalSectors":8192,"minSectors":8192' $rootpxe_original_schema_file || fail mbr-container-minimum
+! grep -Fq '(.startSectors + .minSectors - $part.startSectors)' $funcs || fail mbr-container-minimum-builder
 grep -Fq '"lvm"' $rootpxe_original_schema_file && fail mbr-v2-empty-lvm-must-be-omitted
 node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1]));const e=s.partitions.find(p=>p.kind==="extended"),l=s.partitions.find(p=>p.kind==="logical");if(!e||!l||"parentNumber" in e||!("ebrReservedSectors" in e)||"ebrReservedSectors" in l||"logicalNumbers" in l)process.exit(1)' "$rootpxe_original_schema_file" || fail mbr-v2-field-boundaries
 grep -Fq 'extended container must be derived' $funcs || fail mbr-derived-layout-guard
@@ -1209,11 +1208,21 @@ LAYOUT_SFDISK_ARGS=$tmp/layout-sfdisk-args; export LAYOUT_SFDISK_ARGS
 LAYOUT_PARTPROBE_TRACE=$tmp/layout-partprobe-trace; export LAYOUT_PARTPROBE_TRACE
 LAYOUT_SLEEP_TRACE=$tmp/layout-sleep-trace; export LAYOUT_SLEEP_TRACE
 LAYOUT_EXPECT_DISK=/dev/sda
+# The unmodified default uses d1.partitions as its immutable template.  It may
+# rewrite source-device/GPT geometry in a private stream for sfdisk, but must
+# not materialize a d1.deployment.partitions file.
+rootpxe_deployment_layout_changed=no
 rootpxe_apply_deployment_layout /dev/sda $layout_template || fail layout-apply-nvme-to-sata
+[[ -z ${rootpxe_deployment_partition_file:-} ]] || fail default-layout-must-not-materialize-deployment-table
 layout_apply_assert_table /dev/sda "$layout_applied" || fail layout-apply-nvme-to-sata-rewritten-table
 grep -Fqx -- '--no-reread --no-tell-kernel /dev/sda' "$LAYOUT_SFDISK_ARGS" || fail layout-sfdisk-write-must-disable-implicit-kernel-reread
+# A changed policy produces a task-private d1.deployment.partitions and that
+# exact table is the one passed to sfdisk; the image d1.partitions stays read-only.
+rootpxe_deployment_layout_changed=yes
 LAYOUT_EXPECT_DISK=/dev/nvme0n1
 rootpxe_apply_deployment_layout /dev/nvme0n1 $layout_template || fail layout-apply-nvme-suffix
+[[ ${rootpxe_deployment_partition_file:-} == /tmp/rootpxe-deployment-layout.*/d1.deployment.partitions && -r $rootpxe_deployment_partition_file ]] || fail changed-layout-must-materialize-deployment-table
+cmp -s "$rootpxe_deployment_partition_file" "$layout_applied" || fail changed-layout-must-use-materialized-table
 layout_apply_assert_table /dev/nvme0n1 "$layout_applied" || fail layout-apply-nvme-suffix-rewritten-table
 : >"$LAYOUT_PARTPROBE_TRACE"
 : >"$LAYOUT_SLEEP_TRACE"

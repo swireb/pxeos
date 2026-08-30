@@ -402,11 +402,33 @@ EOF
 rootpxe_build_partition_inventory "$tmp/capture" mps /dev/nvme0n1 "" || fail mps
 jq -e '.version == 1 and (.disks|length)==1 and .disks[0].partitions[0].fs == "vfat" and .disks[0].partitions[0].uuid == "efi-uuid"' "$rootpxe_partition_inventory_file" >/dev/null || fail mps-facts
 # This exercises the real jq invocation in the n schema builder with no LVM
-# rawfile supplied, which previously compiled `$lvm` as an undefined variable.
-cp "$tmp/capture/d1.partitions" "$tmp/capture/d1.minimum.partitions"
+# rawfile supplied.  The canonical d1.partitions is the sole source layout;
+# no shrunken/minimum sidecar is created for the new n contract.
 : >"$tmp/capture/d1p1.img"
 rootpxe_build_original_schema /dev/nvme0n1 "$tmp/capture" || fail n-schema-real-jq
-jq -e '.partitionTable == "gpt" and .partitions[0].fs == "vfat"' "$rootpxe_original_schema_file" >/dev/null || fail n-schema-facts
+jq -e '.partitionTable == "gpt" and .partitions[0].fs == "vfat" and .minDeployBytes == .originalDiskBytes and (.partitions | all(.minSectors == .originalSectors))' "$rootpxe_original_schema_file" >/dev/null || fail n-schema-facts
+[[ ! -e "$tmp/capture/d1.minimum.partitions" && ! -e "$tmp/capture/d1.original.partitions" && ! -e "$tmp/capture/d1.shrunken.partitions" ]] || fail n-schema-must-not-read-legacy-layouts
+# An MBR extended container may contain unused tail sectors after its last
+# logical partition.  d1.partitions is both the captured and minimum layout,
+# so Schema v2 must retain the container's captured size instead of deriving a
+# smaller minimum from the last logical partition.
+cp "$tmp/capture/d1.partitions" "$tmp/capture/d1.gpt.partitions"
+cat >"$tmp/capture/d1.partitions" <<'EOF'
+label: dos
+device: /dev/sda
+unit: sectors
+sector-size: 512
+/dev/sda1 : start=        2048, size=        1024, type=83
+/dev/sda2 : start=        4096, size=       10000, type=5
+/dev/sda5 : start=        4098, size=        1000, type=83
+/dev/sda6 : start=        6100, size=        1000, type=83
+EOF
+: >"$tmp/capture/d1p1.img"
+: >"$tmp/capture/d1p5.img"
+: >"$tmp/capture/d1p6.img"
+rootpxe_build_original_schema /dev/sda "$tmp/capture" || fail mbr-extended-tail-schema
+jq -e '.version == 2 and .partitionTable == "mbr" and .minDeployBytes == .originalDiskBytes and ([.partitions[] | select(.kind == "extended") | .originalSectors == 10000 and .minSectors == .originalSectors] | length) == 1 and (.partitions | all(.minSectors == .originalSectors))' "$rootpxe_original_schema_file" >/dev/null || fail mbr-extended-tail-must-keep-captured-minimum
+mv "$tmp/capture/d1.gpt.partitions" "$tmp/capture/d1.partitions"
 # Exercise the production LVM layout resolver with the real jq binary too.
 # The separate LVM suite intentionally replaces jq to focus on command-flow
 # failures, so it cannot detect jq syntax or result-shape regressions here.
@@ -644,21 +666,14 @@ export E2FSCK_RC=1; rootpxe_capture_lvm_volumes "$tmp/image" || fail legal-captu
 [[ -s "$tmp/image/d1.lvm.schema.json" && -f "$tmp/image/d1.lv.lv-root.img" && ! -e "$tmp/image/d1.lv.lv-swap.img" ]] || fail artifacts
 awk -F'|' '$5 == "swap" && $6 != "" { exit 1 }' "$tmp/image/d1.lvm.capture.tsv" || fail swap-artifact-inherited
 grep -Fq 'partclone.extfs:' "$LVM_TRACE" || fail writer-not-run
-grep -Fq 'lvreduce:' "$LVM_TRACE" || fail source-shrink-missing
-grep -Fq 'lvextend:' "$LVM_TRACE" || fail source-expand-missing
-# Later injected producer/writer failures only verify that the capture branch
-# invokes cleanup.  The successful path above already exercises the real
-# source expand helper; a marker avoids turning an expected writer failure
-# into a host-shell timing test.
-rootpxe_lvm_restore_source_lv() { echo "source-cleanup:$*" >>"$LVM_TRACE"; }
+! grep -Fq 'lvreduce:' "$LVM_TRACE" || fail n-capture-must-not-shrink-source-lv
+! grep -Fq 'lvextend:' "$LVM_TRACE" || fail n-capture-must-not-expand-source-lv
 export LVM_MODE=multi; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail multipv; unset LVM_MODE
 rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" || fail facts-after-multipv
 export PV_FAIL=1; rootpxe_capture_lvm_volumes "$tmp/image" && fail sidecar-failure; unset PV_FAIL
 export WRITER_FAIL=1; rootpxe_capture_lvm_volumes "$tmp/image" && fail writer-failure; unset WRITER_FAIL
 : >"$LVM_TRACE"; export UPLOAD_FAIL=1; rootpxe_capture_lvm_volumes "$tmp/image" && fail upload-failure; unset UPLOAD_FAIL
-grep -Fq 'source-cleanup:' "$LVM_TRACE" || fail upload-failure-source-rollback
-: >"$LVM_TRACE"; export LVREDUCE_FAIL=1; rootpxe_capture_lvm_volumes "$tmp/image" && fail reduce-failure; unset LVREDUCE_FAIL
-grep -Fq 'source-cleanup:' "$LVM_TRACE" || fail reduce-failure-source-cleanup
+! grep -Fq 'lvreduce:' "$LVM_TRACE" || fail upload-failure-must-not-shrink-source-lv
 export LVM_MODE=cross; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail cross-disk-vg; unset LVM_MODE
 export LVM_SEGTYPE=thin; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail thin-topology; unset LVM_SEGTYPE
 export LVM_MODE=crypt; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail crypt-topology; unset LVM_MODE

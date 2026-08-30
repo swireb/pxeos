@@ -20,143 +20,28 @@ statusReporter="$!"
 prepareUploadLocation "$imagePath"
 printf '%s\n' "$taskid" > "$imagePath/.rootpxe-capture-taskid" || handleError "Could not initialize capture task marker ($0)"
 rootpxe_console_message INFO "Using image: $img."
-# resizable image type
-#  discover windows partitions
-#  remove pagefile and hibernate file
-#  validate XP partition location
-#  save original partition table
-#  save MBR
-#  shrink filesystems and partitions
-#  save GRUB
-#  save shrunken partition table
-#  clone filesystems
-#  restore original MBR and partition table
-#  expand filesystems
-rootpxe_capture_recovery_disarm() {
-    local local_table="${rootpxe_capture_recovery_local_table:-}"
-    if [[ $local_table == /tmp/pxeos-capture-recovery/* && -f $local_table ]]; then
-        rm -f -- "$local_table" >/dev/null 2>&1 || true
-    fi
-    rootpxe_capture_recovery_armed=0
-    rootpxe_capture_recovery_running=0
-    rootpxe_capture_recovery_entries=""
-    rootpxe_capture_recovery_local_table=""
-}
+# A resizable single-disk image keeps the captured partition layout intact.
+# d1.partitions is both the capture fact and the minimum deployment layout;
+# administrators may only grow partitions later during deployment.  Capturing
+# must therefore never shrink, move, or restore the source disk.
+rootpxe_capture_single_disk() {
+    local part
+    runPartprobe "$hd"
+    parts=""
+    getPartitions "$hd"
+    [[ ${#parts} -gt 0 ]] || handleError "No partitions found ($0)\n   Args Passed: $*"
 
-rootpxe_capture_recovery_arm() {
-    local disk="$1" image_path="$2" fixed_partitions="$3"
-    local source_table="$image_path/d1.original.partitions"
-    local recovery_dir=/tmp/pxeos-capture-recovery local_table temporary_table
-    local task_label="${taskid:-task}"
-    task_label=$(printf '%s' "$task_label" | tr -c 'A-Za-z0-9_.-' '_')
+    dots "Saving original partition table"
+    savePartitionTablesAndBootLoaders "$hd" 1 "$imagePath" "$osid" "$imgPartitionType"
+    echo "Done"
+    debugPause
 
-    rootpxe_capture_recovery_disarm
-    [[ -r $source_table ]] || return 1
-    (umask 077 && mkdir -p "$recovery_dir") || return 1
-    chmod 700 "$recovery_dir" >/dev/null 2>&1 || return 1
-    local_table="$recovery_dir/${task_label}.$$.original.partitions"
-    temporary_table="$local_table.tmp"
-    (umask 077 && cat "$source_table" >"$temporary_table") \
-        && chmod 600 "$temporary_table" >/dev/null 2>&1 \
-        && mv -f -- "$temporary_table" "$local_table" || {
-            rm -f -- "$temporary_table" "$local_table" >/dev/null 2>&1 || true
-            return 1
-        }
-
-    rootpxe_capture_recovery_disk="$disk"
-    rootpxe_capture_recovery_image_path="$image_path"
-    rootpxe_capture_recovery_fixed_partitions="$fixed_partitions"
-    rootpxe_capture_recovery_local_table="$local_table"
-    rootpxe_capture_recovery_entries=""
-    rootpxe_capture_recovery_running=0
-    rootpxe_capture_recovery_armed=1
-}
-
-rootpxe_capture_note_partition_shrunk() {
-    local part="$1" fstype="$2" entry
-    [[ ${rootpxe_capture_recovery_armed:-0} -eq 1 ]] || return 0
-    [[ ${rootpxe_capture_recovery_running:-0} -eq 0 ]] || return 0
-    [[ -n $part && -n $fstype ]] || return 0
-    entry="$part|$fstype"
-    case "|${rootpxe_capture_recovery_entries:-}|" in
-        *"|$entry|"*) return 0 ;;
-    esac
-    if [[ -n ${rootpxe_capture_recovery_entries:-} ]]; then
-        rootpxe_capture_recovery_entries+=$'\n'
-    fi
-    rootpxe_capture_recovery_entries+="$entry"
-}
-
-rootpxe_capture_expand_recovered_filesystem() {
-    local part="$1" fstype="$2" status=0 mount_dir=""
-    case $fstype in
-        extfs)
-            rootpxe_e2fsck_preflight "$part" /tmp/e2fsck.txt || return $?
-            resize2fs "$part" >/tmp/resize2fs.txt 2>&1 || return $?
-            rootpxe_e2fsck_preflight "$part" /tmp/e2fsck.txt || return $?
-            ;;
-        ntfs)
-            yes | ntfsresize -fbP "$part" >/tmp/tmpoutput.txt 2>&1
-            status=${PIPESTATUS[1]}
-            [[ $status -eq 0 ]] || return "$status"
-            ntfsfix -b -d "$part" >/tmp/tmpoutput.txt 2>&1 || return $?
-            ;;
-        btrfs)
-            mount_dir=$(umask 077; mktemp -d /tmp/pxeos-capture-btrfs.XXXXXX) || return 1
-            if ! mount -t btrfs "$part" "$mount_dir" >/tmp/btrfs-recovery.txt 2>&1; then
-                rmdir "$mount_dir" >/dev/null 2>&1 || true
-                return 1
-            fi
-            btrfs filesystem resize max "$mount_dir" >>/tmp/btrfs-recovery.txt 2>&1 || status=1
-            umount "$mount_dir" >>/tmp/btrfs-recovery.txt 2>&1 || status=1
-            rmdir "$mount_dir" >/dev/null 2>&1 || status=1
-            return "$status"
-            ;;
-        *)
-            return 0
-            ;;
-    esac
-}
-
-rootpxe_capture_recover_source() {
-    local original_table entry part fstype status=0
-    [[ ${rootpxe_capture_recovery_armed:-0} -eq 1 ]] || return 0
-    [[ ${rootpxe_capture_recovery_running:-0} -eq 0 ]] || return 0
-
-    # Disarm first: handleError can wait for a web retry and must never cause
-    # another write attempt while this best-effort source recovery is running.
-    rootpxe_capture_recovery_armed=0
-    rootpxe_capture_recovery_running=1
-    original_table="${rootpxe_capture_recovery_local_table:-}"
-    [[ -r $original_table ]] || original_table="$rootpxe_capture_recovery_image_path/d1.original.partitions"
-    rootpxe_console_message WARN 'Capture failed. Restoring the source partition layout.'
-
-    if [[ ! -r $original_table ]] \
-        || ! flock "$rootpxe_capture_recovery_disk" sfdisk "$rootpxe_capture_recovery_disk" <"$original_table" >/dev/null 2>&1; then
-        status=1
-    fi
-    if [[ $status -eq 0 && -r /usr/share/pxeos/lib/EOFRESTOREPART ]]; then
-        flock "$rootpxe_capture_recovery_disk" fdisk "$rootpxe_capture_recovery_disk" \
-            </usr/share/pxeos/lib/EOFRESTOREPART >/dev/null 2>&1 || status=1
-    fi
-    if [[ $status -eq 0 ]]; then
-        udevadm settle >/dev/null 2>&1 || status=1
-        blockdev --rereadpt "$rootpxe_capture_recovery_disk" >/dev/null 2>&1 || status=1
-    fi
-    if [[ $status -eq 0 ]]; then
-        while IFS='|' read -r part fstype; do
-            [[ -n $part && -n $fstype ]] || continue
-            rootpxe_capture_expand_recovered_filesystem "$part" "$fstype" || status=1
-        done <<< "${rootpxe_capture_recovery_entries:-}"
-    fi
-
-    rootpxe_capture_recovery_disarm
-    if [[ $status -eq 0 ]]; then
-        rootpxe_console_message INFO 'Source partition layout restored.'
-        return 0
-    fi
-    rootpxe_console_message ERROR 'Source partition recovery failed.'
-    return 1
+    rootpxe_console_message INFO "Processing disk device: $hd."
+    for part in $parts; do
+        isBitlockedPartition "$part"
+        savePartition "$part" 1 "$imagePath" "$imgPartitionType"
+    done
+    rootpxe_capture_lvm_volumes "$imagePath" || handleError "PXEOS_STAGE=capture CODE=LVM_CAPTURE_FAILED REASON=metadata_or_lv_writer_failed"
 }
 
 beginUpload() {
@@ -164,166 +49,8 @@ beginUpload() {
     local writer_exitcode=0
     case $imgType in
         [Nn])
-            validResizeOS
-            runPartprobe "$hd"
-            parts=""
-            getPartitions "$hd"
-            [[ ${#parts} -lt 1 ]] && handleError "No partitions found ($0)\n   Args Passed: $*"
-            [[ $osid == @([1-2]|[4-7]|9|10|11) ]] && win7partcnt=$(echo $parts | wc -w)
-            dots "Checking for fixed partitions"
-            part_number=0
-            for part in $parts; do
-                isBitlockedPartition "$part"
-                fsTypeSetting "$part"
-                getPartitionNumber "$part"
-                rootpxe_lvm_is_pv_partition "$part" && { fixed_size_partitions="$fixed_size_partitions:$part_number"; continue; }
-                case $fstype in
-                    ntfs|extfs|btrfs|f2fs|xfs)
-                        continue
-                        ;;
-                    *)
-                        fixed_size_partitions="$fixed_size_partitions:$part_number"
-                        ;;
-                esac
-            done
-            echo "Done"
-            debugPause
-            dots "Getting Windows/Linux Partition Count"
-            countPartTypes "$hd" "ntfs" "ntfscnt"
-            countPartTypes "$hd" "extfs" "extfscnt"
-            countPartTypes "$hd" "btrfs" "btrfscnt"
-            countPartTypes "$hd" "f2fs" "f2fscnt"
-            countPartTypes "$hd" "xfs" "xfscnt"
-            countPartTypes "$hd" "*" "partscnt"
-            if [[ $ntfscnt -eq 0 && $extfscnt -eq 0 && $btrfscnt -eq 0 && $f2fscnt -eq 0 && $xfscnt -eq 0 && ${rootpxe_lvm_active:-no} != yes ]]; then
-                echo "Failed"
-                debugPause
-                handleError "No resizable partitions found ($0)\n   Args Passed: $*"
-            fi
-            echo "Done"
-            debugPause
-            rootpxe_console_message INFO "NTFS partition count: $ntfscnt."
-            debugPause
-            rootpxe_console_message INFO "EXTFS partition count: $extfscnt."
-            debugPause
-            rootpxe_console_message INFO "BTRFS partition count: $btrfscnt."
-            debugPause
-            rootpxe_console_message INFO "F2FS partition count: $f2fscnt."
-            debugPause
-            rootpxe_console_message INFO "XFS partition count: $xfscnt."
-            debugPause
-            rootpxe_console_message INFO "Total partition count: $partscnt."
-            debugPause
-            case $osid in
-                [4-7]|9|10|11|50|51)
-                    rootpxe_console_message INFO 'Setting up additional fixed partitions.'
-                    part_number=0
-                    for part in $parts; do
-                        getPartitionNumber "$part"
-                        fsTypeSetting "$part"
-                        [[ $fstype != ntfs ]] && continue
-                        dots "Mounting partition ($part)"
-                        if [[ ! -d /bcdstore ]]; then
-                            mkdir -p /bcdstore >/dev/null 2>&1
-                            case $? in
-                                0)
-                                    ;;
-                                *)
-                                    echo "Failed"
-                                    debugPause
-                                    handleError "Could not create mount location ($0->${FUNCNAME[0]})\n    Args Passed: $*"
-                                    ;;
-                            esac
-                        fi
-                        ntfs-3g -o remove_hiberfile,rw $part /bcdstore >/tmp/ntfs-mount-output 2>&1
-                        case $? in
-                            0)
-                                echo "Done"
-                                debugPause
-                                ;;
-                            *)
-                                echo "Failed"
-                                debugPause
-                                handleError "Could not mount $part ($0->${FUNCNAME[0]})\n    Args Passed: $*\n    Reason: $(cat /tmp/ntfs-mount-output | tr -d \\0)"
-                                ;;
-                        esac
-                        umount /bcdstore >/dev/null 2>&1
-                        if [[ $partscnt -gt 1 ]]; then
-                                flock $hd parted -s $hd print | grep "^ *${part_number} " | grep -q "boot\|msftres\|hidden"
-                                if [[ $? -eq 0 ]]; then
-                                        rootpxe_console_message INFO "Added fixed partition: $part."
-                                        fixed_size_partitions="$fixed_size_partitions:$part_number"
-                                fi
-                        fi
-                    done
-                    ;;
-            esac
-            # All:
-            #  save the list of fixed size partitions
-            fixed_size_partitions=$(echo $fixed_size_partitions | tr ':' '\n' | grep -v "^$" | sort -n | uniq | tr '\n' ':' | sed 's/:$//g')
-            echo "$fixed_size_partitions" > "$imagePath/d1.fixed_size_partitions"
-            # Windows 2000/XP, Vista, 7, 8, 8.1, Linux:
-            #  Save unmodified partition table for download use
-            #  Start filesytem type record
-            dots "Saving original partition table"
-            saveOriginalPartitions "$hd" "$imagePath" 1
-            rootpxe_capture_recovery_arm "$hd" "$imagePath" "$fixed_size_partitions" \
-                || handleError "PXEOS_STAGE=capture CODE=SOURCE_LAYOUT_STAGING_FAILED REASON=unable_to_stage_original_partition_table"
-            swapuuidfilename=""
-            swapUUIDFileName "$imagePath" 1
-            echo -n "" > "$imagePath/d1.original.fstypes"
-            echo -n "" > $swapuuidfilename
-            echo "Done"
-            debugPause
-            rootpxe_console_message INFO 'Shrinking partitions on disk.'
-            debugPause
-            for part in $parts; do
-                rootpxe_lvm_is_pv_partition "$part" && continue
-                clearMountedDevices "$part"
-                removePageFile "$part"
-                shrinkPartition "$part" "$imagePath/d1.original.fstypes" "$fixed_size_partitions"
-            done
-            local hasgpt=0
-            hasGPT "$hd"
-            if [[ $hasgpt -eq 1 ]]; then
-                rootpxe_console_message INFO "Moving partitions on disk device $hd."
-                debugPause
-                saveSfdiskPartitions "$hd" "$imagePath/d1.shrunken.partitions"
-                prevPart=""
-                for part in $parts; do
-                    movePartition "$part" "$prevPart"
-                    prevPart="$part"
-                done
-            fi
-            rootpxe_console_message INFO 'Saving the shrunken partition table.'
-            debugPause
-            sfdiskminimumpartitionfilename=""
-            sfdiskMinimumPartitionFileName "$imagePath" 1
-            savePartitionTablesAndBootLoaders "$hd" 1 "$imagePath" "$osid" "$imgPartitionType" "$sfdiskminimumpartitionfilename"
-            if [[ $hasgpt -eq 1 ]]; then
-                rootpxe_console_message INFO "Moving partitions back on disk device $hd."
-                debugPause
-                applySfdiskPartitions "$hd" "$imagePath/d1.shrunken.partitions"
-            fi
-            rootpxe_console_message INFO "Processing disk device: $hd."
-            for part in $parts; do
-                rootpxe_lvm_is_pv_partition "$part" && continue
-                savePartition "$part" 1 "$imagePath" "$imgPartitionType"
-            done
-            rootpxe_capture_lvm_volumes "$imagePath" || handleError "PXEOS_STAGE=capture CODE=LVM_CAPTURE_FAILED REASON=metadata_or_lv_writer_failed"
-            dots "Restoring Original Partition Layout"
-            restoreOriginalPartitions "$hd" "$imagePath" 1
-            runPartprobe "$hd"
-            echo "Done"
-            debugPause
-            [[ $osid -eq 2 ]] && correctVistaMBR "$hd"
-            getPartitions "$hd"
-            for part in $parts; do
-                rootpxe_lvm_is_pv_partition "$part" && continue
-                expandPartition "$part" "$fixed_size_partitions"
-            done
-            rootpxe_capture_recovery_disarm
-            ;;
+			rootpxe_capture_single_disk
+			;;
         mps)
             parts=""
             getPartitions "$hd"
