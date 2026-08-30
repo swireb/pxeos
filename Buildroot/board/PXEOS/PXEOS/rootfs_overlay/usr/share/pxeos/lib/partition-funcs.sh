@@ -244,7 +244,7 @@ saveSwapUUID() {
     local uuid=$(blkid -s UUID $2 | cut -d\" -f2)
     [[ -z $uuid ]] && return
     getPartitionNumber "$part"
-    echo " * Saving UUID ($uuid) for ($part)"
+    rootpxe_console_message INFO "Saving UUID $uuid for $part."
     echo "${part_number} $uuid" >> $file
 }
 # Linux swap partition strategy:
@@ -371,7 +371,7 @@ resizeSfdiskPartition() {
     saveSfdiskPartitions "$disk" "$tmp_file"
     processSfdisk "$tmp_file" resize "$part" "$size" > "$tmp_file2" || handleError "PXEOS_STAGE=partition_resize CODE=PROCESS_SFDISK_FAILED REASON=unable_to_generate_partition_table"
     if [[ $ismajordebug -gt 0 ]]; then
-        echo "Debug"
+        rootpxe_console_message INFO 'Major debug: generated partition layout.'
         majorDebugEcho "Trying to fill the disk with these partitions:"
         cat $tmp_file2
         majorDebugPause
@@ -410,7 +410,7 @@ fillSfdiskWithPartitions() {
     processSfdisk "$minf" filldisk "$disk" "$disk_size" "$fixed" "$orig" > "$tmp_file2"
     status=$?
     if [[ $ismajordebug -gt 0 ]]; then
-        echo "Debug"
+        rootpxe_console_message INFO 'Major debug: generated partition layout.'
         majorDebugEcho "Trying to fill with the disk with these partititions:"
         cat $tmp_file2
         majorDebugPause
@@ -802,7 +802,7 @@ majorDebugShowCurrentPartitionTable() {
     [[ -z $disk_number ]] && handleError "No disk number passed (${FUNCNAME[0]})\n   Args Passed: $*"
     local table_type=""
     getDesiredPartitionTableType "$imagePath" "$disk_number"
-    echo "Current partition table:"
+    rootpxe_console_message INFO 'Current partition table:'
     case $table_type in
         MBR|GPT)
             flock $disk sfdisk -d $disk

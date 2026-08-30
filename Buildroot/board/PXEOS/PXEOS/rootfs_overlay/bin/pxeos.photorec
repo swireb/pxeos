@@ -27,16 +27,16 @@ case $? in
     *)
         echo "Failed"
         debugPause
-        handleError " * Could not mount $storage ($0)\n    Args Passed: $*\n     Reason: $(cat /tmp/mount-output | tr -d \\0)"
+        handleError "Could not mount $storage ($0)\n    Args Passed: $*\n     Reason: $(cat /tmp/mount-output | tr -d \\0)"
         ;;
 esac
 debugPause
 for disk in $disks; do
-    echo " * Starting PhotoRec on $disk"
+rootpxe_console_message INFO "Starting PhotoRec on $disk."
     usleep 2000000
     getPartitions "$disk"
     for part in $parts; do
-        echo "Performing photorec on $part"
+rootpxe_console_message INFO "Running PhotoRec on $part."
         photorec $part
     done
     usleep 5000000

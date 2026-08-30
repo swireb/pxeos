@@ -11,8 +11,8 @@ clearScreen
 displayBanner
 mac=$(getMACAddresses)
 oPS3=$PS3
-PS3="Please enter your choice: "
-choices="Network Information\nPartition Information\nCheck FOG Compatibility\nPing a Host\nDisplay MAC Address\nShow DMI Information"
+PS3="[INFO]  Select an option: "
+choices="Network Information\nPartition Information\nCheck PXEOS Compatibility\nPing a Host\nDisplay MAC Address\nShow DMI Information"
 case $isdebug in
     [Yy][Ee][Ss]|[Yy])
         choices="Quit\n$choices"
@@ -26,7 +26,7 @@ IFS=$'\n'
 choices=$(echo -e $choices)
 wait_enter() {
     echo -e "\n\n\n"
-    echo " * Press [Enter] to continue"
+    rootpxe_console_prompt INFO 'Press Enter to continue.'
     read -s tmp
     echo -e "\n\n\n"
 }
@@ -67,14 +67,17 @@ while :; do
             4)
                 clearScreen
                 echo "   ==================================================="
-                echo "   =              FOG Compatibility Test             ="
+                echo "   =            PXEOS Compatibility Check           ="
                 echo "   ==================================================="
                 tmpDisk=$(parted --list 2>/dev/null | grep "Disk")
                 tmpNic=$(ip addr | grep "link/ether")
                 [[ -n $tmpDisk ]] && blHddOk="Pass" || blHddOk="Fail"
                 [[ -n $tmpNic ]] && blNicOk="Pass" || blNicOk="Fail"
-                [[ $blNicOk == Pass && $blHddOk == Pass ]] && tmpstr="Computer appears to be compatible with FOG!" || tmpstr="Computer is NOT compatibile with FOG!"
-                echo "$tmpstr"
+                if [[ $blNicOk == Pass && $blHddOk == Pass ]]; then
+                    rootpxe_console_message INFO 'Hardware compatibility checks passed.'
+                else
+                    rootpxe_console_message WARN 'Hardware compatibility checks failed.'
+                fi
                 echo "   ==================================================="
                 echo "   =                      Results                    ="
                 echo "   ==================================================="
@@ -82,22 +85,12 @@ while :; do
                 echo "   = Disk.....................................[$blHddOk] ="
                 echo "   ==================================================="
                 if [[ $blNicOk == Fail || $blHddOk == Fail ]]; then
-                    echo "   ###################################################"
-                    echo "   # Try using a newer kernel that may be compatible #"
-                    echo "   # with this device.                               #"
-                    echo "   #                                                 #"
-                    echo "   # New kernels can be downloaded from the GUI.     #"
-                    echo "   # From the menu select:                           #"
-                    echo "   # FOG Configuration->                             #"
-                    echo "   #     Kernel Update                               #"
-                    echo "   #                                                 #"
-                    echo "   # Below you is some valuable information to post  #"
-                    echo "   # to the forums to get more help if needed!       #"
-                    echo "   ###################################################"
+                    rootpxe_console_message WARN 'Try a newer PXEOS kernel if this device is unsupported.'
+                    rootpxe_console_message INFO 'Collect the following data for PXEOS support.'
+                    rootpxe_console_message INFO 'PCI Ethernet devices:'
                     lspci -nn | grep Ethernet
-                    echo "   ###################################################"
+                    rootpxe_console_message INFO 'Block devices:'
                     lsblk
-                    echo "   ###################################################"
                 fi
                 wait_enter
                 ;;
@@ -108,12 +101,12 @@ while :; do
                 echo "   ==================================================="
                 regex='(https?|ftp|file)://[-A-Za-z0-9\+&@#/%?=~_|!:,.;]*[-A-Za-z0-9\+&@#/%=~_|]'
                 while [[ -z $phost ]]; do
-                    echo -n " * Enter host to ping: "
+                    rootpxe_console_prompt INFO 'Enter host to ping: '
                     read phost
                     phost=$(echo $phost)
                     if [[ -z $phost || $phost =~ $regex ]]; then
                         phost=""
-                        echo " * Invalid Entry, try again!"
+                        rootpxe_console_message WARN 'Invalid entry. Please try again.'
                     fi
                 done
                 ping -c 4 $phost
@@ -139,7 +132,7 @@ while :; do
                     echo -e "$str   $v\n\n"
                     let i+=1
                     if [[ $i == 5 ]]; then
-                        echo " * Press [Enter] to Proceed"
+                        rootpxe_console_prompt INFO 'Press Enter to proceed.'
                         read tmp
                         i=0
                     fi
@@ -148,7 +141,7 @@ while :; do
                 wait_enter
                 ;;
             *)
-                echo "Invalid entry, try again"
+                rootpxe_console_message WARN 'Invalid entry. Please try again.'
                 wait_enter
                 ;;
         esac

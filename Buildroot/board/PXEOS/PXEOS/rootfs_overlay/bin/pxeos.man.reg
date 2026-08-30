@@ -55,8 +55,9 @@ casever64=""
 caseserial64=""
 caseasset64=""
 dots "Using disk device"
-echo $hd
-echo " * Starting host registration"
+echo 'Done'
+rootpxe_console_message INFO "Using disk device: $hd"
+rootpxe_console_message INFO 'Starting host registration.'
 mac=$(getMACAddresses | base64)
 sysuuid=$(dmidecode -s system-uuid)
 sysuuid=${sysuuid,,}
@@ -85,7 +86,9 @@ setIDs() {
     local oIFS=$IFS
     local line=""
     while [[ -z ${!varVar} ]]; do
-        [[ $csvstyle =~ [Tt][Rr][Uu][Ee] ]] && echo -n "    Enter the $str IDs separated with , to associate with computer (? for listing): " || echo -n "    Enter the $str ID to associate with computer (? for listing): "
+        [[ $csvstyle =~ [Tt][Rr][Uu][Ee] ]] \
+            && rootpxe_console_prompt INFO "Enter $str IDs separated by commas (? for listing): " \
+            || rootpxe_console_prompt INFO "Enter a $str ID (? for listing): "
         read dummy
         dummy=$(echo $dummy | sed -e 's/^,//' -e 's/,$//')
         case $dummy in
@@ -99,7 +102,9 @@ setIDs() {
                     let i+=1
                     echo $line
                     if [[ $i -eq $max ]]; then
-                        [[ $csvstyle =~ [Tt][Rr][Uu][Ee] ]] && echo -n "    Press [Enter] to proceed or enter the $str IDs separated with , to associate with computer: " || echo -n "    Press [Enter] to proceed or enter the $str ID to associate with computer: "
+                        [[ $csvstyle =~ [Tt][Rr][Uu][Ee] ]] \
+                            && rootpxe_console_prompt INFO "Press Enter or enter $str IDs separated by commas: " \
+                            || rootpxe_console_prompt INFO "Press Enter or enter a $str ID: "
                         read dummy
                         case $dummy in
                             [?]|"")
@@ -158,11 +163,11 @@ keyEnter=""
 blDoAD=""
 res=""
 while [[ $res != "#!ok" ]]; do
-    echo -n " * Enter hostname for this computer: "
+    rootpxe_console_prompt INFO 'Enter hostname for this computer: '
     read host
     if [[ ${#host} -gt 15 ]]; then
         host=${host:0:15}
-        echo " | Truncated to 15 characters: $host"
+        rootpxe_console_message WARN "Hostname was truncated to 15 characters: $host"
         usleep 2000000
     fi
     host=$(echo $host | base64)
@@ -173,7 +178,7 @@ imageid=""
 setIDs "imageid" "image" "" "" 20
 if [[ $(curl -Lks ${web}service/locationcheck.php 2>/dev/null) == "##" ]]; then
     while [[ -z $askme ]]; do
-        echo -n "    Would you like to assign a location for this host? (y/N) "
+        rootpxe_console_prompt INFO 'Assign a location for this host? (y/N) '
         read askme
         case $askme in
             [Nn]|[Nn][Oo]|"")
@@ -185,7 +190,7 @@ if [[ $(curl -Lks ${web}service/locationcheck.php 2>/dev/null) == "##" ]]; then
                 ;;
             *)
                 askme=""
-                echo " * Invalid input, please try again"
+                rootpxe_console_message WARN 'Invalid input. Please try again.'
                 ;;
         esac
     done
@@ -193,7 +198,7 @@ fi
 askme=""
 if [[ $(curl -Lks ${web}service/oucheck.php 2>/dev/null) == "##" ]]; then
     while [[ -z $askme ]]; do
-        echo -n "    Would you like to assign an ou for this host? (y/N) "
+        rootpxe_console_prompt INFO 'Assign an OU for this host? (y/N) '
         read askme
         case $askme in
             [Nn]|[Nn][Oo]|"")
@@ -205,14 +210,14 @@ if [[ $(curl -Lks ${web}service/oucheck.php 2>/dev/null) == "##" ]]; then
                 ;;
             *)
                 askme=""
-                echo " * Invalid input, please try again"
+                rootpxe_console_message WARN 'Invalid input. Please try again.'
                 ;;
         esac
     done
 fi
 askme=""
 while [[ -z $askme ]]; do
-    echo -n "    Would you like to associate this host with groups? (y/N) "
+    rootpxe_console_prompt INFO 'Associate this host with groups? (y/N) '
     read askme
     case $askme in
         [Nn]|[Nn][Oo]|"")
@@ -224,13 +229,13 @@ while [[ -z $askme ]]; do
             ;;
         *)
             askme=""
-            echo " * Invalid input, please try again"
+            rootpxe_console_message WARN 'Invalid input. Please try again.'
             ;;
     esac
 done
 askme=""
 while [[ -z $askme ]]; do
-    echo -n "    Would you like to associate this host with snapins? (y/N) "
+    rootpxe_console_prompt INFO 'Associate this host with snapins? (y/N) '
     read askme
     case $askme in
         [Nn]|[Nn][Oo]|"")
@@ -242,32 +247,32 @@ while [[ -z $askme ]]; do
             ;;
         *)
             askme=""
-            echo " * Invalid input, please try again"
+            rootpxe_console_message WARN 'Invalid input. Please try again.'
             ;;
     esac
 done
 askme=""
 while [[ -z $askme ]]; do
-    echo -n "    Would you like to associate a product key to this host? (y/N) "
+    rootpxe_console_prompt INFO 'Associate a product key with this host? (y/N) '
     read askme
     case $askme in
         [Nn]|[Nn][Oo]|"")
             askme="N"
             ;;
         [Yy]|[Yy][Ee][Ss])
-            echo -n " * Enter the product key for this computer: "
+            rootpxe_console_prompt INFO 'Enter the product key for this computer: '
             read productKey
             productKey=$(echo $productKey | base64)
             ;;
         *)
             askme=""
-            echo " * Invalid input, please try again"
+            rootpxe_console_message WARN 'Invalid input. Please try again.'
             ;;
     esac
 done
 askme=""
 while [[ -z $askme ]]; do
-    echo -n "    Would you like this host to join a domain, (using default settings)? (y/N) "
+    rootpxe_console_prompt INFO 'Join this host to a domain using default settings? (y/N) '
     read askme
     case $askme in
         [Nn]|[Nn][Oo]|"")
@@ -279,23 +284,23 @@ while [[ -z $askme ]]; do
             ;;
         *)
             askme=""
-            echo " * Invalid input, please try again"
+            rootpxe_console_message WARN 'Invalid input. Please try again.'
             ;;
     esac
 done
-echo -n " * Enter the primary user for this computer: "
+rootpxe_console_prompt INFO 'Enter the primary user for this computer: '
 read primaryuser
 primaryuser=$(echo $primaryuser | base64)
-echo -n " * Enter the other tag #1 for this computer: "
+rootpxe_console_prompt INFO 'Enter other tag #1 for this computer: '
 read other1
 other1=$(echo $other1 | base64)
-echo -n " * Enter the other tag #2 for this computer: "
+rootpxe_console_prompt INFO 'Enter other tag #2 for this computer: '
 read other2
 other2=$(echo $other2 | base64)
-echo " * You entered all required information, "
+rootpxe_console_message INFO 'All required information was entered.'
 askme=""
 while [[ -z $askme ]]; do
-    echo -n "    Would you like to deploy image to this computer now? (y/N) "
+    rootpxe_console_prompt INFO 'Deploy an image to this computer now? (y/N) '
     read askme
     case $askme in
         [Nn]|[Nn][Oo]|"")
@@ -306,10 +311,10 @@ while [[ -z $askme ]]; do
             ret=""
             retry=3
             while [[ $ret != "#!ok" && ! $retry -eq 0 ]]; do
-                echo " * Enter FOG GUI Username and Password"
-                echo -n "    Username: "
+                rootpxe_console_message INFO 'Enter RootPXE GUI credentials.'
+                rootpxe_console_prompt INFO 'Username: '
                 read username
-                echo -n "    Password: "
+                rootpxe_console_prompt INFO 'Password: '
                 read -s password
                 user64=$(echo $username | tr -d '\012' | base64)
                 pass64=$(echo $password | tr -d '\012' | base64)
@@ -317,14 +322,14 @@ while [[ -z $askme ]]; do
                 case $ret in
                     '#!ok')
                         echo
-                        echo " * This host will reboot and deployment will start!"
+                        rootpxe_console_message INFO 'This host will reboot and deployment will start.'
                         ret=$tmp
                         realdoimage=$(echo -n 1 | base64)
                         break
                         ;;
                     '#!il')
                         echo
-                        echo " * Error: Invalid Login! ($retry remaining)"
+                        rootpxe_console_message WARN "Invalid login. Attempts remaining: $retry."
                         let retry-=1
                         ;;
                 esac
@@ -333,7 +338,7 @@ while [[ -z $askme ]]; do
             ;;
         *)
             askme=""
-            echo " * Invalid input, please try again"
+            rootpxe_console_message WARN 'Invalid input. Please try again.'
             ;;
     esac
 done

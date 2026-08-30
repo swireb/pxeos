@@ -2,11 +2,30 @@
 #
 # Start the network....
 #
+# S40network runs before funcs.sh is available. Keep its own console formatter
+# compatible with the PXEOS runtime helpers.
+pxeos_network_message() {
+    local level="$1" message="${2-}" line chunk
+    case $level in INFO|WARN|ERROR) ;; *) return 1;; esac
+    while IFS= read -r line || [[ -n $line ]]; do
+        while (( ${#line} > 72 )); do
+            chunk=${line:0:72}
+            printf '%-7s %s\n' "[$level]" "$chunk"
+            line=${line:72}
+        done
+        printf '%-7s %s\n' "[$level]" "$line"
+    done <<<"$message"
+}
+pxeos_network_prompt() {
+    local level="$1" message="${2-}"
+    case $level in INFO|WARN|ERROR) ;; *) return 1;; esac
+    printf '%-7s %s' "[$level]" "$message"
+}
 if [[ -n $has_usb_nic ]]; then
-    echo "Please unplug your device and replug it into the usb port"
-    echo -n "Please press enter key to connect [Enter]"
-    read -p "$*"
-    echo "Sleeping for 5 seconds to allow USB to sync back with system"
+    pxeos_network_message INFO "Please unplug and reconnect the USB network device."
+    pxeos_network_prompt INFO "Press Enter to connect the USB network device."
+    read -r
+    pxeos_network_message INFO "Waiting 5s for the USB network device to reconnect."
     sleep 5
 fi
 
@@ -30,17 +49,17 @@ pxeos_network_init_version() {
 pxeos_network_diagnostics() {
     local kernel iface
     echo
-    echo "=== PXEOS network diagnostics ==="
+    pxeos_network_message INFO "PXEOS network diagnostics:"
     kernel=$(uname -r 2>/dev/null) || kernel=unavailable
-    printf 'Kernel: %s\n' "$kernel"
-    printf 'PXEOS init version: %s\n' "$(pxeos_network_init_version)"
-    echo "Ethernet/Network PCI devices:"
+    pxeos_network_message INFO "Kernel: $kernel"
+    pxeos_network_message INFO "PXEOS init version: $(pxeos_network_init_version)"
+    pxeos_network_message INFO "Ethernet/network PCI devices:"
     if command -v lspci >/dev/null 2>&1; then
-        lspci -nnk 2>/dev/null | grep -Ei 'ethernet|network' || echo '  none reported'
+        lspci -nnk 2>/dev/null | grep -Ei 'ethernet|network' || pxeos_network_message INFO 'No PCI network device reported.'
     else
-        echo '  unavailable (lspci not installed)'
+        pxeos_network_message WARN 'lspci is not installed.'
     fi
-    echo "Interfaces:"
+    pxeos_network_message INFO "Interfaces:"
     if /sbin/ip -br link 2>/dev/null; then
         /sbin/ip -br addr 2>/dev/null || true
     else
@@ -63,7 +82,7 @@ read p_ifaces <<< $(/sbin/ip -0 addr show | awk 'ORS=NR%2?FS:RS' | awk -F'[: ]+'
 read o_ifaces <<< $(/sbin/ip -0 addr show | awk 'ORS=NR%2?FS:RS' | awk -F'[: ]+' 'tolower($0) ~ /link[/]?ether/ && tolower($0) !~ /'$mac'/ {print $2}' | tr '\n' ' ')
 ifaces="$p_ifaces $o_ifaces"
 for iface in $ifaces; do
-    echo "Starting $iface interface and waiting for the link to come up"
+    pxeos_network_message INFO "Starting interface $iface and waiting for link."
     echo -e "auto $iface\niface $iface inet dhcp\n\n" >> /etc/network/interfaces
     /sbin/ip link set $iface up
 
@@ -75,7 +94,7 @@ for iface in $ifaces; do
         linkstate=$(/bin/cat /sys/class/net/$iface/carrier)
         [[ $linkstate -eq 0 ]] && sleep 1 || break
     done
-    [[ $linkstate -eq 0 ]] && echo "No link detected on $iface for $timeout seconds, skipping it." && continue
+    [[ $linkstate -eq 0 ]] && pxeos_network_message WARN "No link on $iface after ${timeout}s; skipping." && continue
     for retry in $(seq 3); do
         /sbin/udhcpc -i $iface --now
         ustat="$?"
@@ -115,28 +134,28 @@ for iface in $ifaces; do
             fi
             [[ $ustat -eq 0 && $cstat -eq 0 ]] && exit 0
         fi
-        echo "Either DHCP failed or connectivity checks to PXEOS API failed."
+        pxeos_network_message WARN "DHCP or PXEOS API connectivity check failed."
         # Geo-If we are on the 2nd loop, lets check to see if
         # spanning tree is blocking dhcp
         if [[ $seq -eq 2 ]]; then
-            echo "Waiting for Spanning Tree timeout on ${iface}..."
+            pxeos_network_message INFO "Waiting for spanning-tree timeout on $iface."
             sleep 27
         else
             sleep 1
         fi
     done
-    echo "No DHCP response on interface $iface, skipping it."
+    pxeos_network_message WARN "No DHCP response on $iface; skipping."
 done
 
 # If we end up here something went wrong as we do exit the script as soon as we get an IP!
 if [[ -z "$(echo $ifaces | tr -d ' ')" ]]; then  # because ifaces is constructed with a space, we must strip it
-    echo "No network interfaces found, your kernel is most probably missing the correct driver!"
+    pxeos_network_message ERROR "No network interface found. The kernel may lack a driver."
 else
-    echo "Failed to get an IP via DHCP! Tried on interface(s): $ifaces"
+    pxeos_network_message ERROR "DHCP did not assign an IP address. Interfaces: $ifaces"
 fi
 pxeos_network_diagnostics
-echo "Please check your network setup and try again!"
+pxeos_network_message INFO "Check the network setup and try again."
 [[ -z $isdebug ]] && sleep 60 && reboot
-echo "Press enter to continue"
-read -t 60
+pxeos_network_prompt INFO "Press Enter to continue."
+read -r -t 60
 exit 1

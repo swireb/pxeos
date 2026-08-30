@@ -32,10 +32,10 @@ done
 echo "Done"
 debugPause
 for disk in $disks; do
-    dots " * Disk Surface test for $disk"
+    dots "Disk surface test for $disk"
     usleep 2000000
     badblocks -sv $disk
-    echo " * Press [Enter] key to continue"
-    read  -p "$*"
+rootpxe_console_prompt INFO 'Press Enter to continue.'
+    read -r
 done
 . /bin/pxeos.nonimgcomplete

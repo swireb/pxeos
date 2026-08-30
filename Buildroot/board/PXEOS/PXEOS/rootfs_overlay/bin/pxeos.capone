@@ -12,11 +12,12 @@ done
 export capone=1
 clearScreen
 displayBanner
-echo " * Starting Capone"
+rootpxe_console_message INFO 'Starting Capone.'
 debugPause
-dots "Using Key Value:"
+dots 'Reading DMI key value'
 dmivalue=$(dmidecode -s $dmi)
-echo "$dmivalue"
+echo 'Done'
+rootpxe_console_message INFO "DMI key value: $dmivalue"
 debugPause
 dmi64=$(echo -n $dmivalue | base64)
 dots "Looking for images"
@@ -52,24 +53,18 @@ for line in $imgret; do
     awk_returned_vars=$(echo $linedecode | awk -F'|' "{printf(\"%s %s %s %s %s %s %s\",\$1,\$2,\$3,\$4,\$5,\$6,\$7)}")
     read img osid imgType imgPartitionType imgFormat storage storageip <<< $awk_returned_vars
     determineOS "$osid"
-    echo -n " ID $cnt) "
-    echo -n " OS: $osname"
-    echo -n " Image: "
-    echo $img
-    echo -n " Partition: "
-    echo $imgPartitionType
-    echo -n " Format : "
     case $imgFormat in
         1)
-            echo "Partimage"
+            image_format='Partimage'
             ;;
         2)
-            echo "Partclone split files"
+            image_format='Partclone split files'
             ;;
         *)
-            echo "Partclone"
+            image_format='Partclone'
             ;;
     esac
+    rootpxe_console_message INFO "Image $cnt: OS=$osname; image=$img; partition=$imgPartitionType; format=$image_format."
 done
 case $cnt in
     0)
@@ -80,7 +75,7 @@ case $cnt in
     *)
         imgchoice=""
         while [[ -z $imgchoice ]]; do
-            echo -n " Multiple images found, please select an image #: "
+            rootpxe_console_prompt INFO 'Multiple images found. Select an image number: '
             read imgchoice
         done
         cnt=0
@@ -96,7 +91,7 @@ case $cnt in
         done
         ;;
 esac
-echo " * Setting up environment to deploy image"
+rootpxe_console_message INFO 'Setting up the image deployment environment.'
 export type="down"
 export mac=$(getMACAddresses)
 export img

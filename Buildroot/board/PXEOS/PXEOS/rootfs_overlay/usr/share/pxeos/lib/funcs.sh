@@ -1042,47 +1042,47 @@ rootpxe_set_disk_permit_reason() {
         code=$(jq -er '.code | strings' <<<"$body" 2>/dev/null || :)
     fi
     rootpxe_disk_permit_console_reason="Disk permission was denied."
-    rootpxe_disk_permit_report_message="磁盘操作许可被拒绝，请确认任务、目标磁盘和操作绑定。"
+    rootpxe_disk_permit_report_message="Disk permission was denied. Confirm the task, target disk, and operation binding."
     case "$code" in
         DISK_PERMIT_INVALID_REQUEST)
             rootpxe_disk_permit_code="$code"
             rootpxe_disk_permit_console_reason="Disk permit request is invalid."
-            rootpxe_disk_permit_report_message="磁盘操作许可请求无效，请检查任务上下文和操作。"
+            rootpxe_disk_permit_report_message="Disk permit request is invalid. Check the task context and operation."
             ;;
         DISK_PERMIT_UNSUPPORTED_OPERATION)
             rootpxe_disk_permit_code="$code"
             rootpxe_disk_permit_console_reason="Disk operation is not supported."
-            rootpxe_disk_permit_report_message="请求的磁盘操作不受支持，请检查任务类型。"
+            rootpxe_disk_permit_report_message="Disk operation is not supported. Check the task type."
             ;;
         DISK_PERMIT_INVALID_TARGET)
             rootpxe_disk_permit_code="$code"
             rootpxe_disk_permit_console_reason="Disk target identifier is invalid."
-            rootpxe_disk_permit_report_message="目标磁盘标识无效，请检查稳定磁盘标识。"
+            rootpxe_disk_permit_report_message="Disk target identifier is invalid. Check the stable disk identifier."
             ;;
         DISK_PERMIT_TASK_TYPE_MISMATCH)
             rootpxe_disk_permit_code="$code"
             rootpxe_disk_permit_console_reason="Task type does not allow this disk operation."
-            rootpxe_disk_permit_report_message="任务类型不允许当前磁盘操作，请检查任务配置。"
+            rootpxe_disk_permit_report_message="Task type does not allow this disk operation. Check the task configuration."
             ;;
         DISK_PERMIT_BINDING_CONFLICT)
             rootpxe_disk_permit_code="$code"
             rootpxe_disk_permit_console_reason="Disk permit binding does not match the task."
-            rootpxe_disk_permit_report_message="磁盘许可绑定与任务不一致，请确认目标磁盘和操作。"
+            rootpxe_disk_permit_report_message="Disk permit binding does not match the task. Confirm the target disk and operation."
             ;;
         DISK_PERMIT_TASK_NOT_FOUND)
             rootpxe_disk_permit_code="$code"
             rootpxe_disk_permit_console_reason="Task is not available for disk permission."
-            rootpxe_disk_permit_report_message="任务不存在或已失效，请确认任务状态。"
+            rootpxe_disk_permit_report_message="Task is unavailable for disk permission. Confirm the task status."
             ;;
         DISK_PERMIT_TASK_REJECTED)
             rootpxe_disk_permit_code="$code"
             rootpxe_disk_permit_console_reason="Task or disk binding was rejected."
-            rootpxe_disk_permit_report_message="任务或磁盘绑定校验被拒绝，请确认任务状态。"
+            rootpxe_disk_permit_report_message="Task or disk binding was rejected. Confirm the task status."
             ;;
         DISK_PERMIT_TASK_NOT_RUNNING)
             rootpxe_disk_permit_code="$code"
             rootpxe_disk_permit_console_reason="Task is not running for disk permission."
-            rootpxe_disk_permit_report_message="任务当前未处于可执行状态，请确认任务状态。"
+            rootpxe_disk_permit_report_message="Task is not running for disk permission. Confirm the task status."
             ;;
     esac
 }
@@ -1091,7 +1091,7 @@ rootpxe_set_disk_permit_protocol_error() {
     rootpxe_disk_permit_http_status="$1"
     rootpxe_disk_permit_code=""
     rootpxe_disk_permit_console_reason="Disk permit response is invalid."
-    rootpxe_disk_permit_report_message="磁盘操作许可响应无效，请检查服务端协议和任务绑定。"
+    rootpxe_disk_permit_report_message="Disk permit response is invalid. Check the server protocol and task binding."
 }
 
 # A permit denial alone never proves that a task was cancelled.  Ask the
@@ -1180,9 +1180,9 @@ rootpxe_report_disk_permit_denial() {
         sleep 5
         return 1
     fi
-    report_message="${rootpxe_disk_permit_report_message:-磁盘操作许可响应无效，请检查服务端协议和任务绑定。}（HTTP ${status}"
-    [[ -z ${rootpxe_disk_permit_code:-} ]] || report_message+="，${rootpxe_disk_permit_code}"
-    report_message+='）'
+    report_message="${rootpxe_disk_permit_report_message:-Disk permit response is invalid. Check the server protocol and task binding.} (HTTP ${status}"
+    [[ -z ${rootpxe_disk_permit_code:-} ]] || report_message+=", ${rootpxe_disk_permit_code}"
+    report_message+=')'
     if rootpxe_error_wait_for_retry "$report_message" PXEOS_DISK_PERMIT_DENIED; then
         result=0
     else
@@ -1497,7 +1497,7 @@ rootpxe_nvme_find_metadata_free_lbaf() {
 rootpxe_nvme_wait_for_cancel() {
     local seconds="${PXEOS_NVME_FORMAT_COUNTDOWN_SEC:-60}" reply="" remaining
     [[ $seconds =~ ^[0-9]+$ && $seconds -le 60 ]] || seconds=60
-    echo "WARNING: NVMe logical-sector alignment will erase the whole namespace in ${seconds}s; press c to cancel."
+    rootpxe_console_message WARN "NVMe logical-sector alignment will erase the namespace in ${seconds}s; press c to cancel."
     for ((remaining=seconds; remaining>0; remaining--)); do
         if read -r -t 1 -n 1 reply; then
             case $reply in
@@ -1608,29 +1608,15 @@ displayBanner() {
     version=$(curl -Lks "${pxeapi:-$web}health" 2>/dev/null | sed -n 's/.*"version"[^"]*"\([^"]*\)".*/\1/p')
     [[ -z $version ]] && version=$(curl -Lks "${pxeapi:-$web}health" 2>/dev/null)
 
-    # 使用 cat << 'EOF' 确保块字符原样输出，不被 Shell 转义
     cat << 'EOF'
-   ========================================================
-   ===                                                  ===
-   ===  ██████╗  ██╗  ██╗ ███████╗  ██████╗  ███████╗   ===
-   ===  ██╔══██╗ ╚██╗██╔╝ ██╔════╝ ██╔═══██╗ ██╔════╝   ===
-   ===  ██████╔╝  ╚███╔╝  █████╗   ██║   ██║ ███████╗   ===
-   ===  ██╔═══╝   ██╔██╗  ██╔══╝   ██║   ██║ ╚════██║   ===
-   ===  ██║      ██╔╝ ██╗ ███████╗ ╚██████╔╝ ███████║   ===
-   ===  ╚═╝      ╚═╝  ╚═╝ ╚══════╝  ╚═════╝  ╚══════╝   ===
-   ===                                                  ===
-   ==================== PXEOS Runtime =====================
-   ===                                                  ===
-   ===  Credits: https://rootpxe.local/pxeos            ===
-   ===  License: Released under GPL Version 3           ===
-   ===                                                  ===
-   ========================================================
++------------------------------------------------------------------------------+
+|                                PXEOS Runtime                                 |
++------------------------------------------------------------------------------+
 EOF
 
-    # 变量部分单独输出，保持对齐缩进
-    echo "   Version: $version"
-    echo "   Init Version: $initversion"
-    echo ""
+    rootpxe_console_message INFO "Version: $version"
+    rootpxe_console_message INFO "Init version: $initversion"
+    printf '\n'
 }
 # Gets all system mac addresses except for loopback
 #getMACAddresses() {
@@ -1663,7 +1649,7 @@ verifyNetworkConnection() {
 }
 # Verifies that the OS is valid for resizing
 validResizeOS() {
-    [[ $osid != @([1-2]|4|[5-7]|9|10|11|50|51) ]] && handleError " * Invalid operating system id: $osname ($osid) (${FUNCNAME[0]})\n   Args Passed: $*"
+    [[ $osid != @([1-2]|4|[5-7]|9|10|11|50|51) ]] && handleError "Invalid operating system ID: $osname ($osid) (${FUNCNAME[0]})\n   Args Passed: $*"
 }
 # Gets the graphics information from the system
 getGraphics() {
@@ -1763,6 +1749,17 @@ rootpxe_console_message() {
     done <<<"$message"
 }
 
+# Prints a levelled interactive prompt without a trailing newline so callers
+# can immediately read user input while keeping the console column aligned.
+rootpxe_console_prompt() {
+    local level="$1" message="${2-}"
+    case $level in
+        INFO|WARN|ERROR) ;;
+        *) return 1 ;;
+    esac
+    printf '%-7s %s' "[$level]" "$message"
+}
+
 # Appends dots to a progress message while preserving its caller's inline
 # result contract (for example, `dots ...; echo Done`).  The last segment uses
 # a shorter fixed body width so the usual result text remains within 80 columns.
@@ -1788,7 +1785,7 @@ enableWriteCache()  {
     [[ -z $disk ]] && handleError "No disk passed (${FUNCNAME[0]})\n   Args Passed: $*"
     wcache=$(hdparm -W $disk 2>/dev/null | tr -d '[[:space:]]' | awk -F= '/.*write-caching=/{print $2}')
     if [[ -z $wcache || $wcache == notsupported ]]; then
-        echo " * Write caching not supported"
+        rootpxe_console_message WARN 'Write caching is not supported.'
         debugPause
         return
     fi
@@ -1821,7 +1818,7 @@ expandPartition() {
     getPartitionNumber "$part"
     local is_fixed=$(echo $fixed | awk "/(^$part_number:|:$part_number:|:$part_number$|^$part_number$)/{print 1}")
     if [[ $is_fixed -eq 1 ]]; then
-        echo " * Not expanding ($part) fixed size"
+        rootpxe_console_message INFO "Not expanding $part: fixed size."
         debugPause
         return
     fi
@@ -1972,12 +1969,13 @@ expandPartition() {
                     fi
                     echo "Done"
                 else
-                    echo "Failed, XFS partition cannot be expanded"
+                    echo "Skipped"
+                    rootpxe_console_message WARN 'XFS partition cannot be expanded.'
                 fi
             fi
             ;;
         *)
-            echo " * Not expanding ($part -- $fstype)"
+            rootpxe_console_message INFO "Not expanding $part: $fstype is not supported."
             debugPause
             ;;
     esac
@@ -2178,7 +2176,7 @@ movePartition() {
     newStart=$(calculate "${prevPartStart}+${prevPartSize}")
     currPartStart=$(grep "$part" $tmp_file1 | cut -d',' -f1 | awk -F'=' '{print $2}' | tr -d ' ')
     if [[ $currPartStart -gt $newStart ]]; then
-        echo " * Moving $part forward to close gap between end of $prevPart and start of $part."
+        rootpxe_console_message INFO "Moving $part to close the gap after $prevPart."
         debugPause
         processSfdisk "$tmp_file1" move "$part" "$newStart" > "$tmp_file2"
         if [[ $ismajordebug -gt 0 ]]; then
@@ -2209,7 +2207,7 @@ shrinkPartition() {
     getPartitionNumber "$part"
     local is_fixed=$(echo $fixed | awk "/(^$part_number:|:$part_number:|:$part_number$|^$part_number$)/{print 1}")
     if [[ $is_fixed -eq 1 ]]; then
-        echo " * Not shrinking ($part) as it is detected as fixed size"
+        rootpxe_console_message INFO "Not shrinking $part: fixed size."
         debugPause
         return
     fi
@@ -2233,7 +2231,7 @@ shrinkPartition() {
         ntfs)
             ntfsresize -fivP $part >/tmp/tmpoutput.txt 2>&1
             if [[ ! $? -eq 0 ]]; then
-                echo " * Not shrinking ($part) trying fixed size"
+                rootpxe_console_message INFO "Not shrinking $part: trying fixed size."
                 debugPause
                 echo "$(cat "$imagePath/d1.fixed_size_partitions" | tr -d \\0):${part_number}" > "$imagePath/d1.fixed_size_partitions"
                 return
@@ -2241,7 +2239,7 @@ shrinkPartition() {
             fi
             tmpoutput=$(cat /tmp/tmpoutput.txt | tr -d \\0)
             size=$(cat /tmp/tmpoutput.txt | tr -d \\0 | sed -n 's/.*you might resize at\s\+\([0-9]\+\).*$/\1/pi')
-            [[ -z $size ]] && handleError " * (${FUNCNAME[0]})\n   Args Passed: $*\n\nFatal Error, Unable to determine possible ntfs size\n * To better help you debug we will run the ntfs resize\n\t but this time with full output, please wait!\n\t $(cat /tmp/tmpoutput.txt | tr -d \\0)"
+[[ -z $size ]] && handleError "${FUNCNAME[0]}\n   Args Passed: $*\n\nFatal error: unable to determine possible NTFS size.\nRunning ntfsresize again with full output; please wait.\n$(cat /tmp/tmpoutput.txt | tr -d \\0)"
             local min_slack_bytes=$((500 * 1024 * 1024))
 
             # percent-based slack, in bytes (integer math)
@@ -2260,10 +2258,10 @@ shrinkPartition() {
             # (bytes -> KiB), and add slack (also bytes -> KiB)
             rm /tmp/tmpoutput.txt >/dev/null 2>&1
             sizentfsresize=$(calculate "(${size}+${slack_bytes})/1024")
-            [[ -z $sizentfsresize || $sizentfsresize -lt 1 ]] && handleError " * (${FUNCNAME[0]})\n   Args Passed: $*\n\nFatal Error, Unable to determine NTFS target size with 500MB minimum slack"
+[[ -z $sizentfsresize || $sizentfsresize -lt 1 ]] && handleError "${FUNCNAME[0]}\n   Args Passed: $*\n\nFatal error: unable to determine NTFS target size with 500MB minimum slack."
 
-            echo " * Possible resize partition size (includes >=500MB slack): ${sizentfsresize}k"
-            echo " * Possible resize partition size: ${sizentfsresize}k"
+            rootpxe_console_message INFO "Possible resize partition size with slack: ${sizentfsresize}k."
+            rootpxe_console_message INFO "Possible resize partition size: ${sizentfsresize}k."
             dots "Running resize test $part"
             yes | ntfsresize -fns ${sizentfsresize}k ${part} >/tmp/tmpoutput.txt 2>&1
             local ntfsstatus="$?"
@@ -2274,18 +2272,18 @@ shrinkPartition() {
             rm /tmp/tmpoutput.txt >/dev/null 2>&1
             case $test_string in
                 endedsuccessfully)
-                    echo " * Resize test was successful"
+                    rootpxe_console_message INFO 'Resize test completed successfully.'
                     do_resizefs=1
                     do_resizepart=1
                     ntfsstatus=0
                     ;;
                 biggerthanthedevicesize)
-                    echo " * Not resizing filesystem $part (part too small)"
+                    rootpxe_console_message INFO "Not resizing filesystem $part: partition is too small."
                     echo "$(cat ${imagePath}/d1.fixed_size_partitions | tr -d \\0):${part_number}" > "$imagePath/d1.fixed_size_partitions"
                     ntfsstatus=0
                     ;;
                 volumesizeisalreadyOK)
-                    echo " * Not resizing filesystem $part (already OK)"
+                    rootpxe_console_message INFO "Not resizing filesystem $part: already sized correctly."
                     do_resizepart=1
                     ntfsstatus=0
                     ;;
@@ -2419,13 +2417,13 @@ shrinkPartition() {
             echo "Done"
             ;;
         f2fs)
-            echo " * Cannot shrink F2FS partitions"
+            rootpxe_console_message WARN 'F2FS partitions cannot be shrunk.'
             ;;
         xfs)
-            echo " * Cannot shrink XFS partitions"
+            rootpxe_console_message WARN 'XFS partitions cannot be shrunk.'
             ;;
         *)
-            echo " * Not shrinking ($part $fstype)"
+            rootpxe_console_message INFO "Not shrinking $part: $fstype is not supported."
             ;;
     esac
     debugPause
@@ -2524,7 +2522,7 @@ writeImage()  {
     case $format in
         5|6)
             # ZSTD Compressed image.
-            echo " * Imaging using Partclone (zstd)"
+            rootpxe_console_message INFO 'Imaging with Partclone (zstd).'
             if ( set -o pipefail; zstdmt -dc </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" --ignore_crc -O "${target}" -Nf 1 ); then
                 exitcode=0
             else
@@ -2533,7 +2531,7 @@ writeImage()  {
             ;;
         3|4)
             # Uncompressed partclone
-            echo " * Imaging using Partclone (uncompressed)"
+            rootpxe_console_message INFO 'Imaging with Partclone (uncompressed).'
             if ( set -o pipefail; cat </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" --ignore_crc -O "${target}" -Nf 1 ); then
                 exitcode=0
             else
@@ -2544,7 +2542,7 @@ writeImage()  {
             ;;
         1)
             # Partimage
-            echo " * Imaging using Partimage (gzip)"
+            rootpxe_console_message INFO 'Imaging with Partimage (gzip).'
             #zstdmt -dc </tmp/pigz1 | partimage restore ${target} stdin -f3 -b 2>/tmp/status.pxeos
             if ( set -o pipefail; pigz -dc </tmp/pigz1 | partimage restore "${target}" stdin -f3 -b 2>/tmp/status.pxeos ); then
                 exitcode=0
@@ -2554,7 +2552,7 @@ writeImage()  {
             ;;
         0|2)
             # GZIP Compressed partclone
-            echo " * Imaging using Partclone (gzip)"
+            rootpxe_console_message INFO 'Imaging with Partclone (gzip).'
             #zstdmt -dc </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" --ignore_crc -O ${target} -N -f 1
             if ( set -o pipefail; pigz -dc </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" --ignore_crc -O "${target}" -N -f 1 ); then
                 exitcode=0
@@ -3039,7 +3037,7 @@ rootpxe_change_hostname_registry() {
         if [[ ! $? -eq 0 ]]; then
             echo "Failed"
             debugPause
-            handleError " * Could not create mount location (${FUNCNAME[0]})\n    Args Passed: $*"
+                    handleError "Could not create mount location (${FUNCNAME[0]})\n    Args Passed: $*"
         fi
     fi
     umount /ntfs >/dev/null 2>&1
@@ -3052,7 +3050,7 @@ rootpxe_change_hostname_registry() {
         *)
             echo "Failed"
             debugPause
-            handleError " * Could not mount $part (${FUNCNAME[0]})\n    Args Passed: $*\n    Reason: $(cat /tmp/ntfs-mount-output | tr -d \\0)"
+                    handleError "Could not mount $part (${FUNCNAME[0]})\n    Args Passed: $*\n    Reason: $(cat /tmp/ntfs-mount-output | tr -d \\0)"
             ;;
     esac
     if [[ ! -f /usr/share/pxeos/lib/EOFREG ]]; then
@@ -3140,7 +3138,7 @@ rootpxe_change_hostname_registry() {
                 echo "Failed"
                 debugPause
                 umount /ntfs >/dev/null 2>&1
-                echo " * Failed to change hostname"
+                rootpxe_console_message WARN 'Failed to change hostname.'
                 return
                 ;;
         esac
@@ -3169,7 +3167,7 @@ fixWin7boot() {
             *)
                 echo "Failed"
                 debugPause
-                handleError " * Could not create mount location (${FUNCNAME[0]})\n    Args Passed: $*"
+                    handleError "Could not create mount location (${FUNCNAME[0]})\n    Args Passed: $*"
                 ;;
         esac
     fi
@@ -3182,7 +3180,7 @@ fixWin7boot() {
         *)
             echo "Failed"
             debugPause
-            handleError " * Could not mount $part (${FUNCNAME[0]})\n    Args Passed: $*\n    Reason: $(cat /tmp/ntfs-mount-output | tr -d \\0)"
+                    handleError "Could not mount $part (${FUNCNAME[0]})\n    Args Passed: $*\n    Reason: $(cat /tmp/ntfs-mount-output | tr -d \\0)"
             ;;
     esac
     if [[ ! -f /bcdstore/Boot/BCD ]]; then
@@ -3198,7 +3196,7 @@ fixWin7boot() {
             echo "Failed"
             debugPause
             umount /bcdstore >/dev/null 2>&1
-            echo " * Could not create backup"
+            rootpxe_console_message WARN 'Could not create backup.'
             return
             ;;
     esac
@@ -3213,7 +3211,7 @@ fixWin7boot() {
             echo "Failed"
             debugPause
             umount /bcdstore >/dev/null 2>&1
-            echo " * Could not copy our bcd file"
+            rootpxe_console_message WARN 'Could not copy the BCD file.'
             return
             ;;
     esac
@@ -3258,11 +3256,12 @@ clearMountedDevices() {
                         *)
                             echo "Failed"
                             debugPause
-                            handleError " * Could not mount $part (${FUNCNAME[0]})\n    Args Passed: $*\n    Reason: $(cat /tmp/ntfs-mount-output | tr -d \\0)"
+                            handleError "Could not mount $part (${FUNCNAME[0]})\n    Args Passed: $*\n    Reason: $(cat /tmp/ntfs-mount-output | tr -d \\0)"
                             ;;
                     esac
                     if [[ ! -f $REG_LOCAL_MACHINE_7 ]]; then
-                        echo "Reg file not found"
+                        echo "Skipped"
+                        rootpxe_console_message WARN 'Registry file was not found.'
                         debugPause
                         umount /ntfs >/dev/null 2>&1
                         return
@@ -3278,7 +3277,7 @@ clearMountedDevices() {
                             echo "Failed"
                             debugPause
                             /umount /ntfs >/dev/null 2>&1
-                            echo " * Could not clear partition $part"
+                            rootpxe_console_message WARN "Could not clear partition $part."
                             return
                             ;;
                     esac
@@ -3309,7 +3308,7 @@ removePageFile() {
                             *)
                                 echo "Failed"
                                 debugPause
-                                handleError " * Could not create mount location (${FUNCNAME[0]})\n    Args Passed: $*"
+                                handleError "Could not create mount location (${FUNCNAME[0]})\n    Args Passed: $*"
                                 ;;
                         esac
                     fi
@@ -3323,7 +3322,7 @@ removePageFile() {
                         *)
                             echo "Failed"
                             debugPause
-                            handleError " * Could not mount $part (${FUNCNAME[0]})\n    Args Passed: $*\n    Reason: $(cat /tmp/ntfs-mount-output | tr -d \\0)"
+                                handleError "Could not mount $part (${FUNCNAME[0]})\n    Args Passed: $*\n    Reason: $(cat /tmp/ntfs-mount-output | tr -d \\0)"
                             ;;
                     esac
                     if [[ -f /ntfs/pagefile.sys ]]; then
@@ -3337,7 +3336,7 @@ removePageFile() {
                             *)
                                 echo "Failed"
                                 debugPause
-                                echo " * Could not delete the page file"
+                                rootpxe_console_message WARN 'Could not delete the page file.'
                                 ;;
                         esac
                     fi
@@ -3353,7 +3352,7 @@ removePageFile() {
                                 echo "Failed"
                                 debugPause
                                 umount /ntfs >/dev/null 2>&1
-                                echo " * Could not delete the hibernate file"
+                                rootpxe_console_message WARN 'Could not delete the hibernation file.'
                                 ;;
                         esac
                     fi
@@ -3431,7 +3430,7 @@ determineOS() {
             mbrfile=""
             ;;
         *)
-            handleError " * Invalid OS ID ($osid) (${FUNCNAME[0]})\n   Args Passed: $*"
+            handleError "Invalid OS ID: $osid (${FUNCNAME[0]})\n   Args Passed: $*"
             ;;
     esac
 }
@@ -3539,15 +3538,15 @@ getHardDisk() {
                 wwn="$(normalize "$wwn_raw")"
 
                 [[ -n $isdebug ]] && {
-                    echo "Comparing spec='$spec' (resolved: '$spec_resolved') with dev=$dev"
-                    echo "  size=$size serial=$serial wwn=$wwn uuid=$uuid"
+                    debugEcho "Comparing spec=$spec (resolved: $spec_resolved) with dev=$dev."
+                    debugEcho "size=$size serial=$serial wwn=$wwn uuid=$uuid"
                 }
                 if [[ "x$spec_resolved" == "x$dev" || \
                       "x$spec_normalized" == "x$size" || \
                       "x$spec_normalized" == "x$wwn" || \
                       "x$spec_normalized" == "x$serial" || \
                       "x$spec_normalized" == "x$uuid" ]]; then
-                    [[ -n $isdebug ]] && echo "Matched spec '$spec' to device '$dev' (size=$size, serial=$serial, wwn=$wwn, uuid=$uuid)"
+                    [[ -n $isdebug ]] && debugEcho "Matched spec $spec to device $dev (size=$size, serial=$serial, wwn=$wwn, uuid=$uuid)."
                     matched=1
                     found_match=1
                     disks="$disks $dev"
@@ -3557,7 +3556,7 @@ getHardDisk() {
                 fi
             done
 
-            [[ $matched -eq 0 ]] && echo "WARNING: Drive spec '$spec' does not match any available device." >&2
+            [[ $matched -eq 0 ]] && rootpxe_console_message WARN "Drive spec $spec does not match any available device." >&2
         done
 
         [[ $found_match -eq 0 ]] && handleError "Fatal: No valid drives found for 'Host Primary Disk'='$fdrive'."
@@ -3609,7 +3608,7 @@ getHardDisk() {
                     fi
 
                     # Ambiguous or missing -> warn and fall back
-                    echo "WARNING: Could not uniquely match disk for expected size $exp (found $candidates exact matches). Falling back to enumeration order." >&2
+                    rootpxe_console_message WARN "Could not uniquely match disk for expected size $exp; using enumeration order." >&2
                     mapped=()
                     break
                 done
@@ -4083,8 +4082,8 @@ restoreGRUB() {
 debugPause() {
     case $isdebug in
         [Yy][Ee][Ss]|[Yy])
-            echo " * Press [Enter] key to continue"
-            read  -p "$*"
+            rootpxe_console_prompt INFO "${*:-Press Enter to continue.}"
+            read -r
             ;;
         *)
             return
@@ -4095,7 +4094,7 @@ debugEcho() {
     local str="$*"
     case $isdebug in
         [Yy][Ee][Ss]|[Yy])
-            echo "$str"
+            rootpxe_console_message INFO "$str"
             ;;
         *)
             return
@@ -4103,12 +4102,12 @@ debugEcho() {
     esac
 }
 majorDebugEcho() {
-    [[ $ismajordebug -ge 1 ]] && echo "$*"
+    [[ $ismajordebug -ge 1 ]] && rootpxe_console_message INFO "$*"
 }
 majorDebugPause() {
     [[ ! $ismajordebug -gt 0 ]] && return
-    echo " * Press [Enter] key to continue"
-    read -p "$*"
+    rootpxe_console_prompt INFO "${*:-Press Enter to continue.}"
+    read -r
 }
 swapUUIDFileName() {
     local imagePath="$1"  # e.g. /net/dev/foo
@@ -4286,7 +4285,8 @@ clearPartitionTables() {
             echo "Done"
             ;;
         2)
-            echo "Done, but cleared corrupted partition."
+            echo "Done"
+            rootpxe_console_message WARN 'Cleared a corrupted partition table.'
             ;;
         *)
             echo "Failed"
@@ -4318,7 +4318,7 @@ restorePartitionTablesAndBootLoaders() {
     local tmpMBR=""
     local strdots=""
     if [[ $nombr -eq 1 ]]; then
-        echo " * Skipping partition tables and MBR"
+        rootpxe_console_message INFO 'Skipping partition tables and MBR.'
         debugPause
         return
     fi
@@ -4348,7 +4348,7 @@ restorePartitionTablesAndBootLoaders() {
             echo "Failed"
             debugPause
             [[ -r /tmp/sgdisk-gl.err ]] && cat /tmp/sgdisk-gl.err
-            echo "Find the detailed error message above this line. Use Shift-PageUp to scroll upwards."
+            rootpxe_console_message INFO 'Review the detailed error above. Use Shift-PageUp to scroll.'
             handleError "Error trying to restore GPT partition tables (${FUNCNAME[0]})\n   Args Passed: $*\n    CMD Tried: sgdisk -gl $tmpMBR $disk\n    Exit returned code: $sgdiskexit"
         fi
         rm -f /tmp/sgdisk-gl.err
@@ -4384,7 +4384,7 @@ restorePartitionTablesAndBootLoaders() {
             applySfdiskPartitions "$disk" "$sfdisklegacyoriginalpartitionfilename"
             echo "Done"
         else
-            echo " * No extended partitions"
+            rootpxe_console_message INFO 'No extended partitions found.'
         fi
     fi
     debugPause
@@ -4408,11 +4408,11 @@ savePartition() {
     local imgpart=""
     local fifoname="/tmp/pigz1"
     if [[ $imgPartitionType != all && $imgPartitionType != $part_number ]]; then
-        echo " * Skipping partition $part ($part_number)"
+        rootpxe_console_message INFO "Skipping partition $part ($part_number)."
         debugPause
         return
     fi
-    echo " * Processing Partition: $part ($part_number)"
+    rootpxe_console_message INFO "Processing partition: $part ($part_number)."
     debugPause
     fsTypeSetting "$part"
     getPartType "$part"
@@ -4421,7 +4421,7 @@ savePartition() {
     # An extended partition is an EBR container, never an image payload.
     case $parttype in
         5|f|85|0x5|0xf|0x85)
-            echo " * Not capturing content of extended partition"
+            rootpxe_console_message INFO 'Not capturing extended partition content.'
             debugPause
             EBRFileName "$imagePath" "$disk_number" "$part_number"
             touch "$ebrfilename"
@@ -4431,12 +4431,12 @@ savePartition() {
     esac
     case $fstype in
         swap)
-            echo " * Saving swap partition UUID"
+            rootpxe_console_message INFO 'Saving swap partition UUID.'
             swapUUIDFileName "$imagePath" "$disk_number"
             saveSwapUUID "$swapuuidfilename" "$part"
             ;;
         imager)
-            echo " * Using partclone.$fstype"
+            rootpxe_console_message INFO "Using partclone.$fstype."
             debugPause
             imgpart="$imagePath/d${disk_number}p${part_number}.img"
             uploadFormat "$fifoname" "$imgpart"
@@ -4459,19 +4459,19 @@ savePartition() {
                 handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_FAILED REASON=storage_writer_or_compressor_failed"
             fi
             mv "${imgpart}.000" "$imgpart" >/dev/null 2>&1 || handleError "PXEOS_STAGE=capture CODE=CAPTURE_ARTIFACT_FINALIZE_FAILED REASON=unable_to_finalize_image_artifact"
-            echo " * Image Captured"
+            rootpxe_console_message INFO 'Image captured.'
             debugPause
             ;;
         *)
             case $parttype in
                 5|f|85|0x5|0xf|0x85)
-                    echo " * Not capturing content of extended partition"
+                    rootpxe_console_message INFO 'Not capturing extended partition content.'
                     debugPause
                     EBRFileName "$imagePath" "$disk_number" "$part_number"
                     touch "$ebrfilename"
                     ;;
                 *)
-                    echo " * Using partclone.$fstype"
+                    rootpxe_console_message INFO "Using partclone.$fstype."
                     debugPause
                     imgpart="$imagePath/d${disk_number}p${part_number}.img"
                     uploadFormat "$fifoname" "$imgpart"
@@ -4494,7 +4494,7 @@ savePartition() {
                         handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_FAILED REASON=storage_writer_or_compressor_failed"
                     fi
                     mv "${imgpart}.000" "$imgpart" >/dev/null 2>&1 || handleError "PXEOS_STAGE=capture CODE=CAPTURE_ARTIFACT_FINALIZE_FAILED REASON=unable_to_finalize_image_artifact"
-                    echo " * Image Captured"
+                    rootpxe_console_message INFO 'Image captured.'
                     debugPause
                     ;;
             esac
@@ -4515,7 +4515,7 @@ restorePartition() {
     [[ -z $disk_number ]] && handleError "No disk number passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $imagePath ]] && handleError "No image path passed (${FUNCNAME[0]})\n   Args Passed: $*"
     if [[ $imgPartitionType != all && $imgPartitionType != $part_number ]]; then
-        echo " * Skipping partition: $part ($part_number)"
+        rootpxe_console_message INFO "Skipping partition: $part ($part_number)."
         debugPause
         return
     fi
@@ -4533,12 +4533,12 @@ restorePartition() {
     getPartType "$part"
     case $parttype in
         5|f|85|0x5|0xf|0x85)
-            echo " * Not deploying content of extended partition"
+            rootpxe_console_message INFO 'Not deploying extended partition content.'
             runPartprobe "$disk"
             return
             ;;
     esac
-    echo " * Processing Partition: $part ($part_number)"
+    rootpxe_console_message INFO "Processing partition: $part ($part_number)."
     debugPause
     case $imgType in
         dd)
@@ -4597,7 +4597,11 @@ restorePartition() {
     ls $imgpart >/dev/null 2>&1
     if [[ ! $? -eq 0 ]]; then
         EBRFileName "$imagePath" "$disk_number" "$part_number"
-        [[ -e $ebrfilename ]] && echo " * Not deploying content of extended partition" || echo " * Partition File Missing: $imgpart"
+        if [[ -e $ebrfilename ]]; then
+            rootpxe_console_message INFO 'Not deploying extended partition content.'
+        else
+            rootpxe_console_message WARN "Partition file is missing: $imgpart."
+        fi
         runPartprobe "$disk"
         return
     fi
@@ -4643,7 +4647,7 @@ prepareResizeDownloadPartitions() {
     [[ -z $osid ]] && handleError "No osid passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $imgPartitionType ]] && handleError "No image partition type  passed (${FUNCNAME[0]})\n   Args Passed: $*"
     if [[ $nombr -eq 1 ]]; then
-        echo -e " * Skipping partition preperation\n"
+        rootpxe_console_message INFO 'Skipping partition preparation.'
         debugPause
         return
     fi
@@ -4727,10 +4731,10 @@ performRestore() {
             [[ $osid == +([5-7]) && $imgType =~ [Nn] ]] && fixWin7boot "$restorepart"
         done
         restoreparts=""
-        echo " * Resetting UUIDs for $disk"
+        rootpxe_console_message INFO "Resetting UUIDs for $disk."
         debugPause
         restoreUUIDInformation "$disk" "$sfdiskoriginalpartitionfilename" "$disk_number" "$imagePath"
-        echo " * Resetting swap systems"
+        rootpxe_console_message INFO 'Resetting swap systems.'
         debugPause
         makeAllSwapSystems "$disk" "$disk_number" "$imagePath" "$imgPartitionType"
         let disk_number+=1

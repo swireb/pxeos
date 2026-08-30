@@ -1,5 +1,5 @@
 #!/bin/bash
-echo " * Task Complete"
+rootpxe_console_message INFO 'Task complete.'
 [[ ! -z $1 ]] && mactosend="$1" || mactosend="$mac"
 rootpxe_api="${pxeapi:-$web}"
 count=0
@@ -8,7 +8,8 @@ sysuuid=$(dmidecode -s system-uuid)
 sysuuid=${sysuuid,,}
 dots "Updating Database"
 if [[ -z $taskid ]]; then
-    echo "Skipped (no taskid)"
+    echo "Skipped"
+    rootpxe_console_message INFO 'Database update skipped: no task ID.'
     debugPause
     exit 0
 fi

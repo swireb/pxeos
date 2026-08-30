@@ -343,7 +343,7 @@ rootpxe_clear_capture_marker() {
     : > "${MOCK_MARKER_CLEARED:?}"
 }
 rootpxe_cleanup_task_json() { : > "${MOCK_JSON_CLEARED:?}"; }
-rootpxe_console_message() { printf '[%s] %s\n' "$1" "$2"; }
+rootpxe_console_message() { printf '%-7s %s\n' "[$1]" "$2"; }
 dots() { :; }
 debugPause() { :; }
 handleError() { printf 'HANDLE_ERROR:%s\n' "$*" >&2; exit 91; }
@@ -372,10 +372,11 @@ attention_rc=$?
 set -e
 assert_eq "$attention_rc" 91 '服务端 attention 必须立刻进入故障等待，不能继续 finish 重试'
 assert_eq "$(cat "$tmp/attention-curl-count")" 1 '服务端 attention 后不得再次请求 finish'
-grep -Fq '"error" : "捕获分区清单结构无效"' "$tmp/attention.out" || fail '必须保留并输出服务端返回的首个错误'
+grep -Fqx '[ERROR] RootPXE rejected the finish callback.' "$tmp/attention.out" || fail '必须输出稳定的完成回调错误'
+! grep -Fq '捕获分区清单结构无效' "$tmp/attention.out" || fail '不得输出服务端动态错误文本'
 grep -Fq 'PXEOS_STAGE=finish_notify CODE=FINISH_REJECTED' "$tmp/attention.err" || fail 'attention 必须交给统一故障等待处理'
 [[ ! -e $tmp/attention-marker-cleared && ! -e $tmp/attention-json-cleared ]] || fail 'attention 时不得清理 capture marker 或任务上下文'
-! grep -Fq ' * Task Complete' "$tmp/attention.out" || fail 'attention 时不得误报 Task Complete'
+! grep -Fq '[INFO]  Task complete.' "$tmp/attention.out" || fail 'attention 时不得误报 Task complete'
 pass 'finish attention response stops retry and preserves the original error'
 
 # finish 已被服务端确认后，marker 的保守清理失败只能留下告警，不能把已完成
@@ -391,10 +392,10 @@ set -e
 assert_eq "$marker_warning_rc" 0 'finish 确认后的 marker 清理失败不得变成业务失败'
 grep -Fq 'CODE=CAPTURE_MARKER_CLEAR_FAILED' "$tmp/marker-warning.out" || fail 'marker 清理失败必须输出稳定告警码'
 grep -Fxq 'Done' "$tmp/marker-warning.out" || fail 'finish 成功状态行必须在 marker 告警前结束'
-grep -Fq ' * Task Complete' "$tmp/marker-warning.out" || fail 'Task Complete 必须在 finish 确认流程结束后输出'
+grep -Fqx '[INFO]  Task complete.' "$tmp/marker-warning.out" || fail 'Task complete 必须在 finish 确认流程结束后输出'
 done_line=$(grep -n -m1 -x 'Done' "$tmp/marker-warning.out" | cut -d: -f1)
 warning_line=$(grep -n -m1 'CODE=CAPTURE_MARKER_CLEAR_FAILED' "$tmp/marker-warning.out" | cut -d: -f1)
-complete_line=$(grep -n -m1 -F ' * Task Complete' "$tmp/marker-warning.out" | cut -d: -f1)
+complete_line=$(grep -n -m1 -F '[INFO]  Task complete.' "$tmp/marker-warning.out" | cut -d: -f1)
 [[ $done_line =~ ^[1-9][0-9]*$ && $warning_line =~ ^[1-9][0-9]*$ && $complete_line =~ ^[1-9][0-9]*$ && $done_line -lt $warning_line && $warning_line -lt $complete_line ]] || fail 'finish状态、marker告警和Task Complete的输出顺序错误'
 [[ ! -e $tmp/marker-warning-cleared && -f $tmp/marker-warning-json-cleared ]] || fail 'marker 失败应保留 marker 并仍清理任务上下文'
 pass 'finish-confirmed marker cleanup failure is warning-only'

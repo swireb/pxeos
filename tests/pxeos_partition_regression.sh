@@ -1021,7 +1021,7 @@ set +e
 attention_status=$?
 set -e
 [[ $attention_status -eq 0 ]] || fail 'permit denial did not reach error wait terminal path'
-grep -Fqx 'report:任务或磁盘绑定校验被拒绝，请确认任务状态。（HTTP 403，DISK_PERMIT_TASK_REJECTED）:PXEOS_DISK_PERMIT_DENIED' "$tmp/attention.out" || fail 'permit denial report contract changed'
+grep -Fqx 'report:Task or disk binding was rejected. Confirm the task status. (HTTP 403, DISK_PERMIT_TASK_REJECTED):PXEOS_DISK_PERMIT_DENIED' "$tmp/attention.out" || fail 'permit denial report contract changed'
 grep -Fq '[ERROR] Disk permission denied (HTTP 403).' "$tmp/attention.out" || fail 'HTTP diagnosis missing'
 ! grep -Eq '\[INFO\].*\[ERROR\]' "$tmp/attention.out" || fail 'unfinished disk-permit progress was not terminated before ERROR'
 grep -Fqx '[INFO]  Server code: DISK_PERMIT_TASK_REJECTED.' "$tmp/attention.out" || fail 'known permit code diagnosis missing'

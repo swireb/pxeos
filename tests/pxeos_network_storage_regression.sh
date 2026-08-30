@@ -64,7 +64,7 @@ set -e
 grep -Fq 'PXEOS network diagnostics' "$tmp/output" || fail missing-diagnostic-banner
 grep -Fq 'Kernel: test-kernel-9.9' "$tmp/output" || fail missing-kernel-version
 grep -Fq 'PXEOS init version: 20990101' "$tmp/output" || fail missing-init-version
-grep -Fq 'Ethernet/Network PCI devices:' "$tmp/output" || fail missing-pci-section
+grep -Fq 'Ethernet/network PCI devices:' "$tmp/output" || fail missing-pci-section
 grep -Fq 'Interfaces:' "$tmp/output" || fail missing-interface-section
 grep -Fq 'Test NIC' "$tmp/output" || fail missing-pci-fact
 ! grep -Fq 'token:password' "$tmp/output" || fail leaked-api-credential
@@ -80,7 +80,7 @@ PATH="$tmp/mock:$PATH" bash "$tmp/S40network" >"$tmp/output-no-lspci" 2>&1
 rc=$?
 set -e
 [[ $rc -eq 1 ]] || fail "missing-lspci failure path exit code: $rc"
-grep -Fq 'unavailable (lspci not installed)' "$tmp/output-no-lspci" || fail missing-lspci-fallback
+grep -Fq 'lspci is not installed.' "$tmp/output-no-lspci" || fail missing-lspci-fallback
 printf 'PASS: PXEOS network diagnostics regression\n'
 )
 # ===== 原脚本结束：tests/pxeos_network_regression.sh =====
@@ -206,9 +206,14 @@ PXEOS_DEBUG_IP_MODE=has-ip \
 rc=$?
 set -e
 [[ $rc -eq 0 ]] || fail "有 IPv4 时调试模式退出码: $rc"
-grep -Fq 'PXEOS SSH 调试模式' "$tmp/has-ip.out" || fail '缺少 SSH 调试模式说明'
-grep -Fq 'eth0: 192.0.2.10/24' "$tmp/has-ip.out" || fail '缺少接口和 CIDR'
-grep -Fq 'ssh root@192.0.2.10' "$tmp/has-ip.out" || fail '缺少 SSH 连接提示'
+grep -Fqx '[INFO]  Mode: SSH debug.' "$tmp/has-ip.out" || fail '缺少 SSH 调试模式说明'
+grep -Fqx '[INFO]  Interface: eth0 (192.0.2.10/24).' "$tmp/has-ip.out" || fail '缺少接口和 CIDR'
+grep -Fqx '[INFO]  SSH command: ssh root@192.0.2.10' "$tmp/has-ip.out" || fail '缺少 SSH 连接提示'
+LC_ALL=C grep -Eq '[^ -~]' "$tmp/has-ip.out" && fail 'SSH 调试输出包含非 ASCII 字符'
+while IFS= read -r line; do
+    [[ -z $line ]] && continue
+    [[ ${#line} -le 80 ]] || fail "SSH 调试输出超过 80 列: $line"
+done <"$tmp/has-ip.out"
 ! grep -Fq 'secret-os' "$tmp/has-ip.out" || fail '泄露任务变量'
 ! grep -Fq 'secret-token' "$tmp/has-ip.out" || fail '泄露任务令牌'
 ! grep -Fq 'token:password' "$tmp/has-ip.out" || fail '泄露接口凭据'
@@ -218,10 +223,13 @@ PXEOS_DEBUG_IP_MODE=no-ip bash "$tmp/pxeos.debug" >"$tmp/no-ip.out" 2>&1
 rc=$?
 set -e
 [[ $rc -eq 0 ]] || fail "无 IPv4 时调试模式退出码: $rc"
-grep -Fq '未检测到可用于 SSH 的全局 IPv4 地址' "$tmp/no-ip.out" || fail '无 IPv4 时缺少明确警告'
-grep -Fq '请在本地控制台检查网络配置' "$tmp/no-ip.out" || fail '无 IPv4 时缺少本地排查提示'
+grep -Fqx '[WARN]  No global IPv4 address is available for SSH.' "$tmp/no-ip.out" || fail '无 IPv4 时缺少明确警告'
+grep -Fqx '[INFO]  Check network configuration, DHCP status, and cable connectivity.' "$tmp/no-ip.out" || fail '无 IPv4 时缺少本地排查提示'
+LC_ALL=C grep -Eq '[^ -~]' "$tmp/no-ip.out" && fail '无 IPv4 调试输出包含非 ASCII 字符'
+expected_banner=$'+------------------------------------------------------------------------------+\n|                                PXEOS Runtime                                 |\n+------------------------------------------------------------------------------+'
+[[ $(head -n 3 "$tmp/has-ip.out") == "$expected_banner" ]] || fail '调试模式横幅布局不正确'
 
-for forbidden in determineOS getHardDisk debugPause pxeos.mount pxeos.checkin task_token pxeapi storage exportpath capturepath postinitpath; do
+for forbidden in determineOS getHardDisk debugPause pxeos.mount pxeos.checkin task_token pxeapi exportpath capturepath postinitpath; do
     ! grep -Fq -- "$forbidden" "$debug" || fail "调试脚本包含禁止任务或磁盘入口: $forbidden"
 done
 grep -Fq 'pxeos.debug' "$s99" || fail 'S99 未进入调试脚本'

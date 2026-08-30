@@ -47,29 +47,26 @@ while true; do
     if echo "$res" | grep -q '"status"[[:space:]]*:[[:space:]]*"attention"'; then
         echo "Failed"
         debugPause
-        printf " * Error returned: %s" "$res"
-        echo
+        rootpxe_console_message ERROR 'RootPXE rejected the finish callback.'
         debugPause
-        handleError "PXEOS_STAGE=finish_notify CODE=FINISH_REJECTED REASON=rootpxe_finish_callback_attention RESPONSE=$res"
+        handleError "PXEOS_STAGE=finish_notify CODE=FINISH_REJECTED REASON=rootpxe_finish_callback_attention"
     fi
     if [[ $count -lt 10 ]]; then
         echo "Failed"
         debugPause
-        printf " * Error returned: %s" "$res"
-        echo
+        rootpxe_console_message WARN 'Finish callback did not complete. Retrying.'
         debugPause
         dots "Reattempting to update database"
     fi
     if [[ $count -ge 10 ]]; then
         echo "Failed"
         debugPause
-        printf " * Error returned: %s" "$res"
-        echo
+        rootpxe_console_message ERROR 'Finish callback retry limit was reached.'
         debugPause
         handleError "PXEOS_STAGE=finish_notify CODE=FINISH_RETRY_EXHAUSTED REASON=rootpxe_finish_callback_failed"
     fi
     let count+=1
     usleep $((500000 * (1 << (count > 5 ? 5 : count))))
 done
-echo " * Task Complete"
+rootpxe_console_message INFO 'Task complete.'
 debugPause

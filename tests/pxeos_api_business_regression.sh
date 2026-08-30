@@ -328,7 +328,7 @@ grep -Fq RESUME_TARGET_IDENTITY_UNAVAILABLE "$download" || fail resume
 # 真实目标容量；避免小于捕获盘的目标盘被触及。
 pre_layout_validation_line=$(grep -n 'pre_permit_validation_failed' "$download" | head -n 1 | cut -d: -f1)
 permit_line=$(grep -n 'rootpxe_wait_for_disk_permit "$rootpxe_planned_target_id"' "$download" | head -n 1 | cut -d: -f1)
-prepare_line=$(grep -n 'Skipping partition layout (Single Partition restore)' "$download" | head -n 1 | cut -d: -f1)
+prepare_line=$(grep -n 'Skipping partition layout: single-partition restore.' "$download" | head -n 1 | cut -d: -f1)
 apply_layout_line=$(grep -n 'rootpxe_apply_deployment_layout' "$download" | head -n 1 | cut -d: -f1)
 [[ $pre_layout_validation_line =~ ^[1-9][0-9]*$ && $permit_line =~ ^[1-9][0-9]*$ && $prepare_line =~ ^[1-9][0-9]*$ && $apply_layout_line =~ ^[1-9][0-9]*$ && $pre_layout_validation_line -lt $permit_line && $permit_line -lt $prepare_line && $prepare_line -lt $apply_layout_line ]] || fail layout-capacity-validation-must-precede-permit-and-write
 grep -Fq 'CODE=${rootpxe_layout_apply_code:-LAYOUT_APPLY_FAILED}' "$download" || fail layout-apply-must-report-real-stage-code
@@ -1203,20 +1203,34 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
 funcs="$overlay/usr/share/pxeos/lib/funcs.sh"
-runtime_files=(
-    "$overlay/bin/pxeos.checkin"
-    "$overlay/bin/pxeos.download"
-    "$overlay/etc/init.d/S99pxeos"
-    "$overlay/usr/share/pxeos/lib/funcs.sh"
+# PXEOS uses extensionless runtime scripts in bin and init.d.  Collect only
+# text files that explicitly identify as sh/bash scripts, so binary artifacts
+# and metadata records are never inspected as console sources.
+mapfile -d '' -t runtime_candidates < <(
+    find "$overlay/bin" "$overlay/etc/init.d" "$overlay/usr/share/pxeos" \
+        -type f -print0 | LC_ALL=C sort -z
 )
+runtime_files=()
+for runtime_candidate in "${runtime_candidates[@]}"; do
+    IFS= read -r runtime_shebang <"$runtime_candidate" || true
+    case $runtime_shebang in
+        '#!'*bash*|'#!'*'/sh'*) runtime_files+=("$runtime_candidate") ;;
+    esac
+done
+[[ ${#runtime_files[@]} -gt 0 ]] || { printf 'FAIL: no PXEOS runtime scripts found\n' >&2; exit 1; }
+for required_runtime in pxeos.upload pxeos.av pxeos.man.reg pxeos.debug S99pxeos funcs.sh; do
+    printf '%s\n' "${runtime_files[@]}" | grep -Eq "/${required_runtime}$" \
+        || { printf 'FAIL: runtime shebang scan missed %s\n' "$required_runtime" >&2; exit 1; }
+done
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 must_have() { grep -Fq -- "$2" "$1" || fail "$1 is missing expected console output: $2"; }
 must_not_have() { ! grep -Fq -- "$2" "$1" || fail "$1 contains obsolete console output: $2"; }
 must_fit() { [[ ${#1} -le 80 ]] || fail "console line exceeds 80 columns: $1"; }
 
-# Check fixed echo/printf source lines only. Dynamic variable contents are out
-# of scope: this contract verifies static messages, not arbitrary runtime data.
+# Check every runtime shell script.  Dynamic values and redirected protocol
+# records are outside this contract; fixed output must remain ASCII so the
+# console font can render it.  Comments are intentionally excluded.
 set +e
 LC_ALL=C awk '
     /^[[:space:]]*#/ { next }
@@ -1226,7 +1240,7 @@ LC_ALL=C awk '
             if ($0 !~ /\\[[:space:]]*$/) { printf_block = 0 }
             next
         }
-        if ($0 ~ /echo|printf[[:space:]]/) {
+        if ($0 ~ /(^|[[:space:];])(echo|printf|rootpxe_console_message|rootpxe_console_prompt|dots|handleError|handleWarning|debugEcho|majorDebugEcho|pxeos_network_message|pxeos_network_prompt)[[:space:]]/) {
             if ($0 ~ /[^ -~\t]/) { print FILENAME ":" FNR ":" $0; invalid = 1 }
             if ($0 ~ /printf[[:space:]].*\\[[:space:]]*$/) { printf_block = 1 }
         }
@@ -1241,6 +1255,27 @@ case "$scan_status" in
     *) fail "console output scanner failed (exit $scan_status)" ;;
 esac
 
+# Legacy decorative output bypasses the level/body convention.  Completion
+# tokens are intentionally not covered here because they are the inline result
+# of `dots` progress rows; all standalone fixed messages must use a formatter.
+set +e
+awk '
+    /^[[:space:]]*#/ { next }
+    /(^|[[:space:];])(echo|printf|rootpxe_console_message|rootpxe_console_prompt|dots|handleError|handleWarning|debugEcho|majorDebugEcho|pxeos_network_message|pxeos_network_prompt)[[:space:]]/ &&
+    ($0 ~ /["\047] \*/ || $0 ~ /["\047]WARNING:/) {
+        print FILENAME ":" FNR ":" $0
+        invalid = 1
+    }
+    /echo[[:space:]]+-n[[:space:]]+["\047][[:alpha:]]/ && $0 !~ />/ {
+        print FILENAME ":" FNR ":" $0
+        invalid = 1
+    }
+    END { exit invalid ? 1 : 0 }
+' "${runtime_files[@]}"
+legacy_status=$?
+set -e
+[[ $legacy_status -eq 0 ]] || fail 'standalone PXEOS console messages must use levelled output'
+
 # Extract only the display helpers.  The mocks below prove that completed
 # messages have a level/body column and that inline progress remains aligned;
 # no PXEOS top-level code, disk command, network request, or real wait runs.
@@ -1249,7 +1284,34 @@ trap 'rm -rf "$tmp"' EXIT
 awk '/^rootpxe_console_message\(\)/ { copy = 1 } /^# Appends dots/ { exit } copy' "$funcs" >"$tmp/console.sh"
 awk '/^dots\(\)/ { copy = 1 } /^# Enables write caching/ { exit } copy' "$funcs" >"$tmp/dots.sh"
 awk '/^handleError\(\)/ { copy = 1 } /^# Re-reads the partition table/ { exit } copy' "$funcs" >"$tmp/handlers.sh"
+awk '/^displayBanner\(\)/ { copy = 1 } /^# Gets all system mac addresses except for loopback/ { exit } copy' "$funcs" >"$tmp/banner.sh"
 [[ -s $tmp/console.sh ]] || fail 'console formatter was not extracted'
+[[ -s $tmp/banner.sh ]] || fail 'console banner was not extracted'
+
+(
+    . "$tmp/console.sh"
+    rootpxe_console_prompt WARN 'Confirm test prompt: '
+) >"$tmp/prompt.out"
+[[ $(cat "$tmp/prompt.out") == '[WARN]  Confirm test prompt: ' ]] || fail 'interactive prompt must keep the level/body column'
+must_fit "$(cat "$tmp/prompt.out")"
+
+(
+    initversion=test-init
+    pxeapi=https://example.invalid/service/
+    curl() { printf 'test-version\n'; }
+    . "$tmp/console.sh"
+    . "$tmp/banner.sh"
+    displayBanner
+) >"$tmp/banner.out"
+head -n 3 "$tmp/banner.out" >"$tmp/normal-banner.out"
+expected_banner=$'+------------------------------------------------------------------------------+\n|                                PXEOS Runtime                                 |\n+------------------------------------------------------------------------------+'
+[[ $(cat "$tmp/normal-banner.out") == "$expected_banner" ]] || fail 'normal banner layout changed'
+LC_ALL=C grep -Eq '[^ -~]' "$tmp/banner.out" && fail 'normal banner must be ASCII only'
+while IFS= read -r line; do
+    must_fit "$line"
+done <"$tmp/banner.out"
+grep -Fqx '[INFO]  Version: test-version' "$tmp/banner.out" || fail 'normal banner version must use INFO layout'
+grep -Fqx '[INFO]  Init version: test-init' "$tmp/banner.out" || fail 'normal banner init version must use INFO layout'
 
 set +e
 (
@@ -1354,6 +1416,19 @@ done <"$tmp/long-dots-error.out"
 
 (
     . "$tmp/console.sh"
+    . "$tmp/dots.sh"
+    dots 'Updating Database'
+    printf 'Skipped\n'
+    rootpxe_console_message INFO 'Database update skipped: no task ID.'
+) >"$tmp/short-result.out"
+while IFS= read -r line; do
+    must_fit "$line"
+done <"$tmp/short-result.out"
+[[ $(sed -n '1p' "$tmp/short-result.out") == '[INFO]  Updating Database'*Skipped ]] || fail 'short skipped result no longer shares its dots line'
+[[ $(sed -n '2p' "$tmp/short-result.out") == '[INFO]  Database update skipped: no task ID.' ]] || fail 'short result explanation is missing'
+
+(
+    . "$tmp/console.sh"
     rootpxe_console_message INFO "$long_message"
 ) >"$tmp/long.out"
 [[ $(wc -l <"$tmp/long.out") -eq 3 ]] || fail 'long message was not safely wrapped'
@@ -1402,6 +1477,30 @@ must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[ERROR] Operation failed.'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  Operation warning.'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  System will reboot in 60s.'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[INFO]  Continuing in 60s.'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'Disk permit response is invalid. Check the server protocol and task binding.'
+must_not_have "$overlay/usr/share/pxeos/lib/funcs.sh" '磁盘操作许可响应无效'
+must_have "$overlay/bin/pxeos.debug" "pxeos_debug_message INFO 'Mode: SSH debug.'"
+must_have "$overlay/bin/pxeos.debug" "pxeos_debug_message WARN 'No global IPv4 address is available for SSH.'"
+must_have "$overlay/etc/init.d/S40network" 'pxeos_network_message INFO "PXEOS network diagnostics:"'
+must_have "$overlay/etc/init.d/S40network" 'pxeos_network_prompt INFO "Press Enter to continue."'
+must_have "$overlay/bin/pxeos.sysinfo" 'PS3="[INFO]  Select an option: "'
+must_have "$overlay/etc/init.d/K40network" "printf '%-7s %s\\n' '[INFO]' \"Stopping interface \$iface.\""
+must_have "$overlay/bin/pxeos.sysinfo" "rootpxe_console_message WARN 'Hardware compatibility checks failed.'"
+must_not_have "$overlay/bin/pxeos.sysinfo" 'FOG'
+must_not_have "$overlay/bin/pxeos.sysinfo" '####'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_prompt INFO "${*:-Press Enter to continue.}"'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" "rootpxe_console_message WARN 'XFS partition cannot be expanded.'"
+must_not_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'Failed, XFS partition cannot be expanded'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" "rootpxe_console_message WARN 'Cleared a corrupted partition table.'"
+must_not_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'Done, but cleared corrupted partition.'
+must_have "$overlay/bin/pxeos.nonimgcomplete" "rootpxe_console_message INFO 'Database update skipped: no task ID.'"
+must_not_have "$overlay/bin/pxeos.nonimgcomplete" 'Skipped (no taskid)'
+grep -B1 -F "rootpxe_console_message WARN 'XFS partition cannot be expanded.'" "$overlay/usr/share/pxeos/lib/funcs.sh" | grep -Fq 'echo "Skipped"' || fail 'XFS dots result must remain short'
+grep -B1 -F "rootpxe_console_message WARN 'Cleared a corrupted partition table.'" "$overlay/usr/share/pxeos/lib/funcs.sh" | grep -Fq 'echo "Done"' || fail 'corrupted-table dots result must remain short'
+grep -B1 -F "rootpxe_console_message INFO 'Database update skipped: no task ID.'" "$overlay/bin/pxeos.nonimgcomplete" | grep -Fq 'echo "Skipped"' || fail 'no-task-id dots result must remain short'
+must_fit '[INFO]  Stopping interface eth0.'
+must_have "$overlay/bin/pxeos.imgcomplete" "rootpxe_console_message INFO 'Task complete.'"
+must_have "$overlay/bin/pxeos.nonimgcomplete" "rootpxe_console_message INFO 'Task complete.'"
 
 for line in \
     '[WARN]  Check-in not confirmed. Retrying in 5s.' \

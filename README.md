@@ -101,6 +101,8 @@ PXEOS 的协议、安全、硬件与故障处理说明已按主题拆分；本�
 
 内核参数传入 `isdebug=yes` 时，PXEOS 只完成网络初始化并显示非回环全局 IPv4 地址和 `ssh root@IP` 连接提示，随后保持 SSH 与本地控制台可用。该模式不读取 RootPXE 任务、不挂载存储、不扫描或写入磁盘，也不会自动重启或关机；调试人员登录后自行执行需要排查的脚本。未取得全局 IPv4 时，控制台会提示检查网络配置、DHCP 状态和网线连接。
 
+PXEOS 自身固定控制台提示统一采用 ASCII 英文：横幅为 80 列 ASCII 边框，普通消息使用 `[INFO]`、`[WARN]` 或 `[ERROR]` 级别列；交互输入提示使用同一列格式且不自行换行；进度操作保持 `[INFO]  Operation ... Done` 的单行形式。SSH 调试入口会显示 `Mode: SSH debug.`、`Interface: <name> (<cidr>).` 和 `SSH command: ssh root@<ip>`。`pxeos.inventory` 与 `pxeos.sysinfo` 的数据表、菜单和诊断原始内容为结构化视图，保留其必要布局；其中固定说明、警告和输入提示仍使用上述级别列。内核、DHCP、SSH 服务及 Partclone 等第三方程序的原始输出不由 PXEOS 重排。
+
 ## 文档索引
 
 - [安全配置](docs/安全配置.md)：默认 Root 凭据与敏感信息边界。

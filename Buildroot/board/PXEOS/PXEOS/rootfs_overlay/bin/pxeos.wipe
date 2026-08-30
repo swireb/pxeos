@@ -7,33 +7,33 @@ disk=""
 hd=""
 [[ -z $seconds ]] && seconds=60
 getHardDisk
-echo " WARNING!  You are about to destroy the contents of the following hard disk:"
-echo -e "      $hd\n"
-echo -e " You have $seconds seconds to turn off this computer to cancel!\n"
+rootpxe_console_message WARN 'The following hard disk will be erased.'
+rootpxe_console_message WARN "Target disk: $hd"
+rootpxe_console_message WARN "Power off this computer within $seconds seconds to cancel."
 usleep $((seconds * 1000000))
 
 [[ $hd == *[Nn][Vv][Mm][Ee]* ]] && wipemode="nvme"
 
 case $wipemode in
     nvme)
-        echo -e " Starting disk wipe of $hd using nvme format...\n"
+        rootpxe_console_message INFO "Starting NVMe format wipe for $hd."
         usleep 10000000
         nvme format $hd --force
         ;;
     full)
-        echo -e " Starting full disk wipe of $hd using shred...\n"
+        rootpxe_console_message INFO "Starting full shred wipe for $hd."
         usleep 10000000
         shred -f -v -z -n 3 "$hd"
         ;;
     normal)
-        echo -e " Starting normal disk wipe of $hd using shred...\n"
+        rootpxe_console_message INFO "Starting normal shred wipe for $hd."
         usleep 10000000
         shred -f -v -n 1 "$hd"
         ;;
     fast|fastwipe)
-        echo " Writing zeros to start of $hd"
+        rootpxe_console_message INFO "Writing zeros to the start of $hd."
         dd if=/dev/zero of="$hd" bs=512 count=100000
         ;;
 esac
-echo -e "\n Wiping complete.\n"
+rootpxe_console_message INFO 'Wiping complete.'
 . /bin/pxeos.nonimgcomplete

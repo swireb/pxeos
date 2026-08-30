@@ -5,7 +5,7 @@ for iface in $ifaces; do
         /sbin/ip link set lo down
         continue
     fi
-    echo "Stopping $iface interface"
+    printf '%-7s %s\n' '[INFO]' "Stopping interface $iface."
     /sbin/udhcpc -i $iface -R
     /sbin/ip link set $iface down
 done

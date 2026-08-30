@@ -1,11 +1,34 @@
 #!/bin/bash
-# isdebug=yes 只提供网络地址和 SSH 接入提示。不要加载任务变量、挂载存储或扫描磁盘；
-# 调试人员通过 SSH 自行选择要执行的 PXEOS 脚本。
+# isdebug=yes only provides network addresses and SSH access instructions.
+# Do not load task variables, mount storage, or scan disks in this script.
 clear >/dev/null 2>&1 || :
-printf '%s\n' '==================== PXEOS Runtime ===================='
-printf '%s\n' ' PXEOS SSH 调试模式'
-printf '%s\n' ' 已跳过任务执行、存储挂载和磁盘扫描。'
-printf '%s\n\n' ' 请通过 SSH 登录后手工执行需要调试的脚本。'
+cat <<'EOF'
++------------------------------------------------------------------------------+
+|                                PXEOS Runtime                                 |
++------------------------------------------------------------------------------+
+EOF
+
+pxeos_debug_message() {
+    local level="$1" message="$2" line chunk
+    case $level in
+        INFO|WARN|ERROR) ;;
+        *) return 1 ;;
+    esac
+    while IFS= read -r line || [[ -n $line ]]; do
+        while (( ${#line} > 72 )); do
+            chunk=${line:0:72}
+            printf '%-7s %s\n' "[$level]" "$chunk"
+            line=${line:72}
+        done
+        printf '%-7s %s\n' "[$level]" "$line"
+    done <<<"$message"
+}
+
+pxeos_debug_message INFO 'Mode: SSH debug.'
+pxeos_debug_message INFO 'Task execution: skipped.'
+pxeos_debug_message INFO 'Storage mounting: skipped.'
+pxeos_debug_message INFO 'Disk discovery: skipped.'
+pxeos_debug_message INFO 'Use SSH to run the PXEOS script you need to debug.'
 
 addresses=$(/sbin/ip -o -4 addr show scope global 2>/dev/null | awk '{
     iface=$2
@@ -17,15 +40,15 @@ addresses=$(/sbin/ip -o -4 addr show scope global 2>/dev/null | awk '{
 }')
 
 if [[ -n $addresses ]]; then
-    printf '%s\n' ' 可用于 SSH 的 IPv4 地址：'
+    pxeos_debug_message INFO 'Global IPv4 addresses available for SSH:'
     while read -r iface cidr address; do
         [[ -z $iface || -z $cidr || -z $address ]] && continue
-        printf '  %s: %s\n' "$iface" "$cidr"
-        printf '  ssh root@%s\n' "$address"
+        pxeos_debug_message INFO "Interface: $iface ($cidr)."
+        pxeos_debug_message INFO "SSH command: ssh root@$address"
     done <<<"$addresses"
 else
-    printf '%s\n' '[WARN] 未检测到可用于 SSH 的全局 IPv4 地址。'
-    printf '%s\n' ' 请在本地控制台检查网络配置、DHCP 状态和网线连接。'
+    pxeos_debug_message WARN 'No global IPv4 address is available for SSH.'
+    pxeos_debug_message INFO 'Check network configuration, DHCP status, and cable connectivity.'
 fi
 
 exit 0

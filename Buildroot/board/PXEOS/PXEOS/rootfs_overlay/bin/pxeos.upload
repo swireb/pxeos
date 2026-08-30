@@ -75,21 +75,21 @@ beginUpload() {
             fi
             echo "Done"
             debugPause
-            echo " * NTFS Partition count of: $ntfscnt"
+            rootpxe_console_message INFO "NTFS partition count: $ntfscnt."
             debugPause
-            echo " * EXTFS Partition count of: $extfscnt"
+            rootpxe_console_message INFO "EXTFS partition count: $extfscnt."
             debugPause
-            echo " * BTRFS Partition count of: $btrfscnt"
+            rootpxe_console_message INFO "BTRFS partition count: $btrfscnt."
             debugPause
-            echo " * F2FS Partition count of: $f2fscnt"
+            rootpxe_console_message INFO "F2FS partition count: $f2fscnt."
             debugPause
-            echo " * XFS Partition count of: $xfscnt"
+            rootpxe_console_message INFO "XFS partition count: $xfscnt."
             debugPause
-            echo " * Total Partition count of: $partscnt"
+            rootpxe_console_message INFO "Total partition count: $partscnt."
             debugPause
             case $osid in
                 [4-7]|9|10|11|50|51)
-                    echo " * Setting up any additional fixed parts"
+                    rootpxe_console_message INFO 'Setting up additional fixed partitions.'
                     part_number=0
                     for part in $parts; do
                         getPartitionNumber "$part"
@@ -104,7 +104,7 @@ beginUpload() {
                                 *)
                                     echo "Failed"
                                     debugPause
-                                    handleError " * Could not create mount location ($0->${FUNCNAME[0]})\n    Args Passed: $*"
+                                    handleError "Could not create mount location ($0->${FUNCNAME[0]})\n    Args Passed: $*"
                                     ;;
                             esac
                         fi
@@ -117,14 +117,14 @@ beginUpload() {
                             *)
                                 echo "Failed"
                                 debugPause
-                                handleError " * Could not mount $part ($0->${FUNCNAME[0]})\n    Args Passed: $*\n    Reason: $(cat /tmp/ntfs-mount-output | tr -d \\0)"
+                                handleError "Could not mount $part ($0->${FUNCNAME[0]})\n    Args Passed: $*\n    Reason: $(cat /tmp/ntfs-mount-output | tr -d \\0)"
                                 ;;
                         esac
                         umount /bcdstore >/dev/null 2>&1
                         if [[ $partscnt -gt 1 ]]; then
                                 flock $hd parted -s $hd print | grep "^ *${part_number} " | grep -q "boot\|msftres\|hidden"
                                 if [[ $? -eq 0 ]]; then
-                                        echo " * New fixed partition for ($part) added."
+                                        rootpxe_console_message INFO "Added fixed partition: $part."
                                         fixed_size_partitions="$fixed_size_partitions:$part_number"
                                 fi
                         fi
@@ -146,7 +146,7 @@ beginUpload() {
             echo -n "" > $swapuuidfilename
             echo "Done"
             debugPause
-            echo " * Shrinking Partitions on disk"
+            rootpxe_console_message INFO 'Shrinking partitions on disk.'
             debugPause
             for part in $parts; do
                 rootpxe_lvm_is_pv_partition "$part" && continue
@@ -157,7 +157,7 @@ beginUpload() {
             local hasgpt=0
             hasGPT "$hd"
             if [[ $hasgpt -eq 1 ]]; then
-                echo " * Moving Partitions on disk $hd"
+                rootpxe_console_message INFO "Moving partitions on disk $hd."
                 debugPause
                 saveSfdiskPartitions "$hd" "$imagePath/d1.shrunken.partitions"
                 prevPart=""
@@ -166,17 +166,17 @@ beginUpload() {
                     prevPart="$part"
                 done
             fi
-            echo " * Saving shrunken partition table"
+            rootpxe_console_message INFO 'Saving the shrunken partition table.'
             debugPause
             sfdiskminimumpartitionfilename=""
             sfdiskMinimumPartitionFileName "$imagePath" 1
             savePartitionTablesAndBootLoaders "$hd" 1 "$imagePath" "$osid" "$imgPartitionType" "$sfdiskminimumpartitionfilename"
             if [[ $hasgpt -eq 1 ]]; then
-                echo " * Moving Partitions back on disk $hd"
+                rootpxe_console_message INFO "Moving partitions back on disk $hd."
                 debugPause
                 applySfdiskPartitions "$hd" "$imagePath/d1.shrunken.partitions"
             fi
-            echo " * Processing Hard Disk: $hd"
+            rootpxe_console_message INFO "Processing hard disk: $hd."
             for part in $parts; do
                 rootpxe_lvm_is_pv_partition "$part" && continue
                 savePartition "$part" 1 "$imagePath" "$imgPartitionType"
@@ -198,7 +198,7 @@ beginUpload() {
             parts=""
             getPartitions "$hd"
             [[ ${#parts} -lt 1 ]] && handleError "No partitions found ($0)\n   Args Passed: $*"
-            echo " * Processing Hard Disk: $hd"
+            rootpxe_console_message INFO "Processing hard disk: $hd."
             debugPause
             savePartitionTablesAndBootLoaders "$hd" 1 "$imagePath" "$osid" "$imgPartitionType"
             getPartitions "$hd"
@@ -215,9 +215,9 @@ beginUpload() {
                 getPartitions "$disk"
                 [[ ${#parts} -lt 1 ]] && continue
                 debugPause
-                echo " * Processing Hard Disk: $disk"
+                rootpxe_console_message INFO "Processing hard disk: $disk."
                 debugPause
-                echo " * Saving disk size, partition table and boot loader information"
+                rootpxe_console_message INFO 'Saving disk size, partition table, and boot loader information.'
                 debugPause
                 echo -n "${disk_number}:" > ${imagePath}/d${disk_number}.size
                 blockdev --getsize64 $disk >> ${imagePath}/d${disk_number}.size
@@ -228,7 +228,7 @@ beginUpload() {
                     isBitlockedPartition "$part"
                     savePartition "$part" "$disk_number" "$imagePath" "$imgPartitionType"
                 done
-                echo " * Disk $disk complete"
+                rootpxe_console_message INFO "Disk $disk is complete."
                 let disk_number+=1
             done
             ;;

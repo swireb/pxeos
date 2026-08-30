@@ -52,12 +52,11 @@ preparePartitions() {
 putDataBack() {
     runPartprobe "$hd"
     getPartitions "$hd"
-    [[ -z $parts ]] && echo -e " * Seems like you are trying to restore to an empty disk. Be aware this will most probably cause trouble.\n"
-    echo "   +--------------------------------+"
-    echo "   |   Attempting to deploy image   |"
-    echo "   +--------------------------------+"
-    [[ $imgFormat -eq 1 || $imgLegacy -eq 1 ]] && echo "   |         Using Partimage        |" || echo "   |         Using Partclone        |"
-    echo "   +--------------------------------+"
+    [[ -z $parts ]] && rootpxe_console_message WARN 'Restoring to an empty disk may cause problems.'
+    rootpxe_console_message INFO 'Attempting image deployment.'
+    [[ $imgFormat -eq 1 || $imgLegacy -eq 1 ]] \
+        && rootpxe_console_message INFO 'Image format: Partimage.' \
+        || rootpxe_console_message INFO 'Image format: Partclone.'
     [[ $mc == yes ]] && usleep 10000000 || usleep 3000000
     case $imgType in
         dd)
@@ -144,7 +143,7 @@ while :; do
 done
 rootpxe_run_postinit || handleError "Post-init script failed ($0)"
 rootpxe_stage init "pxeos download started, storage mounted"
-[[ $nombr -eq 1 ]] && echo " * Skipping partition layout (Single Partition restore)" || preparePartitions
+[[ $nombr -eq 1 ]] && rootpxe_console_message INFO 'Skipping partition layout: single-partition restore.' || preparePartitions
 if [[ ${imgType:-} == [Nn] ]]; then
     # NVMe reformat may have changed logical geometry; resolve once more before
     # the final sfdisk write and verify the table after applying it.
@@ -165,6 +164,6 @@ if [[ $imgPartitionType != mbr ]]; then
         rootpxe_restore_lvm_volumes "$imagePath" "$hd" || handleError "PXEOS_STAGE=restore_lvm CODE=LVM_RESTORE_FAILED REASON=metadata_or_lv_restore_failed"
     fi
 else
-    echo " * Skipping partition restore (MBR Only)"
+    rootpxe_console_message INFO 'Skipping partition restore: MBR only.'
 fi
 completeTasking

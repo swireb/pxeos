@@ -55,8 +55,9 @@ caseserial64=""
 caseasset64=""
 dots "Using disk device"
 getHardDisk
-echo "$hd"
-echo "Starting host registration"
+echo 'Done'
+rootpxe_console_message INFO "Using disk device: $hd"
+rootpxe_console_message INFO 'Starting host registration.'
 debugPause
 mac=$(getMACAddresses | base64)
 sysuuid=$(dmidecode -s system-uuid)

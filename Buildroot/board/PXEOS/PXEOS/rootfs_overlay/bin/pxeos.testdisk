@@ -10,10 +10,10 @@ part=""
 getHardDisk "true"
 [[ -z $disks ]] && handleError "No Hard disks not found! ($0)\n   Args Passed: $*"
 for disk in $disks; do
-    echo " Starting TestDisk on $disk"
+rootpxe_console_message INFO "Starting TestDisk on $disk."
     getPartitions "$disk"
     for part in $parts; do
-        dots " * Scanning $part"
+    dots "Scanning $part"
         testdisk "$part" >/dev/null 2>&1
         case $? in
             0)
