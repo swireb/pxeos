@@ -295,7 +295,7 @@ rootpxe_capture_lvm_volumes() {
     rootpxe_safe_relative_path "$pv_artifact" >/dev/null && rootpxe_safe_relative_path "$vg_artifact" >/dev/null || return 1
     vgchange -ay "$rootpxe_lvm_vg_name" || return 1
     vg_active=yes
-    pvdisplay -m --units b --nosuffix "$rootpxe_lvm_pv_path" >"$stage/$pv_artifact" 2>/dev/null || return 1
+    pvdisplay -m --units b "$rootpxe_lvm_pv_path" >"$stage/$pv_artifact" 2>/dev/null || return 1
     vgcfgbackup -f "$stage/$vg_artifact" "$rootpxe_lvm_vg_name" >/dev/null 2>&1 || return 1
     : >"$stage/d1.lvm.capture.tsv" || return 1
     while IFS='|' read -r lv_name lv_uuid lv_path lv_size; do
@@ -318,7 +318,7 @@ rootpxe_capture_lvm_volumes() {
     done <"$rootpxe_lvm_lv_facts_file"
     pv_min_bytes="$rootpxe_lvm_pv_bytes"
     jq -n --arg pv_uuid "$rootpxe_lvm_pv_uuid" --arg vg_uuid "$rootpxe_lvm_vg_uuid" --arg vg_name "$rootpxe_lvm_vg_name" --arg pv_artifact "$pv_artifact" --arg vg_artifact "$vg_artifact" --argjson part "$rootpxe_lvm_pv_number" --argjson pv_bytes "$rootpxe_lvm_pv_bytes" --argjson pv_min "$pv_min_bytes" --argjson pe_start "$rootpxe_lvm_pe_start_bytes" --argjson extent "$rootpxe_lvm_vg_extent_bytes" --argjson free "$rootpxe_lvm_vg_free_bytes" --rawfile lvs "$stage/d1.lvm.capture.tsv" '
-      {version:1,captureMode:"per_lv",resizePolicy:"grow_only",pvs:[{partitionNumber:$part,uuid:$pv_uuid,vgUuid:$vg_uuid,originalBytes:$pv_bytes,minBytes:$pv_min,peStartBytes:$pe_start,artifact:$pv_artifact,vgConfigArtifact:$vg_artifact}],vgs:[{name:$vg_name,uuid:$vg_uuid,extentBytes:$extent,pvPartitionNumbers:[$part],originalFreeBytes:$free,lvs:($lvs|split("\n")|map(select(length>0)|split("|")|{name:.[0],uuid:.[1],layout:"linear",originalBytes:(.[2]|tonumber),minBytes:(.[3]|tonumber),fs:.[4],role:(if .[4]=="swap" then "swap" else "data" end),resizable:(.[4] != "swap"),artifact:.[5],swapUuid:(if .[4]=="swap" then .[6] else "" end)})}]} ' >"$stage/d1.lvm.schema.json" || return 1
+      {version:1,captureMode:"per_lv",resizePolicy:"grow_only",pvs:[{partitionNumber:$part,uuid:$pv_uuid,vgUuid:$vg_uuid,originalBytes:$pv_bytes,minBytes:$pv_min,peStartBytes:$pe_start,artifact:$pv_artifact,vgConfigArtifact:$vg_artifact}],vgs:[{name:$vg_name,uuid:$vg_uuid,extentBytes:$extent,pvPartitionNumbers:[$part],originalFreeBytes:$free,lvs:($lvs|split("\n")|map(select(length>0)|split("|")|{name:.[0],uuid:.[1],layout:"linear",originalBytes:(.[2]|tonumber),minBytes:(.[3]|tonumber),fs:.[4],role:(if .[4]=="swap" then "swap" else "data" end),resizable:(.[4] != "swap"),artifact:.[5],swapUuid:(if .[4]=="swap" then .[6] else "" end)}))}]} ' >"$stage/d1.lvm.schema.json" || return 1
     jq -e '.version == 1 and .captureMode == "per_lv" and .resizePolicy == "grow_only" and (.pvs|length) == 1 and (.vgs|length) == 1' "$stage/d1.lvm.schema.json" >/dev/null || return 1
     rm -f -- "$stage/d1.lvm.capture.tsv" || return 1
     [[ ! -e "$image_path/d1.lvm.schema.json" && ! -e "$image_path/$pv_artifact" && ! -e "$image_path/$vg_artifact" && ! -e "$image_path/d1p${rootpxe_lvm_pv_number}.img" && ! -e "$image_path/d1p${rootpxe_lvm_pv_number}.img.000" ]] || return 1

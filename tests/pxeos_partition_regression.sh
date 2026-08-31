@@ -507,6 +507,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
+real_jq=$(command -v jq) || fail 'host jq is required for production LVM schema coverage'
 mkdir -p "$tmp/bin" "$tmp/image"; export PATH="$tmp/bin:$PATH" LVM_TRACE="$tmp/trace"; : >"$LVM_TRACE"
 cat >"$tmp/bin/pvs" <<'EOF'
 #!/usr/bin/env bash
@@ -537,6 +538,10 @@ case " $* " in *' TYPE '*) [[ ${LVM_MODE:-ok} == crypt ]] && { echo crypto_LUKS;
 EOF
 cat >"$tmp/bin/pvdisplay" <<'EOF'
 #!/usr/bin/env bash
+echo "pvdisplay:$*" >>"$LVM_TRACE"
+for arg in "$@"; do
+  [[ $arg != --nosuffix ]] || { echo 'unsupported pvdisplay option: --nosuffix' >&2; exit 64; }
+done
 [[ ${PV_FAIL:-0} == 1 ]] && exit 1; echo 'PV UUID pv-1'
 EOF
 cat >"$tmp/bin/vgcfgbackup" <<'EOF'
@@ -647,10 +652,22 @@ rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" || fail preflight-after-com
 export E2FSCK_RC=1; rootpxe_capture_lvm_volumes "$tmp/image" || fail legal-capture-e2fsck-fixed; unset E2FSCK_RC
 [[ -s "$tmp/image/d1.lvm.schema.json" && -f "$tmp/image/d1.lv.lv-root.img" && ! -e "$tmp/image/d1.lv.lv-swap.img" ]] || fail artifacts
 jq -e '.version == 1 and .captureMode == "per_lv" and .resizePolicy == "grow_only" and ([.vgs[].lvs[] | select(.fs == "swap" and .artifact != "")] | length) == 0' "$tmp/image/d1.lvm.schema.json" >/dev/null || fail lvm-v1-schema
+! grep -Fq -- '--nosuffix' "$LVM_TRACE" || fail capture-must-not-use-unsupported-pvdisplay-option
 grep -Fq 'partclone.extfs:' "$LVM_TRACE" || fail writer-not-run
 grep -Fq 'vgchange:-ay vg0' "$LVM_TRACE" || fail capture-vg-not-activated
 grep -Fq 'vgchange:-an vg0' "$LVM_TRACE" || fail capture-vg-not-deactivated
 ! grep -Fq 'lvextend:' "$LVM_TRACE" || fail n-capture-must-not-expand-source-lv
+
+# The surrounding LVM suite uses a jq stub for its command-flow matrix.  Run
+# this production capture branch once with the host jq binary so syntax errors
+# in the real schema program cannot be hidden by the stub.
+real_jq_image="$tmp/real-jq-image"; mkdir -p "$real_jq_image"
+rootpxe_lvm_capture_preflight /dev/mock "$real_jq_image" || fail real-jq-preflight
+jq() { command "$real_jq" "$@"; }
+rootpxe_capture_lvm_volumes "$real_jq_image" || fail real-jq-schema-capture
+unset -f jq
+"$real_jq" -e '.version == 1 and .captureMode == "per_lv" and .resizePolicy == "grow_only" and (.pvs | length) == 1 and (.vgs | length) == 1' "$real_jq_image/d1.lvm.schema.json" >/dev/null || fail real-jq-schema-content
+
 export LVM_MODE=multi; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail multipv; unset LVM_MODE
 rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" || fail facts-after-multipv
 : >"$LVM_TRACE"; export PV_FAIL=1; rootpxe_capture_lvm_volumes "$tmp/image" && fail sidecar-failure; unset PV_FAIL
