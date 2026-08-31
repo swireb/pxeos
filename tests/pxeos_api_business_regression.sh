@@ -684,13 +684,15 @@ fi
 EOF
 cat >$tmp/mock/pvs <<'EOF'
 #!/usr/bin/env bash
-if [[ ${MODE:-} == linux_lvm || ${MODE:-} == linux_lvm_all_active || ${MODE:-} == linux_lvm_mixed ]]; then
+if [[ ${MODE:-} == linux_lvm || ${MODE:-} == linux_lvm_all_active || ${MODE:-} == linux_lvm_all_inactive_blank || ${MODE:-} == linux_lvm_mixed || ${MODE:-} == linux_lvm_postverify_fail || ${MODE:-} == linux_lvm_activation_command_fail || ${MODE:-} == linux_lvm_empty || ${MODE:-} == linux_lvm_lvs_badjson ]]; then
     case " $* " in
+        *'reportformat json'*) printf '{"report":[{"pv":[{"pv_name":"/dev/mockpv","vg_name":"vg0","vg_uuid":"vg-uuid-0"}]}]}\n' ;;
         *'pv_name,vg_uuid'*) printf ' /dev/mockpv vg-uuid-0\n' ;;
         *) printf ' /dev/mockpv vg0 vg-uuid-0\n' ;;
     esac
 elif [[ ${MODE:-} == linux_lvm_external ]]; then
     case " $* " in
+        *'reportformat json'*) printf '{"report":[{"pv":[{"pv_name":"/dev/mockpv","vg_name":"vg0","vg_uuid":"vg-uuid-0"},{"pv_name":"/dev/externalpv","vg_name":"vg0","vg_uuid":"vg-uuid-0"}]}]}\n' ;;
         *'pv_name,vg_uuid'*) printf ' /dev/mockpv vg-uuid-0\n /dev/externalpv vg-uuid-0\n' ;;
         *) printf ' /dev/mockpv vg0 vg-uuid-0\n /dev/externalpv vg0 vg-uuid-0\n' ;;
     esac
@@ -699,9 +701,23 @@ EOF
 cat >$tmp/mock/lvs <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
+    *'reportformat json'*)
+        [[ ${MODE:-} != linux_lvm_lvs_badjson ]] || { printf '{bad json\n'; exit 0; }
+        [[ ${MODE:-} != linux_lvm_empty ]] || { printf '{"report":[{"lv":[]}]}\n'; exit 0; }
+        if [[ -f ${LVM_ACTIVE_STATE:-} && ${MODE:-} != linux_lvm_postverify_fail ]]; then
+            state='active'
+        else case ${MODE:-} in
+            linux_lvm_all_active) state='active';;
+            linux_lvm_mixed) printf '{"report":[{"lv":[{"vg_name":"vg0","vg_uuid":"vg-uuid-0","lv_name":"root","lv_path":"/dev/vg0/root","lv_active":"active"},{"vg_name":"vg0","vg_uuid":"vg-uuid-0","lv_name":"var","lv_path":"/dev/vg0/var","lv_active":"inactive"}]}]}\n'; exit 0;;
+            linux_lvm_all_inactive_blank) state='';;
+            *) state='inactive';;
+        esac; fi
+        printf '{"report":[{"lv":[{"vg_name":"vg0","vg_uuid":"vg-uuid-0","lv_name":"root","lv_path":"/dev/vg0/root","lv_active":"%s"},{"vg_name":"vg0","vg_uuid":"vg-uuid-0","lv_name":"var","lv_path":"/dev/vg0/var","lv_active":"%s"}]}]}\n' "$state" "$state"
+        ;;
     *'lv_active'*)
         case ${MODE:-} in
             linux_lvm_all_active) printf ' active\n active\n' ;;
+            linux_lvm_all_inactive_blank) printf '   \n   \n' ;;
             linux_lvm_mixed) printf ' active\n inactive\n' ;;
             *) printf ' inactive\n inactive\n' ;;
         esac
@@ -712,6 +728,10 @@ EOF
 cat >$tmp/mock/vgchange <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>$LVM_TRACE
+case " $* " in
+    *' -ay '*) [[ ${MODE:-} != linux_lvm_activation_command_fail ]] || exit 1; : >"$LVM_ACTIVE_STATE" ;;
+    *' -an '*) rm -f -- "$LVM_ACTIVE_STATE" ;;
+esac
 EOF
 cat >$tmp/mock/cat <<'EOF'
 #!/usr/bin/env bash
@@ -751,12 +771,26 @@ sed -e "s|^\. /usr/share/pxeos/lib/partition-funcs.sh|. \"$overlay/usr/share/pxe
 MOUNT_TRACE=$tmp/mount-trace; export MOUNT_TRACE
 : >$tmp/hostmode-trace
 HOSTMODE_TRACE=$tmp/hostmode-trace; export HOSTMODE_TRACE
+: >$tmp/lvm-trace
+LVM_TRACE=$tmp/lvm-trace; LVM_ACTIVE_STATE=$tmp/lvm-active-state; export LVM_TRACE LVM_ACTIVE_STATE
 export PATH=$tmp/mock:$PATH
 ismajordebug=0
 isdebug=0
 . $tmp/funcs.sh
 rootpxe_require_task_context() { return 0; }
 rootpxe_require_identity() { return 0; }
+real_jq=$(command -v jq) || fail linux-lvm-real-jq-required
+rootpxe_linux_test_jq() {
+    local arg converted=()
+    for arg in "$@"; do
+        [[ -e $arg ]] && converted+=("$(cygpath -w "$arg")") || converted+=("$arg")
+    done
+    MSYS_NO_PATHCONV=1 "$real_jq" "${converted[@]}"
+}
+# Keep production pinned to jq while preventing Git Bash from rewriting mock
+# Linux device names passed through jq --arg.
+rootpxe_lvm_json_jq() { rootpxe_linux_test_jq "$@"; }
+rootpxe_linux_lvm_path_readable() { [[ ${MODE:-} != linux_lvm_postverify_fail ]]; }
 
 # n no longer has a legacy deployment path.  The required snapshot files are
 # checked before disk permission and the old table/fill preparation is never
@@ -902,6 +936,7 @@ fsTypeSetting() {
     esac
 }
 : >$tmp/lvm-trace
+rm -f -- "$LVM_ACTIVE_STATE"
 LVM_TRACE=$tmp/lvm-trace; export LVM_TRACE
 changeHostname=true; hostName=linux-node; osid=50
 MODE=linux_ext; export MODE
@@ -959,10 +994,30 @@ grep -Fqx linux-node $tmp/linuxroot/etc/hostname || fail linux-lvm-write
 MODE=linux_lvm_all_active; export MODE
 [[ $(rootpxe_linux_activate_vg_if_needed /dev/mockdisk vg0 vg-uuid-0) == no ]] || fail linux-lvm-all-active
 [[ ! -s $tmp/lvm-trace ]] || fail linux-lvm-all-active-mutate
+MODE=linux_lvm_all_inactive_blank; export MODE
+[[ $(rootpxe_linux_activate_vg_if_needed /dev/mockdisk vg0 vg-uuid-0) == yes ]] || fail linux-lvm-all-inactive-blank
+grep -Fqx -- '-ay --select vg_uuid=vg-uuid-0 vg0' $tmp/lvm-trace || fail linux-lvm-all-inactive-blank-activate
+rootpxe_linux_cleanup_selected_vg vg0 vg-uuid-0 yes
+: >$tmp/lvm-trace
+MODE=linux_lvm_postverify_fail; export MODE
+rootpxe_linux_activate_vg_if_needed /dev/mockdisk vg0 vg-uuid-0 && fail linux-lvm-postverify-must-fail
+grep -Fqx -- '-ay --select vg_uuid=vg-uuid-0 vg0' $tmp/lvm-trace || fail linux-lvm-postverify-activate
+grep -Fqx -- '-an --select vg_uuid=vg-uuid-0 vg0' $tmp/lvm-trace || fail linux-lvm-postverify-rollback
+: >$tmp/lvm-trace
+MODE=linux_lvm_activation_command_fail; export MODE
+rootpxe_linux_activate_vg_if_needed /dev/mockdisk vg0 vg-uuid-0 && fail linux-lvm-activation-command-must-fail
+grep -Fqx -- '-ay --select vg_uuid=vg-uuid-0 vg0' $tmp/lvm-trace || fail linux-lvm-activation-command-attempt
+grep -Fqx -- '-an --select vg_uuid=vg-uuid-0 vg0' $tmp/lvm-trace || fail linux-lvm-activation-command-rollback
+: >$tmp/lvm-trace
 MODE=linux_lvm_mixed; export MODE
 rootpxe_linux_activate_vg_if_needed /dev/mockdisk vg0 vg-uuid-0 && fail linux-lvm-mixed
 rootpxe_find_linux_root_filesystem /dev/mockdisk && fail linux-lvm-mixed-root
 [[ $? -eq 23 ]] || fail linux-lvm-mixed-root-code
+
+MODE=linux_lvm_empty; export MODE
+rootpxe_linux_activate_vg_if_needed /dev/mockdisk vg0 vg-uuid-0 && fail linux-lvm-empty
+MODE=linux_lvm_lvs_badjson; export MODE
+rootpxe_linux_activate_vg_if_needed /dev/mockdisk vg0 vg-uuid-0 && fail linux-lvm-malformed-json
 
 getPartitions() { parts='/dev/mockroot /dev/mockroot2'; }
 MODE=linux_multiple; export MODE
