@@ -570,6 +570,56 @@ echo "e2fsck:$*" >>"$LVM_TRACE"
 exit "${E2FSCK_RC:-0}"
 EOF
 chmod +x "$tmp/bin/e2fsck"
+cat >"$tmp/bin/xfs_repair" <<'EOF'
+#!/usr/bin/env bash
+echo "xfs_repair:$*" >>"$LVM_TRACE"
+if [[ -n ${XFS_RESTORE_MODE:-} ]]; then
+  if [[ -n ${XFS_RESTORE_STATE_FILE:-} ]]; then
+    printf x >>"$XFS_RESTORE_STATE_FILE"
+    calls=$(wc -c <"$XFS_RESTORE_STATE_FILE")
+  else
+    calls=1
+  fi
+  case $XFS_RESTORE_MODE in
+    clean) exit 0 ;;
+    dirty|mount_fail|umount_fail)
+      if [[ $calls -eq 1 ]]; then
+        printf '%s\n' 'ALERT: The filesystem has valuable metadata changes in a log which is being ignored because the -n option was used.' >&2
+        exit 1
+      fi
+      exit 0
+      ;;
+    corruption) printf '%s\n' 'fatal error -- metadata corruption' >&2; exit 1 ;;
+    second_repair_fail)
+      if [[ $calls -eq 1 ]]; then
+        printf '%s\n' 'ALERT: The filesystem has valuable metadata changes in a log which is being ignored because the -n option was used.' >&2
+      else
+        printf '%s\n' 'fatal error -- metadata corruption' >&2
+      fi
+      exit 1
+      ;;
+  esac
+fi
+exit "${XFS_REPAIR_RC:-0}"
+EOF
+chmod +x "$tmp/bin/xfs_repair"
+cat >"$tmp/bin/findmnt" <<'EOF'
+#!/usr/bin/env bash
+[[ ${XFS_RESTORE_MODE:-} == findmnt_fail ]] && exit 2
+[[ ${XFS_RESTORE_MODE:-} == mounted ]] && exit 0
+exit 1
+EOF
+cat >"$tmp/bin/mount" <<'EOF'
+#!/usr/bin/env bash
+echo "mount:$*" >>"$LVM_TRACE"
+[[ ${XFS_RESTORE_MODE:-} != mount_fail ]]
+EOF
+cat >"$tmp/bin/umount" <<'EOF'
+#!/usr/bin/env bash
+echo "umount:$*" >>"$LVM_TRACE"
+[[ ${XFS_RESTORE_MODE:-} != umount_fail ]]
+EOF
+chmod +x "$tmp/bin/findmnt" "$tmp/bin/mount" "$tmp/bin/umount"
 cat >"$tmp/bin/jq" <<'EOF'
 #!/usr/bin/env bash
 args="$*"
@@ -581,7 +631,18 @@ if [[ $args == *'.volumes[]|.name,'* ]]; then
   printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' root lv-root ext4 "$artifact" 67108864 '' swap lv-swap swap '' 33554432 swap-uuid
   exit 0
 fi
-case "$args" in *'.pv.artifact'*) echo d1p1.lvm.pv.meta; exit 0;; *'.pv.vgConfigArtifact'*) echo d1p1.lvm.vg.cfg; exit 0;; esac
+case "$args" in
+  *'.pv.uuid'*) echo pv-1; exit 0;;
+  *'.vg.name'*) echo vg0; exit 0;;
+  *'.pv.originalBytes'*) echo 268435456; exit 0;;
+  *'.vg.uuid'*) echo vg-1; exit 0;;
+  *'.vg.extentBytes'*) echo 4194304; exit 0;;
+  *'.pv.partitionNumber'*) echo 1; exit 0;;
+  *'.pv.artifact'*) echo d1p1.lvm.pv.meta; exit 0;;
+  *'.pv.vgConfigArtifact'*) echo d1p1.lvm.vg.cfg; exit 0;;
+  *'.pvBytes'*) echo 268435456; exit 0;;
+  *'.volumes|length'*) echo 2; exit 0;;
+esac
 [[ $args == *'if has("lvm") then'* || $args == *'--argjson number'* ]] && exit 0
 [[ $args == *'has("lvm")'* ]] && { [[ ${LVM_LEGACY_SCHEMA:-0} == 1 ]] && exit 1 || exit 0; }
 if [[ $args == *'--rawfile lvs'* ]]; then [[ -n ${JQ_ARGS_LOG:-} ]] && printf '%s\n' "$args" >>"$JQ_ARGS_LOG"; echo '{"version":1,"captureMode":"per_lv","resizePolicy":"grow_only","pvs":[{"partitionNumber":1,"uuid":"pv-1","vgUuid":"vg-1","originalBytes":268435456,"minBytes":268435456,"peStartBytes":1048576,"artifact":"d1p1.lvm.pv.meta","vgConfigArtifact":"d1p1.lvm.vg.cfg"}],"vgs":[{"name":"vg0","uuid":"vg-1","extentBytes":4194304,"pvPartitionNumbers":[1],"originalFreeBytes":0,"lvs":[{"name":"root","uuid":"lv-root","layout":"linear","originalBytes":67108864,"minBytes":67108864,"fs":"ext4","role":"data","resizable":true,"artifact":"d1p1.lvm.lv.root.img"},{"name":"swap","uuid":"lv-swap","layout":"linear","originalBytes":33554432,"minBytes":33554432,"fs":"swap","role":"swap","resizable":false,"artifact":"","swapUuid":"swap-uuid"}]}]}'; exit 0; fi
@@ -651,9 +712,132 @@ getPartitionNumber() { part_number=${1##*mock}; part_number=${part_number##*p}; 
 uploadFormat() { [[ ${UPLOAD_FAIL:-0} != 1 ]] || return 1; : >"$2.000"; rootpxe_last_writer_pid=1; }
 rootpxe_wait_for_writer() { [[ ${WRITER_FAIL:-0} != 1 ]]; }
 
+# XFS images must not be captured from an un-replayed journal.  These mocks
+# make the preflight contract observable without mounting a host filesystem.
+findmnt() {
+  [[ ${XFS_RESTORE_MODE:-} == findmnt_fail ]] && return 2
+  [[ ${XFS_RESTORE_MODE:-} == mounted ]] && return 0
+  [[ ${XFS_PREFLIGHT_MODE:-ok} == findmnt_fail ]] && return 2
+  [[ ${XFS_PREFLIGHT_MODE:-ok} == mounted ]]
+}
+mount() {
+  echo "mount:$*" >>"$LVM_TRACE"
+  [[ ${XFS_RESTORE_MODE:-} != mount_fail && ${XFS_PREFLIGHT_MODE:-ok} != mount_fail ]]
+}
+umount() {
+  echo "umount:$*" >>"$LVM_TRACE"
+  [[ ${XFS_RESTORE_MODE:-} != umount_fail && ${XFS_PREFLIGHT_MODE:-ok} != umount_fail ]]
+}
+xfs_repair() {
+  echo "xfs_repair:$*" >>"$LVM_TRACE"
+  if [[ -n ${XFS_RESTORE_MODE:-} ]]; then
+    if [[ -n ${XFS_RESTORE_STATE_FILE:-} ]]; then
+      printf x >>"$XFS_RESTORE_STATE_FILE"
+      XFS_RESTORE_REPAIR_CALLS=$(wc -c <"$XFS_RESTORE_STATE_FILE")
+    else
+      XFS_RESTORE_REPAIR_CALLS=$(grep -c '^xfs_repair:' "$LVM_TRACE")
+    fi
+    case $XFS_RESTORE_MODE in
+      clean) return 0 ;;
+      dirty|mount_fail|umount_fail)
+        if [[ $XFS_RESTORE_REPAIR_CALLS -eq 1 ]]; then
+          printf '%s\n' 'ALERT: The filesystem has valuable metadata changes in a log which is being ignored because the -n option was used.' >&2
+          return 1
+        fi
+        return 0
+        ;;
+      corruption) printf '%s\n' 'fatal error -- metadata corruption' >&2; return 1 ;;
+      second_repair_fail)
+        if [[ $XFS_RESTORE_REPAIR_CALLS -eq 1 ]]; then
+          printf '%s\n' 'ALERT: The filesystem has valuable metadata changes in a log which is being ignored because the -n option was used.' >&2
+        else
+          printf '%s\n' 'fatal error -- metadata corruption' >&2
+        fi
+        return 1
+        ;;
+    esac
+  fi
+  [[ ${XFS_PREFLIGHT_MODE:-ok} != repair_fail ]]
+}
+
+: >"$LVM_TRACE"
+rootpxe_xfs_capture_preflight /dev/mock1 || fail xfs-preflight-success
+grep -Fq 'mount:-t xfs -o rw,nouuid /dev/mock1' "$LVM_TRACE" || fail xfs-preflight-mount-order
+grep -Fq 'umount:' "$LVM_TRACE" || fail xfs-preflight-umount-order
+grep -Fq 'xfs_repair:-n /dev/mock1' "$LVM_TRACE" || fail xfs-preflight-repair-order
+for xfs_failure in mounted findmnt_fail mount_fail umount_fail repair_fail; do
+  : >"$LVM_TRACE"; export XFS_PREFLIGHT_MODE="$xfs_failure"
+  rootpxe_xfs_capture_preflight /dev/mock1 && fail "xfs-preflight-$xfs_failure"
+  ! grep -Fq 'partclone.xfs:' "$LVM_TRACE" || fail "xfs-preflight-$xfs_failure-partclone"
+  [[ $xfs_failure != umount_fail || $(grep -c '^umount:' "$LVM_TRACE") -eq 2 ]] || fail xfs-preflight-umount-retry
+  unset XFS_PREFLIGHT_MODE
+done
+
+# Restoring an older XFS image with an un-replayed journal is accepted only
+# after the exact observed dirty-log diagnostic, one controlled RW replay and
+# a clean second offline check.  Other repair failures must never mount.
+for restore_mode in clean dirty corruption mount_fail umount_fail second_repair_fail; do
+  : >"$LVM_TRACE"; : >"$tmp/xfs-restore-state"; : >"$tmp/xfs-restore-output"; export XFS_RESTORE_MODE="$restore_mode" XFS_RESTORE_STATE_FILE="$tmp/xfs-restore-state"
+  case $restore_mode in
+    clean|dirty) rootpxe_xfs_restore_postcheck /dev/mock1 2>"$tmp/xfs-restore-output" || fail "xfs-restore-$restore_mode" ;;
+    *) rootpxe_xfs_restore_postcheck /dev/mock1 2>"$tmp/xfs-restore-output" && fail "xfs-restore-$restore_mode-must-fail" ;;
+  esac
+  case $restore_mode in
+    clean)
+      ! grep -Fq 'mount:' "$LVM_TRACE" || fail xfs-restore-clean-must-not-mount
+      ;;
+    dirty)
+      grep -Fq 'valuable metadata changes in a log' "$tmp/xfs-restore-output" || fail xfs-restore-dirty-diagnostic-visible
+      repair_first=$(grep -n -F 'xfs_repair:-n /dev/mock1' "$LVM_TRACE" | sed -n '1p' | cut -d: -f1)
+      mount_line=$(grep -n -F 'mount:-t xfs -o rw,nouuid /dev/mock1' "$LVM_TRACE" | cut -d: -f1)
+      umount_line=$(grep -n -F 'umount:' "$LVM_TRACE" | sed -n '1p' | cut -d: -f1)
+      repair_second=$(grep -n -F 'xfs_repair:-n /dev/mock1' "$LVM_TRACE" | sed -n '2p' | cut -d: -f1)
+      [[ $repair_first =~ ^[0-9]+$ && $mount_line =~ ^[0-9]+$ && $umount_line =~ ^[0-9]+$ && $repair_second =~ ^[0-9]+$ && $repair_first -lt $mount_line && $mount_line -lt $umount_line && $umount_line -lt $repair_second ]] || fail xfs-restore-dirty-order
+      ;;
+    corruption)
+      [[ ${rootpxe_xfs_restore_error:-} == post_restore_inconsistent ]] || fail xfs-restore-corruption-reason
+      grep -Fq 'fatal error -- metadata corruption' "$tmp/xfs-restore-output" || fail xfs-restore-corruption-diagnostic-visible
+      ! grep -Fq 'mount:' "$LVM_TRACE" || fail xfs-restore-corruption-must-not-mount
+      ;;
+    mount_fail) [[ ${rootpxe_xfs_restore_error:-} == dirty_log_replay_mount_failed ]] || fail xfs-restore-mount-reason ;;
+    umount_fail)
+      [[ ${rootpxe_xfs_restore_error:-} == dirty_log_replay_unmount_failed ]] || fail xfs-restore-umount-reason
+      [[ $(grep -c '^umount:' "$LVM_TRACE") -eq 2 ]] || fail xfs-restore-umount-retry
+      ;;
+    second_repair_fail) [[ ${rootpxe_xfs_restore_error:-} == post_replay_check_failed ]] || fail xfs-restore-second-repair-reason ;;
+  esac
+  unset XFS_RESTORE_MODE XFS_RESTORE_STATE_FILE
+done
+
 # Legal preflight/capture executes real helper branches; it occurs before any permit.
 rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" || fail legal-preflight
 [[ $rootpxe_lvm_active == yes && $rootpxe_lvm_pv_number == 1 ]] || fail facts
+export LVM_FS=xfs XFS_PREFLIGHT_MODE=mount_fail; : >"$LVM_TRACE"
+rootpxe_capture_lvm_volumes "$tmp/image" && fail lvm-xfs-preflight-must-fail
+[[ ${rootpxe_lvm_capture_error_code:-} == XFS_CAPTURE_PREFLIGHT_FAILED && ${rootpxe_lvm_capture_error_reason:-} == lv_root_log_replay_mount_failed ]] || fail lvm-xfs-preflight-specific-error
+! grep -Fq 'partclone.xfs:' "$LVM_TRACE" || fail lvm-xfs-preflight-must-not-partclone
+unset LVM_FS XFS_PREFLIGHT_MODE
+(
+  debugPause() { :; }
+  fsTypeSetting() { fstype=xfs; }
+  getPartType() { parttype=83; }
+  getPartitionNumber() { part_number=1; }
+  handleError() { printf 'handleError:%s\n' "$*" >>"$LVM_TRACE"; return 1; }
+  uploadFormat() { printf 'upload:%s\n' "$*" >>"$LVM_TRACE"; : >"$2.000"; rootpxe_last_writer_pid=1; }
+  imgPartitionType=all; storage=mock; img=image
+  export XFS_PREFLIGHT_MODE=mount_fail; : >"$LVM_TRACE"
+  savePartition /dev/mock1 1 "$tmp/physical-xfs" && fail physical-xfs-preflight-must-fail
+  ! grep -Eq '^(upload:|partclone\.xfs:)' "$LVM_TRACE" || fail physical-xfs-preflight-must-not-write
+  unset XFS_PREFLIGHT_MODE; : >"$LVM_TRACE"
+  mkdir -p "$tmp/physical-xfs"
+  savePartition /dev/mock1 1 "$tmp/physical-xfs" || fail physical-xfs-capture-success
+  mount_line=$(grep -n -F 'mount:-t xfs -o rw,nouuid /dev/mock1' "$LVM_TRACE" | cut -d: -f1)
+  repair_line=$(grep -n -F 'xfs_repair:-n /dev/mock1' "$LVM_TRACE" | cut -d: -f1)
+  upload_line=$(grep -n -F 'upload:' "$LVM_TRACE" | cut -d: -f1)
+  partclone_line=$(grep -n -F 'partclone.xfs:' "$LVM_TRACE" | cut -d: -f1)
+  [[ $mount_line =~ ^[0-9]+$ && $repair_line =~ ^[0-9]+$ && $upload_line =~ ^[0-9]+$ && $partclone_line =~ ^[0-9]+$ && $mount_line -lt $repair_line && $repair_line -lt $upload_line && $upload_line -lt $partclone_line ]] || fail physical-xfs-preflight-order
+)
+unset -f findmnt mount umount xfs_repair
 rootpxe_lvm_storage_identifier 'vg+data' || fail plus-storage-identifier
 rootpxe_lvm_storage_identifier 'vg:data' && fail colon-storage-identifier
 rootpxe_lvm_storage_filename 'd1p1.lvm.lv.root+data.img' || fail plus-storage-filename
@@ -699,7 +883,9 @@ export LVM_MODE=casefold; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" &
 rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" || fail facts-after-multipv
 : >"$LVM_TRACE"; export PV_FAIL=1; rootpxe_capture_lvm_volumes "$tmp/image" && fail sidecar-failure; unset PV_FAIL
 grep -Fq 'vgchange:-an --select vg_uuid=vg-1 vg0' "$LVM_TRACE" || fail failed-capture-vg-not-deactivated
-export WRITER_FAIL=1; rootpxe_capture_lvm_volumes "$tmp/image" && fail writer-failure; unset WRITER_FAIL
+export WRITER_FAIL=1; rootpxe_capture_lvm_volumes "$tmp/image" && fail writer-failure
+[[ ${rootpxe_lvm_capture_error_code:-} == LVM_LV_WRITER_FAILED && ${rootpxe_lvm_capture_error_reason:-} == lv_root_ext4 ]] || fail writer-failure-specific-error
+unset WRITER_FAIL
 : >"$LVM_TRACE"; export UPLOAD_FAIL=1; rootpxe_capture_lvm_volumes "$tmp/image" && fail upload-failure; unset UPLOAD_FAIL
 export LVM_MODE=cross; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail cross-disk-vg; unset LVM_MODE
 export LVM_SEGTYPE=thin; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail thin-topology; unset LVM_SEGTYPE
@@ -728,13 +914,21 @@ node -e 'const extent=4194304,capacity=100*extent,min=9*extent,fixed=10*extent,p
 
 rootpxe_resolved_lvm_layout_file="$tmp/plan.json"; printf '{}' >"$rootpxe_resolved_lvm_layout_file"; rootpxe_disk_permit_granted=no
 rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail no-permit
+[[ ${rootpxe_restore_lvm_error_code:-} == LVM_RESTORE_PERMIT_FAILED && ${rootpxe_restore_lvm_error_reason:-} == permit_or_plan ]] || fail no-permit-specific-error
 [[ ! -s "$LVM_TRACE" ]] || fail no-permit-write
 echo pv-1 >"$tmp/image/d1p1.lvm.pv.meta"; echo pv-1 >"$tmp/image/d1p1.lvm.vg.cfg"; : >"$tmp/image/d1p1.lvm.lv.root.img"
 rootpxe_disk_stable_identity() { echo target-1; }; rootpxe_disk_permit_granted=yes; rootpxe_disk_permit_target_id=target-1; rootpxe_disk_permit_operation=deploy_write
-writeImage() { echo "writeImage:$*" >>"$LVM_TRACE"; }
+writeImage() { echo "writeImage:$*" >>"$LVM_TRACE"; [[ ${WRITE_FAIL:-0} != 1 ]]; }
+cat >"$rootpxe_resolved_lvm_layout_file" <<'EOF'
+{"pv":{"uuid":"pv-1","partitionNumber":1,"originalBytes":268435456,"artifact":"d1p1.lvm.pv.meta","vgConfigArtifact":"d1p1.lvm.vg.cfg"},"vg":{"name":"vg0","uuid":"vg-1","extentBytes":4194304},"pvBytes":268435456,"volumes":[{"name":"root","uuid":"lv-root","fs":"ext4","artifact":"d1p1.lvm.lv.root.img","resolvedBytes":67108864},{"name":"swap","uuid":"lv-swap","fs":"swap","artifact":"","swapUuid":"swap-uuid","resolvedBytes":33554432}]}
+EOF
 for list_mode in fail empty; do
   : >"$LVM_TRACE"; export LVM_LIST_MODE="$list_mode"
   rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail "lvm-list-$list_mode"
+  case "$list_mode" in
+    fail) [[ ${rootpxe_restore_lvm_error_code:-} == LVM_LV_LIST_BUILD_FAILED && ${rootpxe_restore_lvm_error_reason:-} == jq ]] || fail "lvm-list-fail-specific-error-${rootpxe_restore_lvm_error_code:-unset}-${rootpxe_restore_lvm_error_reason:-unset}" ;;
+    empty) [[ ${rootpxe_restore_lvm_error_code:-} == LVM_LV_LIST_EMPTY_FAILED && ${rootpxe_restore_lvm_error_reason:-} == empty ]] || fail "lvm-list-empty-specific-error-${rootpxe_restore_lvm_error_code:-unset}-${rootpxe_restore_lvm_error_reason:-unset}" ;;
+  esac
   [[ ! -s "$LVM_TRACE" ]] || fail "lvm-list-$list_mode-wrote-before-parse"
   unset LVM_LIST_MODE
 done
@@ -752,6 +946,21 @@ pvs() { printf '{"report":[{"pv":[{"pv_name":"/dev/mock1","pv_uuid":"pv-1","vg_n
 pvs --reportformat json -o pv_name,pv_uuid,vg_name,vg_uuid /dev/mock1 | MSYS_NO_PATHCONV=1 "$real_jq" -e '.report[0].pv | length == 1 and .[0].pv_name == "/dev/mock1" and .[0].pv_uuid == "pv-1" and .[0].vg_name == "vg0" and .[0].vg_uuid == "vg-1"' >/dev/null || fail restore-pvs-json-fixture
 restore_pvs_json=$(pvs --reportformat json -o pv_name,pv_uuid,vg_name,vg_uuid /dev/mock1)
 rootpxe_lvm_json_jq -e --arg path /dev/mock1 --arg pv pv-1 --arg vg vg0 --arg vguuid vg-1 '(.report|type=="array" and length==1 and ((.[0].pv? // [])|type=="array") and ((.[0].pv? // [])|length==1) and .[0].pv[0].pv_name==$path and .[0].pv[0].pv_uuid==$pv and .[0].pv[0].vg_name==$vg and .[0].pv[0].vg_uuid==$vguuid)' <<<"$restore_pvs_json" >/dev/null || fail restore-pvs-json-production-expression
+# The resolved plan generated from schema deliberately omits swap.artifact.
+# It must be normalized to an empty NUL field, not jq's textual "null", so
+# prevalidation reaches (mocked) pvcreate without writing the target.
+sed 's/,"artifact":"","swapUuid":"swap-uuid"/,"swapUuid":"swap-uuid"/' "$rootpxe_resolved_lvm_layout_file" >"$tmp/swap-missing-artifact-plan.json"
+# Real jq behaviour that caused the PXEOS failure: a missing field serializes
+# as textual null unless it is normalized before emitting the NUL record.
+[[ $(rootpxe_test_real_jq -r '.volumes[] | select(.fs == "swap") | (.artifact | tostring)' "$tmp/swap-missing-artifact-plan.json") == null ]] || fail swap-missing-artifact-old-jq-null-proof
+[[ $(rootpxe_test_real_jq -r '.volumes[] | select(.fs == "swap") | ((.artifact // "") | @json)' "$tmp/swap-missing-artifact-plan.json") == '""' ]] || fail swap-missing-artifact-new-jq-empty-proof
+rootpxe_resolved_lvm_layout_file="$tmp/swap-missing-artifact-plan.json"; : >"$LVM_TRACE"
+pvcreate() { echo "pvcreate:$*" >>"$LVM_TRACE"; return 1; }
+rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail swap-missing-artifact-must-stop-at-fake-pvcreate
+[[ ${rootpxe_restore_lvm_error_code:-} == LVM_PV_CREATE_FAILED && ${rootpxe_restore_lvm_error_reason:-} == pvcreate ]] || fail swap-missing-artifact-specific-error
+grep -Fq 'pvcreate:' "$LVM_TRACE" || fail swap-missing-artifact-did-not-reach-pvcreate
+unset -f pvcreate
+rootpxe_resolved_lvm_layout_file="$tmp/plan.json"
 sed 's/"name":"swap","uuid":"lv-swap","fs":"swap","artifact":"","swapUuid":"swap-uuid","resolvedBytes":33554432/"name":"ROOT","uuid":"lv-root-upper","fs":"ext4","artifact":"d1p1.lvm.lv.root.img","resolvedBytes":33554432/' "$rootpxe_resolved_lvm_layout_file" >"$tmp/casefold-plan.json"
 rootpxe_resolved_lvm_layout_file="$tmp/casefold-plan.json"; : >"$LVM_TRACE"
 rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail restore-casefold-lv-must-fail
@@ -760,6 +969,34 @@ rootpxe_resolved_lvm_layout_file="$tmp/plan.json"
 rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock || fail permitted-restore
 for marker in pvcreate vgcfgrestore writeImage; do grep -Fq "$marker:" "$LVM_TRACE" || fail "missing-$marker"; done
 grep -Fq 'd1p1.lvm.lv.root.img' "$LVM_TRACE" || fail restore-readable-lv-artifact
+export WRITE_FAIL=1; : >"$LVM_TRACE"
+rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail restore-lv-write-must-fail
+[[ ${rootpxe_restore_lvm_error_code:-} == LVM_LV_IMAGE_RESTORE_FAILED && ${rootpxe_restore_lvm_error_reason:-} == lv_root_ext4 ]] || fail restore-lv-write-specific-error
+unset WRITE_FAIL
+sed 's/"fs":"ext4","artifact":"d1p1.lvm.lv.root.img"/"fs":"xfs","artifact":"d1p1.lvm.lv.root.img"/' "$rootpxe_resolved_lvm_layout_file" >"$tmp/xfs-plan.json"
+rootpxe_resolved_lvm_layout_file="$tmp/xfs-plan.json"; : >"$tmp/xfs-restore-state"; export XFS_RESTORE_MODE=dirty XFS_RESTORE_STATE_FILE="$tmp/xfs-restore-state"; : >"$LVM_TRACE"
+rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock || fail restore-xfs-dirty-log-replay-success
+xfs_restore_check_count=$(grep -c '^xfs_repair:-n /dev/vg0/root' "$LVM_TRACE")
+xfs_restore_state_count=$(wc -c <"$tmp/xfs-restore-state")
+[[ $xfs_restore_check_count -eq 2 && $xfs_restore_state_count -eq 2 ]] || fail "restore-xfs-dirty-log-replay-check-count-$xfs_restore_check_count-state-$xfs_restore_state_count"
+grep -Fq 'mount:-t xfs -o rw,nouuid /dev/vg0/root' "$LVM_TRACE" || fail restore-xfs-dirty-log-replay-mount
+grep -Fq 'umount:' "$LVM_TRACE" || fail restore-xfs-dirty-log-replay-umount
+unset XFS_RESTORE_MODE XFS_RESTORE_STATE_FILE
+for xfs_restore_mode_code in \
+  'corruption:LVM_XFS_POST_RESTORE_CHECK_FAILED' \
+  'mount_fail:LVM_XFS_DIRTY_LOG_REPLAY_MOUNT_FAILED' \
+  'umount_fail:LVM_XFS_DIRTY_LOG_REPLAY_UNMOUNT_FAILED' \
+  'second_repair_fail:LVM_XFS_POST_REPLAY_CHECK_FAILED'; do
+  xfs_restore_mode=${xfs_restore_mode_code%%:*}; xfs_expected_code=${xfs_restore_mode_code#*:}
+  : >"$tmp/xfs-restore-state"; export XFS_RESTORE_MODE="$xfs_restore_mode" XFS_RESTORE_STATE_FILE="$tmp/xfs-restore-state"; : >"$LVM_TRACE"
+  rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail "restore-xfs-$xfs_restore_mode-must-fail"
+  [[ ${rootpxe_restore_lvm_error_code:-} == "$xfs_expected_code" && ${rootpxe_restore_lvm_error_reason:-} == lv_root ]] || fail "restore-xfs-$xfs_restore_mode-specific-error-${rootpxe_restore_lvm_error_code:-unset}-${rootpxe_restore_lvm_error_reason:-unset}"
+  unset XFS_RESTORE_MODE XFS_RESTORE_STATE_FILE
+done
+rootpxe_resolved_lvm_layout_file="$tmp/xfs-plan.json"; export XFS_REPAIR_RC=1; : >"$LVM_TRACE"
+rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail restore-xfs-post-check-must-fail
+[[ ${rootpxe_restore_lvm_error_code:-} == LVM_XFS_POST_RESTORE_CHECK_FAILED && ${rootpxe_restore_lvm_error_reason:-} == lv_root ]] || fail restore-xfs-post-check-specific-error
+unset XFS_REPAIR_RC; rootpxe_resolved_lvm_layout_file="$tmp/plan.json"
 pvs() { printf '{"report":[{"pv":[{"pv_name":"/dev/mock1","pv_uuid":"pv-1","vg_name":"vg0","vg_uuid":"wrong-vg"}]}]}\n'; }
 : >"$LVM_TRACE"
 rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail restore-pv-vg-identity-must-fail
@@ -769,6 +1006,7 @@ grep -Fq 'vgchange:-an --select vg_uuid=vg-1 vg0' "$LVM_TRACE" || fail restore-p
 pvs() { printf '{"report":[{"pv":[{"pv_name":"/dev/mock1","pv_uuid":"pv-1","vg_name":"vg0","vg_uuid":"vg-1"}]}]}\n'; }
 sed 's/d1p1\.lvm\.lv\.root\.img/d1p1.lvm.lv.name|safe.img/' "$rootpxe_resolved_lvm_layout_file" >"$tmp/pipe-plan.json"
 rootpxe_resolved_lvm_layout_file="$tmp/pipe-plan.json"; : >"$LVM_TRACE"; rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail pipe-artifact-must-reject
+[[ ${rootpxe_restore_lvm_error_code:-} == LVM_LV_ARTIFACT_INVALID_OR_MISSING && ${rootpxe_restore_lvm_error_reason:-} == lv_root ]] || fail pipe-artifact-specific-error
 [[ ! -s "$LVM_TRACE" ]] || fail pipe-artifact-wrote-before-validation
 sed 's/"pvBytes":268435456/"pvBytes":134217728/' "$rootpxe_resolved_lvm_layout_file" >"$tmp/small-plan.json"
 rootpxe_resolved_lvm_layout_file="$tmp/small-plan.json"; : >"$LVM_TRACE"; rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail small-pv-must-fail

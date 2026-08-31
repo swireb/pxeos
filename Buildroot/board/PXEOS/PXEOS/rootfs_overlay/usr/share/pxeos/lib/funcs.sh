@@ -292,11 +292,82 @@ rootpxe_lvm_capture_preflight() {
     rootpxe_lvm_active=yes
     export rootpxe_lvm_active rootpxe_lvm_facts_file rootpxe_lvm_lv_facts_file rootpxe_lvm_pv_path rootpxe_lvm_pv_number rootpxe_lvm_pv_uuid rootpxe_lvm_vg_name rootpxe_lvm_vg_uuid rootpxe_lvm_pv_bytes rootpxe_lvm_pe_start_bytes rootpxe_lvm_vg_extent_bytes rootpxe_lvm_vg_free_bytes
 }
+rootpxe_xfs_capture_preflight() {
+    local device="$1" mount_point="" primary_error=""
+    rootpxe_xfs_capture_error=""
+    [[ -n $device ]] || { rootpxe_xfs_capture_error=invalid_device; return 1; }
+    findmnt -rn -S "$device" >/dev/null 2>&1
+    case $? in
+        0) rootpxe_xfs_capture_error=source_mounted; return 1 ;;
+        1) ;;
+        *) rootpxe_xfs_capture_error=mount_state_check_failed; return 1 ;;
+    esac
+    mount_point=$(mktemp -d /tmp/rootpxe-xfs-capture.XXXXXX) || { rootpxe_xfs_capture_error=temp_mountpoint_failed; return 1; }
+    if ! mount -t xfs -o rw,nouuid "$device" "$mount_point"; then
+        primary_error=log_replay_mount_failed
+    elif ! umount "$mount_point"; then
+        primary_error=log_replay_unmount_failed
+        umount "$mount_point" >/dev/null 2>&1 || true
+    elif ! xfs_repair -n "$device"; then
+        primary_error=post_replay_check_failed
+    fi
+    if [[ -n $mount_point ]] && ! rmdir "$mount_point" >/dev/null 2>&1 && [[ -z $primary_error ]]; then
+        primary_error=temp_cleanup_failed
+    fi
+    [[ -z $primary_error ]] || { rootpxe_xfs_capture_error=$primary_error; return 1; }
+}
+
+# An XFS image captured by an older PXEOS environment can retain an
+# un-replayed journal. xfs_repair -n rejects it by design, so replay only the
+# exact diagnostic observed in production; every other failure stays closed.
+rootpxe_xfs_restore_postcheck() {
+    local device="$1" mount_point="" primary_error="" repair_output repair_rc mount_state
+    rootpxe_xfs_restore_error=""
+    [[ -n $device ]] || { rootpxe_xfs_restore_error=invalid_device; return 1; }
+    repair_output=$(xfs_repair -n "$device" 2>&1)
+    repair_rc=$?
+    [[ -z $repair_output ]] || printf '%s\n' "$repair_output" >&2
+    [[ $repair_rc -eq 0 ]] && return 0
+    [[ $repair_output == *'valuable metadata changes in a log'* ]] || {
+        rootpxe_xfs_restore_error=post_restore_inconsistent
+        return 1
+    }
+    findmnt -rn -S "$device" >/dev/null 2>&1
+    mount_state=$?
+    case $mount_state in
+        0) rootpxe_xfs_restore_error=device_mounted; return 1 ;;
+        1) ;;
+        *) rootpxe_xfs_restore_error=mount_state_query_failed; return 1 ;;
+    esac
+    mount_point=$(mktemp -d /tmp/rootpxe-xfs-restore.XXXXXX) || {
+        rootpxe_xfs_restore_error=temp_create_failed
+        return 1
+    }
+    if ! mount -t xfs -o rw,nouuid "$device" "$mount_point"; then
+        primary_error=dirty_log_replay_mount_failed
+    elif ! umount "$mount_point"; then
+        primary_error=dirty_log_replay_unmount_failed
+        umount "$mount_point" >/dev/null 2>&1 || true
+    else
+        repair_output=$(xfs_repair -n "$device" 2>&1)
+        repair_rc=$?
+        [[ -z $repair_output ]] || printf '%s\n' "$repair_output" >&2
+        [[ $repair_rc -eq 0 ]] || primary_error=post_replay_check_failed
+    fi
+    if [[ -n $mount_point ]] && ! rmdir "$mount_point" >/dev/null 2>&1 && [[ -z $primary_error ]]; then
+        primary_error=temp_cleanup_failed
+    fi
+    [[ -z $primary_error ]] || { rootpxe_xfs_restore_error=$primary_error; return 1; }
+}
+
 rootpxe_capture_lvm_volumes() {
-    local image_path="$1" pv_artifact vg_artifact lv_name lv_uuid lv_path lv_size fs swap_uuid artifact fifo=/tmp/pigz1 producer writer min_bytes pv_min_bytes stage vg_active=no
+    local image_path="$1" pv_artifact vg_artifact lv_name lv_uuid lv_path lv_size fs swap_uuid artifact fifo=/tmp/pigz1 producer writer min_bytes pv_min_bytes stage vg_active=no rootpxe_lvm_capture_status_file rootpxe_lvm_capture_status_rc
+    rootpxe_lvm_capture_error_code=LVM_CAPTURE_FAILED
+    rootpxe_lvm_capture_error_reason=unknown
     [[ ${rootpxe_lvm_active:-no} == yes && ${rootpxe_lvm_captured:-no} != yes ]] || return 0
     rootpxe_lvm_is_pv_partition "$rootpxe_lvm_pv_path" || return 1
-    stage=$(mktemp -d "$image_path/.rootpxe-lvm.XXXXXX") || return 1
+    rootpxe_lvm_capture_status_file=$(mktemp /tmp/rootpxe-lvm-capture-status.XXXXXX) || return 1
+    stage=$(mktemp -d "$image_path/.rootpxe-lvm.XXXXXX") || { rm -f -- "$rootpxe_lvm_capture_status_file"; return 1; }
     (
     trap 'rm -f -- "$fifo"; [[ $vg_active == yes ]] && vgchange -an --select "vg_uuid=$rootpxe_lvm_vg_uuid" "$rootpxe_lvm_vg_name" >/dev/null 2>&1 || true; rm -rf -- "$stage"' EXIT
     pv_artifact="d1p${rootpxe_lvm_pv_number}.lvm.pv.meta"; vg_artifact="d1p${rootpxe_lvm_pv_number}.lvm.vg.cfg"
@@ -318,11 +389,16 @@ rootpxe_capture_lvm_volumes() {
         min_bytes="$lv_size"; producer=0; writer=0
         if [[ $fs != swap ]]; then
             artifact="d1p${rootpxe_lvm_pv_number}.lvm.lv.${lv_name}.img"; rootpxe_safe_relative_path "$artifact" >/dev/null || return 1
+            if [[ $fs == xfs ]] && ! rootpxe_xfs_capture_preflight "$lv_path"; then
+                printf '%s|%s\n' XFS_CAPTURE_PREFLIGHT_FAILED "lv_${lv_name}_${rootpxe_xfs_capture_error:-unknown}" >"$rootpxe_lvm_capture_status_file"
+                return 1
+            fi
             rm -f "$fifo" || return 1
             uploadFormat "$fifo" "$stage/$artifact" || return 1
             if [[ $fs == xfs ]]; then partclone.xfs -cs "$lv_path" -O "$fifo" -Nf 1 -a0; else partclone.extfs -cs "$lv_path" -O "$fifo" -Nf 1 -a0; fi
             producer=$?; rootpxe_wait_for_writer "$rootpxe_last_writer_pid"; writer=$?
-            [[ $producer -eq 0 && $writer -eq 0 ]] || { rm -f "$fifo"; return 1; }
+            [[ $producer -eq 0 ]] || { printf '%s|%s\n' LVM_LV_PARTCLONE_FAILED "lv_${lv_name}_${fs}" >"$rootpxe_lvm_capture_status_file"; rm -f "$fifo"; return 1; }
+            [[ $writer -eq 0 ]] || { printf '%s|%s\n' LVM_LV_WRITER_FAILED "lv_${lv_name}_${fs}" >"$rootpxe_lvm_capture_status_file"; rm -f "$fifo"; return 1; }
             mv "$stage/$artifact.000" "$stage/$artifact" >/dev/null 2>&1 || return 1
         fi
         printf '%s|%s|%s|%s|%s|%s|%s\n' "$lv_name" "$lv_uuid" "$lv_size" "$min_bytes" "$fs" "$artifact" "$swap_uuid" >>"$stage/d1.lvm.capture.tsv" || return 1
@@ -344,7 +420,13 @@ rootpxe_capture_lvm_volumes() {
     # The schema is the commit marker.  Never publish it before every sidecar
     # and LV payload has reached its final location.
     mv "$stage/d1.lvm.schema.json" "$image_path/d1.lvm.schema.json" || return 1
-    ) || return 1
+    )
+    rootpxe_lvm_capture_status_rc=$?
+    if [[ $rootpxe_lvm_capture_status_rc -ne 0 && -r $rootpxe_lvm_capture_status_file ]]; then
+        IFS='|' read -r rootpxe_lvm_capture_error_code rootpxe_lvm_capture_error_reason <"$rootpxe_lvm_capture_status_file" || true
+    fi
+    rm -f -- "$rootpxe_lvm_capture_status_file"
+    [[ $rootpxe_lvm_capture_status_rc -eq 0 ]] || return 1
     rootpxe_lvm_captured=yes
     export rootpxe_lvm_captured
 }
@@ -777,34 +859,46 @@ rootpxe_validate_lvm_deployment_layout() {
 # Restore metadata and per-LV payloads only after a matching deploy permit.
 # The PV never has a raw payload: doing so would overwrite the layout just
 # resolved from the immutable task snapshot.
-rootpxe_restore_lvm_volumes() (
+rootpxe_restore_lvm_volumes() {
+    local rootpxe_restore_status_file rootpxe_restore_status_rc
+    rootpxe_restore_lvm_error_code=LVM_RESTORE_PREFLIGHT_FAILED
+    rootpxe_restore_lvm_error_reason=preflight_or_validation
+    rootpxe_restore_status_file=$(mktemp /tmp/rootpxe-lvm-restore-status.XXXXXX) || return 1
+    # Keep a caller-visible default even when a preflight branch fails before
+    # it can name a narrower cause inside the isolated restore subshell.
+    printf '%s|%s\n' "$rootpxe_restore_lvm_error_code" "$rootpxe_restore_lvm_error_reason" >"$rootpxe_restore_status_file" || { rm -f -- "$rootpxe_restore_status_file"; return 1; }
+    (
+    rootpxe_restore_lvm_fail() {
+        printf '%s|%s\n' "$1" "$2" >"$rootpxe_restore_status_file"
+        return 1
+    }
     local image_path="$1" target_disk="$2" plan="${rootpxe_resolved_lvm_layout_file:-}" pv vg pv_path pv_meta vg_cfg lv_name lv_uuid lv_fs lv_artifact lv_bytes swap_uuid target_id actual_size current_size pv_original pv_bytes vg_uuid extent lv_list expected_lvs prevalidated_lvs=0 restored_lvs=0 xfs_mount="" vg_active=no vgs_json pvs_json lvs_json
     local -A seen_lv_names=() seen_artifacts=()
     trap '[[ -n $xfs_mount ]] && umount "$xfs_mount" >/dev/null 2>&1 || true; [[ -n $xfs_mount ]] && rmdir "$xfs_mount" >/dev/null 2>&1 || true; [[ $vg_active == yes && -n $vg && -n $vg_uuid ]] && vgchange -an --select "vg_uuid=$vg_uuid" "$vg" >/dev/null 2>&1 || true; rm -f -- "${lv_list:-}"' EXIT
-    [[ ${rootpxe_disk_permit_granted:-no} == yes && -r $plan ]] || return 1
-    target_id=$(rootpxe_disk_stable_identity "$target_disk") || return 1
-    [[ ${rootpxe_disk_permit_target_id:-} == "$target_id" && ${rootpxe_disk_permit_operation:-} =~ ^(deploy_write|nvme_format\+deploy_write)$ ]] || return 1
-    pv=$(jq -er '.pv.uuid' "$plan") || return 1; vg=$(jq -er '.vg.name' "$plan") || return 1
-    pv_original=$(jq -er '.pv.originalBytes' "$plan") || return 1; vg_uuid=$(jq -er '.vg.uuid' "$plan") || return 1; extent=$(jq -er '.vg.extentBytes' "$plan") || return 1
-    pv_path=$(rootpxe_lvm_partition_path "$target_disk" "$(jq -er '.pv.partitionNumber' "$plan")") || return 1
-    pv_meta=$(jq -er '.pv.artifact' "$plan") || return 1; vg_cfg=$(jq -er '.pv.vgConfigArtifact' "$plan") || return 1
-    rootpxe_lvm_safe_identifier "$pv" && rootpxe_lvm_storage_identifier "$vg" && rootpxe_lvm_safe_identifier "$vg_uuid" || return 1
-    rootpxe_safe_relative_path "$pv_meta" >/dev/null && rootpxe_safe_relative_path "$vg_cfg" >/dev/null || return 1
-    [[ -r "$image_path/$pv_meta" && -r "$image_path/$vg_cfg" ]] || return 1
+    [[ ${rootpxe_disk_permit_granted:-no} == yes && -r $plan ]] || { rootpxe_restore_lvm_fail LVM_RESTORE_PERMIT_FAILED permit_or_plan; return 1; }
+    target_id=$(rootpxe_disk_stable_identity "$target_disk") || { rootpxe_restore_lvm_fail LVM_RESTORE_TARGET_IDENTITY_FAILED stable_identity; return 1; }
+    [[ ${rootpxe_disk_permit_target_id:-} == "$target_id" && ${rootpxe_disk_permit_operation:-} =~ ^(deploy_write|nvme_format\+deploy_write)$ ]] || { rootpxe_restore_lvm_fail LVM_RESTORE_PERMIT_FAILED target_or_operation; return 1; }
+    pv=$(jq -er '.pv.uuid' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED pv_uuid; return 1; }; vg=$(jq -er '.vg.name' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED vg_name; return 1; }
+    pv_original=$(jq -er '.pv.originalBytes' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED pv_original_bytes; return 1; }; vg_uuid=$(jq -er '.vg.uuid' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED vg_uuid; return 1; }; extent=$(jq -er '.vg.extentBytes' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED vg_extent_bytes; return 1; }
+    pv_path=$(rootpxe_lvm_partition_path "$target_disk" "$(jq -er '.pv.partitionNumber' "$plan")") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED pv_partition; return 1; }
+    pv_meta=$(jq -er '.pv.artifact' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED pv_artifact; return 1; }; vg_cfg=$(jq -er '.pv.vgConfigArtifact' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED vg_config_artifact; return 1; }
+    rootpxe_lvm_safe_identifier "$pv" && rootpxe_lvm_storage_identifier "$vg" && rootpxe_lvm_safe_identifier "$vg_uuid" || { rootpxe_restore_lvm_fail LVM_RESTORE_IDENTIFIER_INVALID pv_or_vg; return 1; }
+    rootpxe_safe_relative_path "$pv_meta" >/dev/null && rootpxe_safe_relative_path "$vg_cfg" >/dev/null || { rootpxe_restore_lvm_fail LVM_RESTORE_ARTIFACT_PATH_INVALID pv_or_vg_config; return 1; }
+    [[ -r "$image_path/$pv_meta" && -r "$image_path/$vg_cfg" ]] || { rootpxe_restore_lvm_fail LVM_RESTORE_METADATA_ARTIFACT_MISSING pv_or_vg_config; return 1; }
     # The PV sidecar is not a decorative artifact: it binds the restore file
     # to the captured PV UUID before any destructive LVM command is issued.
-    grep -F -- "$pv" "$image_path/$pv_meta" >/dev/null 2>&1 || return 1
-    [[ $pv_original =~ ^[1-9][0-9]*$ && $extent =~ ^[1-9][0-9]*$ ]] || return 1
+    grep -F -- "$pv" "$image_path/$pv_meta" >/dev/null 2>&1 || { rootpxe_restore_lvm_fail LVM_RESTORE_PV_METADATA_MISMATCH pv_uuid; return 1; }
+    [[ $pv_original =~ ^[1-9][0-9]*$ && $extent =~ ^[1-9][0-9]*$ ]] || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_SIZE_INVALID pv_or_extent; return 1; }
     # Process substitution would hide jq's exit status from the while loop.
     # Materialise and validate the whole NUL-framed LV list before *any* LVM
     # metadata command: malformed/empty plans must fail loud without writes.
-    lv_list=$(mktemp /tmp/rootpxe-lvm-restore.XXXXXX) || return 1
-    chmod 600 "$lv_list" || { rm -f "$lv_list"; return 1; }
-    if ! jq -jr '.volumes[]|.name,"\u0000",.uuid,"\u0000",.fs,"\u0000",.artifact,"\u0000",(.resolvedBytes|tostring),"\u0000",(.swapUuid // ""),"\u0000"' "$plan" >"$lv_list"; then
-        rm -f "$lv_list"; return 1
+    lv_list=$(mktemp /tmp/rootpxe-lvm-restore.XXXXXX) || { rootpxe_restore_lvm_fail LVM_LV_LIST_CREATE_FAILED mktemp; return 1; }
+    chmod 600 "$lv_list" || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_LIST_CREATE_FAILED chmod; return 1; }
+    if ! jq -jr '.volumes[]|.name,"\u0000",.uuid,"\u0000",.fs,"\u0000",(.artifact // ""),"\u0000",(.resolvedBytes|tostring),"\u0000",(.swapUuid // ""),"\u0000"' "$plan" >"$lv_list"; then
+        rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_LIST_BUILD_FAILED jq; return 1
     fi
-    expected_lvs=$(jq -er '.volumes|length' "$plan") || { rm -f "$lv_list"; return 1; }
-    [[ $expected_lvs =~ ^[1-9][0-9]*$ ]] || { rm -f "$lv_list"; return 1; }
+    expected_lvs=$(jq -er '.volumes|length' "$plan") || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_LIST_COUNT_FAILED jq; return 1; }
+    [[ $expected_lvs =~ ^[1-9][0-9]*$ ]] || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_LIST_COUNT_FAILED invalid; return 1; }
     rootpxe_lvm_json_jq -e '
       (.volumes) as $volumes |
       ($volumes|type=="array" and length > 0 and
@@ -813,37 +907,38 @@ rootpxe_restore_lvm_volumes() (
                          (.fs|IN("ext2","ext3","ext4","xfs","swap")) and
                          (.resolvedBytes|type=="number" and . > 0)) and
        ([$volumes[].name|ascii_downcase]|unique|length) == ($volumes|length))
-    ' "$plan" >/dev/null || { rm -f "$lv_list"; return 1; }
+    ' "$plan" >/dev/null || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_PLAN_INVALID schema; return 1; }
     # Validate every payload contract before metadata writes.  Artifact names
     # are deliberately restricted to one Windows-safe filename: schema paths
     # are never interpreted as directories and are not scanned for fallbacks.
-    [[ -s $lv_list ]] || { rm -f "$lv_list"; return 1; }
+    [[ -s $lv_list ]] || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_LIST_EMPTY_FAILED empty; return 1; }
     while IFS= read -r -d '' lv_name && IFS= read -r -d '' lv_uuid && IFS= read -r -d '' lv_fs && IFS= read -r -d '' lv_artifact && IFS= read -r -d '' lv_bytes && IFS= read -r -d '' swap_uuid; do
-        rootpxe_lvm_storage_identifier "$lv_name" && rootpxe_lvm_safe_identifier "$lv_uuid" && [[ $lv_bytes =~ ^[1-9][0-9]*$ ]] || { rm -f "$lv_list"; return 1; }
-        [[ ${seen_lv_names[${lv_name,,}]:-0} -eq 0 ]] || { rm -f "$lv_list"; return 1; }
+        rootpxe_lvm_storage_identifier "$lv_name" && rootpxe_lvm_safe_identifier "$lv_uuid" && [[ $lv_bytes =~ ^[1-9][0-9]*$ ]] || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_PLAN_INVALID "lv_${lv_name}_identity_or_size"; return 1; }
+        [[ ${seen_lv_names[${lv_name,,}]:-0} -eq 0 ]] || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_PLAN_INVALID "lv_${lv_name}_duplicate"; return 1; }
         seen_lv_names[${lv_name,,}]=1
         case $lv_fs in ext2|ext3|ext4|xfs)
-            [[ -n $lv_artifact ]] && rootpxe_lvm_storage_filename "$lv_artifact" && rootpxe_safe_relative_path "$lv_artifact" >/dev/null && [[ -r "$image_path/$lv_artifact" && ${seen_artifacts[${lv_artifact,,}]:-0} -eq 0 ]] || { rm -f "$lv_list"; return 1; }
+            [[ -n $lv_artifact ]] && rootpxe_lvm_storage_filename "$lv_artifact" && rootpxe_safe_relative_path "$lv_artifact" >/dev/null && [[ -r "$image_path/$lv_artifact" && ${seen_artifacts[${lv_artifact,,}]:-0} -eq 0 ]] || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_ARTIFACT_INVALID_OR_MISSING "lv_${lv_name}"; return 1; }
             seen_artifacts[${lv_artifact,,}]=1
-            [[ -z $swap_uuid ]] || { rm -f "$lv_list"; return 1; }
+            [[ -z $swap_uuid ]] || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_PLAN_INVALID "lv_${lv_name}_swap_uuid"; return 1; }
             ;;
         swap)
-            [[ -z $lv_artifact ]] && rootpxe_lvm_safe_identifier "$swap_uuid" || { rm -f "$lv_list"; return 1; }
+            [[ -z $lv_artifact ]] && rootpxe_lvm_safe_identifier "$swap_uuid" || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_PLAN_INVALID "lv_${lv_name}_swap_artifact_or_uuid"; return 1; }
             ;;
-        *) rm -f "$lv_list"; return 1;;
+        *) rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_PLAN_INVALID "lv_${lv_name}_filesystem"; return 1;;
         esac
         prevalidated_lvs=$((prevalidated_lvs + 1))
     done <"$lv_list"
-    [[ $prevalidated_lvs -eq $expected_lvs ]] || { rm -f "$lv_list"; return 1; }
-    pv_bytes=$(jq -er '.pvBytes' "$plan") || return 1
-    [[ $pv_bytes =~ ^[1-9][0-9]*$ && $pv_bytes -ge $pv_original ]] || return 1
-    pvcreate --uuid "$pv" --restorefile "$image_path/$vg_cfg" -ff -y "$pv_path" || return 1
-    vgcfgrestore -f "$image_path/$vg_cfg" "$vg" || return 1
+    [[ $prevalidated_lvs -eq $expected_lvs ]] || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_LIST_COUNT_FAILED parsed; return 1; }
+    pv_bytes=$(jq -er '.pvBytes' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED pv_bytes; return 1; }
+    [[ $pv_bytes =~ ^[1-9][0-9]*$ && $pv_bytes -ge $pv_original ]] || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_SIZE_INVALID pv_bytes; return 1; }
+    pvcreate --uuid "$pv" --restorefile "$image_path/$vg_cfg" -ff -y "$pv_path" || { rootpxe_restore_lvm_fail LVM_PV_CREATE_FAILED pvcreate; return 1; }
+    vgcfgrestore -f "$image_path/$vg_cfg" "$vg" || { rootpxe_restore_lvm_fail LVM_VG_CONFIG_RESTORE_FAILED vgcfgrestore; return 1; }
     if [[ $pv_bytes -gt $pv_original ]]; then
-        pvresize --setphysicalvolumesize "${pv_bytes}B" "$pv_path" || return 1
+        pvresize --setphysicalvolumesize "${pv_bytes}B" "$pv_path" || { rootpxe_restore_lvm_fail LVM_PV_RESIZE_FAILED pvresize; return 1; }
     fi
     if ! vgchange -ay --select "vg_uuid=$vg_uuid" "$vg"; then
         vgchange -an --select "vg_uuid=$vg_uuid" "$vg" >/dev/null 2>&1 || true
+        rootpxe_restore_lvm_fail LVM_VG_ACTIVATION_FAILED vgchange
         return 1
     fi
     vg_active=yes
@@ -857,31 +952,51 @@ rootpxe_restore_lvm_volumes() (
     # The list was fully validated before pvcreate.  Re-read its NUL framing
     # here only to bind each verified schema entry to the restored LV.
     while IFS= read -r -d '' lv_name && IFS= read -r -d '' lv_uuid && IFS= read -r -d '' lv_fs && IFS= read -r -d '' lv_artifact && IFS= read -r -d '' lv_bytes && IFS= read -r -d '' swap_uuid; do
-        lvs_json=$(lvs --reportformat json -o vg_name,vg_uuid,lv_name,lv_uuid,lv_path --select "vg_uuid=$vg_uuid" "$vg/$lv_name" 2>/dev/null) || return 1
-        rootpxe_lvm_json_jq -e --arg name "$vg" --arg uuid "$vg_uuid" --arg lv "$lv_name" --arg lvuuid "$lv_uuid" '(.report|type=="array" and length==1 and ((.[0].lv? // [])|type=="array") and ((.[0].lv? // [])|length==1) and .[0].lv[0].vg_name==$name and .[0].lv[0].vg_uuid==$uuid and .[0].lv[0].lv_name==$lv and .[0].lv[0].lv_uuid==$lvuuid and .[0].lv[0].lv_path==("/dev/"+$name+"/"+$lv))' <<<"$lvs_json" >/dev/null || return 1
-        current_size=$(blockdev --getsize64 "/dev/$vg/$lv_name" 2>/dev/null) || return 1
-        [[ $current_size =~ ^[1-9][0-9]*$ && $lv_bytes -ge $current_size ]] || return 1
-        if [[ $lv_bytes -gt $current_size ]]; then lvextend -y -L "${lv_bytes}B" "/dev/$vg/$lv_name" || return 1; fi
-        if [[ $lv_fs == swap ]]; then mkswap -U "$swap_uuid" "/dev/$vg/$lv_name" || { rm -f "$lv_list"; return 1; }; restored_lvs=$((restored_lvs + 1)); continue; fi
-        writeImage "$image_path/$lv_artifact" "/dev/$vg/$lv_name" no || { rm -f "$lv_list"; return 1; }
+        lvs_json=$(lvs --reportformat json -o vg_name,vg_uuid,lv_name,lv_uuid,lv_path --select "vg_uuid=$vg_uuid" "$vg/$lv_name" 2>/dev/null) || { rootpxe_restore_lvm_fail LVM_LV_IDENTITY_QUERY_FAILED "lv_${lv_name}"; return 1; }
+        rootpxe_lvm_json_jq -e --arg name "$vg" --arg uuid "$vg_uuid" --arg lv "$lv_name" --arg lvuuid "$lv_uuid" '(.report|type=="array" and length==1 and ((.[0].lv? // [])|type=="array") and ((.[0].lv? // [])|length==1) and .[0].lv[0].vg_name==$name and .[0].lv[0].vg_uuid==$uuid and .[0].lv[0].lv_name==$lv and .[0].lv[0].lv_uuid==$lvuuid and .[0].lv[0].lv_path==("/dev/"+$name+"/"+$lv))' <<<"$lvs_json" >/dev/null || { rootpxe_restore_lvm_fail LVM_LV_IDENTITY_FAILED "lv_${lv_name}"; return 1; }
+        current_size=$(blockdev --getsize64 "/dev/$vg/$lv_name" 2>/dev/null) || { rootpxe_restore_lvm_fail LVM_LV_SIZE_READ_FAILED "lv_${lv_name}"; return 1; }
+        [[ $current_size =~ ^[1-9][0-9]*$ && $lv_bytes -ge $current_size ]] || { rootpxe_restore_lvm_fail LVM_LV_SIZE_INVALID "lv_${lv_name}"; return 1; }
+        if [[ $lv_bytes -gt $current_size ]]; then lvextend -y -L "${lv_bytes}B" "/dev/$vg/$lv_name" || { rootpxe_restore_lvm_fail LVM_LV_EXTEND_FAILED "lv_${lv_name}"; return 1; }; fi
+        if [[ $lv_fs == swap ]]; then mkswap -U "$swap_uuid" "/dev/$vg/$lv_name" || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_SWAP_RECREATE_FAILED "lv_${lv_name}"; return 1; }; restored_lvs=$((restored_lvs + 1)); continue; fi
+        writeImage "$image_path/$lv_artifact" "/dev/$vg/$lv_name" no || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_IMAGE_RESTORE_FAILED "lv_${lv_name}_${lv_fs}"; return 1; }
+        if [[ $lv_fs == xfs ]] && ! rootpxe_xfs_restore_postcheck "/dev/$vg/$lv_name"; then
+            case ${rootpxe_xfs_restore_error:-post_restore_inconsistent} in
+                dirty_log_replay_mount_failed) rootpxe_restore_lvm_fail LVM_XFS_DIRTY_LOG_REPLAY_MOUNT_FAILED "lv_${lv_name}" ;;
+                dirty_log_replay_unmount_failed) rootpxe_restore_lvm_fail LVM_XFS_DIRTY_LOG_REPLAY_UNMOUNT_FAILED "lv_${lv_name}" ;;
+                post_replay_check_failed) rootpxe_restore_lvm_fail LVM_XFS_POST_REPLAY_CHECK_FAILED "lv_${lv_name}" ;;
+                post_restore_inconsistent) rootpxe_restore_lvm_fail LVM_XFS_POST_RESTORE_CHECK_FAILED "lv_${lv_name}" ;;
+                device_mounted) rootpxe_restore_lvm_fail LVM_XFS_POST_RESTORE_DEVICE_MOUNTED "lv_${lv_name}" ;;
+                mount_state_query_failed) rootpxe_restore_lvm_fail LVM_XFS_POST_RESTORE_MOUNT_STATE_FAILED "lv_${lv_name}" ;;
+                temp_create_failed|temp_cleanup_failed) rootpxe_restore_lvm_fail LVM_XFS_POST_RESTORE_CLEANUP_FAILED "lv_${lv_name}" ;;
+                *) rootpxe_restore_lvm_fail LVM_XFS_POST_RESTORE_CHECK_FAILED "lv_${lv_name}" ;;
+            esac
+            return 1
+        fi
         if [[ $lv_fs == xfs && $lv_bytes -gt $current_size ]]; then
             xfs_mount=$(mktemp -d /tmp/rootpxe-xfs-grow.XXXXXX) || return 1
-            mount -o nouuid "/dev/$vg/$lv_name" "$xfs_mount" || return 1
-            xfs_growfs "$xfs_mount" || return 1
-            umount "$xfs_mount" || return 1
+            mount -o nouuid "/dev/$vg/$lv_name" "$xfs_mount" || { rootpxe_restore_lvm_fail LVM_XFS_GROW_MOUNT_FAILED "lv_${lv_name}"; return 1; }
+            xfs_growfs "$xfs_mount" || { rootpxe_restore_lvm_fail LVM_XFS_GROW_FAILED "lv_${lv_name}"; return 1; }
+            umount "$xfs_mount" || { rootpxe_restore_lvm_fail LVM_XFS_GROW_UNMOUNT_FAILED "lv_${lv_name}"; return 1; }
             rmdir "$xfs_mount" || return 1
             xfs_mount=""
         elif [[ $lv_fs != xfs ]]; then
             e2fsck -pf "/dev/$vg/$lv_name"; actual_size=$?
-            [[ $actual_size -eq 0 || $actual_size -eq 1 ]] || { rm -f "$lv_list"; return 1; }
-            resize2fs "/dev/$vg/$lv_name" || { rm -f "$lv_list"; return 1; }
+            [[ $actual_size -eq 0 || $actual_size -eq 1 ]] || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_EXT_CHECK_FAILED "lv_${lv_name}_${actual_size}"; return 1; }
+            resize2fs "/dev/$vg/$lv_name" || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_EXT_RESIZE_FAILED "lv_${lv_name}"; return 1; }
         fi
-        actual_size=$(blockdev --getsize64 "/dev/$vg/$lv_name" 2>/dev/null) || { rm -f "$lv_list"; return 1; }
-        [[ $actual_size == "$lv_bytes" ]] || { rm -f "$lv_list"; return 1; }
+        actual_size=$(blockdev --getsize64 "/dev/$vg/$lv_name" 2>/dev/null) || { rootpxe_restore_lvm_fail LVM_LV_FINAL_SIZE_READ_FAILED "lv_${lv_name}"; return 1; }
+        [[ $actual_size == "$lv_bytes" ]] || { rootpxe_restore_lvm_fail LVM_LV_FINAL_SIZE_MISMATCH "lv_${lv_name}"; return 1; }
         restored_lvs=$((restored_lvs + 1))
     done <"$lv_list"
     [[ $restored_lvs -eq $expected_lvs ]]
-)
+    )
+    rootpxe_restore_status_rc=$?
+    if [[ $rootpxe_restore_status_rc -ne 0 && -r $rootpxe_restore_status_file ]]; then
+        IFS='|' read -r rootpxe_restore_lvm_error_code rootpxe_restore_lvm_error_reason <"$rootpxe_restore_status_file" || true
+    fi
+    rm -f -- "$rootpxe_restore_status_file"
+    return "$rootpxe_restore_status_rc"
+}
 
 rootpxe_sfdisk_layout_fingerprint() {
     local table_file="$1"
@@ -4684,7 +4799,7 @@ savePartition() {
             # A LVM PV is captured exclusively through its supported linear
             # LVs.  Never let the generic imager create a raw PV payload.
             rootpxe_lvm_is_pv_partition "$part" || handleError "Unsupported LVM PV topology. (${FUNCNAME[0]})"
-            rootpxe_capture_lvm_volumes "$imagePath" || handleError "Unable to capture LVM logical volumes. (${FUNCNAME[0]})"
+            rootpxe_capture_lvm_volumes "$imagePath" || handleError "PXEOS_STAGE=capture CODE=${rootpxe_lvm_capture_error_code:-LVM_CAPTURE_FAILED} REASON=${rootpxe_lvm_capture_error_reason:-unknown}"
             ;;
         swap)
             rootpxe_console_message INFO 'Saving swap partition UUID.'
@@ -4708,7 +4823,7 @@ savePartition() {
             fi
             if [[ $exitcode -ne 0 ]]; then
                 rm -f "$fifoname" >/dev/null 2>&1 || true
-                handleError "PXEOS_STAGE=capture CODE=CAPTURE_PRODUCER_FAILED REASON=partclone_capture_failed"
+                handleError "PXEOS_STAGE=capture CODE=CAPTURE_PARTCLONE_FAILED REASON=partition_${part_number}_${fstype}"
             fi
             if [[ $writer_exitcode -ne 0 ]]; then
                 rm -f "$fifoname" >/dev/null 2>&1 || true
@@ -4730,6 +4845,10 @@ savePartition() {
                     rootpxe_console_message INFO "Using partclone.$fstype."
                     debugPause
                     imgpart="$imagePath/d${disk_number}p${part_number}.img"
+                    if [[ $fstype == xfs ]] && ! rootpxe_xfs_capture_preflight "$part"; then
+                        handleError "PXEOS_STAGE=capture CODE=XFS_CAPTURE_PREFLIGHT_FAILED REASON=partition_${part_number}_${rootpxe_xfs_capture_error:-unknown}"
+                        return 1
+                    fi
                     uploadFormat "$fifoname" "$imgpart"
                     if partclone.$fstype -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -Nf 1 -a0; then
                         exitcode=0
@@ -4743,7 +4862,7 @@ savePartition() {
                     fi
                     if [[ $exitcode -ne 0 ]]; then
                         rm -f "$fifoname" >/dev/null 2>&1 || true
-                        handleError "PXEOS_STAGE=capture CODE=CAPTURE_PRODUCER_FAILED REASON=partclone_capture_failed"
+                        handleError "PXEOS_STAGE=capture CODE=CAPTURE_PARTCLONE_FAILED REASON=partition_${part_number}_${fstype}"
                     fi
                     if [[ $writer_exitcode -ne 0 ]]; then
                         rm -f "$fifoname" >/dev/null 2>&1 || true

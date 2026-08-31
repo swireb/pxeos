@@ -164,7 +164,7 @@ if [[ $imgPartitionType != mbr ]]; then
         putDataBack
     fi
     if [[ -n ${rootpxe_resolved_lvm_layout_file:-} ]]; then
-        rootpxe_restore_lvm_volumes "$imagePath" "$hd" || handleError "PXEOS_STAGE=restore_lvm CODE=LVM_RESTORE_FAILED REASON=metadata_or_lv_restore_failed"
+        rootpxe_restore_lvm_volumes "$imagePath" "$hd" || handleError "PXEOS_STAGE=restore_lvm CODE=${rootpxe_restore_lvm_error_code:-LVM_RESTORE_FAILED} REASON=${rootpxe_restore_lvm_error_reason:-unknown}"
     fi
 else
     rootpxe_console_message INFO 'Skipping partition restore: MBR only.'
