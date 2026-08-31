@@ -839,10 +839,14 @@ rootpxe_validate_lvm_deployment_layout() {
       if $capacity < 0 then error("pv capacity exhausted") else . end |
       [range(0;($vg.lvs|length)) as $i | ($vg.lvs[$i]) as $lv | ($plan.volumes[$i]) as $v |
         if ($v.uuid != $lv.uuid or ($v.mode|IN("original","fixed","percentage","remaining")|not)) then error("lvm volume identity") else . end |
-        if ($lv.resizable|not or $lv.role == "swap") and $v.mode != "original" then error("protected lvm volume") else . end |
-        if $v.mode == "fixed" and (($v.fixedBytes|type)!="number" or $v.fixedBytes < $lv.minBytes or ($v.fixedBytes % $vg.extentBytes)!=0 or $v|has("percentage")) then error("invalid fixed lvm volume") else . end |
-        if $v.mode == "percentage" and (($v.percentage|type)!="number" or $v.percentage < 1 or $v.percentage > 100 or $v|has("fixedBytes")) then error("invalid percentage lvm volume") else . end |
-        if ($v.mode == "original" or $v.mode == "remaining") and ($v|has("fixedBytes") or has("percentage")) then error("unexpected lvm fields") else . end |
+        # Swap has no payload and is recreated after a possible lvextend.  It
+        # remains resizable=false in capture metadata, so accept non-original
+        # modes only for the exact typed swap schema contract.
+        if ($lv.fs == "swap" and ($lv.role != "swap" or $lv.resizable != false or (($lv.artifact // "") != "") or (($lv.swapUuid|type) != "string") or ($lv.swapUuid|length) == 0)) then error("invalid recreated swap volume") else . end |
+        if ((($lv.resizable != true) or ($lv.role == "swap")) and (($lv.fs != "swap") or ($lv.role != "swap") or ($lv.resizable != false) or (($lv.artifact // "") != "") or (($lv.swapUuid|type) != "string") or (($lv.swapUuid|length) == 0)) and $v.mode != "original") then error("protected lvm volume") else . end |
+        if $v.mode == "fixed" and (($v.fixedBytes|type)!="number" or $v.fixedBytes < $lv.minBytes or ($v.fixedBytes % $vg.extentBytes)!=0 or ($v|has("percentage"))) then error("invalid fixed lvm volume") else . end |
+        if $v.mode == "percentage" and (($v.percentage|type)!="number" or $v.percentage < 1 or $v.percentage > 100 or ($v|has("fixedBytes"))) then error("invalid percentage lvm volume") else . end |
+        if ($v.mode == "original" or $v.mode == "remaining") and (($v|has("fixedBytes")) or ($v|has("percentage"))) then error("unexpected lvm fields") else . end |
         {schema:$lv,layout:$v}] as $items |
       if ([$items[].layout|select(.mode=="remaining")]|length)>1 or ([$items[].layout|select(.mode=="percentage")|.percentage]|add//0)>100 then error("lvm mode totals") else . end |
       ($items | map(. + {bytes:modebytes((.schema + .layout);$capacity;$vg.extentBytes)})) as $pre |

@@ -529,7 +529,7 @@ printf ' swap | lv-swap | /dev/vg0/swap | 33554432 | -wi-a----- | linear |  |  |
 EOF
 cat >"$tmp/bin/blockdev" <<'EOF'
 #!/usr/bin/env bash
-case "$1" in --getsize64) case "$2" in /dev/mock1) echo 268435456;; /dev/vg0/root) [[ -f ${LVM_SIZE_STATE:-} ]] && cat "$LVM_SIZE_STATE" || echo 67108864;; /dev/vg0/swap) echo 33554432;; *) echo 209715200;; esac;; --getss|--getpbsz) echo 512;; *) exit 1;; esac
+case "$1" in --getsize64) case "$2" in /dev/mock1) echo 268435456;; /dev/vg0/root) [[ -f ${LVM_SIZE_STATE:-} ]] && cat "$LVM_SIZE_STATE" || echo 67108864;; /dev/vg0/swap) [[ -f ${SWAP_SIZE_STATE:-} ]] && cat "$SWAP_SIZE_STATE" || echo 33554432;; *) echo 209715200;; esac;; --getss|--getpbsz) echo 512;; *) exit 1;; esac
 EOF
 cat >"$tmp/bin/blkid" <<'EOF'
 #!/usr/bin/env bash
@@ -561,7 +561,14 @@ printf '#!/usr/bin/env bash\necho "%s:$*" >>"$LVM_TRACE"\nexit 0\n' "$cmd" >"$tm
 done
 cat >"$tmp/bin/lvextend" <<'EOF'
 #!/usr/bin/env bash
-echo "lvextend:$*" >>"$LVM_TRACE"; echo 67108864 >"$LVM_SIZE_STATE"
+echo "lvextend:$*" >>"$LVM_TRACE"
+size=""; target=""
+while (($#)); do
+  [[ $1 == -L ]] && { size=${2%B}; shift 2; continue; }
+  target=$1; shift
+done
+[[ $size =~ ^[1-9][0-9]*$ ]] || exit 1
+if [[ $target == /dev/vg0/swap ]]; then echo "$size" >"$SWAP_SIZE_STATE"; else echo "$size" >"$LVM_SIZE_STATE"; fi
 EOF
 chmod +x "$tmp/bin/lvextend"
 cat >"$tmp/bin/e2fsck" <<'EOF'
@@ -936,6 +943,38 @@ for mode in fixed percentage remaining; do export LAYOUT_MODE="$mode"; rootpxe_v
 export LAYOUT_MODE=belowmin; rootpxe_validate_lvm_deployment_layout "$tmp/schema.json" "$tmp/layout.json" "$tmp/partitions.json" && fail layout-below-min; unset LAYOUT_MODE
 node -e 'const extent=4194304,capacity=100*extent,min=9*extent,fixed=10*extent,pct=Math.floor(capacity*25/100/extent)*extent,remaining=capacity-fixed-pct;if(fixed<min||pct<=0||remaining<min)process.exit(1)' || fail layout-capacity-oracle
 
+# A captured swap intentionally remains resizable=false in the immutable
+# schema because it has no payload.  The deployment resolver must nevertheless
+# accept only grow-only fixed/percentage/remaining sizes: it recreates swap
+# after a possible lvextend and preserves its captured UUID.
+cat >"$tmp/swap-grow-schema.json" <<'EOF'
+{"version":2,"logicalSectorBytes":512,"lvm":{"version":1,"captureMode":"per_lv","resizePolicy":"grow_only","pvs":[{"partitionNumber":1,"uuid":"pv-1","vgUuid":"vg-1","originalBytes":268435456,"minBytes":268435456,"peStartBytes":1048576,"artifact":"d1p1.lvm.pv.meta","vgConfigArtifact":"d1p1.lvm.vg.cfg"}],"vgs":[{"name":"vg0","uuid":"vg-1","extentBytes":4194304,"pvPartitionNumbers":[1],"originalFreeBytes":0,"lvs":[{"name":"root","uuid":"lv-root","layout":"linear","originalBytes":67108864,"minBytes":67108864,"fs":"ext4","role":"data","resizable":true,"artifact":"d1p1.lvm.lv.root.img"},{"name":"swap","uuid":"lv-swap","layout":"linear","originalBytes":33554432,"minBytes":33554432,"fs":"swap","role":"swap","resizable":false,"artifact":"","swapUuid":"swap-uuid"}]}]}}
+EOF
+printf '%s\n' '[{"number":1,"resolvedSectors":524288}]' >"$tmp/swap-grow-partitions.json"
+for swap_layout in \
+  '{"uuid":"lv-swap","mode":"fixed","fixedBytes":37748736}' \
+  '{"uuid":"lv-swap","mode":"percentage","percentage":25}' \
+  '{"uuid":"lv-swap","mode":"remaining"}'; do
+  swap_mode=$(rootpxe_test_real_jq -r '.mode' <<<"$swap_layout")
+  printf '{"version":2,"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"allocateToRemaining","volumes":[{"uuid":"lv-root","mode":"original"},%s]}]}\n' "$swap_layout" >"$tmp/swap-grow-layout.json"
+  jq() { rootpxe_test_real_jq "$@"; }
+  rootpxe_validate_lvm_deployment_layout "$tmp/swap-grow-schema.json" "$tmp/swap-grow-layout.json" "$tmp/swap-grow-partitions.json" || fail "swap-grow-layout-$swap_mode"
+  rootpxe_test_real_jq -e '.volumes[] | select(.uuid == "lv-swap") | (.resolvedBytes >= 33554432 and (.resolvedBytes % 4194304) == 0)' "$rootpxe_resolved_lvm_layout_file" >/dev/null || fail swap-grow-resolved-bytes
+  rm -f "$rootpxe_resolved_lvm_layout_file"; unset rootpxe_resolved_lvm_layout_file
+  unset -f jq
+done
+printf '%s\n' '{"version":2,"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"allocateToRemaining","volumes":[{"uuid":"lv-root","mode":"original"},{"uuid":"lv-swap","mode":"fixed","fixedBytes":29360128}]}]}' >"$tmp/swap-grow-layout.json"
+jq() { rootpxe_test_real_jq "$@"; }
+rootpxe_validate_lvm_deployment_layout "$tmp/swap-grow-schema.json" "$tmp/swap-grow-layout.json" "$tmp/swap-grow-partitions.json" && fail swap-grow-must-not-shrink
+printf '%s\n' '{"version":2,"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"allocateToRemaining","volumes":[{"uuid":"lv-root","mode":"remaining"},{"uuid":"lv-swap","mode":"remaining"}]}]}' >"$tmp/swap-grow-layout.json"
+rootpxe_validate_lvm_deployment_layout "$tmp/swap-grow-schema.json" "$tmp/swap-grow-layout.json" "$tmp/swap-grow-partitions.json" && fail swap-grow-multiple-remaining-must-fail
+unset -f jq
+sed 's/"fs":"ext4","role":"data","resizable":true/"fs":"ext4","role":"swap","resizable":true/' "$tmp/swap-grow-schema.json" >"$tmp/lvm-role-swap-schema.json"
+printf '%s\n' '{"version":2,"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"allocateToRemaining","volumes":[{"uuid":"lv-root","mode":"fixed","fixedBytes":71303168},{"uuid":"lv-swap","mode":"original"}]}]}' >"$tmp/lvm-role-swap-layout.json"
+jq() { rootpxe_test_real_jq "$@"; }
+rootpxe_validate_lvm_deployment_layout "$tmp/lvm-role-swap-schema.json" "$tmp/lvm-role-swap-layout.json" "$tmp/swap-grow-partitions.json" && fail lvm-role-swap-non-swap-must-be-protected
+unset -f jq
+
 rootpxe_resolved_lvm_layout_file="$tmp/plan.json"; printf '{}' >"$rootpxe_resolved_lvm_layout_file"; rootpxe_disk_permit_granted=no
 rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail no-permit
 [[ ${rootpxe_restore_lvm_error_code:-} == LVM_RESTORE_PERMIT_FAILED && ${rootpxe_restore_lvm_error_reason:-} == permit_or_plan ]] || fail no-permit-specific-error
@@ -993,6 +1032,19 @@ rootpxe_resolved_lvm_layout_file="$tmp/plan.json"
 rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock || fail permitted-restore
 for marker in pvcreate vgcfgrestore writeImage; do grep -Fq "$marker:" "$LVM_TRACE" || fail "missing-$marker"; done
 grep -Fq 'd1p1.lvm.lv.root.img' "$LVM_TRACE" || fail restore-readable-lv-artifact
+
+# Swap has no payload: a grown resolved plan must extend the LV first and then
+# recreate swap with the captured UUID, while an old schema still declares
+# resizable=false and omits the artifact.
+sed 's/"resolvedBytes":33554432/"resolvedBytes":37748736/' "$tmp/plan.json" >"$tmp/swap-extended-plan.json"
+rootpxe_resolved_lvm_layout_file="$tmp/swap-extended-plan.json"; export SWAP_SIZE_STATE="$tmp/swap-size"; echo 33554432 >"$SWAP_SIZE_STATE"; : >"$LVM_TRACE"
+rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock || fail swap-extended-restore
+swap_extend_line=$(grep -n -F 'lvextend:-y -L 37748736B /dev/vg0/swap' "$LVM_TRACE" | cut -d: -f1)
+swap_mkswap_line=$(grep -n -F 'mkswap:-U swap-uuid /dev/vg0/swap' "$LVM_TRACE" | cut -d: -f1)
+[[ $swap_extend_line =~ ^[0-9]+$ && $swap_mkswap_line =~ ^[0-9]+$ && $swap_extend_line -lt $swap_mkswap_line ]] || fail swap-extend-before-mkswap
+[[ $(cat "$SWAP_SIZE_STATE") == 37748736 ]] || fail swap-extend-final-size
+unset SWAP_SIZE_STATE
+rootpxe_resolved_lvm_layout_file="$tmp/plan.json"
 export WRITE_FAIL=1; : >"$LVM_TRACE"
 rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail restore-lv-write-must-fail
 [[ ${rootpxe_restore_lvm_error_code:-} == LVM_LV_IMAGE_RESTORE_FAILED && ${rootpxe_restore_lvm_error_reason:-} == lv_root_ext4 ]] || fail restore-lv-write-specific-error
