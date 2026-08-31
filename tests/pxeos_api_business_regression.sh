@@ -115,7 +115,7 @@ unset pre_expected_file post_expected_file missing_pre_hash missing_post_hash no
 # Both scripts run only in clean child environments and always delete their
 # independent temporary files.
 (
-awk '/^rootpxe_run_deploy_script\(\)/ { on=1 } /^# LVM v2/ { on=0 } on { print }' "$funcs" >"$tmp/deploy-scripts-run.sh"
+awk '/^rootpxe_run_deploy_script\(\)/ { on=1 } /^# LVM is deliberately narrow/ { on=0 } on { print }' "$funcs" >"$tmp/deploy-scripts-run.sh"
 . "$tmp/deploy-scripts-run.sh"
 mkdir -p "$tmp/deploy-script-image"
 pre_exec="$tmp/pre-exec.sh"; post_exec="$tmp/post-exec.sh"

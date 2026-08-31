@@ -6,6 +6,7 @@
 . /bin/pxeos.checkmountdrivesize
 . /bin/pxeos.checkimgvar
 rootpxe_require_task_context || handleError "Invalid task context ($0)"
+rootpxe_validate_image_contract || handleError "PXEOS_STAGE=capture CODE=IMAGE_CONTRACT_INVALID REASON=unsupported_type_scope_or_partimage_format"
 imagePath="/storage/dev/$macWinSafe"
 parts=""
 part=""
@@ -41,7 +42,6 @@ rootpxe_capture_single_disk() {
         isBitlockedPartition "$part"
         savePartition "$part" 1 "$imagePath" "$imgPartitionType"
     done
-    rootpxe_capture_lvm_volumes "$imagePath" || handleError "PXEOS_STAGE=capture CODE=LVM_CAPTURE_FAILED REASON=metadata_or_lv_writer_failed"
 }
 
 beginUpload() {
@@ -124,6 +124,13 @@ beginUpload() {
 findHDDInfo
 if [[ ${imgType:-} == [Nn] ]]; then
     rootpxe_lvm_capture_preflight "$hd" "$imagePath" || handleError "PXEOS_STAGE=capture CODE=LVM_TOPOLOGY_UNSUPPORTED REASON=single_pv_single_vg_linear_lvs_required"
+fi
+if [[ ${imgType:-} == mps ]]; then
+    rootpxe_disk_has_lvm_pv "$hd" && handleError "PXEOS_STAGE=capture CODE=LVM_RAW_UNSUPPORTED REASON=mps_requires_non_lvm_partition_inventory"
+elif [[ ${imgType:-} == mpa ]]; then
+    for disk in $disks; do
+        rootpxe_disk_has_lvm_pv "$disk" && handleError "PXEOS_STAGE=capture CODE=LVM_RAW_UNSUPPORTED REASON=mpa_requires_non_lvm_partition_inventory"
+    done
 fi
 capture_target_id=$(rootpxe_disk_stable_identity "$hd") || handleError "PXEOS_STAGE=permit CODE=TARGET_IDENTITY_UNAVAILABLE REASON=unable_to_bind_capture_disk"
 while :; do

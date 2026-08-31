@@ -58,6 +58,38 @@ rootpxe_require_task_context() {
     rootpxe_require_identity || return 1
     [[ ${task_token:-} =~ ^[A-Za-z0-9._~+/=-]{16,512}$ ]]
 }
+
+# Keep type/scope/format decisions identical to the management API.  Format 1
+# is a deployment-only compatibility reader: PXEOS must never create it.
+rootpxe_validate_image_contract() {
+    case "${imgType:-}" in n|N|dd|mps|mpa) ;; *) return 1 ;; esac
+    case "${imgPartitionType:-}" in all|mbr|[1-9]|10) ;; *) return 1 ;; esac
+    case "${imgType:-}" in n|N|dd) [[ ${imgPartitionType:-} == all ]] || return 1 ;; esac
+    if [[ ${type:-} == up && ${imgFormat:-} == 1 ]]; then return 1; fi
+    return 0
+}
+
+rootpxe_disk_has_lvm_pv() {
+    local disk="$1" candidate
+    getPartitions "$disk"
+    for candidate in ${parts:-}; do
+        [[ $(blkid -s TYPE -o value "$candidate" 2>/dev/null) == LVM2_member ]] && return 0
+    done
+    return 1
+}
+
+# Fixed partition images cannot encode a safe per-LV restore plan.  Their
+# capture inventory is therefore a required, immutable negative proof.  A
+# missing historical sidecar fails before disk permit/write; dd remains the
+# explicit raw whole-disk exception and never calls this helper.
+rootpxe_validate_fixed_image_lvm_inventory() {
+    local image_path="$1" inventory="$image_path/.rootpxe-partition-inventory.json"
+    case "${imgType:-}" in mps|mpa) ;; *) return 0 ;; esac
+    [[ -r $inventory ]] || return 1
+    jq -e '
+      .version == 1 and (.disks|type == "array") and (.disks|length > 0) and
+      ([.disks[].partitions[]? | ((.fs // "") | ascii_downcase) as $fs | ((.typeGuid // "") | ascii_downcase) as $type | select($fs == "lvm2_member" or $type == "0x8e" or $type == "8e" or $type == "e6d6d379-f507-44c2-a23c-238f2a3df928)] | length == 0)' "$inventory" >/dev/null 2>&1
+}
 rootpxe_safe_relative_path() {
     local value=${1#/} segment
     [[ -n $value && $value != */ && $value != *\\* && $value != *//* ]] || return 1
@@ -149,7 +181,7 @@ rootpxe_run_post_deploy_script() {
     rootpxe_run_deploy_script post_deploy_script postDeployScriptFile postDeployScriptSha256 'post-deploy script'
 }
 
-# LVM v2 is deliberately narrow.  It is not a fallback for arbitrary device
+# LVM is deliberately narrow.  It is not a fallback for arbitrary device
 # mapper stacks: only one target-disk PV, one VG and linear LVs can be made
 # reproducible from a per-LV image.  Keep the facts in root-only temporary
 # files so an unsupported topology fails before the caller asks for a write
@@ -167,22 +199,9 @@ rootpxe_lvm_is_pv_partition() {
     getPartitionNumber "$part"; number=$part_number
     [[ $number == "${rootpxe_lvm_pv_number:-}" ]]
 }
-rootpxe_lvm_restore_source_lv() {
-    local lv_path="$1" original_bytes="$2" current rc
-    current=$(blockdev --getsize64 "$lv_path" 2>/dev/null) || return 1
-    [[ $current =~ ^[1-9][0-9]*$ && $original_bytes =~ ^[1-9][0-9]*$ ]] || return 1
-    if [[ $current -lt $original_bytes ]]; then
-        lvextend -y -f -L "${original_bytes}B" "$lv_path" >/dev/null 2>&1 || return 1
-    fi
-    e2fsck -pf "$lv_path" >/dev/null 2>&1; rc=$?
-    [[ $rc -eq 0 || $rc -eq 1 ]] || return 1
-    resize2fs "$lv_path" >/dev/null 2>&1 || return 1
-    current=$(blockdev --getsize64 "$lv_path" 2>/dev/null) || return 1
-    [[ $current == "$original_bytes" ]]
-}
 rootpxe_lvm_reset_capture_facts() {
     rm -f -- "${rootpxe_lvm_facts_file:-}" "${rootpxe_lvm_lv_facts_file:-}"
-    unset rootpxe_lvm_active rootpxe_lvm_facts_file rootpxe_lvm_lv_facts_file rootpxe_lvm_pv_path rootpxe_lvm_pv_number rootpxe_lvm_pv_uuid rootpxe_lvm_vg_name rootpxe_lvm_vg_uuid rootpxe_lvm_pv_bytes rootpxe_lvm_pe_start_bytes rootpxe_lvm_vg_extent_bytes rootpxe_lvm_vg_free_bytes
+    unset rootpxe_lvm_active rootpxe_lvm_captured rootpxe_lvm_facts_file rootpxe_lvm_lv_facts_file rootpxe_lvm_pv_path rootpxe_lvm_pv_number rootpxe_lvm_pv_uuid rootpxe_lvm_vg_name rootpxe_lvm_vg_uuid rootpxe_lvm_pv_bytes rootpxe_lvm_pe_start_bytes rootpxe_lvm_vg_extent_bytes rootpxe_lvm_vg_free_bytes
 }
 rootpxe_lvm_remove_probe_files() { rm -f -- "$@"; }
 # Return 0 for no LVM or for the only supported topology; return non-zero for
@@ -266,15 +285,21 @@ rootpxe_lvm_capture_preflight() {
     export rootpxe_lvm_active rootpxe_lvm_facts_file rootpxe_lvm_lv_facts_file rootpxe_lvm_pv_path rootpxe_lvm_pv_number rootpxe_lvm_pv_uuid rootpxe_lvm_vg_name rootpxe_lvm_vg_uuid rootpxe_lvm_pv_bytes rootpxe_lvm_pe_start_bytes rootpxe_lvm_vg_extent_bytes rootpxe_lvm_vg_free_bytes
 }
 rootpxe_capture_lvm_volumes() {
-    local image_path="$1" pv_artifact vg_artifact lv_name lv_uuid lv_path lv_size fs swap_uuid artifact fifo=/tmp/pigz1 producer writer min_bytes min_blocks block_bytes shrunk=no pv_min_bytes
-    [[ ${rootpxe_lvm_active:-no} == yes ]] || return 0
+    local image_path="$1" pv_artifact vg_artifact lv_name lv_uuid lv_path lv_size fs swap_uuid artifact fifo=/tmp/pigz1 producer writer min_bytes pv_min_bytes stage vg_active=no
+    [[ ${rootpxe_lvm_active:-no} == yes && ${rootpxe_lvm_captured:-no} != yes ]] || return 0
+    rootpxe_lvm_is_pv_partition "$rootpxe_lvm_pv_path" || return 1
+    stage=$(mktemp -d "$image_path/.rootpxe-lvm.XXXXXX") || return 1
+    (
+    trap 'rm -f -- "$fifo"; [[ $vg_active == yes ]] && vgchange -an "$rootpxe_lvm_vg_name" >/dev/null 2>&1 || true; rm -rf -- "$stage"' EXIT
     pv_artifact="d1.pv.${rootpxe_lvm_pv_uuid}.meta"; vg_artifact="d1.vg.${rootpxe_lvm_vg_uuid}.cfg"
     rootpxe_safe_relative_path "$pv_artifact" >/dev/null && rootpxe_safe_relative_path "$vg_artifact" >/dev/null || return 1
-    pvdisplay -m --units b --nosuffix "$rootpxe_lvm_pv_path" >"$image_path/$pv_artifact" 2>/dev/null || return 1
-    vgcfgbackup -f "$image_path/$vg_artifact" "$rootpxe_lvm_vg_name" >/dev/null 2>&1 || return 1
-    : >"$image_path/d1.lvm.capture.tsv" || return 1
+    vgchange -ay "$rootpxe_lvm_vg_name" || return 1
+    vg_active=yes
+    pvdisplay -m --units b --nosuffix "$rootpxe_lvm_pv_path" >"$stage/$pv_artifact" 2>/dev/null || return 1
+    vgcfgbackup -f "$stage/$vg_artifact" "$rootpxe_lvm_vg_name" >/dev/null 2>&1 || return 1
+    : >"$stage/d1.lvm.capture.tsv" || return 1
     while IFS='|' read -r lv_name lv_uuid lv_path lv_size; do
-        artifact=""; swap_uuid=""; shrunk=no
+        artifact=""; swap_uuid=""
         fs=$(blkid -s TYPE -o value "$lv_path" 2>/dev/null | tr -d '\r\n'); swap_uuid=$(blkid -s UUID -o value "$lv_path" 2>/dev/null | tr -d '\r\n')
         case $fs in ext2|ext3|ext4|xfs|swap) ;; *) return 1;; esac
         # n images preserve the source layout while capturing.  The original
@@ -283,18 +308,34 @@ rootpxe_capture_lvm_volumes() {
         if [[ $fs != swap ]]; then
             artifact="d1.lv.${lv_uuid}.img"; rootpxe_safe_relative_path "$artifact" >/dev/null || return 1
             rm -f "$fifo" || return 1
-            uploadFormat "$fifo" "$image_path/$artifact" || return 1
+            uploadFormat "$fifo" "$stage/$artifact" || return 1
             if [[ $fs == xfs ]]; then partclone.xfs -cs "$lv_path" -O "$fifo" -Nf 1 -a0; else partclone.extfs -cs "$lv_path" -O "$fifo" -Nf 1 -a0; fi
             producer=$?; rootpxe_wait_for_writer "$rootpxe_last_writer_pid"; writer=$?
             [[ $producer -eq 0 && $writer -eq 0 ]] || { rm -f "$fifo"; return 1; }
-            mv "$image_path/$artifact.000" "$image_path/$artifact" >/dev/null 2>&1 || return 1
+            mv "$stage/$artifact.000" "$stage/$artifact" >/dev/null 2>&1 || return 1
         fi
-        printf '%s|%s|%s|%s|%s|%s|%s\n' "$lv_name" "$lv_uuid" "$lv_size" "$min_bytes" "$fs" "$artifact" "$swap_uuid" >>"$image_path/d1.lvm.capture.tsv" || return 1
+        printf '%s|%s|%s|%s|%s|%s|%s\n' "$lv_name" "$lv_uuid" "$lv_size" "$min_bytes" "$fs" "$artifact" "$swap_uuid" >>"$stage/d1.lvm.capture.tsv" || return 1
     done <"$rootpxe_lvm_lv_facts_file"
     pv_min_bytes="$rootpxe_lvm_pv_bytes"
-    jq -n --arg pv_uuid "$rootpxe_lvm_pv_uuid" --arg vg_uuid "$rootpxe_lvm_vg_uuid" --arg vg_name "$rootpxe_lvm_vg_name" --arg pv_artifact "$pv_artifact" --arg vg_artifact "$vg_artifact" --argjson part "$rootpxe_lvm_pv_number" --argjson pv_bytes "$rootpxe_lvm_pv_bytes" --argjson pv_min "$pv_min_bytes" --argjson pe_start "$rootpxe_lvm_pe_start_bytes" --argjson extent "$rootpxe_lvm_vg_extent_bytes" --argjson free "$rootpxe_lvm_vg_free_bytes" --rawfile lvs "$image_path/d1.lvm.capture.tsv" '
-      {version:2,pvs:[{partitionNumber:$part,uuid:$pv_uuid,vgUuid:$vg_uuid,originalBytes:$pv_bytes,minBytes:$pv_min,peStartBytes:$pe_start,artifact:$pv_artifact,vgConfigArtifact:$vg_artifact}],vgs:[{name:$vg_name,uuid:$vg_uuid,extentBytes:$extent,pvPartitionNumbers:[$part],originalFreeBytes:$free,lvs:($lvs|split("\n")|map(select(length>0)|split("|")|{name:.[0],uuid:.[1],layout:"linear",originalBytes:(.[2]|tonumber),minBytes:(.[3]|tonumber),fs:.[4],role:(if .[4]=="swap" then "swap" else "data" end),resizable:(.[4] != "xfs" and .[4] != "swap"),artifact:.[5],swapUuid:(if .[4]=="swap" then .[6] else "" end)})}]} ' >"$image_path/d1.lvm.schema.json" || return 1
-    jq -e '.version == 2 and (.pvs|length) == 1 and (.vgs|length) == 1' "$image_path/d1.lvm.schema.json" >/dev/null || return 1
+    jq -n --arg pv_uuid "$rootpxe_lvm_pv_uuid" --arg vg_uuid "$rootpxe_lvm_vg_uuid" --arg vg_name "$rootpxe_lvm_vg_name" --arg pv_artifact "$pv_artifact" --arg vg_artifact "$vg_artifact" --argjson part "$rootpxe_lvm_pv_number" --argjson pv_bytes "$rootpxe_lvm_pv_bytes" --argjson pv_min "$pv_min_bytes" --argjson pe_start "$rootpxe_lvm_pe_start_bytes" --argjson extent "$rootpxe_lvm_vg_extent_bytes" --argjson free "$rootpxe_lvm_vg_free_bytes" --rawfile lvs "$stage/d1.lvm.capture.tsv" '
+      {version:1,captureMode:"per_lv",resizePolicy:"grow_only",pvs:[{partitionNumber:$part,uuid:$pv_uuid,vgUuid:$vg_uuid,originalBytes:$pv_bytes,minBytes:$pv_min,peStartBytes:$pe_start,artifact:$pv_artifact,vgConfigArtifact:$vg_artifact}],vgs:[{name:$vg_name,uuid:$vg_uuid,extentBytes:$extent,pvPartitionNumbers:[$part],originalFreeBytes:$free,lvs:($lvs|split("\n")|map(select(length>0)|split("|")|{name:.[0],uuid:.[1],layout:"linear",originalBytes:(.[2]|tonumber),minBytes:(.[3]|tonumber),fs:.[4],role:(if .[4]=="swap" then "swap" else "data" end),resizable:(.[4] != "swap"),artifact:.[5],swapUuid:(if .[4]=="swap" then .[6] else "" end)})}]} ' >"$stage/d1.lvm.schema.json" || return 1
+    jq -e '.version == 1 and .captureMode == "per_lv" and .resizePolicy == "grow_only" and (.pvs|length) == 1 and (.vgs|length) == 1' "$stage/d1.lvm.schema.json" >/dev/null || return 1
+    rm -f -- "$stage/d1.lvm.capture.tsv" || return 1
+    [[ ! -e "$image_path/d1.lvm.schema.json" && ! -e "$image_path/$pv_artifact" && ! -e "$image_path/$vg_artifact" && ! -e "$image_path/d1p${rootpxe_lvm_pv_number}.img" && ! -e "$image_path/d1p${rootpxe_lvm_pv_number}.img.000" ]] || return 1
+    while IFS='|' read -r lv_name lv_uuid lv_path lv_size; do
+        fs=$(blkid -s TYPE -o value "$lv_path" 2>/dev/null | tr -d '\r\n')
+        [[ $fs == swap ]] && continue
+        artifact="d1.lv.${lv_uuid}.img"
+        mv "$stage/$artifact" "$image_path/$artifact" || return 1
+    done <"$rootpxe_lvm_lv_facts_file"
+    mv "$stage/$pv_artifact" "$image_path/$pv_artifact" || return 1
+    mv "$stage/$vg_artifact" "$image_path/$vg_artifact" || return 1
+    # The schema is the commit marker.  Never publish it before every sidecar
+    # and LV payload has reached its final location.
+    mv "$stage/d1.lvm.schema.json" "$image_path/d1.lvm.schema.json" || return 1
+    ) || return 1
+    rootpxe_lvm_captured=yes
+    export rootpxe_lvm_captured
 }
 
 # Captured n-type images carry a compact, canonical partition fact record.
@@ -362,7 +403,7 @@ rootpxe_build_original_schema() {
         mv "$sorted_parts" "$parts_file" || { rm -f "$parts_file" "$facts_file" "$sorted_parts"; return 1; }
         schema_version=2
     fi
-    # LVM layout metadata is a Schema v2 extension even on GPT/ordinary MBR.
+    # LVM layout metadata is carried by the outer Schema v2 even on GPT/ordinary MBR.
     # The v1 decoder intentionally treats extensions as opaque, so emitting
     # it as v1 would lose the LVM contract at task snapshot creation.
     [[ -n $lvm_fragment ]] && schema_version=2
@@ -443,7 +484,7 @@ rootpxe_build_original_schema() {
             ([.partitions[] | select(.kind == "extended" and (.number < 1 or .number > 4 or .role != "extended_container" or .artifact != "" or .resizable != false or .ebrReservedSectors != 2 or has("parentNumber")))] | length) == 0 and
             ([.partitions[] | select(.kind == "logical" and (.number < 5 or (.parentNumber|type) != "number" or has("ebrReservedSectors") or has("logicalNumbers")))] | length) == 0)
          else false end) and
-        (if has("lvm") then (.lvm.version == 2 and (.lvm.pvs|length)==1 and (.lvm.vgs|length)==1) else true end)
+        (if has("lvm") then (.lvm.version == 1 and .lvm.captureMode == "per_lv" and .lvm.resizePolicy == "grow_only" and (.lvm.pvs|length)==1 and (.lvm.vgs|length)==1) else true end)
       else false end' "$rootpxe_original_schema_file" >/dev/null || { rm -f "$rootpxe_original_schema_file"; return 1; }
     export rootpxe_original_schema_file
 }
@@ -678,8 +719,9 @@ rootpxe_validate_lvm_deployment_layout() {
     local schema_file="$1" layout_file="$2" partition_plan="$3"
     rm -f -- "${rootpxe_resolved_lvm_layout_file:-}"; unset rootpxe_resolved_lvm_layout_file
     command -v jq >/dev/null 2>&1 || return 1
-    jq -e 'if has("lvm") then (.version == 2 and .lvm.version == 2) else true end' "$schema_file" >/dev/null 2>&1 || return 1
+    jq -e 'if has("lvm") then (.version == 2 and .lvm.version == 1 and .lvm.captureMode == "per_lv" and .lvm.resizePolicy == "grow_only") else true end' "$schema_file" >/dev/null 2>&1 || return 1
     if ! jq -e 'has("lvm")' "$schema_file" >/dev/null 2>&1; then
+        jq -e '([.partitions[] | select(.fs == "LVM2_member" or .role == "lvm_pv" or ((.typeGuid // "") | ascii_downcase | IN("8e","0x8e","e6d6d379-f507-44c2-a23c-238f2a3df928")))] | length) == 0' "$schema_file" >/dev/null 2>&1 || return 1
         jq -e '((.lvm // [])|length) == 0' "$layout_file" >/dev/null 2>&1
         return
     fi
@@ -694,17 +736,17 @@ rootpxe_validate_lvm_deployment_layout() {
         else 0 end;
       ($schema[0]) as $s | ($layout[0]) as $l | ($partitions[0]) as $resolved |
       ($s.lvm) as $ls | ($l.lvm // []) as $ll |
-      if ($ls.version != 2 or ($ls.pvs|length)!=1 or ($ls.vgs|length)!=1 or ($ll|length)!=1) then error("invalid lvm topology") else . end |
+      if ($ls.version != 1 or $ls.captureMode != "per_lv" or $ls.resizePolicy != "grow_only" or ($ls.pvs|length)!=1 or ($ls.vgs|length)!=1 or ($ll|length)!=1) then error("invalid lvm topology") else . end |
       ($ls.pvs[0]) as $pv | ($ls.vgs[0]) as $vg | ($ll[0]) as $plan |
       if ($pv.vgUuid != $vg.uuid or $pv.partitionNumber != $vg.pvPartitionNumbers[0] or $plan.pvPartitionNumber != $pv.partitionNumber or ($plan.freeSpacePolicy|IN("preserveOriginal","allocateToRemaining")|not) or ($plan.volumes|length) != ($vg.lvs|length)) then error("lvm identity mismatch") else . end |
       ([$resolved[] | select(.number == $pv.partitionNumber)]|if length==1 then .[0] else error("resolved pv missing") end) as $resolvedPV |
       ($resolvedPV.resolvedSectors * $s.logicalSectorBytes) as $pvBytes |
-      if ($pvBytes < $pv.minBytes or $pv.peStartBytes < 0 or $pv.peStartBytes >= $pvBytes) then error("invalid pv capacity") else . end |
+      if ($pvBytes < $pv.originalBytes or $pvBytes < $pv.minBytes or $pv.peStartBytes < 0 or $pv.peStartBytes >= $pvBytes) then error("invalid pv capacity") else . end |
       (((($pvBytes - $pv.peStartBytes - (if $plan.freeSpacePolicy == "preserveOriginal" then $vg.originalFreeBytes else 0 end)) / $vg.extentBytes)|floor) * $vg.extentBytes) as $capacity |
       if $capacity < 0 then error("pv capacity exhausted") else . end |
       [range(0;($vg.lvs|length)) as $i | ($vg.lvs[$i]) as $lv | ($plan.volumes[$i]) as $v |
         if ($v.uuid != $lv.uuid or ($v.mode|IN("original","fixed","percentage","remaining")|not)) then error("lvm volume identity") else . end |
-        if ($lv.resizable|not or $lv.role == "swap" or $lv.fs == "xfs") and $v.mode != "original" then error("protected lvm volume") else . end |
+        if ($lv.resizable|not or $lv.role == "swap") and $v.mode != "original" then error("protected lvm volume") else . end |
         if $v.mode == "fixed" and (($v.fixedBytes|type)!="number" or $v.fixedBytes < $lv.minBytes or ($v.fixedBytes % $vg.extentBytes)!=0 or $v|has("percentage")) then error("invalid fixed lvm volume") else . end |
         if $v.mode == "percentage" and (($v.percentage|type)!="number" or $v.percentage < 1 or $v.percentage > 100 or $v|has("fixedBytes")) then error("invalid percentage lvm volume") else . end |
         if ($v.mode == "original" or $v.mode == "remaining") and ($v|has("fixedBytes") or has("percentage")) then error("unexpected lvm fields") else . end |
@@ -724,8 +766,9 @@ rootpxe_validate_lvm_deployment_layout() {
 # Restore metadata and per-LV payloads only after a matching deploy permit.
 # The PV never has a raw payload: doing so would overwrite the layout just
 # resolved from the immutable task snapshot.
-rootpxe_restore_lvm_volumes() {
-    local image_path="$1" target_disk="$2" plan="${rootpxe_resolved_lvm_layout_file:-}" pv vg pv_path pv_meta vg_cfg lv_name lv_uuid lv_fs lv_artifact lv_bytes target_id actual_uuid actual_size pv_original vg_uuid extent rebuild=no lv_list expected_lvs field_count restored_lvs=0
+rootpxe_restore_lvm_volumes() (
+    local image_path="$1" target_disk="$2" plan="${rootpxe_resolved_lvm_layout_file:-}" pv vg pv_path pv_meta vg_cfg lv_name lv_uuid lv_fs lv_artifact lv_bytes target_id actual_uuid actual_size current_size pv_original vg_uuid extent lv_list expected_lvs field_count restored_lvs=0 xfs_mount="" vg_active=no
+    trap '[[ -n $xfs_mount ]] && umount "$xfs_mount" >/dev/null 2>&1 || true; [[ -n $xfs_mount ]] && rmdir "$xfs_mount" >/dev/null 2>&1 || true; [[ $vg_active == yes && -n $vg ]] && vgchange -an "$vg" >/dev/null 2>&1 || true; rm -f -- "${lv_list:-}"' EXIT
     [[ ${rootpxe_disk_permit_granted:-no} == yes && -r $plan ]] || return 1
     target_id=$(rootpxe_disk_stable_identity "$target_disk") || return 1
     [[ ${rootpxe_disk_permit_target_id:-} == "$target_id" && ${rootpxe_disk_permit_operation:-} =~ ^(deploy_write|nvme_format\+deploy_write)$ ]] || return 1
@@ -751,23 +794,15 @@ rootpxe_restore_lvm_volumes() {
     [[ $expected_lvs =~ ^[1-9][0-9]*$ ]] || { rm -f "$lv_list"; return 1; }
     field_count=$(tr -cd '\000' <"$lv_list" | wc -c | tr -d '[:space:]') || { rm -f "$lv_list"; return 1; }
     [[ $field_count =~ ^[0-9]+$ && $field_count -eq $((expected_lvs * 5)) ]] || { rm -f "$lv_list"; return 1; }
-    if [[ $(jq -er '.pvBytes' "$plan") -lt $pv_original ]]; then
-        # A smaller but >=minimum PV cannot replay the original VG allocation
-        # map. Rebuild the single-PV linear VG from its immutable snapshot;
-        # LV identities are capture facts, while bootability still relies on
-        # VG/LV names and filesystem UUIDs after the per-LV restore.
-        rebuild=yes
-        pvcreate -ff -y --norestorefile --uuid "$pv" "$pv_path" || { rm -f "$lv_list"; return 1; }
-        # This branch intentionally creates fresh VG/LV UUIDs.  The target
-        # cannot replay the old allocation map on a smaller PV; boot identity
-        # is retained through the captured VG/LV names and filesystem UUIDs.
-        vgcreate -y -s "${extent}B" "$vg" "$pv_path" || { rm -f "$lv_list"; return 1; }
-    else
-        pvcreate --uuid "$pv" --restorefile "$image_path/$vg_cfg" -ff -y "$pv_path" || { rm -f "$lv_list"; return 1; }
-        vgcfgrestore -f "$image_path/$vg_cfg" "$vg" || { rm -f "$lv_list"; return 1; }
-        pvresize --setphysicalvolumesize "$(jq -er '.pvBytes' "$plan")B" "$pv_path" || { rm -f "$lv_list"; return 1; }
+    [[ $(jq -er '.pvBytes' "$plan") -ge $pv_original ]] || return 1
+    pvcreate --uuid "$pv" --restorefile "$image_path/$vg_cfg" -ff -y "$pv_path" || return 1
+    vgcfgrestore -f "$image_path/$vg_cfg" "$vg" || return 1
+    if [[ $(jq -er '.pvBytes' "$plan") -gt $pv_original ]]; then
+        pvresize --setphysicalvolumesize "$(jq -er '.pvBytes' "$plan")B" "$pv_path" || return 1
     fi
-    vgchange -ay "$vg" || { rm -f "$lv_list"; return 1; }
+    vgchange -ay "$vg" || return 1
+    vg_active=yes
+    [[ $(vgs --noheadings -o vg_uuid "$vg" 2>/dev/null | tr -d '[:space:]') == "$vg_uuid" ]] || return 1
     actual_uuid=$(pvs --noheadings -o pv_uuid "$pv_path" 2>/dev/null | tr -d '[:space:]') || { rm -f "$lv_list"; return 1; }
     [[ $actual_uuid == "$pv" ]] || { rm -f "$lv_list"; return 1; }
     # The artifact is a safe relative path but may legally contain a pipe, so
@@ -776,11 +811,21 @@ rootpxe_restore_lvm_volumes() {
     # empty swap artifact without treating it as the following size.
     while IFS= read -r -d '' lv_name && IFS= read -r -d '' lv_uuid && IFS= read -r -d '' lv_fs && IFS= read -r -d '' lv_artifact && IFS= read -r -d '' lv_bytes; do
         rootpxe_lvm_safe_identifier "$lv_name" && rootpxe_lvm_safe_identifier "$lv_uuid" && [[ $lv_bytes =~ ^[1-9][0-9]*$ ]] || { rm -f "$lv_list"; return 1; }
-        if [[ $rebuild == yes ]]; then lvcreate -y -L "${lv_bytes}B" -n "$lv_name" "$vg" || { rm -f "$lv_list"; return 1; }; else lvresize -y -f -L "${lv_bytes}B" "/dev/$vg/$lv_name" || { rm -f "$lv_list"; return 1; }; fi
+        [[ $(lvs --noheadings -o lv_uuid "/dev/$vg/$lv_name" 2>/dev/null | tr -d '[:space:]') == "$lv_uuid" ]] || return 1
+        current_size=$(blockdev --getsize64 "/dev/$vg/$lv_name" 2>/dev/null) || return 1
+        [[ $current_size =~ ^[1-9][0-9]*$ && $lv_bytes -ge $current_size ]] || return 1
+        if [[ $lv_bytes -gt $current_size ]]; then lvextend -y -L "${lv_bytes}B" "/dev/$vg/$lv_name" || return 1; fi
         if [[ $lv_fs == swap ]]; then mkswap -U "$(jq -er --arg u "$lv_uuid" '.volumes[]|select(.uuid==$u)|.swapUuid' "$plan")" "/dev/$vg/$lv_name" || { rm -f "$lv_list"; return 1; }; restored_lvs=$((restored_lvs + 1)); continue; fi
         rootpxe_safe_relative_path "$lv_artifact" >/dev/null && [[ -r "$image_path/$lv_artifact" ]] || { rm -f "$lv_list"; return 1; }
         writeImage "$image_path/$lv_artifact" "/dev/$vg/$lv_name" no || { rm -f "$lv_list"; return 1; }
-        if [[ $lv_fs != xfs ]]; then
+        if [[ $lv_fs == xfs && $lv_bytes -gt $current_size ]]; then
+            xfs_mount=$(mktemp -d /tmp/rootpxe-xfs-grow.XXXXXX) || return 1
+            mount -o nouuid "/dev/$vg/$lv_name" "$xfs_mount" || return 1
+            xfs_growfs "$xfs_mount" || return 1
+            umount "$xfs_mount" || return 1
+            rmdir "$xfs_mount" || return 1
+            xfs_mount=""
+        elif [[ $lv_fs != xfs ]]; then
             e2fsck -pf "/dev/$vg/$lv_name"; actual_size=$?
             [[ $actual_size -eq 0 || $actual_size -eq 1 ]] || { rm -f "$lv_list"; return 1; }
             resize2fs "/dev/$vg/$lv_name" || { rm -f "$lv_list"; return 1; }
@@ -789,9 +834,8 @@ rootpxe_restore_lvm_volumes() {
         [[ $actual_size == "$lv_bytes" ]] || { rm -f "$lv_list"; return 1; }
         restored_lvs=$((restored_lvs + 1))
     done <"$lv_list"
-    rm -f "$lv_list"
     [[ $restored_lvs -eq $expected_lvs ]]
-}
+)
 
 rootpxe_sfdisk_layout_fingerprint() {
     local table_file="$1"
@@ -2043,18 +2087,9 @@ expandPartition() {
             if [[ $type == "down" ]]; then
                 dots "Attempting to resize $fstype volume ($part)"
 
-                # XFS partitions can only be expanded when there is free space after that partition.
-                # Retrieving the partition number of a XFS partition that has free space after it.
-                local xfsPartitionNumberThatCanBeExpanded=$(parted -s -a opt $disk "print free" | grep -i "free space" -B 1 | grep -i "xfs" | cut -d ' ' -f2)
-                local currentPartitionNumber=$(echo $part | grep -o '[0-9]*$')
-                # 与参考 FOS 对比：原 `"$n"a` 会与字面量 "3a" 比较，几乎永不成立，导致 XFS 从不扩容
-                if [[ "$xfsPartitionNumberThatCanBeExpanded" == "$currentPartitionNumber" ]]; then
-                    parted -s -a opt $disk "resizepart $xfsPartitionNumberThatCanBeExpanded 100%" >>/tmp/xfslog.txt 2>&1
-                    if [[ $? -gt 0 ]]; then
-                        echo "Failed"
-                        debugPause
-                        handleError "Could not resize partition $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/xfslog.txt)\n   Args Passed: $*"
-                    fi
+                # The resolved deployment layout already owns partition
+                # geometry.  Do not overwrite it with a later 100% end or
+                # infer free space from a second partition-table scan.
                     if [[ ! -d /tmp/xfs ]]; then
                         mkdir /tmp/xfs >>/tmp/xfslog.txt 2>&1
                         if [[ $? -gt 0 ]]; then
@@ -2069,8 +2104,9 @@ expandPartition() {
                         debugPause
                         handleError "Could not mount $part to /tmp/xfs (${FUNCNAME[0]})\n   Info: $(cat /tmp/xfslog.txt)\n   Args Passed: $*"
                     fi
-                    xfs_growfs $part >>/tmp/xfslog.txt 2>&1
+                    xfs_growfs /tmp/xfs >>/tmp/xfslog.txt 2>&1
                     if [[ $? -gt 0 ]]; then
+                        umount /tmp/xfs >>/tmp/xfslog.txt 2>&1 || true
                         echo "Failed"
                         debugPause
                         handleError "Could not grow XFS partition $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/xfslog.txt)\n   Args Passed: $*"
@@ -2082,10 +2118,6 @@ expandPartition() {
                         handleError "Could not unmount $part from /tmp/xfs (${FUNCNAME[0]})\n   Info: $(cat /tmp/xfslog.txt)\n   Args Passed: $*"
                     fi
                     echo "Done"
-                else
-                    echo "Skipped"
-                    rootpxe_console_message WARN 'XFS partition cannot be expanded.'
-                fi
             fi
             ;;
         *)
@@ -2134,6 +2166,9 @@ fsTypeSetting() {
             ;;
         hfsplus)
             fstype="hfsp"
+            ;;
+        LVM2_member)
+            fstype="lvm"
             ;;
         ntfs)
             fstype="ntfs"
@@ -3731,10 +3766,10 @@ getHardDisk() {
                         continue
                     fi
 
-                    # Ambiguous or missing -> warn and fall back
-                    rootpxe_console_message WARN "Could not uniquely match disk for expected size $exp; using enumeration order." >&2
-                    mapped=()
-                    break
+                    # A multi-disk image has no safe enumeration fallback:
+                    # a same-sized or missing disk would receive another
+                    # disk's partition table and payload.
+                    handleError "Could not uniquely match disk for expected size $exp (mpa deployment requires one exact target per captured disk)."
                 done
 
                 if [[ ${#mapped[@]} -gt 0 ]]; then
@@ -4552,6 +4587,12 @@ savePartition() {
             ;;
     esac
     case $fstype in
+        lvm)
+            # A LVM PV is captured exclusively through its supported linear
+            # LVs.  Never let the generic imager create a raw PV payload.
+            rootpxe_lvm_is_pv_partition "$part" || handleError "Unsupported LVM PV topology. (${FUNCNAME[0]})"
+            rootpxe_capture_lvm_volumes "$imagePath" || handleError "Unable to capture LVM logical volumes. (${FUNCNAME[0]})"
+            ;;
         swap)
             rootpxe_console_message INFO 'Saving swap partition UUID.'
             swapUUIDFileName "$imagePath" "$disk_number"
@@ -4870,56 +4911,6 @@ getFSID() {
     local disk
     getDiskFromPartition "$part"
     fsid="$(flock $disk sfdisk -d "$disk" |  grep "$part" | sed -n 's/.*Id=\([0-9]\+\).*\(,\|\).*/\1/p')"
-}
-# Gets any lvm layouts.
-# $1 is the partition to search within.
-getLVM() {
-    local part="$1"
-    [[ -z $part ]] && handleError "No partition passed (${FUNCNAME[0]})\n   Args Passed: $*"
-    vgscan >/dev/null 2>&1
-    local vggroup
-    getVolumeGroup "${part}"
-    [[ -z $vggroup ]] && return
-    changeVolumeGroup "${vggroup}"
-    read lvmGUID lvmSIZE <<< $(vgs --noheadings -v ${vggroup} --units s 2>/dev/null | awk '{printf("%s %s", $9, gensub(/[Ss]/,"","g",$7))}')
-}
-# Gets the volume group name/label.
-# $1 The partition to check on.
-getVolumeGroup() {
-    local part="$1"
-    [[ -z $part ]] && handleError "No partition passed (${FUNCNAME[0]})\n   Args Passed: $*"
-    vggroup=$(pvs --noheadings ${part} | sed -n "s|.*${part}[[:space:]]\+\([A-Za-z0-9_-]\+\)[[:space:]]\+.*|\1|p")
-}
-# Changes to volume group
-# $1 The group name to change to.
-changeVolumeGroup() {
-    local vggroup="$1"
-    [[ -z $vggroup ]] && handleError "No group name passed (${FUNCNAME[0]})\n   Args Passed: $*"
-    vgchange -a y "$vggroup"
-}
-# Get's volume labels from volume group.
-# $1 The group to get logical volumes from.
-getLogicalVolumes() {
-    local vggroup="$1"
-    [[ -z $vggroup ]] && handleError "No group name passed (${FUNCNAME[0]})\n   Args Passed: $*"
-    local lvs
-    local lgvol
-    lgvols=""
-    lvs=$(lvs --noheadings ${vggroup} | sed -n 's|[[:space:]]\+\([A-Za-z0-9_-]\+\)[[:space:]]\+.*|\1|p')
-    for lgvol in ${lvs}; do
-        lgvols=(${lgvols} ${lgvol})
-    done
-}
-# Get's volume device mapper.
-# $1 The volume to get
-# $2 The group to get
-getLGDevice() {
-    local lgvol="$1"
-    local lggroup="$2"
-    [[ -z $lgvol ]] && handleError "No volume device passed (${FUNCNAME[0]})\n   Args Passed: $*"
-    [[ -z $lggroup ]] && handleError "No volume group passed (${FUNCNAME[0]})\n   Args Passed: $*"
-    lgdev="/dev/mapper/${lggroup}-${lgvol}"
-    read lgvUUID lgvSIZE <<< $(lvs --noheadings -v ${lggroup} --units s 2>/dev/null | awk '/'${lgvol}'/ {printf("%s %s", $5, gensub(/[Ss]/,"","g",$10))}')
 }
 # Trims character from string
 # $1 The variable to trim

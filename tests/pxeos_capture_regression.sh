@@ -739,6 +739,20 @@ pass 'extfs preflight only accepts a clean recheck after journal recovery'
      ! grep -Fq "$forbidden" <<<"$n_capture" || fail "n capture must not mutate the source disk: $forbidden"
  done
  ! grep -Fq 'rootpxe_capture_recovery' "$upload" || fail 'n capture must not include source recovery helpers'
- pass 'n capture preserves the source layout and only writes d1.partitions'
+pass 'n capture preserves the source layout and only writes d1.partitions'
+
+# Type/scope/format/LVM cross-contract: fixed image types may select a
+# partition subset, while n/dd are always all-disk scopes; Partimage is never
+# a new capture writer and fixed LVM raw capture is rejected before permit.
+grep -Fq 'rootpxe_validate_image_contract || handleError "PXEOS_STAGE=capture CODE=IMAGE_CONTRACT_INVALID' "$upload" || fail 'capture must validate type scope and format before work'
+grep -Fq 'imgType:-} == mps' "$upload" || fail 'mps capture must have an explicit LVM rejection path'
+grep -Fq 'imgType:-} == mpa' "$upload" || fail 'mpa capture must have an explicit LVM rejection path'
+grep -Fq 'rootpxe_disk_has_lvm_pv' "$upload" || fail 'fixed capture must inspect LVM PV signatures'
+grep -Fq 'imgFormat:-} == 1' "$funcs" || fail 'capture contract must reject Partimage format 1'
+grep -Fq 'case "${imgPartitionType:-}" in all|mbr|[1-9]|10)' "$funcs" || fail 'capture contract must enumerate fixed-image partition scopes'
+for legacy_lvm_helper in getLVM getVolumeGroup changeVolumeGroup getLogicalVolumes getLGDevice; do
+    ! grep -Eq "^${legacy_lvm_helper}\\(\\)" "$funcs" || fail "obsolete LVM helper remains: $legacy_lvm_helper"
+done
+pass 'image type scope format and LVM capture contract'
 )
 # ===== 单盘可调整镜像的捕获布局检查结束 =====

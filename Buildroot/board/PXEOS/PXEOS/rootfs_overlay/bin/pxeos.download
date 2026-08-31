@@ -4,12 +4,14 @@
 . /bin/pxeos.mount
 . /bin/pxeos.checkmount
 . /bin/pxeos.checkimgvar
+rootpxe_validate_image_contract || handleError "PXEOS_STAGE=layout_validation CODE=IMAGE_CONTRACT_INVALID REASON=unsupported_type_scope_or_capture_format"
 hd=""
 disks=""
 disk=""
 parts=""
 part=""
 imagePath=$(rootpxe_storage_path "${img:-}") || handleError "Invalid image path ($0)"
+rootpxe_validate_fixed_image_lvm_inventory "$imagePath" || handleError "PXEOS_STAGE=layout_validation CODE=FIXED_IMAGE_LVM_INVENTORY_INVALID REASON=missing_or_lvm_raw_inventory"
 origmac=$mac
 mac=$(getMACAddresses | base64)
 . /bin/pxeos.inventory "true"
