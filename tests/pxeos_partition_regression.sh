@@ -681,6 +681,10 @@ rootpxe_lvm_trim() {
 pvs() {
   case " $* " in
     *'reportformat json'*)
+      if [[ -n ${LINUX_PVS_JSON:-} ]]; then
+        printf '%s\n' "$LINUX_PVS_JSON"
+        return 0
+      fi
       [[ ${PVS_FAIL:-0} != 1 ]] || return 1
       [[ ${LVM_MODE:-ok} != badjson ]] || { printf '{bad json\n'; return 0; }
       [[ ${LVM_MODE:-ok} != none ]] || { printf '{"report":[{"pv":[]}]}\n'; return 0; }
@@ -707,10 +711,30 @@ lvs() {
   printf '{"report":[{"lv":[%s]}]}\n' "$rows"
 }
 export LVM_SIZE_STATE="$tmp/lv-size"; echo 67108864 >"$LVM_SIZE_STATE"
-getPartitions() { parts='/dev/mock1'; }
+getPartitions() { parts=${LINUX_TARGET_PARTS:-/dev/mock1}; }
 getPartitionNumber() { part_number=${1##*mock}; part_number=${part_number##*p}; }
 uploadFormat() { [[ ${UPLOAD_FAIL:-0} != 1 ]] || return 1; : >"$2.000"; rootpxe_last_writer_pid=1; }
 rootpxe_wait_for_writer() { [[ ${WRITER_FAIL:-0} != 1 ]]; }
+
+# Linux hostname probing must accept every exact target-PV position emitted by
+# getPartitions.  That helper is newline-separated, so a space-boundary or
+# substring match would misclassify an in-disk PV as cross-disk.
+linux_target_vg=vg-target
+LINUX_PVS_JSON='{"report":[{"pv":[{"pv_name":"/dev/mock2","vg_uuid":"vg-target"}]}]}'
+for linux_target_position in first middle last; do
+  case $linux_target_position in
+    first) export LINUX_TARGET_PARTS=$'/dev/mock2\n/dev/mock3\n/dev/mock4' ;;
+    middle) export LINUX_TARGET_PARTS=$'/dev/mock1\n/dev/mock2\n/dev/mock3' ;;
+    last) export LINUX_TARGET_PARTS=$'/dev/mock1\n/dev/mock3\n/dev/mock2' ;;
+  esac
+  rootpxe_linux_validate_vg_target_pvs /dev/mock "$linux_target_vg" || fail "linux-target-pv-newline-membership-$linux_target_position"
+done
+export LINUX_TARGET_PARTS=$'/dev/mock1\n/dev/mock2'
+LINUX_PVS_JSON='{"report":[{"pv":[{"pv_name":"/dev/mock2-extra","vg_uuid":"vg-target"}]}]}'
+rootpxe_linux_validate_vg_target_pvs /dev/mock "$linux_target_vg" && fail linux-target-pv-similar-path-must-reject
+LINUX_PVS_JSON='{"report":[{"pv":[{"pv_name":"/dev/mock2","vg_uuid":"vg-target"},{"pv_name":"/dev/foreign2","vg_uuid":"vg-target"}]}]}'
+rootpxe_linux_validate_vg_target_pvs /dev/mock "$linux_target_vg" && fail linux-target-pv-cross-disk-must-reject
+unset LINUX_TARGET_PARTS LINUX_PVS_JSON
 
 # XFS images must not be captured from an un-replayed journal.  These mocks
 # make the preflight contract observable without mounting a host filesystem.

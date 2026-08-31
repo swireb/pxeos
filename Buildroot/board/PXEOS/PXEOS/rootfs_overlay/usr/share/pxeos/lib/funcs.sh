@@ -3080,7 +3080,7 @@ rootpxe_linux_probe_root_candidate() {
 }
 
 rootpxe_linux_validate_vg_target_pvs() {
-    local disk="$1" vg_uuid="$2" pv pvs_json all_pvs
+    local disk="$1" vg_uuid="$2" pv pvs_json all_pvs target_part pv_on_target
     getPartitions "$disk"
     [[ -n ${parts:-} ]] || return 1
     rootpxe_lvm_safe_identifier "$vg_uuid" || return 1
@@ -3090,7 +3090,13 @@ rootpxe_linux_validate_vg_target_pvs() {
     [[ -n $all_pvs ]] || return 1
     for pv in $all_pvs; do
         pv=$(rootpxe_lvm_trim "$pv")
-        case " ${parts:-} " in *" $pv "*) ;; *) return 1 ;; esac
+        pv_on_target=no
+        while IFS= read -r target_part; do
+            [[ -n $target_part && $pv == "$target_part" ]] || continue
+            pv_on_target=yes
+            break
+        done <<<"${parts:-}"
+        [[ $pv_on_target == yes ]] || return 1
     done
     return 0
 }
