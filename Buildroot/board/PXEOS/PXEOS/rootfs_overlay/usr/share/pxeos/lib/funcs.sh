@@ -2248,6 +2248,20 @@ expandPartition() {
                 echo "Done"
             fi
             ;;
+        fat)
+            # The resolved deployment layout is the sole source of partition
+            # geometry.  pxeosfatgrow only expands the FAT filesystem inside
+            # the already-expanded partition and never edits its table entry.
+            if [[ $type == "down" ]]; then
+                dots "Resizing $fstype volume ($part)"
+                command -v fsck.fat >/dev/null 2>&1 || { echo "Failed"; debugPause; handleError "FAT filesystem check tool is unavailable for $part (${FUNCNAME[0]})"; }
+                command -v pxeosfatgrow >/dev/null 2>&1 || { echo "Failed"; debugPause; handleError "FAT grow tool is unavailable for $part (${FUNCNAME[0]})"; }
+                fsck.fat -n "$part" >/tmp/pxeosfatgrow-fsck.txt 2>&1 || { echo "Failed"; debugPause; handleError "FAT filesystem check failed before growth for $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/pxeosfatgrow-fsck.txt)\n   Args Passed: $*"; }
+                pxeosfatgrow "$part" >/tmp/pxeosfatgrow.txt 2>&1 || { echo "Failed"; debugPause; handleError "Could not grow FAT filesystem on $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/pxeosfatgrow.txt)\n   Args Passed: $*"; }
+                fsck.fat -n "$part" >/tmp/pxeosfatgrow-fsck.txt 2>&1 || { echo "Failed"; debugPause; handleError "FAT filesystem check failed after growth for $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/pxeosfatgrow-fsck.txt)\n   Args Passed: $*"; }
+                echo "Done"
+            fi
+            ;;
         xfs)
             if [[ $type == "down" ]]; then
                 dots "Attempting to resize $fstype volume ($part)"
@@ -3028,10 +3042,51 @@ rootpxe_linux_root_fstype_supported() {
     esac
 }
 
+rootpxe_linux_btrfs_subvolid_valid() {
+    [[ $1 =~ ^[1-9][0-9]*$ ]]
+}
+
+rootpxe_linux_btrfs_default_subvolid() {
+    local mountpoint="$1" output subvolid
+    output=$(btrfs subvolume get-default "$mountpoint" 2>/dev/null) || return 1
+    subvolid=$(awk '$1 == "ID" && $2 ~ /^[1-9][0-9]*$/ { print $2; exit }' <<<"$output")
+    rootpxe_linux_btrfs_subvolid_valid "$subvolid" || return 1
+    printf '%s\n' "$subvolid"
+}
+
+rootpxe_linux_btrfs_subvolume_ids() {
+    local device="$1" mountpoint=/linuxroot options rows parsed subvolids
+    mkdir -p "$mountpoint" || return 3
+    if mountpoint -q "$mountpoint" 2>/dev/null; then
+        umount "$mountpoint" >/dev/null 2>&1 || return 2
+    fi
+    options=$(rootpxe_linux_mount_options ro btrfs) || return 3
+    mount -t btrfs -o "$options" "$device" "$mountpoint" >/tmp/rootpxe-linux-btrfs-list-output 2>&1 || return 3
+    rows=$(mktemp /tmp/rootpxe-linux-btrfs-subvolumes.XXXXXX) || { umount "$mountpoint" >/dev/null 2>&1 || return 2; return 3; }
+    btrfs subvolume list "$mountpoint" >"$rows" 2>/dev/null || { rm -f -- "$rows"; umount "$mountpoint" >/dev/null 2>&1 || return 2; return 3; }
+    parsed=$(mktemp /tmp/rootpxe-linux-btrfs-subvolumes-parsed.XXXXXX) || { rm -f -- "$rows"; umount "$mountpoint" >/dev/null 2>&1 || return 2; return 3; }
+    awk '
+        NF == 0 { next }
+        $1 == "ID" && $2 ~ /^[1-9][0-9]*$/ { print $2; next }
+        { exit 1 }
+    ' "$rows" >"$parsed" || { rm -f -- "$rows" "$parsed"; umount "$mountpoint" >/dev/null 2>&1 || return 2; return 3; }
+    subvolids=$(sort -un "$parsed") || { rm -f -- "$rows" "$parsed"; umount "$mountpoint" >/dev/null 2>&1 || return 2; return 3; }
+    rm -f -- "$rows" "$parsed"
+    umount "$mountpoint" >/dev/null 2>&1 || return 2
+    [[ -n $subvolids ]] || return 1
+    printf '%s\n' "$subvolids"
+}
+
 rootpxe_linux_mount_options() {
-    local mode="$1" fstype="$2"
+    local mode="$1" fstype="$2" subvolid="${3:-}" options
     case $fstype in
         xfs) printf '%s,nouuid' "$mode" ;;
+        btrfs)
+            [[ -z $subvolid ]] || rootpxe_linux_btrfs_subvolid_valid "$subvolid" || return 1
+            if [[ $mode == ro ]]; then options=ro,nologreplay; else options=rw; fi
+            [[ -z $subvolid ]] || options="$options,subvolid=$subvolid"
+            printf '%s' "$options"
+            ;;
         *) printf '%s' "$mode" ;;
     esac
 }
@@ -3069,16 +3124,21 @@ rootpxe_linux_paths_safe_for_write() {
 }
 
 rootpxe_linux_probe_root_candidate() {
-    local device="$1" fstype="$2" vg_name="${3:-}" vg_uuid="${4:-}" mountpoint=/linuxroot options candidate=""
+    local device="$1" fstype="$2" vg_name="${3:-}" vg_uuid="${4:-}" subvolid="${5:-}" mountpoint=/linuxroot options candidate=""
     rootpxe_linux_root_fstype_supported "$fstype" || return 1
     mkdir -p "$mountpoint" || return 1
-    umount "$mountpoint" >/dev/null 2>&1 || true
-    options=$(rootpxe_linux_mount_options ro "$fstype")
-    mount -t "$fstype" -o "$options" "$device" "$mountpoint" >/tmp/rootpxe-linux-probe-output 2>&1 || return 1
-    if [[ -d "$mountpoint/etc" && ! -L "$mountpoint/etc" ]] && rootpxe_linux_has_safe_os_release "$mountpoint"; then
-        candidate="$device|$fstype|$vg_name|$vg_uuid"
+    if mountpoint -q "$mountpoint" 2>/dev/null; then
+        umount "$mountpoint" >/dev/null 2>&1 || return 2
     fi
-    umount "$mountpoint" >/dev/null 2>&1 || true
+    options=$(rootpxe_linux_mount_options ro "$fstype" "$subvolid") || { [[ $fstype == btrfs ]] && return 3; return 1; }
+    mount -t "$fstype" -o "$options" "$device" "$mountpoint" >/tmp/rootpxe-linux-probe-output 2>&1 || { [[ $fstype == btrfs ]] && return 3; return 1; }
+    if [[ -d "$mountpoint/etc" && ! -L "$mountpoint/etc" ]] && rootpxe_linux_has_safe_os_release "$mountpoint"; then
+        if [[ $fstype == btrfs && -z $subvolid ]]; then
+            subvolid=$(rootpxe_linux_btrfs_default_subvolid "$mountpoint") || { umount "$mountpoint" >/dev/null 2>&1 || return 2; return 3; }
+        fi
+        candidate="$device|$fstype|$vg_name|$vg_uuid|$subvolid"
+    fi
+    umount "$mountpoint" >/dev/null 2>&1 || return 2
     [[ -n $candidate ]] || return 1
     printf '%s\n' "$candidate"
 }
@@ -3165,22 +3225,55 @@ rootpxe_linux_cleanup_selected_vg() {
 # LVM, all PVs of a VG must be target-disk partitions and the VG UUID is used
 # for selection, so a same-name or cross-disk VG cannot be activated blindly.
 # Return 20=no root, 21=ambiguous root, 22=only cross-disk LVM candidates,
-# 23=LVM activation/state failure.  Do not report an activation failure as a
-# cross-disk topology violation.
+# 23=LVM activation/state failure, 24=filesystem probe failure.  Do not
+# report an activation failure as a cross-disk topology violation.
 rootpxe_find_linux_root_filesystem() {
-    local disk="$1" part fs candidate pv vg_name vg_uuid activation lvs_output lv pvs_json lvs_rows pv_rows
-    local target_parts="" seen_vgs="" activated_vgs="" candidates="" cross_disk_lvm=0 lvm_activation_failed=0 rc=20
+    local disk="$1" part fs candidate pv vg_name vg_uuid activation lvs_output lv pvs_json lvs_rows pv_rows subvolid probe_rc enum_rc subvolids
+    local target_parts="" lvm_parts="" seen_vgs="" activated_vgs="" candidates="" cross_disk_lvm=0 lvm_activation_failed=0 probe_failed=0 rc=20
     [[ -n $disk ]] || return 20
     getPartitions "$disk"
     [[ -n ${parts:-} ]] || return 20
     for part in $parts; do
         target_parts="$target_parts $part"
-        fsTypeSetting "$part"
-        fs=${fstype:-}
-        candidate=$(rootpxe_linux_probe_root_candidate "$part" "$fs") || continue
-        candidates="$candidates $candidate"
+        # fsTypeSetting returns PXEOS/Partclone handler names (for example,
+        # ext2/3/4 become extfs), which are not mount filesystem types.  Root
+        # discovery must retain blkid's physical type and only inspect PVs.
+        fs=$(blkid -p -o value -s TYPE "$part" 2>/dev/null) || continue
+        case $fs in
+            LVM2_member)
+                lvm_parts="$lvm_parts $part"
+                ;;
+            btrfs)
+                candidate=$(rootpxe_linux_probe_root_candidate "$part" "$fs")
+                probe_rc=$?
+                if [[ $probe_rc -eq 0 ]]; then
+                    candidates="$candidates $candidate"
+                    continue
+                fi
+                if [[ $probe_rc -ne 1 ]]; then probe_failed=1; continue; fi
+                subvolids=$(rootpxe_linux_btrfs_subvolume_ids "$part")
+                enum_rc=$?
+                if [[ $enum_rc -eq 2 || $enum_rc -eq 3 ]]; then probe_failed=1; continue; fi
+                [[ $enum_rc -eq 0 ]] || continue
+                while IFS= read -r subvolid; do
+                    rootpxe_linux_btrfs_subvolid_valid "$subvolid" || continue
+                    candidate=$(rootpxe_linux_probe_root_candidate "$part" "$fs" "" "" "$subvolid")
+                    probe_rc=$?
+                    if [[ $probe_rc -ne 0 && $probe_rc -ne 1 ]]; then probe_failed=1; continue; fi
+                    [[ $probe_rc -eq 0 ]] || continue
+                    candidates="$candidates $candidate"
+                done <<<"$subvolids"
+                ;;
+            *)
+                candidate=$(rootpxe_linux_probe_root_candidate "$part" "$fs")
+                probe_rc=$?
+                if [[ $probe_rc -ne 0 && $probe_rc -ne 1 ]]; then probe_failed=1; continue; fi
+                [[ $probe_rc -eq 0 ]] || continue
+                candidates="$candidates $candidate"
+                ;;
+        esac
     done
-    for part in $parts; do
+    for part in $lvm_parts; do
         pvs_json=$(pvs --reportformat json -o pv_name,vg_name,vg_uuid "$part" 2>/dev/null) || { lvm_activation_failed=1; continue; }
         rootpxe_lvm_json_jq -e '(.report|type == "array" and length == 1 and ((.[0].pv? // [])|type == "array") and all((.[0].pv? // [])[]; (.pv_name|type == "string") and (.vg_name|type == "string") and (.vg_uuid|type == "string")))' <<<"$pvs_json" >/dev/null || { lvm_activation_failed=1; continue; }
         pv_rows=$(mktemp /tmp/rootpxe-linux-pvs.XXXXXX) || { lvm_activation_failed=1; continue; }
@@ -3205,9 +3298,34 @@ rootpxe_find_linux_root_filesystem() {
             while IFS=$'\t' read -r _lv_name lv _lv_active; do
                 lv=$(rootpxe_lvm_trim "$lv")
                 [[ -n $lv ]] || { lvm_activation_failed=1; continue; }
-                fs=$(blkid -o value -s TYPE "$lv" 2>/dev/null)
-                candidate=$(rootpxe_linux_probe_root_candidate "$lv" "$fs" "$vg_name" "$vg_uuid") || continue
-                candidates="$candidates $candidate"
+                fs=$(blkid -p -o value -s TYPE "$lv" 2>/dev/null) || continue
+                if [[ $fs == btrfs ]]; then
+                    candidate=$(rootpxe_linux_probe_root_candidate "$lv" "$fs" "$vg_name" "$vg_uuid")
+                    probe_rc=$?
+                    if [[ $probe_rc -eq 0 ]]; then
+                        candidates="$candidates $candidate"
+                        continue
+                    fi
+                    if [[ $probe_rc -ne 1 ]]; then probe_failed=1; continue; fi
+                    subvolids=$(rootpxe_linux_btrfs_subvolume_ids "$lv")
+                    enum_rc=$?
+                    if [[ $enum_rc -eq 2 || $enum_rc -eq 3 ]]; then probe_failed=1; continue; fi
+                    [[ $enum_rc -eq 0 ]] || continue
+                    while IFS= read -r subvolid; do
+                        rootpxe_linux_btrfs_subvolid_valid "$subvolid" || continue
+                        candidate=$(rootpxe_linux_probe_root_candidate "$lv" "$fs" "$vg_name" "$vg_uuid" "$subvolid")
+                        probe_rc=$?
+                        if [[ $probe_rc -ne 0 && $probe_rc -ne 1 ]]; then probe_failed=1; continue; fi
+                        [[ $probe_rc -eq 0 ]] || continue
+                        candidates="$candidates $candidate"
+                    done <<<"$subvolids"
+                else
+                    candidate=$(rootpxe_linux_probe_root_candidate "$lv" "$fs" "$vg_name" "$vg_uuid")
+                    probe_rc=$?
+                    if [[ $probe_rc -ne 0 && $probe_rc -ne 1 ]]; then probe_failed=1; continue; fi
+                    [[ $probe_rc -eq 0 ]] || continue
+                    candidates="$candidates $candidate"
+                fi
             done <"$lvs_rows"
             rm -f -- "$lvs_rows"
         done <"$pv_rows"
@@ -3218,16 +3336,20 @@ rootpxe_find_linux_root_filesystem() {
         candidate_count=$((candidate_count + 1))
         final_candidate="$candidate"
     done
-    case $candidate_count in
-        1) rc=0 ;;
-        0)
-            if [[ $cross_disk_lvm -eq 1 ]]; then rc=22
-            elif [[ $lvm_activation_failed -eq 1 ]]; then rc=23
-            else rc=20
-            fi
-            ;;
-        *) rc=21 ;;
-    esac
+    if [[ $probe_failed -eq 1 ]]; then
+        rc=24
+    else
+        case $candidate_count in
+            1) rc=0 ;;
+            0)
+                if [[ $cross_disk_lvm -eq 1 ]]; then rc=22
+                elif [[ $lvm_activation_failed -eq 1 ]]; then rc=23
+                else rc=20
+                fi
+                ;;
+            *) rc=21 ;;
+        esac
+    fi
     for activation in $activated_vgs; do
         vg_name=${activation%%|*}
         vg_uuid=${activation#*|}
@@ -3243,7 +3365,7 @@ rootpxe_validate_linux_hostname() {
 }
 
 rootpxe_apply_linux_hostname_for_disk() {
-    local disk="$1" root_spec root_device root_fs root_lvm_name root_lvm_uuid root_lvm_activated=no rc mountpoint=/linuxroot options
+    local disk="$1" root_spec root_device root_fs root_lvm_name root_lvm_uuid root_subvolid root_lvm_activated=no rc mountpoint=/linuxroot options
     local hostname_path hosts_path old_hostname actual_hostname hosts_tmp expected_hash actual_hash hostname_exists=0
     [[ ${changeHostname:-false} == true ]] || return 0
     rootpxe_validate_linux_hostname "${hostName:-}" || handleError "PXEOS_STAGE=customizing_hostname CODE=INVALID_LINUX_HOSTNAME REASON=linux_name_policy"
@@ -3255,6 +3377,7 @@ rootpxe_apply_linux_hostname_for_disk() {
         21) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_AMBIGUOUS" ;;
         22) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_CROSS_DISK_LVM" ;;
         23) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_LVM_ACTIVATION_FAILED" ;;
+        24) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED" ;;
         *) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED" ;;
     esac
     root_device=${root_spec%%|*}
@@ -3262,8 +3385,11 @@ rootpxe_apply_linux_hostname_for_disk() {
     root_fs=${root_spec%%|*}
     root_spec=${root_spec#*|}
     root_lvm_name=${root_spec%%|*}
-    root_lvm_uuid=${root_spec#*|}
+    root_spec=${root_spec#*|}
+    root_lvm_uuid=${root_spec%%|*}
+    root_subvolid=${root_spec#*|}
     [[ -n $root_device && -n $root_fs && $root_spec == *"|"* ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"
+    [[ $root_fs != btrfs || $root_subvolid =~ ^[1-9][0-9]*$ ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"
     if [[ -n $root_lvm_name || -n $root_lvm_uuid ]]; then
         [[ -n $root_lvm_name && -n $root_lvm_uuid ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"
         root_lvm_activated=$(rootpxe_linux_activate_vg_if_needed "$disk" "$root_lvm_name" "$root_lvm_uuid")
@@ -3275,8 +3401,10 @@ rootpxe_apply_linux_hostname_for_disk() {
     fi
     rootpxe_stage customizing_hostname "code=HOSTNAME_STARTED method=linux"
     mkdir -p "$mountpoint" || handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_MOUNTPOINT_FAILED"
-    umount "$mountpoint" >/dev/null 2>&1 || true
-    options=$(rootpxe_linux_mount_options rw "$root_fs")
+    if mountpoint -q "$mountpoint" 2>/dev/null; then
+        umount "$mountpoint" >/dev/null 2>&1 || { rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"; }
+    fi
+    options=$(rootpxe_linux_mount_options rw "$root_fs" "$root_subvolid") || handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"
     mount -t "$root_fs" -o "$options" "$root_device" "$mountpoint" >/tmp/rootpxe-linux-mount-output 2>&1 || { rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_MOUNT_FAILED"; }
     rootpxe_linux_paths_safe_for_write "$mountpoint" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_PATH_UNSAFE"; }
     hostname_path="$mountpoint/etc/hostname"
@@ -3321,7 +3449,9 @@ rootpxe_apply_linux_hostname_for_disk() {
         rm -f "$hosts_tmp"
         [[ -n $expected_hash && $expected_hash == "$actual_hash" ]] || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTS_READBACK_FAILED"; }
     fi
-    umount "$mountpoint" >/dev/null 2>&1 || true
+    if mountpoint -q "$mountpoint" 2>/dev/null; then
+        umount "$mountpoint" >/dev/null 2>&1 || { rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"; }
+    fi
     rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"
     rootpxe_stage customizing_hostname "code=HOSTNAME_COMPLETE method=linux"
 }

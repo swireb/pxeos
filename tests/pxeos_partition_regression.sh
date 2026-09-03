@@ -356,6 +356,343 @@ if rootpxe_nvme_reformat_to_sector_size /dev/nvme0n1 4096 nvme-test-wwn; then fa
 unset -f read
 must_not_call_format
 
+# FAT expansion runs only for a deployment partition that is not fixed.  The
+# helper must be bracketed by read-only fsck.fat checks, and no failure may be
+# treated as a successful expansion.
+(
+    FAT_TRACE="$tmp/fat-grow-trace"; : >"$FAT_TRACE"; export FAT_TRACE
+    debugPause() { :; }
+    dots() { printf 'dots:%s\n' "$*" >>"$FAT_TRACE"; }
+    rootpxe_console_message() { printf 'console:%s\n' "$*" >>"$FAT_TRACE"; }
+    getDiskFromPartition() { disk=/dev/mockdisk; }
+    getPartitionNumber() { part_number=1; }
+    fsTypeSetting() { fstype=fat; }
+    runPartprobe() { printf 'partprobe:%s\n' "$1" >>"$FAT_TRACE"; }
+    handleError() { printf 'error:%s\n' "$*" >>"$FAT_TRACE"; exit 91; }
+    fsck.fat() {
+        printf 'fsck:%s\n' "$*" >>"$FAT_TRACE"
+        FAT_FSCK_CALLS=$(( ${FAT_FSCK_CALLS:-0} + 1 ))
+        case ${FAT_FSCK_MODE:-ok}:$FAT_FSCK_CALLS in
+            pre_fail:1|post_fail:2) return 8 ;;
+        esac
+    }
+    pxeosfatgrow() {
+        printf 'grow:%s\n' "$*" >>"$FAT_TRACE"
+        [[ ${FAT_GROW_STATUS:-0} -eq 0 ]]
+    }
+    type=down; FAT_FSCK_MODE=ok; FAT_FSCK_CALLS=0; FAT_GROW_STATUS=0
+    expandPartition /dev/mockfat '' || fail fat-grow-success
+    [[ $(grep -Fc 'fsck:-n /dev/mockfat' "$FAT_TRACE") -eq 2 ]] || fail fat-grow-fsck-before-after
+    grep -Fqx 'grow:/dev/mockfat' "$FAT_TRACE" || fail fat-grow-helper-call
+    grep -Fqx 'partprobe:/dev/mockdisk' "$FAT_TRACE" || fail fat-grow-partprobe
+)
+(
+    FAT_TRACE="$tmp/fat-fixed-trace"; : >"$FAT_TRACE"; export FAT_TRACE
+    debugPause() { :; }
+    getDiskFromPartition() { disk=/dev/mockdisk; }
+    getPartitionNumber() { part_number=1; }
+    fsTypeSetting() { fstype=fat; }
+    rootpxe_console_message() { printf 'console:%s\n' "$*" >>"$FAT_TRACE"; }
+    fsck.fat() { printf 'UNEXPECTED:fsck\n' >>"$FAT_TRACE"; }
+    pxeosfatgrow() { printf 'UNEXPECTED:grow\n' >>"$FAT_TRACE"; }
+    type=down
+    expandPartition /dev/mockfat 1 || fail fat-fixed-skip
+    ! grep -Fq UNEXPECTED: "$FAT_TRACE" || fail fat-fixed-must-not-touch-filesystem
+)
+(
+    FAT_TRACE="$tmp/fat-capture-trace"; : >"$FAT_TRACE"; export FAT_TRACE
+    debugPause() { :; }
+    getDiskFromPartition() { disk=/dev/mockdisk; }
+    getPartitionNumber() { part_number=1; }
+    fsTypeSetting() { fstype=fat; }
+    runPartprobe() { :; }
+    fsck.fat() { printf 'UNEXPECTED:fsck\n' >>"$FAT_TRACE"; }
+    pxeosfatgrow() { printf 'UNEXPECTED:grow\n' >>"$FAT_TRACE"; }
+    type=up
+    expandPartition /dev/mockfat '' || fail fat-capture-skip
+    ! grep -Fq UNEXPECTED: "$FAT_TRACE" || fail fat-capture-must-not-grow
+)
+for fat_failure in pre_fail grow_fail post_fail missing_fsck missing_helper; do
+    set +e
+    (
+        FAT_TRACE="$tmp/fat-$fat_failure-trace"; : >"$FAT_TRACE"; export FAT_TRACE
+        debugPause() { :; }
+        dots() { :; }
+        getDiskFromPartition() { disk=/dev/mockdisk; }
+        getPartitionNumber() { part_number=1; }
+        fsTypeSetting() { fstype=fat; }
+        runPartprobe() { printf 'UNEXPECTED:partprobe\n' >>"$FAT_TRACE"; }
+        handleError() { printf 'error:%s\n' "$*" >>"$FAT_TRACE"; exit 91; }
+        fsck.fat() {
+            printf 'fsck:%s\n' "$*" >>"$FAT_TRACE"
+            FAT_FSCK_CALLS=$(( ${FAT_FSCK_CALLS:-0} + 1 ))
+            case $fat_failure:$FAT_FSCK_CALLS in
+                pre_fail:1|post_fail:2) return 8 ;;
+            esac
+        }
+        pxeosfatgrow() { printf 'grow:%s\n' "$*" >>"$FAT_TRACE"; [[ $fat_failure != grow_fail ]]; }
+        if [[ $fat_failure == missing_fsck ]]; then
+            unset -f fsck.fat
+            PATH="$tmp/mock:/usr/bin:/bin"
+        elif [[ $fat_failure == missing_helper ]]; then
+            unset -f pxeosfatgrow
+            PATH="$tmp/mock:/usr/bin:/bin"
+        fi
+        type=down; FAT_FSCK_CALLS=0
+        expandPartition /dev/mockfat ''
+    )
+    fat_status=$?
+    set -e
+    [[ $fat_status -eq 91 ]] || fail "fat-$fat_failure-must-fail"
+    grep -q '^error:' "$tmp/fat-$fat_failure-trace" || fail "fat-$fat_failure-error-report"
+    ! grep -Fq UNEXPECTED: "$tmp/fat-$fat_failure-trace" || fail "fat-$fat_failure-must-not-partprobe"
+done
+[[ $(grep -Fc 'fsck:-n /dev/mockfat' "$tmp/fat-pre_fail-trace") -eq 1 ]] || fail fat-pre-failure-must-not-grow
+! grep -q '^grow:' "$tmp/fat-pre_fail-trace" || fail fat-pre-failure-must-not-grow
+[[ $(grep -Fc 'fsck:-n /dev/mockfat' "$tmp/fat-grow_fail-trace") -eq 1 ]] || fail fat-grow-failure-must-not-postcheck
+[[ $(grep -Fc 'fsck:-n /dev/mockfat' "$tmp/fat-post_fail-trace") -eq 2 ]] || fail fat-post-failure-must-check-twice
+
+# Native FAT16/32 regular-image tests are explicitly environment-gated.
+# They never run against a block device and report SKIP until a Linux toolchain
+# supplies both the compiled helper and its source path.
+(
+set -eu
+
+bin=${PXEOS_FATGROW_TEST_BINARY:-}
+source_file=${PXEOS_FATGROW_TEST_SOURCE:-}
+if [ -z "$bin" ]; then
+    echo 'SKIP: set PXEOS_FATGROW_TEST_BINARY to the compiled pxeosfatgrow binary'
+    exit 0
+fi
+if [ -z "$source_file" ]; then
+    echo 'SKIP: set PXEOS_FATGROW_TEST_SOURCE for the fail-closed exception fixture'
+    exit 0
+fi
+for tool in cc mkfs.fat fsck.fat fatlabel mcopy mmd mdir parted python3 sha256sum truncate; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "SKIP: required native tool is unavailable: $tool"
+        exit 0
+    fi
+done
+if [ ! -x "$bin" ]; then
+    echo "SKIP: PXEOS_FATGROW_TEST_BINARY is not executable: $bin"
+    exit 0
+fi
+if [ ! -r "$source_file" ]; then
+    echo "SKIP: PXEOS_FATGROW_TEST_SOURCE is unreadable: $source_file"
+    exit 0
+fi
+
+test_dir=$(mktemp -d "${TMPDIR:-/tmp}/pxeosfatgrow.XXXXXX")
+trap 'rm -rf "$test_dir"' EXIT HUP INT TERM
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+cat > "$test_dir/exception_fixture.c" <<EOF
+#include <assert.h>
+#define main pxeosfatgrow_program_main
+#include "$source_file"
+#undef main
+
+static void expect_option(PedExceptionType type, PedExceptionOption options,
+                          PedExceptionOption expected)
+{
+    PedException exception = { 0 };
+    exception.type = type;
+    exception.options = options;
+    assert(cancel_exception(&exception) == expected);
+}
+
+int main(void)
+{
+    allow_same_type_choice = 1;
+    same_type_choice = PED_EXCEPTION_NO;
+    expect_option(PED_EXCEPTION_INFORMATION, PED_EXCEPTION_YES_NO_CANCEL,
+                  PED_EXCEPTION_NO);
+    expect_option(PED_EXCEPTION_INFORMATION, PED_EXCEPTION_YES_NO,
+                  PED_EXCEPTION_CANCEL);
+    expect_option(PED_EXCEPTION_WARNING, PED_EXCEPTION_YES_NO_CANCEL,
+                  PED_EXCEPTION_CANCEL);
+    expect_option(PED_EXCEPTION_INFORMATION, PED_EXCEPTION_OK_CANCEL,
+                  PED_EXCEPTION_CANCEL);
+    allow_same_type_choice = 0;
+    expect_option(PED_EXCEPTION_INFORMATION, PED_EXCEPTION_YES_NO_CANCEL,
+                  PED_EXCEPTION_CANCEL);
+    return 0;
+}
+EOF
+cc -std=c11 -Wall -Wextra -Werror -o "$test_dir/exception_fixture" \
+    "$test_dir/exception_fixture.c" -lparted-fs-resize -lparted
+"$test_dir/exception_fixture"
+
+expect_fail_unchanged() {
+    image=$1
+    before=$(sha256sum "$image")
+    if "$bin" "$image"; then
+        fail "expected rejection: $image"
+    fi
+    after=$(sha256sum "$image")
+    [ "$before" = "$after" ] || fail "rejected input was modified: $image"
+}
+
+write_fat16_sentinels() {
+    python3 - "$1" <<'PY'
+import struct, sys
+p = sys.argv[1]
+with open(p, 'r+b') as f:
+    boot = bytearray(f.read(512))
+    sentinel = b'PXE16-BOOT-CODE!'
+    boot[3:11] = b'PXE16OEM'
+    boot[28:32] = struct.pack('<I', 2048)
+    boot[62:62 + len(sentinel)] = sentinel
+    assert len(boot) == 512
+    f.seek(0)
+    f.write(boot)
+PY
+}
+
+write_fat32_sentinels_with_nondefault_backup() {
+    python3 - "$1" <<'PY'
+import struct, sys
+p = sys.argv[1]
+with open(p, 'r+b') as f:
+    main = bytearray(f.read(512))
+    old_backup = struct.unpack_from('<H', main, 50)[0]
+    if old_backup != 6:
+        raise SystemExit('fixture assumes mkfs.fat default backup sector 6')
+    f.seek(old_backup * 512)
+    backup = bytearray(f.read(512))
+    info_sector = struct.unpack_from('<H', main, 48)[0]
+    if info_sector == 0:
+        raise SystemExit('fixture requires a FAT32 FSInfo sector')
+    f.seek((old_backup + info_sector) * 512)
+    backup_info = f.read(512)
+    sentinel = b'PXE32-BOOT-CODE!'
+    for boot in (main, backup):
+        boot[3:11] = b'PXE32OEM'
+        boot[28:32] = struct.pack('<I', 4096)
+        boot[90:90 + len(sentinel)] = sentinel
+        struct.pack_into('<H', boot, 50, 7)
+        assert len(boot) == 512
+    f.seek(0)
+    f.write(main)
+    f.seek(7 * 512)
+    f.write(backup)
+    f.seek((7 + info_sector) * 512)
+    f.write(backup_info)
+PY
+}
+
+assert_fat16_grown_and_preserved() {
+    python3 - "$1" "$2" <<'PY'
+import struct, sys
+p, expected_bytes = sys.argv[1], int(sys.argv[2])
+with open(p, 'rb') as f:
+    b = f.read(512)
+if b[3:11] != b'PXE16OEM': raise SystemExit('FAT16 OEM changed')
+if struct.unpack_from('<I', b, 28)[0] != 2048: raise SystemExit('FAT16 hidden changed')
+if b[62:78] != b'PXE16-BOOT-CODE!': raise SystemExit('FAT16 boot code changed')
+if struct.unpack_from('<I', b, 39)[0] != 0x11223344: raise SystemExit('FAT16 UUID changed')
+if b[43:54] != b'KEEP16     ': raise SystemExit('FAT16 volume label changed')
+sectors = struct.unpack_from('<H', b, 19)[0] or struct.unpack_from('<I', b, 32)[0]
+if sectors != expected_bytes // 512: raise SystemExit('FAT16 total sectors not grown')
+PY
+}
+
+assert_fat32_grown_and_preserved() {
+    python3 - "$1" "$2" <<'PY'
+import struct, sys
+p, expected_bytes = sys.argv[1], int(sys.argv[2])
+with open(p, 'rb') as f:
+    main = f.read(512)
+    backup_sector = struct.unpack_from('<H', main, 50)[0]
+    reserved = struct.unpack_from('<H', main, 14)[0]
+    if not (0 < backup_sector < reserved): raise SystemExit('new FAT32 backup sector invalid')
+    f.seek(backup_sector * 512)
+    backup = f.read(512)
+if main[3:11] != b'PXE32OEM': raise SystemExit('FAT32 main OEM changed')
+if backup[3:11] != b'PXE32OEM': raise SystemExit('FAT32 backup OEM changed')
+for boot in (main, backup):
+    if struct.unpack_from('<I', boot, 28)[0] != 4096: raise SystemExit('FAT32 hidden changed')
+    if boot[90:106] != b'PXE32-BOOT-CODE!': raise SystemExit('FAT32 boot code changed')
+    if struct.unpack_from('<I', boot, 67)[0] != 0x55667788: raise SystemExit('FAT32 UUID changed')
+    if boot[71:82] != b'KEEP32     ': raise SystemExit('FAT32 volume label changed')
+if main[11:24] != backup[11:24] or main[28:52] != backup[28:52]:
+    raise SystemExit('FAT32 main and backup geometry differ')
+if struct.unpack_from('<I', main, 32)[0] != expected_bytes // 512:
+    raise SystemExit('FAT32 total sectors not grown')
+PY
+}
+
+efi_payload=$test_dir/BOOTX64.EFI
+printf 'PXEOS native FAT grow EFI checksum sentinel\n' > "$efi_payload"
+efi_hash=$(sha256sum "$efi_payload" | awk '{print $1}')
+
+fat16=$test_dir/fat16.img
+truncate -s 48M "$fat16"
+mkfs.fat -F 16 -n KEEP16 -i 11223344 "$fat16" >/dev/null
+write_fat16_sentinels "$fat16"
+mmd -i "$fat16" ::/EFI ::/EFI/BOOT
+mcopy -i "$fat16" "$efi_payload" ::/EFI/BOOT/BOOTX64.EFI
+fsck.fat -n "$fat16" >/dev/null
+truncate -s 96M "$fat16"
+"$bin" "$fat16"
+assert_fat16_grown_and_preserved "$fat16" $((96 * 1024 * 1024))
+[ "$(fatlabel "$fat16")" = KEEP16 ] || fail 'FAT16 volume label changed'
+fsck.fat -n "$fat16" >/dev/null
+mcopy -i "$fat16" ::/EFI/BOOT/BOOTX64.EFI "$test_dir/extracted16.efi"
+[ "$(sha256sum "$test_dir/extracted16.efi" | awk '{print $1}')" = "$efi_hash" ] || fail 'FAT16 EFI checksum changed'
+same_before=$(sha256sum "$fat16")
+"$bin" "$fat16"
+[ "$same_before" = "$(sha256sum "$fat16")" ] || fail 'same-size FAT16 run modified image'
+
+shrink=$test_dir/shrink.img
+cp "$fat16" "$shrink"
+truncate -s 48M "$shrink"
+expect_fail_unchanged "$shrink"
+
+fat32=$test_dir/fat32.img
+truncate -s 96M "$fat32"
+mkfs.fat -F 32 -n KEEP32 -i 55667788 "$fat32" >/dev/null
+write_fat32_sentinels_with_nondefault_backup "$fat32"
+mmd -i "$fat32" ::/EFI ::/EFI/BOOT
+mcopy -i "$fat32" "$efi_payload" ::/EFI/BOOT/BOOTX64.EFI
+fsck.fat -n "$fat32" >/dev/null
+truncate -s 192M "$fat32"
+"$bin" "$fat32"
+assert_fat32_grown_and_preserved "$fat32" $((192 * 1024 * 1024))
+[ "$(fatlabel "$fat32")" = KEEP32 ] || fail 'FAT32 volume label changed'
+fsck.fat -n "$fat32" >/dev/null
+mcopy -i "$fat32" ::/EFI/BOOT/BOOTX64.EFI "$test_dir/extracted32.efi"
+[ "$(sha256sum "$test_dir/extracted32.efi" | awk '{print $1}')" = "$efi_hash" ] || fail 'FAT32 EFI checksum changed'
+
+fat4k=$test_dir/fat4k.img
+truncate -s 32M "$fat4k"
+mkfs.fat -F 16 -S 4096 "$fat4k" >/dev/null
+expect_fail_unchanged "$fat4k"
+
+pt_image=$test_dir/gpt.img
+truncate -s 16M "$pt_image"
+parted -s "$pt_image" mklabel gpt
+expect_fail_unchanged "$pt_image"
+
+mbr_image=$test_dir/mbr.img
+truncate -s 16M "$mbr_image"
+parted -s "$mbr_image" mklabel msdos
+expect_fail_unchanged "$mbr_image"
+
+conversion=$test_dir/conversion.img
+truncate -s 48M "$conversion"
+mkfs.fat -F 16 "$conversion" >/dev/null
+truncate -s 3G "$conversion"
+expect_fail_unchanged "$conversion"
+
+echo 'PASS: pxeosfatgrow native regular-image tests'
+)
+
 printf 'PASS: PXEOS partition regression contract\n'
 )
 # ===== 原脚本结束：tests/pxeos_partition_regression.sh =====

@@ -393,6 +393,9 @@ expect_line "$ROOT_DIR/build.sh" '            compiledfile="../fssource$arch/out
 for arch in x86 x64 arm64; do
     config="$ROOT_DIR/configs/kernel${arch}.config"
     expect_line "$config" '# CONFIG_MODULES is not set'
+    expect_line "$config" 'CONFIG_BLOCK=y'
+    expect_line "$config" 'CONFIG_CRYPTO=y'
+    expect_line "$config" 'CONFIG_F2FS_FS=y'
     expect_line "$config" 'CONFIG_R8169=y'
     for driver in R8125 R8126 R8127 R8168; do
         expect_line "$config" "# CONFIG_${driver} is not set"

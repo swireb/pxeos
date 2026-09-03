@@ -618,8 +618,27 @@ EOF
 cat >$tmp/mock/blkid <<'EOF'
 #!/usr/bin/env bash
 for last; do :; done
-if [[ ${MODE:-} == linux_lvm && $last == /dev/vg0/root ]]; then
-    case " $* " in *' TYPE '*) echo ext4 ;; esac
+linux_type_for_device() {
+    case $1 in
+        /dev/mockboot) printf '%s\n' vfat ;;
+        /dev/mockroot) printf '%s\n' "${LINUX_MOCK_ROOT_TYPE:-ext4}" ;;
+        /dev/mockroot2) printf '%s\n' ext4 ;;
+        /dev/mockdata) printf '%s\n' ext4 ;;
+        /dev/mockswap) printf '%s\n' swap ;;
+        /dev/mockpv) printf '%s\n' LVM2_member ;;
+        /dev/vg0/root) printf '%s\n' "${LINUX_MOCK_LV_TYPE:-ext4}" ;;
+        *) printf '%s\n' "$BLKTYPE" ;;
+    esac
+}
+if [[ ${MODE:-} == linux_* ]]; then
+    linux_type=$(linux_type_for_device "$last")
+    [[ $last != /dev/vg0/root || -z ${LV_BLKID_TRACE:-} ]] || printf '%s\n' "$*" >>"$LV_BLKID_TRACE"
+    case " $* " in
+        *' -po udev '*) printf 'FS_TYPE=%s\n' "$linux_type" ;;
+        *' TYPE '*) printf '%s\n' "$linux_type" ;;
+        *' UUID '*) printf 'swap-uuid\n' ;;
+        *' PARTUUID '*) printf 'swap-partuuid\n' ;;
+    esac
     exit 0
 fi
 case " $* " in *' TYPE '*) echo "$BLKTYPE" ;; *' UUID '*) echo swap-uuid ;; *' PARTUUID '*) echo swap-partuuid ;; esac
@@ -645,6 +664,7 @@ fi
 EOF
 cat >$tmp/mock/umount <<'EOF'
 #!/usr/bin/env bash
+[[ ${MODE:-} != linux_unmount_fail ]] || exit 1
 exit 0
 EOF
 cat >$tmp/mock/mount <<'EOF'
@@ -652,6 +672,11 @@ cat >$tmp/mock/mount <<'EOF'
 device=${@: -2:1}
 mount=${!#}
 printf '%s\n' "$*" >>$MOUNT_TRACE
+[[ ${MODE:-} != linux_btrfs_subvol_mount_fail || " $* " != *'subvolid=256'* ]] || exit 1
+if [[ ${MODE:-} == linux_btrfs_list_mount_fail && " $* " == *' -t btrfs -o ro,nologreplay '* ]]; then
+    printf 'ro\n' >>"$BTRFS_RO_MOUNT_TRACE"
+    [[ $(wc -l <"$BTRFS_RO_MOUNT_TRACE") -lt 2 ]] || exit 1
+fi
 rm -rf "$mount"
 mkdir -p "$mount"
 make_linux_root() {
@@ -673,6 +698,15 @@ case ${MODE:-} in
     linux_lvm)
         [[ $device == /dev/vg0/root ]] && make_linux_root
         ;;
+    linux_btrfs_default)
+        [[ $device == /dev/mockroot && ( " $* " == *' -o ro,nologreplay '* || " $* " == *'subvolid=256'* ) ]] && make_linux_root
+        ;;
+    linux_btrfs_subvol)
+        [[ $device == /dev/mockroot && " $* " == *'subvolid=256'* ]] && make_linux_root
+        ;;
+    linux_btrfs_ambiguous)
+        [[ $device == /dev/mockroot && ( " $* " == *'subvolid=256'* || " $* " == *'subvolid=257'* ) ]] && make_linux_root
+        ;;
     linux_multiple)
         [[ $device == /dev/mockroot || $device == /dev/mockroot2 ]] && make_linux_root
         ;;
@@ -682,8 +716,17 @@ if [[ ${MODE:-} == linux_symlink && -d $mount/etc ]]; then
     ln -s /etc/hostname "$mount/etc/hostname"
 fi
 EOF
+cat >$tmp/mock/btrfs <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+    *' subvolume get-default '*) [[ ${BTRFS_GET_DEFAULT_FAIL:-no} != yes ]] || exit 1; printf 'ID %s gen 1 top level 5 path @\n' "${BTRFS_DEFAULT_ID:-256}" ;;
+    *' subvolume list '*) [[ -z ${BTRFS_LIST_TRACE:-} ]] || printf '%s\n' "$*" >>"$BTRFS_LIST_TRACE"; printf '%s\n' "${BTRFS_SUBVOLS:-}" ;;
+    *) exit 1 ;;
+esac
+EOF
 cat >$tmp/mock/pvs <<'EOF'
 #!/usr/bin/env bash
+[[ -z ${PVS_TRACE:-} ]] || printf '%s\n' "$*" >>"$PVS_TRACE"
 if [[ ${MODE:-} == linux_lvm || ${MODE:-} == linux_lvm_all_active || ${MODE:-} == linux_lvm_all_inactive_blank || ${MODE:-} == linux_lvm_mixed || ${MODE:-} == linux_lvm_postverify_fail || ${MODE:-} == linux_lvm_activation_command_fail || ${MODE:-} == linux_lvm_empty || ${MODE:-} == linux_lvm_lvs_badjson ]]; then
     case " $* " in
         *'reportformat json'*) printf '{"report":[{"pv":[{"pv_name":"/dev/mockpv","vg_name":"vg0","vg_uuid":"vg-uuid-0"}]}]}\n' ;;
@@ -777,9 +820,11 @@ export PATH=$tmp/mock:$PATH
 ismajordebug=0
 isdebug=0
 . $tmp/funcs.sh
+declare -f fsTypeSetting >"$tmp/actual-fsTypeSetting.sh"
 rootpxe_require_task_context() { return 0; }
 rootpxe_require_identity() { return 0; }
-real_jq=$(command -v jq) || fail linux-lvm-real-jq-required
+real_jq=${REAL_JQ:-}
+[[ -x $real_jq || $real_jq == *.exe ]] || fail linux-lvm-real-jq-required
 rootpxe_linux_test_jq() {
     local arg converted=()
     for arg in "$@"; do
@@ -927,19 +972,21 @@ set -e
 # actual root filesystem rather than selecting a largest/first partition.
 rootpxe_stage() { :; }
 getPartitions() { parts='/dev/mockboot /dev/mockroot'; }
-fsTypeSetting() {
-    case $1 in
-        /dev/mockboot) fstype=vfat ;;
-        /dev/mockroot|/dev/mockroot2) fstype=ext4 ;;
-        /dev/mockpv) fstype=LVM2_member ;;
-        *) fstype=unknown ;;
-    esac
-}
+# Restore the production function instead of faking its Partclone category:
+# the true blkid output below deliberately maps ext2/3/4 to production extfs.
+. "$tmp/actual-fsTypeSetting.sh"
 : >$tmp/lvm-trace
 rm -f -- "$LVM_ACTIVE_STATE"
 LVM_TRACE=$tmp/lvm-trace; export LVM_TRACE
 changeHostname=true; hostName=linux-node; osid=50
-MODE=linux_ext; export MODE
+MODE=linux_ext; LINUX_MOCK_ROOT_TYPE=ext4; export MODE LINUX_MOCK_ROOT_TYPE
+fsTypeSetting /dev/mockroot
+[[ $fstype == extfs ]] || fail linux-real-fstypesetting-ext4-category
+set +e
+linux_ext4_root=$(rootpxe_find_linux_root_filesystem /dev/mockdisk)
+linux_ext4_rc=$?
+set -e
+[[ $linux_ext4_rc -eq 0 && $linux_ext4_root == /dev/mockroot'|'ext4'|'* ]] || fail linux-ext4-raw-blkid-root
 rootpxe_apply_hostname_for_disk /dev/mockdisk || fail linux-ext-hostname
 grep -Fqx linux-node $tmp/linuxroot/etc/hostname || fail linux-hostname-write
 grep -Fq '127.0.1.1 linux-node old.example' $tmp/linuxroot/etc/hosts || fail linux-hosts-token-replace
@@ -958,37 +1005,91 @@ grep -Fq "chmod:0644 $tmp/linuxroot/etc/hostname" $tmp/hostmode-trace || fail li
 grep -Fq "chown:root:root $tmp/linuxroot/etc/hostname" $tmp/hostmode-trace || fail linux-new-hostname-owner
 
 : >$tmp/mount-trace
-fsTypeSetting() {
-    case $1 in
-        /dev/mockboot) fstype=vfat ;;
-        /dev/mockroot) fstype=xfs ;;
-        /dev/mockroot2) fstype=ext4 ;;
-        /dev/mockpv) fstype=LVM2_member ;;
-        *) fstype=unknown ;;
-    esac
-}
-MODE=linux_ext; export MODE
+MODE=linux_ext; LINUX_MOCK_ROOT_TYPE=xfs; export MODE LINUX_MOCK_ROOT_TYPE
 rootpxe_apply_hostname_for_disk /dev/mockdisk || fail linux-xfs-hostname
 grep -Fq -- '-o ro,nouuid' $tmp/mount-trace || fail linux-xfs-readonly-nouuid
 grep -Fq -- '-o rw,nouuid' $tmp/mount-trace || fail linux-xfs-readwrite-nouuid
-fsTypeSetting() {
-    case $1 in
-        /dev/mockboot) fstype=vfat ;;
-        /dev/mockroot|/dev/mockroot2) fstype=ext4 ;;
-        /dev/mockpv) fstype=LVM2_member ;;
-        *) fstype=unknown ;;
-    esac
-}
+LINUX_MOCK_ROOT_TYPE=ext4; export LINUX_MOCK_ROOT_TYPE
+
+# Btrfs must probe without log replay and preserve the selected numeric
+# subvolume for the later read-write hostname mount.  A valid default root
+# wins before snapshots are enumerated.
+: >$tmp/mount-trace; : >$tmp/btrfs-list-trace
+MODE=linux_btrfs_default; LINUX_MOCK_ROOT_TYPE=btrfs; BTRFS_DEFAULT_ID=256; BTRFS_SUBVOLS='ID 999 gen 1 top level 5 path @snap'; BTRFS_LIST_TRACE=$tmp/btrfs-list-trace; export MODE LINUX_MOCK_ROOT_TYPE BTRFS_DEFAULT_ID BTRFS_SUBVOLS BTRFS_LIST_TRACE
+[[ $(rootpxe_find_linux_root_filesystem /dev/mockdisk) == '/dev/mockroot|btrfs|||256' ]] || fail linux-btrfs-default-root
+grep -Fq -- '-t btrfs -o ro,nologreplay' $tmp/mount-trace || fail linux-btrfs-readonly-nologreplay
+[[ ! -s $tmp/btrfs-list-trace ]] || fail linux-btrfs-default-must-not-enumerate-snapshot
+rootpxe_apply_hostname_for_disk /dev/mockdisk || fail linux-btrfs-default-hostname
+grep -Fq -- '-t btrfs -o rw,subvolid=256' $tmp/mount-trace || fail linux-btrfs-default-rw-subvolid
+
+: >$tmp/mount-trace
+MODE=linux_btrfs_subvol; BTRFS_SUBVOLS='ID 256 gen 1 top level 5 path @'; export MODE BTRFS_SUBVOLS
+[[ $(rootpxe_find_linux_root_filesystem /dev/mockdisk) == '/dev/mockroot|btrfs|||256' ]] || fail linux-btrfs-subvol-root
+rootpxe_apply_hostname_for_disk /dev/mockdisk || fail linux-btrfs-subvol-hostname
+grep -Fq -- '-t btrfs -o rw,subvolid=256' $tmp/mount-trace || fail linux-btrfs-subvol-rw-subvolid
+
+# A broken default-subvolume query or a malformed listing is a probe error,
+# not permission to select a snapshot or any other candidate.
+MODE=linux_btrfs_default; BTRFS_GET_DEFAULT_FAIL=yes; : >$tmp/mount-trace; : >$tmp/btrfs-list-trace; export MODE BTRFS_GET_DEFAULT_FAIL
+set +e
+rootpxe_find_linux_root_filesystem /dev/mockdisk >/dev/null
+btrfs_default_failure_rc=$?
+set -e
+[[ $btrfs_default_failure_rc -eq 24 ]] || fail linux-btrfs-default-query-failure-code
+[[ ! -s $tmp/btrfs-list-trace ]] || fail linux-btrfs-default-query-failure-must-not-enumerate
+BTRFS_GET_DEFAULT_FAIL=no; export BTRFS_GET_DEFAULT_FAIL
+
+MODE=linux_btrfs_subvol; BTRFS_SUBVOLS=$'ID 256 gen 1 top level 5 path @\nmalformed listing'; : >$tmp/mount-trace; export MODE BTRFS_SUBVOLS
+set +e
+rootpxe_find_linux_root_filesystem /dev/mockdisk >/dev/null
+btrfs_malformed_listing_rc=$?
+set -e
+[[ $btrfs_malformed_listing_rc -eq 24 ]] || fail linux-btrfs-malformed-listing-code
+! grep -Fq -- '-o rw' $tmp/mount-trace || fail linux-btrfs-malformed-listing-must-not-write
+
+MODE=linux_btrfs_list_mount_fail; BTRFS_SUBVOLS='ID 256 gen 1 top level 5 path @'; BTRFS_RO_MOUNT_TRACE=$tmp/btrfs-ro-mount-trace; : >$BTRFS_RO_MOUNT_TRACE; : >$tmp/mount-trace; export MODE BTRFS_SUBVOLS BTRFS_RO_MOUNT_TRACE
+set +e
+rootpxe_find_linux_root_filesystem /dev/mockdisk >/dev/null
+btrfs_list_mount_failure_rc=$?
+set -e
+[[ $btrfs_list_mount_failure_rc -eq 24 ]] || fail linux-btrfs-list-mount-failure-code
+[[ $(wc -l <$BTRFS_RO_MOUNT_TRACE) -eq 2 ]] || fail linux-btrfs-list-mount-failure-must-reach-enumeration
+! grep -Fq -- '-o rw' $tmp/mount-trace || fail linux-btrfs-list-mount-failure-must-not-write
+
+MODE=linux_btrfs_subvol_mount_fail; BTRFS_SUBVOLS='ID 256 gen 1 top level 5 path @'; : >$tmp/mount-trace; export MODE BTRFS_SUBVOLS
+set +e
+rootpxe_find_linux_root_filesystem /dev/mockdisk >/dev/null
+btrfs_subvol_mount_failure_rc=$?
+set -e
+[[ $btrfs_subvol_mount_failure_rc -eq 24 ]] || fail linux-btrfs-subvol-mount-failure-code
+! grep -Fq -- '-o rw' $tmp/mount-trace || fail linux-btrfs-subvol-mount-failure-must-not-write
+
+MODE=linux_btrfs_ambiguous; BTRFS_SUBVOLS=$'ID 256 gen 1 top level 5 path @\nID 257 gen 1 top level 5 path @snapshot'; export MODE BTRFS_SUBVOLS
+rootpxe_find_linux_root_filesystem /dev/mockdisk && fail linux-btrfs-subvol-ambiguous
+[[ $? -eq 21 ]] || fail linux-btrfs-subvol-ambiguous-code
+MODE=linux_unmount_fail; LINUX_MOCK_ROOT_TYPE=ext4; : >$tmp/mount-trace; export MODE LINUX_MOCK_ROOT_TYPE
+rootpxe_find_linux_root_filesystem /dev/mockdisk && fail linux-unmount-failure
+[[ $? -eq 24 ]] || fail linux-unmount-failure-code
+! grep -Fq -- '-o rw' $tmp/mount-trace || fail linux-unmount-failure-must-not-write
+LINUX_MOCK_ROOT_TYPE=ext4; export LINUX_MOCK_ROOT_TYPE
 
 MODE=linux_relative_osrelease; export MODE
 [[ $(rootpxe_find_linux_root_filesystem /dev/mockdisk) == /dev/mockroot'|'ext4'|'* ]] || fail linux-relative-osrelease
 
+for root_type in ext2 ext3; do
+    MODE=linux_ext; LINUX_MOCK_ROOT_TYPE=$root_type; export MODE LINUX_MOCK_ROOT_TYPE
+    [[ $(rootpxe_find_linux_root_filesystem /dev/mockdisk) == /dev/mockroot"|$root_type|"* ]] || fail "linux-$root_type-root"
+done
+LINUX_MOCK_ROOT_TYPE=ext4; export LINUX_MOCK_ROOT_TYPE
+
 getPartitions() { parts='/dev/mockpv'; }
-MODE=linux_lvm; export MODE
+MODE=linux_lvm; LINUX_MOCK_LV_TYPE=ext4; LV_BLKID_TRACE=$tmp/lv-blkid-trace; : >$LV_BLKID_TRACE; export MODE LINUX_MOCK_LV_TYPE LV_BLKID_TRACE
 rootpxe_apply_hostname_for_disk /dev/mockdisk || fail linux-lvm-hostname
 grep -Fqx linux-node $tmp/linuxroot/etc/hostname || fail linux-lvm-write
 [[ $(grep -Fc -- '-ay' $tmp/lvm-trace) -eq 2 ]] || fail linux-lvm-reactivate
 [[ $(grep -Fc -- '-an' $tmp/lvm-trace) -eq 2 ]] || fail linux-lvm-cleanup
+grep -Fq -- '-p -o value -s TYPE /dev/vg0/root' $LV_BLKID_TRACE || fail linux-lvm-blkid-probe
+unset LV_BLKID_TRACE
 
 : >$tmp/lvm-trace
 MODE=linux_lvm_all_active; export MODE
@@ -1023,10 +1124,17 @@ getPartitions() { parts='/dev/mockroot /dev/mockroot2'; }
 MODE=linux_multiple; export MODE
 rootpxe_find_linux_root_filesystem /dev/mockdisk && fail linux-multiple-root
 [[ $? -eq 21 ]] || fail linux-multiple-root-code
-getPartitions() { parts='/dev/mockboot'; }
-MODE=linux_none; export MODE
+getPartitions() { parts='/dev/mockboot /dev/mockdata /dev/mockswap'; }
+MODE=linux_none; PVS_TRACE=$tmp/pvs-trace; : >$PVS_TRACE; export MODE PVS_TRACE
 rootpxe_find_linux_root_filesystem /dev/mockdisk && fail linux-no-root
 [[ $? -eq 20 ]] || fail linux-no-root-code
+[[ ! -s $PVS_TRACE ]] || fail linux-non-lvm-must-not-call-pvs
+unset PVS_TRACE
+
+getPartitions() { parts='/dev/mockpv'; }
+MODE=linux_lvm_bad_pvs; export MODE
+rootpxe_find_linux_root_filesystem /dev/mockdisk && fail linux-lvm-bad-pvs-root
+[[ $? -eq 23 ]] || fail linux-lvm-bad-pvs-root-code
 
 getPartitions() { parts='/dev/mockroot'; }
 MODE=linux_readback_fail; export MODE
