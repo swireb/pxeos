@@ -10,6 +10,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
+progress_lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -25,6 +26,7 @@ sed \
     -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' \
     -e 's|/storage|${ROOTPXE_TEST_STORAGE}|g' \
     "$funcs" >"$tmp/funcs.sh"
+cp "$progress_lib" "$tmp/partclone-progress.sh"
 
 setup_fixture() {
     ROOTPXE_TEST_STORAGE="$tmp/storage"
@@ -334,6 +336,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
 funcs="$overlay/usr/share/pxeos/lib/funcs.sh"
+progress_lib="$overlay/usr/share/pxeos/lib/partclone-progress.sh"
 imgcomplete="$overlay/bin/pxeos.imgcomplete"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -460,6 +463,7 @@ sed \
     -e 's|^\. /usr/share/pxeos/lib/restore-preflight.sh$|:|' \
     -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' \
     "$funcs" > "$tmp/funcs.sh"
+cp "$progress_lib" "$tmp/partclone-progress.sh"
 set +u
 PATH="$tmp/bin:$PATH"
 source "$tmp/funcs.sh" 2>/dev/null
@@ -477,6 +481,83 @@ set -e
 [[ $writer_rc -ne 0 ]] || fail 'capture writer 的压缩失败不能被 split 成功掩盖'
 pass 'capture writer pipeline failure is observable'
 
+# 格式 2 的进度 FIFO/状态准备失败或 writer 准备失败必须发生在任何
+# Partclone、压缩或分片子进程之前；不能仅杀掉一个 pipeline 父 shell。
+cat > "$tmp/bin/partclone.extfs" <<'EOF'
+#!/bin/sh
+: "${MOCK_CLONE_STARTED:?}"
+: > "$MOCK_CLONE_STARTED"
+exit 0
+EOF
+cat > "$tmp/bin/pigz" <<'EOF'
+#!/bin/sh
+: "${MOCK_COMPRESSOR_STARTED:?}"
+: > "$MOCK_COMPRESSOR_STARTED"
+exit 0
+EOF
+cat > "$tmp/bin/split" <<'EOF'
+#!/bin/sh
+: "${MOCK_SPLIT_STARTED:?}"
+: > "$MOCK_SPLIT_STARTED"
+exit 0
+EOF
+chmod +x "$tmp/bin/partclone.extfs" "$tmp/bin/pigz" "$tmp/bin/split"
+export MOCK_ERROR_FILE="$tmp/capture-prepare-error" MOCK_CLONE_STARTED="$tmp/clone-started" MOCK_COMPRESSOR_STARTED="$tmp/compressor-started" MOCK_SPLIT_STARTED="$tmp/split-started"
+set +e
+(
+    source "$tmp/funcs.sh" 2>/dev/null
+    handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 97; }
+    getPartitionNumber() { part_number=1; }
+    fsTypeSetting() { fstype=extfs; }
+    getPartType() { parttype=0x83; }
+    debugPause() { :; }
+    uploadFormat() { return 1; }
+    ROOTPXE_PROGRESS_STATUS_FILE="$tmp/capture-prepare-progress"
+    export ROOTPXE_PROGRESS_STATUS_FILE
+    imgPartitionType=all
+    storage=mock
+    img=image
+    imgFormat=2
+    PIGZ_COMP=-6
+    writer_pids=()
+    savePartition /dev/mockp1 1 "$tmp/capture-image"
+)
+prepare_rc=$?
+set -e
+assert_eq "$prepare_rc" 97 'capture writer 准备失败必须升级为任务失败'
+[[ ! -e "$MOCK_CLONE_STARTED" && ! -e "$MOCK_COMPRESSOR_STARTED" && ! -e "$MOCK_SPLIT_STARTED" ]] || fail 'capture writer 准备失败后不得启动 clone/compressor/split'
+grep -Fq 'PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_SETUP_FAILED' "$tmp/capture-prepare-error" || fail 'capture writer 准备失败必须使用稳定错误码'
+pass 'capture prepare failure starts no pipeline subprocess'
+
+# 进度状态/FIFO准备本身失败时，writer 准备函数也不得被调用。
+export MOCK_ERROR_FILE="$tmp/capture-progress-prepare-error" MOCK_UPLOAD_FORMAT_CALLED="$tmp/upload-format-called" MOCK_COLLECTOR_STARTED="$tmp/collector-started"
+set +e
+(
+    source "$tmp/funcs.sh" 2>/dev/null
+    handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 98; }
+    getPartitionNumber() { part_number=1; }
+    fsTypeSetting() { fstype=extfs; }
+    getPartType() { parttype=0x83; }
+    debugPause() { :; }
+    uploadFormat() { : > "$MOCK_UPLOAD_FORMAT_CALLED"; return 0; }
+    rootpxe_partclone_progress_start_collector() { : > "$MOCK_COLLECTOR_STARTED"; }
+    ROOTPXE_PROGRESS_STATUS_FILE="$tmp/no-such-progress-dir/status.pxeos"
+    export ROOTPXE_PROGRESS_STATUS_FILE
+    imgPartitionType=all
+    storage=mock
+    img=image
+    imgFormat=2
+    PIGZ_COMP=-6
+    writer_pids=()
+    savePartition /dev/mockp1 1 "$tmp/capture-image"
+)
+progress_prepare_rc=$?
+set -e
+assert_eq "$progress_prepare_rc" 98 'progress 准备失败必须升级为任务失败'
+[[ ! -e "$MOCK_UPLOAD_FORMAT_CALLED" && ! -e "$MOCK_COLLECTOR_STARTED" && ! -e "$MOCK_CLONE_STARTED" && ! -e "$MOCK_COMPRESSOR_STARTED" && ! -e "$MOCK_SPLIT_STARTED" ]] || fail 'progress 准备失败后不得启动 writer/collector/pipeline'
+grep -Fq 'PXEOS_STAGE=capture CODE=CAPTURE_PROGRESS_SETUP_FAILED' "$tmp/capture-progress-prepare-error" || fail 'progress 准备失败必须使用稳定错误码'
+pass 'progress prepare failure starts no writer or collector'
+
 # savePartition 必须在移动产物、进入下一分区前同步等待 writer；其失败会进入
 # RootPXE attention，而不是落到最终 imgcomplete 成功回调。
 cat > "$tmp/bin/partclone.extfs" <<'EOF'
@@ -487,10 +568,21 @@ for arg in "$@"; do
     [ "$previous" = '-O' ] && fifo="$arg"
     previous="$arg"
 done
+printf 'Elapsed: 00:00:01, Remaining: 00:00:01, Completed:  42.00%%,   1.00MB/s,\r' >&2
 printf 'payload' > "$fifo"
 exit 0
 EOF
-chmod +x "$tmp/bin/partclone.extfs"
+cat > "$tmp/bin/pigz" <<'EOF'
+#!/bin/sh
+cat >/dev/null
+exit 7
+EOF
+cat > "$tmp/bin/split" <<'EOF'
+#!/bin/sh
+cat >/dev/null
+exit 0
+EOF
+chmod +x "$tmp/bin/partclone.extfs" "$tmp/bin/pigz" "$tmp/bin/split"
 export MOCK_ERROR_FILE="$tmp/capture-error"
 set +e
 (
@@ -505,6 +597,8 @@ set +e
     img=image
     imgFormat=2
     PIGZ_COMP=-6
+    ROOTPXE_PROGRESS_STATUS_FILE="$tmp/capture-progress"
+    export ROOTPXE_PROGRESS_STATUS_FILE
     writer_pids=()
     savePartition /dev/mockp1 1 "$tmp/capture-image"
 ) 
@@ -512,6 +606,7 @@ save_rc=$?
 set -e
 assert_eq "$save_rc" 91 'savePartition 必须将 writer 失败升级为任务失败'
 grep -Fq 'PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_FAILED' "$tmp/capture-error" || fail 'capture writer 失败必须携带稳定 stage/code'
+grep -Fq '|42|partclone_progress' "$tmp/capture-progress" || fail 'capture fake Partclone stderr 必须在 writer 失败前被采集'
 pass 'savePartition blocks capture success on writer failure'
 
 # restore 中 decoder 非零、partclone 恰好返回 0 时，pipefail 仍必须阻止写盘流程继续。
@@ -562,21 +657,23 @@ done
 EOF
 cat > "$tmp/bin/zstdmt" <<'EOF'
 #!/bin/sh
-while IFS= read -r _line; do :; done
-exit 0
+exec /bin/cat
 EOF
 cat > "$tmp/bin/partclone.restore" <<'EOF'
 #!/bin/sh
-while IFS= read -r _line; do :; done
+"${RESTORE_SYSTEM_CAT:?}" > "${MOCK_RESTORE_STDIN:?}"
+printf 'Elapsed: 00:00:01, Remaining: 00:00:00, Completed: 100.00%%, Rate:   1.00MB/s,\r' >&2
 exit 0
 EOF
 chmod +x "$tmp/bin/cat" "$tmp/bin/zstdmt" "$tmp/bin/partclone.restore"
-export MOCK_CAT_ARGS="$tmp/split-cat-args"
+export MOCK_CAT_ARGS="$tmp/split-cat-args" MOCK_RESTORE_STDIN="$tmp/restore-stdin" RESTORE_SYSTEM_CAT=/bin/cat
 rm -f /tmp/pigz1
 set +e
 (
     source "$tmp/funcs.sh" 2>/dev/null
     : > "$MOCK_CAT_ARGS"
+    ROOTPXE_PROGRESS_STATUS_FILE="$tmp/restore-progress"
+    export ROOTPXE_PROGRESS_STATUS_FILE
     handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 94; }
     cat() {
         local source_file
@@ -599,6 +696,8 @@ assert_eq "$split_rc" 0 'split 镜像 glob 应按顺序恢复'
 expected_split_args="$(printf '%s\n' "$tmp/split/d1p1.img.000" "$tmp/split/d1p1.img.001" "$tmp/split/d1p1.img.010")"
 actual_split_args="$(<"$MOCK_CAT_ARGS")"
 assert_eq "$actual_split_args" "$expected_split_args" 'split 镜像必须保持 shell glob 分片顺序'
+assert_eq "$(<"$MOCK_RESTORE_STDIN")" "$(printf 'payload\npayload\npayload')" 'Partclone restore stdin must remain decoder output only'
+grep -Fq '|100|partclone_progress' "$tmp/restore-progress" || fail 'restore fake Partclone stderr 必须由独立状态 decoder 采集'
 pass 'split image glob is expanded safely and in order'
 
 export MOCK_ERROR_FILE="$tmp/split-no-match-error"
@@ -607,6 +706,8 @@ set +e
 (
     source "$tmp/funcs.sh" 2>/dev/null
     handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 95; }
+    ROOTPXE_PROGRESS_STATUS_FILE="$tmp/split-no-match-progress"
+    export ROOTPXE_PROGRESS_STATUS_FILE
     imgFormat=5
     imgLegacy=''
     storage=mock
@@ -618,6 +719,7 @@ set -e
 rm -f /tmp/pigz1
 assert_eq "$split_missing_rc" 95 '无匹配 split glob 必须在写盘前失败'
 grep -Fq 'PXEOS_STAGE=restore CODE=RESTORE_SOURCE_UNAVAILABLE' "$tmp/split-no-match-error" || fail '无匹配 split glob 必须使用稳定错误码'
+[[ ! -e "$tmp/split-no-match-progress" ]] || fail '无匹配 split glob 不得启动进度 decoder'
 pass 'split image glob rejects no-match safely'
 
 mkdir -p "$tmp/split/not-an-image.img.000"

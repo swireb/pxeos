@@ -2,6 +2,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
+progress_lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh"
 download="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.download"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/rootpxe-mpa-permit.XXXXXX")
 trap 'rm -rf -- "$tmp"' EXIT
@@ -12,6 +13,7 @@ fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 # to ordinary temp files.
 test_funcs="$tmp/funcs.sh"
 sed -e '/partition-funcs\.sh/d' -e '/restore-preflight\.sh/d' -e '/capture-recovery\.sh/d' "$funcs" >"$test_funcs"
+cp "$progress_lib" "$tmp/partclone-progress.sh"
 download_functions="$tmp/download-functions.sh"
 awk '/^preparePartitions\(\)/,/^findHDDInfo$/{ if ($0 ~ /^findHDDInfo$/) exit; print }' "$download" >"$download_functions"
 set +u; source "$test_funcs"; set -u

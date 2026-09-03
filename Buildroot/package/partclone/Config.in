@@ -1,7 +1,7 @@
 config BR2_PACKAGE_PARTCLONE
 	bool "partclone"
 	help
-	  Partclone 0.3.47
+	  Partclone 0.3.48
 	  The Free and Open Source Software for Partition Imaging and Cloning
 
 	  http://partclone.org

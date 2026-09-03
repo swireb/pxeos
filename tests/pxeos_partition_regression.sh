@@ -10,6 +10,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
 funcs="$overlay/usr/share/pxeos/lib/funcs.sh"
+progress_lib="$overlay/usr/share/pxeos/lib/partclone-progress.sh"
 partition_funcs="$overlay/usr/share/pxeos/lib/partition-funcs.sh"
 processor="$overlay/usr/share/pxeos/lib/procsfdisk.awk"
 tmp="$(mktemp -d)"
@@ -249,6 +250,7 @@ sed -e "s|^\. /usr/share/pxeos/lib/partition-funcs.sh|. \"$partition_funcs\"|" \
     -e "s|^\. /usr/share/pxeos/lib/restore-preflight.sh|. \"$overlay/usr/share/pxeos/lib/restore-preflight.sh\"|" \
     -e "s|^\. /usr/share/pxeos/lib/capture-recovery.sh|. \"$overlay/usr/share/pxeos/lib/capture-recovery.sh\"|" \
     -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" "$funcs" >"$tmp/funcs.sh"
+cp "$progress_lib" "$tmp/partclone-progress.sh"
 export PATH="$tmp/mock:$PATH"
 export ismajordebug=0
 # shellcheck disable=SC1090
@@ -840,6 +842,7 @@ chmod +x "$tmp/bin"/*
 export PATH="$tmp/bin:$PATH"
 : >"$tmp/proc-cmdline"
 sed -e "s|/usr/share/pxeos|$overlay/usr/share/pxeos|g" -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" "$overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/funcs.sh"
+cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
 # shellcheck disable=SC1090
 ismajordebug=0; . "$tmp/funcs.sh"
 getPartitions() { case "$1" in /dev/nvme0n1) parts='/dev/nvme0n1p1';; /dev/sda) parts='/dev/sda1';; *) parts='';; esac; }
@@ -1116,6 +1119,7 @@ chmod +x "$tmp/bin"/*
 sed -e "s|/usr/share/pxeos|$overlay/usr/share/pxeos|g" \
     -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" \
     "$overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/funcs.sh"
+cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
 # shellcheck disable=SC1090
 ismajordebug=0
 . "$tmp/funcs.sh"

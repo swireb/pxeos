@@ -3,6 +3,9 @@ export initversion=19800101
 . /usr/share/pxeos/lib/partition-funcs.sh
 . /usr/share/pxeos/lib/restore-preflight.sh
 . /usr/share/pxeos/lib/capture-recovery.sh
+rootpxe_progress_lib=/usr/share/pxeos/lib/partclone-progress.sh
+[[ -r $rootpxe_progress_lib ]] || rootpxe_progress_lib="$(dirname "${BASH_SOURCE[0]}")/partclone-progress.sh"
+. "$rootpxe_progress_lib"
 REG_LOCAL_MACHINE_XP="/ntfs/WINDOWS/system32/config/system"
 REG_LOCAL_MACHINE_7="/ntfs/Windows/System32/config/SYSTEM"
 # 1 to turn on massive debugging of partition table restoration
@@ -430,7 +433,7 @@ rootpxe_xfs_restore_postcheck() {
 }
 
 rootpxe_capture_lvm_volumes() {
-    local image_path="$1" pv_artifact vg_artifact lv_name lv_uuid lv_path lv_size fs swap_uuid artifact fifo=/tmp/pigz1 producer writer min_bytes pv_min_bytes stage vg_active=no rootpxe_lvm_capture_status_file rootpxe_lvm_capture_status_rc
+    local image_path="$1" pv_artifact vg_artifact lv_name lv_uuid lv_path lv_size fs swap_uuid artifact fifo=/tmp/pigz1 producer writer progress_decoder min_bytes pv_min_bytes stage vg_active=no rootpxe_lvm_capture_status_file rootpxe_lvm_capture_status_rc
     rootpxe_lvm_capture_error_code=LVM_CAPTURE_FAILED
     rootpxe_lvm_capture_error_reason=unknown
     [[ ${rootpxe_lvm_active:-no} == yes && ${rootpxe_lvm_captured:-no} != yes ]] || return 0
@@ -463,10 +466,20 @@ rootpxe_capture_lvm_volumes() {
                 return 1
             fi
             rm -f "$fifo" || return 1
-            uploadFormat "$fifo" "$stage/$artifact" || return 1
-            if [[ $fs == xfs ]]; then partclone.xfs -cs "$lv_path" -O "$fifo" -Nf 1 -a0; else partclone.extfs -cs "$lv_path" -O "$fifo" -Nf 1 -a0; fi
-            producer=$?; rootpxe_wait_for_writer "$rootpxe_last_writer_pid"; writer=$?
+            if ! rootpxe_partclone_progress_prepare; then
+                rm -f "$fifo"
+                return 1
+            fi
+            if ! uploadFormat "$fifo" "$stage/$artifact"; then
+                rootpxe_partclone_progress_abort || true
+                rm -f "$fifo"
+                return 1
+            fi
+            rootpxe_partclone_progress_start_collector
+            if [[ $fs == xfs ]]; then LC_ALL=C partclone.xfs -cs "$lv_path" -O "$fifo" -f 1 -a0 2>"$rootpxe_partclone_progress_fifo"; else LC_ALL=C partclone.extfs -cs "$lv_path" -O "$fifo" -f 1 -a0 2>"$rootpxe_partclone_progress_fifo"; fi
+            producer=$?; rootpxe_partclone_progress_wait; progress_decoder=$?; rootpxe_wait_for_writer "$rootpxe_last_writer_pid"; writer=$?
             [[ $producer -eq 0 ]] || { printf '%s|%s\n' LVM_LV_PARTCLONE_FAILED "lv_${lv_name}_${fs}" >"$rootpxe_lvm_capture_status_file"; rm -f "$fifo"; return 1; }
+            [[ $progress_decoder -eq 0 ]] || { printf '%s|%s\n' LVM_LV_PARTCLONE_FAILED "lv_${lv_name}_${fs}_progress" >"$rootpxe_lvm_capture_status_file"; rm -f "$fifo"; return 1; }
             [[ $writer -eq 0 ]] || { printf '%s|%s\n' LVM_LV_WRITER_FAILED "lv_${lv_name}_${fs}" >"$rootpxe_lvm_capture_status_file"; rm -f "$fifo"; return 1; }
             mv "$stage/$artifact.000" "$stage/$artifact" >/dev/null 2>&1 || return 1
         fi
@@ -3122,7 +3135,29 @@ writeImage()  {
     local source_files=()
     [[ -z $target ]] && handleError "No target to place image passed (${FUNCNAME[0]})"
     rootpxe_validate_runtime_img_format || handleError "PXEOS_STAGE=restore CODE=IMAGE_FORMAT_INVALID REASON=unsupported_or_missing_format"
+    local format=$imgLegacy
+    [[ -z $format ]] && format=$imgFormat
+    local exitcode=0 progress_decoder=0 progress_enabled=no
     mkfifo /tmp/pigz1 || handleError "PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_SETUP_FAILED REASON=unable_to_create_restore_fifo"
+    if [[ $mc != yes ]]; then
+        [[ -n $file ]] || handleError "No source file passed (${FUNCNAME[0]})\n   Args Passed: $*"
+        # Validate every split source before the progress decoder or reader is
+        # started, so an early failure cannot leave either FIFO endpoint open.
+        mapfile -t source_files < <(compgen -G "$file")
+        [[ ${#source_files[@]} -gt 0 ]] || handleError "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_UNAVAILABLE REASON=image_source_glob_has_no_regular_files"
+        for source_file in "${source_files[@]}"; do
+            [[ -f $source_file && -r $source_file ]] || handleError "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_UNAVAILABLE REASON=image_source_is_not_readable"
+        done
+    fi
+    case $format in
+        0|2|3|4|5|6)
+            if ! rootpxe_partclone_progress_start; then
+                rm -f /tmp/pigz1 >/dev/null 2>&1 || true
+                handleError "PXEOS_STAGE=restore CODE=RESTORE_PROGRESS_SETUP_FAILED REASON=unable_to_start_partclone_stderr_decoder"
+            fi
+            progress_enabled=yes
+            ;;
+    esac
     case $mc in
         yes)
             if [[ -z $mcastrdv ]]; then
@@ -3133,26 +3168,15 @@ writeImage()  {
             source_pid="$!"
             ;;
         *)
-            [[ -z $file ]] && handleError "No source file passed (${FUNCNAME[0]})\n   Args Passed: $*"
-            # Restore callers use img* for split images.  Expand it without eval,
-            # preserve Bash glob ordering, and never accept directories or a miss.
-            mapfile -t source_files < <(compgen -G "$file")
-            [[ ${#source_files[@]} -gt 0 ]] || handleError "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_UNAVAILABLE REASON=image_source_glob_has_no_regular_files"
-            for source_file in "${source_files[@]}"; do
-                [[ -f $source_file && -r $source_file ]] || handleError "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_UNAVAILABLE REASON=image_source_is_not_readable"
-            done
             cat -- "${source_files[@]}" >/tmp/pigz1 &
             source_pid="$!"
             ;;
     esac
-    local format=$imgLegacy
-    [[ -z $format ]] && format=$imgFormat
-    local exitcode=0
     case $format in
         5|6)
             # ZSTD Compressed image.
             rootpxe_console_message INFO 'Imaging with Partclone (zstd).'
-            if ( set -o pipefail; zstdmt -dc </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" -O "${target}" -Nf 1 ); then
+            if ( set -o pipefail; zstdmt -dc </tmp/pigz1 | LC_ALL=C partclone.restore -n "Storage Location $storage, Image name $img" -O "${target}" -f 1 2>"$rootpxe_partclone_progress_fifo" ); then
                 exitcode=0
             else
                 exitcode=$?
@@ -3161,7 +3185,7 @@ writeImage()  {
         3|4)
             # Uncompressed partclone
             rootpxe_console_message INFO 'Imaging with Partclone (uncompressed).'
-            if ( set -o pipefail; cat </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" -O "${target}" -Nf 1 ); then
+            if ( set -o pipefail; cat </tmp/pigz1 | LC_ALL=C partclone.restore -n "Storage Location $storage, Image name $img" -O "${target}" -f 1 2>"$rootpxe_partclone_progress_fifo" ); then
                 exitcode=0
             else
                 exitcode=$?
@@ -3180,13 +3204,16 @@ writeImage()  {
         0|2)
             # GZIP Compressed partclone
             rootpxe_console_message INFO 'Imaging with Partclone (gzip).'
-            if ( set -o pipefail; pigz -dc </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" -O "${target}" -N -f 1 ); then
+            if ( set -o pipefail; pigz -dc </tmp/pigz1 | LC_ALL=C partclone.restore -n "Storage Location $storage, Image name $img" -O "${target}" -f 1 2>"$rootpxe_partclone_progress_fifo" ); then
                 exitcode=0
             else
                 exitcode=$?
             fi
             ;;
     esac
+    if [[ $progress_enabled == yes ]]; then
+        rootpxe_partclone_progress_wait || progress_decoder=$?
+    fi
     if wait "$source_pid"; then
         source_exitcode=0
     else
@@ -3195,6 +3222,10 @@ writeImage()  {
     if [[ $exitcode -ne 0 ]]; then
         rm -rf /tmp/pigz1 >/dev/null 2>&1
         handleError "PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_FAILED REASON=image_decoder_or_writer_failed"
+    fi
+    if [[ $progress_decoder -ne 0 ]]; then
+        rm -rf /tmp/pigz1 >/dev/null 2>&1
+        handleError "PXEOS_STAGE=restore CODE=RESTORE_PROGRESS_FAILED REASON=partclone_stderr_decoder_failed"
     fi
     if [[ $source_exitcode -ne 0 ]]; then
         rm -rf /tmp/pigz1 >/dev/null 2>&1
@@ -5193,6 +5224,7 @@ savePartition() {
     local part_number=0
     local exitcode=0
     local writer_exitcode=0
+    local progress_decoder=0
     getPartitionNumber "$part"
     local fstype=""
     local parttype=""
@@ -5236,12 +5268,22 @@ savePartition() {
             rootpxe_console_message INFO "Using partclone.$fstype."
             debugPause
             imgpart="$imagePath/d${disk_number}p${part_number}.img"
-            uploadFormat "$fifoname" "$imgpart"
-            if partclone.$fstype -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -Nf 1; then
+            if ! rootpxe_partclone_progress_prepare; then
+                rm -f "$fifoname" >/dev/null 2>&1 || true
+                handleError "PXEOS_STAGE=capture CODE=CAPTURE_PROGRESS_SETUP_FAILED REASON=unable_to_start_partclone_stderr_decoder"
+            fi
+            if ! uploadFormat "$fifoname" "$imgpart"; then
+                rootpxe_partclone_progress_abort || true
+                rm -f "$fifoname" >/dev/null 2>&1 || true
+                handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_SETUP_FAILED REASON=unable_to_start_capture_writer"
+            fi
+            rootpxe_partclone_progress_start_collector
+            if LC_ALL=C partclone.$fstype -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -f 1 2>"$rootpxe_partclone_progress_fifo"; then
                 exitcode=0
             else
                 exitcode=$?
             fi
+            rootpxe_partclone_progress_wait || progress_decoder=$?
             if rootpxe_wait_for_writer "$rootpxe_last_writer_pid"; then
                 writer_exitcode=0
             else
@@ -5250,6 +5292,10 @@ savePartition() {
             if [[ $exitcode -ne 0 ]]; then
                 rm -f "$fifoname" >/dev/null 2>&1 || true
                 handleError "PXEOS_STAGE=capture CODE=CAPTURE_PARTCLONE_FAILED REASON=partition_${part_number}_${fstype}"
+            fi
+            if [[ $progress_decoder -ne 0 ]]; then
+                rm -f "$fifoname" >/dev/null 2>&1 || true
+                handleError "PXEOS_STAGE=capture CODE=CAPTURE_PROGRESS_FAILED REASON=partclone_stderr_decoder_failed"
             fi
             if [[ $writer_exitcode -ne 0 ]]; then
                 rm -f "$fifoname" >/dev/null 2>&1 || true
@@ -5275,12 +5321,22 @@ savePartition() {
                         handleError "PXEOS_STAGE=capture CODE=XFS_CAPTURE_PREFLIGHT_FAILED REASON=partition_${part_number}_${rootpxe_xfs_capture_error:-unknown}"
                         return 1
                     fi
-                    uploadFormat "$fifoname" "$imgpart"
-                    if partclone.$fstype -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -Nf 1 -a0; then
+                    if ! rootpxe_partclone_progress_prepare; then
+                        rm -f "$fifoname" >/dev/null 2>&1 || true
+                        handleError "PXEOS_STAGE=capture CODE=CAPTURE_PROGRESS_SETUP_FAILED REASON=unable_to_start_partclone_stderr_decoder"
+                    fi
+                    if ! uploadFormat "$fifoname" "$imgpart"; then
+                        rootpxe_partclone_progress_abort || true
+                        rm -f "$fifoname" >/dev/null 2>&1 || true
+                        handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_SETUP_FAILED REASON=unable_to_start_capture_writer"
+                    fi
+                    rootpxe_partclone_progress_start_collector
+                    if LC_ALL=C partclone.$fstype -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -f 1 -a0 2>"$rootpxe_partclone_progress_fifo"; then
                         exitcode=0
                     else
                         exitcode=$?
                     fi
+                    rootpxe_partclone_progress_wait || progress_decoder=$?
                     if rootpxe_wait_for_writer "$rootpxe_last_writer_pid"; then
                         writer_exitcode=0
                     else
@@ -5289,6 +5345,10 @@ savePartition() {
                     if [[ $exitcode -ne 0 ]]; then
                         rm -f "$fifoname" >/dev/null 2>&1 || true
                         handleError "PXEOS_STAGE=capture CODE=CAPTURE_PARTCLONE_FAILED REASON=partition_${part_number}_${fstype}"
+                    fi
+                    if [[ $progress_decoder -ne 0 ]]; then
+                        rm -f "$fifoname" >/dev/null 2>&1 || true
+                        handleError "PXEOS_STAGE=capture CODE=CAPTURE_PROGRESS_FAILED REASON=partclone_stderr_decoder_failed"
                     fi
                     if [[ $writer_exitcode -ne 0 ]]; then
                         rm -f "$fifoname" >/dev/null 2>&1 || true

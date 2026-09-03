@@ -16,7 +16,8 @@ hd=""
 rootpxe_console_message INFO 'Preparing to send image file to server.'
 percent="$pct"
 [[ $pct -lt 5 || $pct -ge 100 ]] && percent=5
-pxeos.statusreporter "$mac" "${pxeapi:-$web}" "$taskid" & disown
+rootpxe_partclone_progress_initialize || handleError "PXEOS_STAGE=capture CODE=CAPTURE_PROGRESS_SETUP_FAILED REASON=unable_to_initialize_partclone_progress"
+pxeos.statusreporter "$mac" "${pxeapi:-$web}" "$taskid" "$rootpxe_partclone_progress_run_id" partclone & disown
 statusReporter="$!"
 if rootpxe_capture_resume_published; then
     imagePath="$rootpxe_final_capture_path"
@@ -154,12 +155,22 @@ beginUpload() {
             sfdisk -d "$hd" >"$imagePath/d1.partitions" 2>/dev/null || rm -f "$imagePath/d1.partitions"
             # uploadFormat owns checked FIFO creation; remove any stale task FIFO first.
             rm -f /tmp/pigz1 >/dev/null 2>&1 || handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_SETUP_FAILED REASON=unable_to_clear_capture_fifo"
-            uploadFormat "/tmp/pigz1" "$imgpart"
-            if partclone.imager -c -s "$hd" -O /tmp/pigz1 -N -f 1 -a0; then
+            if ! rootpxe_partclone_progress_prepare; then
+                rm -f /tmp/pigz1 >/dev/null 2>&1 || true
+                handleError "PXEOS_STAGE=capture CODE=CAPTURE_PROGRESS_SETUP_FAILED REASON=unable_to_start_partclone_stderr_decoder"
+            fi
+            if ! uploadFormat "/tmp/pigz1" "$imgpart"; then
+                rootpxe_partclone_progress_abort || true
+                rm -f /tmp/pigz1 >/dev/null 2>&1 || true
+                handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_SETUP_FAILED REASON=unable_to_start_capture_writer"
+            fi
+            rootpxe_partclone_progress_start_collector
+            if LC_ALL=C partclone.imager -c -s "$hd" -O /tmp/pigz1 -f 1 -a0 2>"$rootpxe_partclone_progress_fifo"; then
                 capture_exitcode=0
             else
                 capture_exitcode=$?
             fi
+            rootpxe_partclone_progress_wait || progress_decoder_exitcode=$?
             if rootpxe_wait_for_writer "$rootpxe_last_writer_pid"; then
                 writer_exitcode=0
             else
@@ -168,6 +179,10 @@ beginUpload() {
             if [[ $capture_exitcode -ne 0 ]]; then
                 rm -f /tmp/pigz1 >/dev/null 2>&1 || true
                 handleError "PXEOS_STAGE=capture CODE=CAPTURE_PRODUCER_FAILED REASON=partclone_capture_failed"
+            fi
+            if [[ ${progress_decoder_exitcode:-0} -ne 0 ]]; then
+                rm -f /tmp/pigz1 >/dev/null 2>&1 || true
+                handleError "PXEOS_STAGE=capture CODE=CAPTURE_PROGRESS_FAILED REASON=partclone_stderr_decoder_failed"
             fi
             if [[ $writer_exitcode -ne 0 ]]; then
                 rm -f /tmp/pigz1 >/dev/null 2>&1 || true

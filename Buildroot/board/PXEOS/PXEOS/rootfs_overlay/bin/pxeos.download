@@ -18,7 +18,14 @@ mac=$(getMACAddresses | base64)
 mac="$origmac"
 origmac=""
 layPartSize="-1s"
-pxeos.statusreporter "$mac" "${pxeapi:-$web}" "$taskid" & disown
+progress_mode=partclone
+if [[ ${imgLegacy:-${imgFormat:-}} == 1 ]]; then
+    progress_mode=partimage
+    rootpxe_partclone_progress_run_id=partimage-legacy
+else
+    rootpxe_partclone_progress_initialize || handleError "PXEOS_STAGE=restore CODE=RESTORE_PROGRESS_SETUP_FAILED REASON=unable_to_initialize_partclone_progress"
+fi
+pxeos.statusreporter "$mac" "${pxeapi:-$web}" "$taskid" "$rootpxe_partclone_progress_run_id" "$progress_mode" & disown
 statusReporter="$!"
 fixed_size_partitions=""
 rootpxe_console_message INFO "Using image: $img."

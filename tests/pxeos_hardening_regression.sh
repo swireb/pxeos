@@ -2,6 +2,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
+progress_lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh"
 restore_preflight="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/restore-preflight.sh"
 capture_recovery="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/capture-recovery.sh"
 upload="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.upload"
@@ -12,6 +13,7 @@ test_funcs="$tmp/funcs.sh"
 # The production library imports an absolute Buildroot companion.  These
 # ordinary-file tests do not call that companion, so remove only this import.
 sed -e '/partition-funcs\.sh/d' -e '/restore-preflight\.sh/d' -e '/capture-recovery\.sh/d' "$funcs" >"$test_funcs"
+cp "$progress_lib" "$tmp/partclone-progress.sh"
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 must_have(){ grep -Fq -- "$2" "$1" || fail "missing $2 in $1"; }
 must_not_have(){ if grep -Fq -- "$2" "$1"; then fail "forbidden $2 in $1"; fi; }
