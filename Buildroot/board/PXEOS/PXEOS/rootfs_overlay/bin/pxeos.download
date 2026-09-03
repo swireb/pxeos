@@ -43,6 +43,9 @@ preparePartitions() {
             [[ ! -d $imagePath ]] && handleError "Unable to locate image store ($0)\n   Args Passed: $*"
             disk_number=1
             for disk in $disks; do
+                if [[ ${rootpxe_mpa_permit_is_batch:-no} == yes ]]; then
+                    rootpxe_activate_disk_permit_binding "$disk" deploy_write || handleError "PXEOS_STAGE=prepare_partitions CODE=DISK_PERMIT_BINDING_CHANGED REASON=target_disk_identity_or_operation_mismatch"
+                fi
                 restorePartitionTablesAndBootLoaders "$disk" "$disk_number" "$imagePath" "$osid" "$imgPartitionType"
                 runPartprobe "$disk"
                 gptcheck="$global_gptcheck"
@@ -89,13 +92,32 @@ if [[ ${resumeStage:-} == customizing_hostname || ${resumeStage:-} == post_deplo
     # post-deploy script without restoring partitions again.
     # It must not plan NVMe formatting, validate/apply a new layout, or rerun
     # any pre-write step before the safe resume point.
-    resume_target_id=$(rootpxe_disk_stable_identity "$hd") || handleError "PXEOS_STAGE=${resumeStage} CODE=RESUME_TARGET_IDENTITY_UNAVAILABLE"
+    if [[ ${imgType:-} == mpa ]]; then
+        [[ -z ${rootpxe_disk_permit_disk_map_file:-} ]] || rm -f -- "$rootpxe_disk_permit_disk_map_file"
+        unset rootpxe_disk_permit_disk_map_file
+        rootpxe_clear_disk_permit
+        rootpxe_mpa_permit_args=()
+        for disk in $disks; do
+            resume_target_id=$(rootpxe_disk_stable_identity "$disk") || handleError "PXEOS_STAGE=${resumeStage} CODE=RESUME_TARGET_IDENTITY_UNAVAILABLE"
+            rootpxe_record_disk_permit_binding "$disk" "$resume_target_id" deploy_write || handleError "PXEOS_STAGE=${resumeStage} CODE=RESUME_TARGET_BINDING_INVALID"
+            rootpxe_mpa_permit_args+=("$resume_target_id" deploy_write)
+        done
+        [[ ${#rootpxe_mpa_permit_args[@]} -gt 0 ]] || handleError "PXEOS_STAGE=${resumeStage} CODE=RESUME_TARGET_IDENTITY_UNAVAILABLE"
+        (( ${#rootpxe_mpa_permit_args[@]} > 2 )) && rootpxe_mpa_permit_is_batch=yes || rootpxe_mpa_permit_is_batch=no
+    else
+        resume_target_id=$(rootpxe_disk_stable_identity "$hd") || handleError "PXEOS_STAGE=${resumeStage} CODE=RESUME_TARGET_IDENTITY_UNAVAILABLE"
+        rootpxe_mpa_permit_is_batch=no
+    fi
     while :; do
-        if rootpxe_wait_for_disk_permit "$resume_target_id" deploy_write; then
-            permit_result=0
+        if [[ ${rootpxe_mpa_permit_is_batch:-no} == yes ]]; then
+            rootpxe_wait_for_disk_permit_batch "${rootpxe_mpa_permit_args[@]}"
         else
+            rootpxe_wait_for_disk_permit "$resume_target_id" deploy_write
+        fi && {
+            permit_result=0
+        } || {
             permit_result=$?
-        fi
+        }
         case $permit_result in
             0) break ;;
             10)
@@ -110,6 +132,12 @@ if [[ ${resumeStage:-} == customizing_hostname || ${resumeStage:-} == post_deplo
                 ;;
         esac
     done
+    if [[ ${imgType:-} == mpa && ${rootpxe_mpa_permit_is_batch:-no} == yes ]]; then
+        for disk in $disks; do
+            rootpxe_verify_disk_permit_binding "$disk" deploy_write || handleError "PXEOS_STAGE=${resumeStage} CODE=RESUME_TARGET_BINDING_CHANGED"
+        done
+        rootpxe_activate_disk_permit_binding "$hd" deploy_write || handleError "PXEOS_STAGE=${resumeStage} CODE=RESUME_TARGET_BINDING_CHANGED"
+    fi
     if [[ ${resumeStage:-} == customizing_hostname ]]; then
         [[ ${changeHostname:-false} == true ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=RESUME_CONTRACT_INVALID REASON=hostname_change_not_enabled"
         rootpxe_stage customizing_hostname "resume permit confirmed"
@@ -121,15 +149,26 @@ if [[ ${resumeStage:-} == customizing_hostname || ${resumeStage:-} == post_deplo
 fi
 if [[ ${imgType:-} == [Nn] ]]; then
     rootpxe_require_single_disk_layout_metadata "$sector_metadata" "${originalSchemaFile:-}" "${deploymentLayoutFile:-}" || handleError "PXEOS_STAGE=layout_validation CODE=N_LAYOUT_METADATA_MISSING REASON=${rootpxe_layout_metadata_reason:-unknown}"
-    rootpxe_validate_deployment_layout "$hd" "$originalSchemaFile" "$deploymentLayoutFile" || handleError "PXEOS_STAGE=layout_validation CODE=INVALID_DEPLOYMENT_LAYOUT REASON=pre_permit_validation_failed"
+rootpxe_validate_deployment_layout "$hd" "$originalSchemaFile" "$deploymentLayoutFile" || handleError "PXEOS_STAGE=layout_validation CODE=INVALID_DEPLOYMENT_LAYOUT REASON=pre_permit_validation_failed"
+rootpxe_validate_growth_capability "$originalSchemaFile" "$rootpxe_resolved_layout_file" || handleError "PXEOS_STAGE=layout_validation CODE=UNSUPPORTED_FILESYSTEM_GROWTH REASON=validated_layout_requires_unsupported_growth"
 fi
-rootpxe_plan_deploy_disk_operation "$hd" "$sector_metadata" || handleError "PXEOS_STAGE=permit CODE=TARGET_IDENTITY_UNAVAILABLE REASON=unable_to_bind_target_disk"
+rootpxe_validate_restore_artifacts "$imagePath" "$imgType" "$imgPartitionType" "${originalSchemaFile:-}" || handleError "PXEOS_STAGE=restore_preflight CODE=REQUIRED_ARTIFACT_MISSING REASON=target_write_not_started"
+if [[ ${imgType:-} == mpa ]]; then
+    rootpxe_plan_mpa_disk_permits "$imagePath" || handleError "PXEOS_STAGE=permit CODE=MPA_TARGET_MAPPING_INVALID REASON=unable_to_bind_complete_target_disk_set"
+else
+    rootpxe_plan_deploy_disk_operation "$hd" "$sector_metadata" || handleError "PXEOS_STAGE=permit CODE=TARGET_IDENTITY_UNAVAILABLE REASON=unable_to_bind_target_disk"
+    rootpxe_mpa_permit_is_batch=no
+fi
 while :; do
-    if rootpxe_wait_for_disk_permit "$rootpxe_planned_target_id" "$rootpxe_planned_disk_operation"; then
-        permit_result=0
+    if [[ ${rootpxe_mpa_permit_is_batch:-no} == yes ]]; then
+        rootpxe_wait_for_disk_permit_batch "${rootpxe_mpa_permit_args[@]}"
     else
+        rootpxe_wait_for_disk_permit "$rootpxe_planned_target_id" "$rootpxe_planned_disk_operation"
+    fi && {
+        permit_result=0
+    } || {
         permit_result=$?
-    fi
+    }
     case $permit_result in
         0) break ;;
         10)
@@ -144,6 +183,11 @@ while :; do
             ;;
     esac
 done
+if [[ ${imgType:-} == mpa && ${rootpxe_mpa_permit_is_batch:-no} == yes ]]; then
+    for disk in $disks; do
+        rootpxe_verify_disk_permit_binding "$disk" deploy_write || handleError "PXEOS_STAGE=permit CODE=DISK_PERMIT_BINDING_CHANGED REASON=target_disk_identity_or_operation_mismatch"
+    done
+fi
 rootpxe_run_pre_deploy_script || handleError "PXEOS_STAGE=pre_deploy_script CODE=PRE_DEPLOY_SCRIPT_FAILED REASON=${rootpxe_deploy_script_error:-unknown}"
 rootpxe_stage init "pxeos download started, storage mounted"
 [[ $nombr -eq 1 ]] && rootpxe_console_message INFO 'Skipping partition layout: single-partition restore.' || preparePartitions

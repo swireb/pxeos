@@ -409,7 +409,7 @@ checkin_rootpxe() {
     task_token=${execution_token:-${task_token:-}}; export task_token
     rootpxe_require_task_context || handleError "RootPXE: missing execution token ($0)"
     [[ -z ${osid:-} || $osid =~ ^[0-9]+$ ]] || handleError "Invalid OS id ($0)"
-    [[ -z ${img_format:-} || $img_format =~ ^[0-6]$ ]] || handleError "Invalid image format ($0)"
+    [[ ${img_format:-} =~ ^[0-6]$ ]] || handleError "Invalid image format ($0)"
     [[ -z ${pigz_comp:-} ]] || rootpxe_validate_pigz_compression "$pigz_comp" "${img_format:-${imgFormat:-}}" || handleError "Invalid compression value ($0)"
     [[ -z ${reply_mac:-} || $(rootpxe_normalize_mac "$reply_mac") == "$macWinSafe" ]] || handleError "Checkin MAC mismatch ($0)"
     taskType=${taskType:-${type:-}}; type=${pxe_type:-${type:-}}; pxeType=$type

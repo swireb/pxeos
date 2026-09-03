@@ -18,6 +18,60 @@ percent="$pct"
 [[ $pct -lt 5 || $pct -ge 100 ]] && percent=5
 pxeos.statusreporter "$mac" "${pxeapi:-$web}" "$taskid" & disown
 statusReporter="$!"
+if rootpxe_capture_resume_published; then
+    imagePath="$rootpxe_final_capture_path"
+    rootpxe_console_message INFO 'Capture payload already published; resuming finish notification.'
+    . /bin/pxeos.imgcomplete
+    exit 0
+else
+    resume_status=$?
+    [[ $resume_status -eq 1 ]] || handleError "PXEOS_STAGE=capture_resume CODE=${rootpxe_capture_resume_error_code:-CAPTURE_PUBLISHED_METADATA_MISSING} REASON=${rootpxe_capture_resume_error_reason:-published_artifacts_retained_for_manual_metadata_confirmation}"
+fi
+findHDDInfo
+rootpxe_capture_disks=()
+if [[ ${imgType:-} == mpa ]]; then
+    for disk in $disks; do
+        [[ $disk =~ mmcblk[0-9]+boot[0-9]+ ]] && continue
+        parts=""
+        getPartitions "$disk"
+        [[ ${#parts} -gt 0 ]] && rootpxe_capture_disks+=("$disk")
+    done
+    [[ ${#rootpxe_capture_disks[@]} -gt 0 ]] || handleError "PXEOS_STAGE=capture CODE=CAPTURE_SOURCE_EMPTY REASON=no_partitioned_disks"
+    rootpxe_capture_disks_string="${rootpxe_capture_disks[*]}"
+    export rootpxe_capture_disks_string
+fi
+# Do not clear staging or probe a writable source filesystem before the
+# applicable permit succeeds.  Preserve the established single-disk request
+# for n/mps/dd retries; mpa alone requires one atomic binding for every disk.
+if [[ ${imgType:-} == mpa ]]; then
+    permit_args=()
+    for permit_disk in "${rootpxe_capture_disks[@]}"; do
+        permit_id=$(rootpxe_disk_stable_identity "$permit_disk") || handleError "PXEOS_STAGE=permit CODE=TARGET_IDENTITY_UNAVAILABLE REASON=unable_to_bind_capture_disk"
+        rootpxe_record_disk_permit_binding "$permit_disk" "$permit_id" capture_read_write || handleError "PXEOS_STAGE=permit CODE=TARGET_IDENTITY_UNAVAILABLE REASON=unable_to_record_capture_disk_binding"
+        permit_args+=("$permit_id" capture_read_write)
+    done
+    if rootpxe_wait_for_disk_permit_batch "${permit_args[@]}"; then
+        permit_result=0
+    else
+        permit_result=$?
+    fi
+else
+    capture_target_id=$(rootpxe_disk_stable_identity "$hd") || handleError "PXEOS_STAGE=permit CODE=TARGET_IDENTITY_UNAVAILABLE REASON=unable_to_bind_capture_disk"
+    if rootpxe_wait_for_disk_permit "$capture_target_id" capture_read_write; then
+        permit_result=0
+    else
+        permit_result=$?
+    fi
+    if [[ $permit_result -eq 0 ]]; then
+        rootpxe_record_disk_permit_binding "$hd" "$capture_target_id" capture_read_write || handleError "PXEOS_STAGE=permit CODE=TARGET_IDENTITY_UNAVAILABLE REASON=unable_to_record_capture_disk_binding"
+    fi
+fi
+case $permit_result in
+    0) ;;
+    10) printf '%s\n' reboot > /tmp/pxeos.failure_action; exit 2 ;;
+    20) exit 2 ;;
+    *) handleError "PXEOS_STAGE=permit CODE=DISK_PERMIT_DENIED REASON=capture_binding_not_confirmed" ;;
+esac
 prepareUploadLocation "$imagePath"
 printf '%s\n' "$taskid" > "$imagePath/.rootpxe-capture-taskid" || handleError "Could not initialize capture task marker ($0)"
 rootpxe_console_message INFO "Using image: $img."
@@ -27,6 +81,7 @@ rootpxe_console_message INFO "Using image: $img."
 # must therefore never shrink, move, or restore the source disk.
 rootpxe_capture_single_disk() {
     local part
+    rootpxe_verify_disk_permit_binding "$hd" capture_read_write || handleError "PXEOS_STAGE=permit CODE=CAPTURE_BINDING_CHANGED REASON=source_disk_identity_changed"
     runPartprobe "$hd"
     parts=""
     getPartitions "$hd"
@@ -52,6 +107,7 @@ beginUpload() {
 			rootpxe_capture_single_disk
 			;;
         mps)
+            rootpxe_verify_disk_permit_binding "$hd" capture_read_write || handleError "PXEOS_STAGE=permit CODE=CAPTURE_BINDING_CHANGED REASON=source_disk_identity_changed"
             parts=""
             getPartitions "$hd"
             [[ ${#parts} -lt 1 ]] && handleError "No partitions found ($0)\n   Args Passed: $*"
@@ -66,11 +122,11 @@ beginUpload() {
             ;;
         mpa)
             disk_number=1
-            for disk in $disks; do
-                [[ $disk =~ mmcblk[0-9]+boot[0-9]+ ]] && continue
+            for disk in "${rootpxe_capture_disks[@]}"; do
+                rootpxe_verify_disk_permit_binding "$disk" capture_read_write || handleError "PXEOS_STAGE=permit CODE=CAPTURE_BINDING_CHANGED REASON=source_disk_identity_changed"
                 parts=""
                 getPartitions "$disk"
-                [[ ${#parts} -lt 1 ]] && continue
+                [[ ${#parts} -lt 1 ]] && handleError "PXEOS_STAGE=capture CODE=CAPTURE_SOURCE_CHANGED REASON=partitioned_disk_set_changed"
                 debugPause
                 rootpxe_console_message INFO "Processing disk device: $disk."
                 debugPause
@@ -90,6 +146,7 @@ beginUpload() {
             done
             ;;
         dd)
+            rootpxe_verify_disk_permit_binding "$hd" capture_read_write || handleError "PXEOS_STAGE=permit CODE=CAPTURE_BINDING_CHANGED REASON=source_disk_identity_changed"
             imgpart="$imagePath/$img"
             # A raw image may be intentionally unpartitioned.  Keep a best
             # effort sfdisk dump for the read-only inventory but never turn a
@@ -121,34 +178,16 @@ beginUpload() {
             ;;
     esac
 }
-findHDDInfo
 if [[ ${imgType:-} == [Nn] ]]; then
     rootpxe_lvm_capture_preflight "$hd" "$imagePath" || handleError "PXEOS_STAGE=capture CODE=LVM_TOPOLOGY_UNSUPPORTED REASON=single_pv_single_vg_linear_lvs_required"
 fi
 if [[ ${imgType:-} == mps ]]; then
     rootpxe_disk_has_lvm_pv "$hd" && handleError "PXEOS_STAGE=capture CODE=LVM_RAW_UNSUPPORTED REASON=mps_requires_non_lvm_partition_inventory"
 elif [[ ${imgType:-} == mpa ]]; then
-    for disk in $disks; do
+    for disk in "${rootpxe_capture_disks[@]}"; do
         rootpxe_disk_has_lvm_pv "$disk" && handleError "PXEOS_STAGE=capture CODE=LVM_RAW_UNSUPPORTED REASON=mpa_requires_non_lvm_partition_inventory"
     done
 fi
-capture_target_id=$(rootpxe_disk_stable_identity "$hd") || handleError "PXEOS_STAGE=permit CODE=TARGET_IDENTITY_UNAVAILABLE REASON=unable_to_bind_capture_disk"
-while :; do
-    if rootpxe_wait_for_disk_permit "$capture_target_id" capture_read_write; then
-        permit_result=0
-    else
-        permit_result=$?
-    fi
-    case $permit_result in
-        0) break ;;
-        10) printf '%s\n' reboot > /tmp/pxeos.failure_action; exit 2 ;;
-        20) exit 2 ;;
-        *)
-            rootpxe_console_message WARN 'Disk permit wait was interrupted. Retrying in 5s.'
-            sleep 5
-            ;;
-    esac
-done
 rootpxe_stage init "pxeos upload started, storage mounted"
 rootpxe_console_message INFO 'Capturing image with Partclone.'
 debugPause

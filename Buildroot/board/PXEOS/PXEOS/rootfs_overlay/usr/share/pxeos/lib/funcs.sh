@@ -1,6 +1,8 @@
 #!/bin/bash
 export initversion=19800101
 . /usr/share/pxeos/lib/partition-funcs.sh
+. /usr/share/pxeos/lib/restore-preflight.sh
+. /usr/share/pxeos/lib/capture-recovery.sh
 REG_LOCAL_MACHINE_XP="/ntfs/WINDOWS/system32/config/system"
 REG_LOCAL_MACHINE_7="/ntfs/Windows/System32/config/SYSTEM"
 # 1 to turn on massive debugging of partition table restoration
@@ -69,6 +71,81 @@ rootpxe_validate_image_contract() {
     return 0
 }
 
+# The checkin payload is untrusted.  Keep image-format acceptance in one
+# runtime helper so restore code rejects an invalid value before allocating a
+# FIFO or starting an image reader.
+rootpxe_validate_runtime_img_format() {
+    local format="${imgLegacy:-${imgFormat:-}}"
+    [[ $format =~ ^[0-6]$ ]] || return 1
+    [[ ${type:-} != up || $format != 1 ]]
+}
+
+# Diagnostics may contain values from a task response or a helper's stderr.
+# Replace values before anything reaches the console or callback transport.
+rootpxe_redact_diagnostic() {
+    local text="$*" name value
+    for name in task_token token execution_token smb_password smb_username smb_domain storage_password password credential; do
+        value="${!name:-}"
+        [[ -n $value ]] && text="${text//"$value"/[REDACTED]}"
+    done
+    text=$(printf '%s' "$text" | sed -E 's/(^|[[:space:]])([[:alnum:]_.-]*(token|password|credential|secret)[[:alnum:]_.-]*[[:space:]]*=[[:space:]]*)[^[:space:]]+/\1\2[REDACTED]/Ig')
+    printf '%s\n' "$text"
+}
+
+# Return at most $2 bytes of a valid UTF-8 input without ending inside a code
+# point.  PXEOS can run with LC_ALL=C (for example dosfstools diagnostics), so
+# use byte indexing and inspect the terminal UTF-8 sequence directly instead
+# of relying on a UTF-8 locale or an optional converter.
+rootpxe_utf8_safe_prefix() {
+    local LC_ALL=C text="$1" maximum="$2" prefix byte lead continuation=0 index need=0
+    [[ $maximum =~ ^[0-9]+$ ]] || return 1
+    prefix=${text:0:maximum}
+    index=$((${#prefix} - 1))
+    while (( index >= 0 )); do
+        byte=$(printf '%d' "'${prefix:index:1}")
+        [[ $byte -ge 128 && $byte -le 191 ]] || break
+        continuation=$((continuation + 1)); index=$((index - 1))
+    done
+    (( index >= 0 )) || { printf '%s' ''; return 0; }
+    lead=$(printf '%d' "'${prefix:index:1}")
+    case $lead in
+        [0-9]|[1-9][0-9]|1[01][0-9]|12[0-7]) need=0 ;;
+        19[2-9]|2[0-1][0-9]|22[0-3]) need=1 ;;
+        22[4-9]|23[0-9]) need=2 ;;
+        24[0-4]) need=3 ;;
+        *) prefix=${prefix:0:index}; printf '%s' "$prefix"; return 0 ;;
+    esac
+    if (( continuation != need )); then prefix=${prefix:0:index}; fi
+    printf '%s' "$prefix"
+}
+
+# The service accepts at most 256 KiB of UTF-8 message text.  Keep the full
+# redacted diagnostic locally (root-only) and append an explicit marker when
+# the callback payload is shortened.
+rootpxe_bound_callback_message() {
+    local message marker=' [TRUNCATED: full diagnostic retained locally]' bytes limit=262144 keep
+    message=$(rootpxe_redact_diagnostic "$*")
+    bytes=$(LC_ALL=C printf '%s' "$message" | wc -c) || return 1
+    if [[ $bytes -le $limit ]]; then
+        printf '%s\n' "$message"
+        return 0
+    fi
+    umask 077
+    rootpxe_last_diagnostic_file="/tmp/pxeos.diagnostic.$$.log"
+    printf '%s\n' "$message" >"$rootpxe_last_diagnostic_file" || return 1
+    chmod 600 "$rootpxe_last_diagnostic_file" || return 1
+    keep=$((limit - $(LC_ALL=C printf '%s' "$marker" | wc -c) - 1))
+    message=$(rootpxe_utf8_safe_prefix "$message" "$keep") || return 1
+    while :; do
+        bytes=$(LC_ALL=C printf '%s%s' "$message" "$marker" | wc -c) || return 1
+        [[ $bytes -le $limit ]] && break
+        keep=$(( $(LC_ALL=C printf '%s' "$message" | wc -c) - 1024 ))
+        (( keep > 0 )) || { message=""; break; }
+        message=$(rootpxe_utf8_safe_prefix "$message" "$keep") || return 1
+    done
+    printf '%s%s\n' "$message" "$marker"
+}
+
 rootpxe_disk_has_lvm_pv() {
     local disk="$1" candidate
     getPartitions "$disk"
@@ -82,14 +159,6 @@ rootpxe_disk_has_lvm_pv() {
 # capture inventory is therefore a required, immutable negative proof.  A
 # missing historical sidecar fails before disk permit/write; dd remains the
 # explicit raw whole-disk exception and never calls this helper.
-rootpxe_validate_fixed_image_lvm_inventory() {
-    local image_path="$1" inventory="$image_path/.rootpxe-partition-inventory.json"
-    case "${imgType:-}" in mps|mpa) ;; *) return 0 ;; esac
-    [[ -r $inventory ]] || return 1
-    jq -e '
-      .version == 1 and (.disks|type == "array") and (.disks|length > 0) and
-      ([.disks[].partitions[]? | ((.fs // "") | ascii_downcase) as $fs | ((.typeGuid // "") | ascii_downcase) as $type | select($fs == "lvm2_member" or $type == "0x8e" or $type == "8e" or $type == "e6d6d379-f507-44c2-a23c-238f2a3df928)] | length == 0)' "$inventory" >/dev/null 2>&1
-}
 rootpxe_safe_relative_path() {
     local value=${1#/} segment
     [[ -n $value && $value != */ && $value != *\\* && $value != *//* ]] || return 1
@@ -632,9 +701,10 @@ rootpxe_build_partition_inventory_disk() {
     return $result
 }
 
-# `$4` is the full hardware disk list used by mpa capture.  It is traversed
-# with the exact same "has partitions" rule as pxeos.upload, preserving dN
-# numbering without persisting transient source device names as artifacts.
+# `$4` is the already permitted, fixed capture disk list used by mpa.  It is
+# deliberately not re-filtered here: skipping a disk after payload and permit
+# planning would shift dN numbering and make the saved inventory describe a
+# different source set.
 rootpxe_build_partition_inventory() {
     local capture_path="$1" image_type="$2" primary_disk="$3" all_disks="$4" inventory_rows disk disk_number=1 partitions_file
     command -v jq >/dev/null 2>&1 || return 1
@@ -642,9 +712,9 @@ rootpxe_build_partition_inventory() {
     chmod 600 "$inventory_rows" || { rm -f "$inventory_rows"; return 1; }
     if [[ $image_type == mpa ]]; then
         for disk in $all_disks; do
-            [[ $disk =~ mmcblk[0-9]+boot[0-9]+ ]] && continue
+            rootpxe_verify_disk_permit_binding "$disk" capture_read_write || { rm -f "$inventory_rows"; return 1; }
             getPartitions "$disk"
-            [[ -n ${parts:-} ]] || continue
+            [[ -n ${parts:-} ]] || { rm -f "$inventory_rows"; return 1; }
             partitions_file="$capture_path/d${disk_number}.partitions"
             rootpxe_build_partition_inventory_disk "$disk" "$partitions_file" "$disk_number" >>"$inventory_rows" || { rm -f "$inventory_rows"; return 1; }
             disk_number=$((disk_number + 1))
@@ -1272,7 +1342,9 @@ rootpxe_request_disk_permit() {
 }
 
 rootpxe_clear_disk_permit() {
+    [[ -z ${rootpxe_disk_permit_bindings_file:-} ]] || rm -f -- "$rootpxe_disk_permit_bindings_file"
     unset rootpxe_disk_permit_granted rootpxe_disk_permit_target_id rootpxe_disk_permit_operation
+    unset rootpxe_disk_permit_bindings_file
     rootpxe_disk_permit_http_status=""
     rootpxe_disk_permit_code=""
     rootpxe_disk_permit_console_reason=""
@@ -1469,6 +1541,124 @@ rootpxe_wait_for_disk_permit() {
     done
 }
 
+# Atomically bind every disk in a multi-disk capture before any path is allowed
+# to replay an XFS journal or write capture metadata.  Arguments are alternating
+# stable target id and operation; the server response must be the same set.
+rootpxe_request_disk_permit_batch() {
+    local api response body http_code request granted expected actual binding_file
+    local -a items=() ids=() ops=()
+    (( $# >= 2 && $# % 2 == 0 && $# <= 128 )) || return 12
+    rootpxe_require_task_context || return 11
+    command -v jq >/dev/null 2>&1 || return 12
+    api="${pxeapi:-${web:-}}"; [[ -n $api ]] || return 11
+    while (( $# )); do
+        [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ && $2 =~ ^(capture_read_write|deploy_write|nvme_format\+deploy_write)$ ]] || return 12
+        ids+=("$1"); ops+=("$2"); items+=("$(jq -cn --arg targetId "$1" --arg operation "$2" '{targetId:$targetId,operation:$operation}')")
+        shift 2
+    done
+    [[ $(printf '%s\n' "${ids[@]}" | sort -u | wc -l) -eq ${#ids[@]} ]] || return 12
+    request=$(printf '%s\n' "${items[@]}" | jq -cs .) || return 12
+    response=$(curl -Lks --connect-timeout 10 --max-time 30 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "targets=$request" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
+    http_code=${response##*$'\n'}; body=${response%$'\n'*}
+    [[ $http_code =~ ^[0-9]{3}$ ]] || { rootpxe_set_disk_permit_protocol_error unknown; return 12; }
+    [[ $http_code =~ ^5[0-9][0-9]$ ]] && return 11
+    if [[ $http_code =~ ^2[0-9][0-9]$ ]]; then
+        granted=$(jq -er 'if (.granted | type) == "boolean" then .granted else error("granted must be boolean") end' <<<"$body" 2>/dev/null) || { rootpxe_set_disk_permit_protocol_error "$http_code"; return 12; }
+        if [[ $granted != true ]]; then
+            rootpxe_set_disk_permit_reason "$body" "$http_code"
+            rootpxe_task_status_confirms_disk_permit_cancellation && return 10
+            return 12
+        fi
+    elif [[ $http_code =~ ^4[0-9][0-9]$ ]]; then
+        rootpxe_set_disk_permit_reason "$body" "$http_code"
+        rootpxe_task_status_confirms_disk_permit_cancellation && return 10
+        return 12
+    else
+        rootpxe_set_disk_permit_protocol_error "$http_code"
+        return 12
+    fi
+    expected=$(jq -cS 'sort_by(.targetId,.operation)' <<<"$request") || { rootpxe_set_disk_permit_protocol_error "$http_code"; return 12; }
+    actual=$(jq -ceS '[.targets[] | if ((.targetId|type)=="string" and (.operation|type)=="string") then {targetId,operation} else error("target type") end] | sort_by(.targetId,.operation)' <<<"$body" 2>/dev/null) || { rootpxe_set_disk_permit_protocol_error "$http_code"; return 12; }
+    [[ $actual == "$expected" ]] || { rootpxe_set_disk_permit_protocol_error "$http_code"; return 12; }
+    binding_file=$(mktemp /tmp/rootpxe-disk-permits.XXXXXX) || return 12
+    chmod 600 "$binding_file" || { rm -f "$binding_file"; return 12; }
+    printf '%s\n' "$actual" >"$binding_file" || { rm -f "$binding_file"; return 12; }
+    [[ -z ${rootpxe_disk_permit_bindings_file:-} ]] || rm -f -- "$rootpxe_disk_permit_bindings_file"
+    rootpxe_disk_permit_bindings_file="$binding_file"; export rootpxe_disk_permit_bindings_file
+    return 0
+}
+
+rootpxe_wait_for_disk_permit_batch() {
+    local result
+    while :; do
+        if rootpxe_request_disk_permit_batch "$@"; then
+            return 0
+        else
+            result=$?
+        fi
+        [[ $result -eq 10 ]] && return 10
+        if [[ $result -eq 11 ]]; then
+            printf '%s\n' '[WARN]  Disk permission not confirmed. Retrying in 5s.' '[INFO]  SSH is available for troubleshooting.'
+            sleep 5
+            continue
+        fi
+        # Batch replies intentionally disclose no per-disk detail.  Reuse the
+        # existing bounded error reporter, then retry only after the service
+        # has accepted the attention state.
+        rootpxe_set_disk_permit_protocol_error batch
+        if rootpxe_report_disk_permit_denial; then
+            result=0
+        else
+            result=$?
+        fi
+        [[ $result -eq 20 ]] && return 20
+    done
+}
+
+rootpxe_record_disk_permit_binding() {
+    local disk="$1" target_id="$2" operation="$3" map_file
+    [[ $disk == /dev/* && $target_id =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ && $operation =~ ^(capture_read_write|deploy_write|nvme_format\+deploy_write)$ ]] || return 1
+    if [[ -z ${rootpxe_disk_permit_disk_map_file:-} ]]; then
+        map_file=$(mktemp /tmp/rootpxe-disk-permit-map.XXXXXX) || return 1
+        chmod 600 "$map_file" || { rm -f "$map_file"; return 1; }
+        rootpxe_disk_permit_disk_map_file="$map_file"; export rootpxe_disk_permit_disk_map_file
+    fi
+    [[ -r $rootpxe_disk_permit_disk_map_file ]] || return 1
+    awk -F '\t' -v disk="$disk" -v target="$target_id" '($1 == disk || $2 == target) { bad=1 } END { exit bad }' "$rootpxe_disk_permit_disk_map_file" || return 1
+    printf '%s\t%s\t%s\n' "$disk" "$target_id" "$operation" >>"$rootpxe_disk_permit_disk_map_file"
+}
+
+rootpxe_verify_disk_permit_binding() {
+    local disk="$1" operation="$2" target_id map_disk mapped_id mapped_operation
+    [[ -r ${rootpxe_disk_permit_disk_map_file:-} ]] || return 1
+    IFS=$'\t' read -r map_disk mapped_id mapped_operation < <(awk -F '\t' -v disk="$disk" '$1 == disk { print; exit }' "$rootpxe_disk_permit_disk_map_file") || return 1
+    [[ $map_disk == "$disk" && $mapped_id =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || return 1
+    target_id=$(rootpxe_disk_stable_identity "$disk") || return 1
+    [[ $target_id == "$mapped_id" ]] || return 1
+    case "$mapped_operation:$operation" in
+        "$operation:$operation"|nvme_format+deploy_write:deploy_write) ;;
+        *) return 1 ;;
+    esac
+    if [[ -r ${rootpxe_disk_permit_bindings_file:-} ]]; then
+        jq -e --arg targetId "$mapped_id" --arg operation "$mapped_operation" \
+            'any(.[]; .targetId == $targetId and .operation == $operation)' \
+            "$rootpxe_disk_permit_bindings_file" >/dev/null 2>&1
+    else
+        [[ ${rootpxe_disk_permit_granted:-} == yes && ${rootpxe_disk_permit_target_id:-} == "$mapped_id" && ${rootpxe_disk_permit_operation:-} == "$mapped_operation" ]]
+    fi
+}
+
+rootpxe_activate_disk_permit_binding() {
+    local disk="$1" operation="$2" map_disk mapped_id mapped_operation
+    rootpxe_verify_disk_permit_binding "$disk" "$operation" || return 1
+    IFS=$'\t' read -r map_disk mapped_id mapped_operation < <(awk -F '\t' -v disk="$disk" '$1 == disk { print; exit }' "$rootpxe_disk_permit_disk_map_file") || return 1
+    [[ $map_disk == "$disk" ]] || return 1
+    rootpxe_disk_permit_granted=yes
+    rootpxe_disk_permit_target_id="$mapped_id"
+    rootpxe_disk_permit_operation="$mapped_operation"
+    export rootpxe_disk_permit_granted rootpxe_disk_permit_target_id rootpxe_disk_permit_operation
+}
+
 rootpxe_e2fsck_preflight() {
     local part="$1" output_file="$2" status
     [[ -n $part && -n $output_file ]] || return 16
@@ -1505,10 +1695,11 @@ rootpxe_error_response_reason() {
 }
 
 rootpxe_error_wait_for_retry() {
-    local message="$1" code="${2:-PXEOS_ERROR}" api="${pxeapi:-$web}" response raw_response http_status response_reason wait action deadline now status stage="" stage_count=0 stage_invalid=0 stage_match stage_remainder stage_value
+    local message code="${2:-PXEOS_ERROR}" api="${pxeapi:-$web}" response raw_response http_status response_reason wait action deadline now status stage="" stage_count=0 stage_invalid=0 stage_match stage_remainder stage_value
     local -a error_args
     rootpxe_require_task_context || return 1
     [[ -n $api ]] || return 1
+    message=$(rootpxe_bound_callback_message "$1") || return 1
     # Only resume-safe stages may be persisted independently of the diagnostic
     # message. A malformed, repeated, or arbitrary marker is intentionally not
     # sent, so the service cannot resume a disk-writing phase by inference.
@@ -1653,6 +1844,8 @@ rootpxe_capture_set_final_path() {
     rootpxe_final_capture_path="$target"
     export capture_size_bytes rootpxe_final_capture_path
 }
+
+
 
 rootpxe_finalize_capture() {
     [[ ${type:-} == "up" ]] || return 0
@@ -1906,6 +2099,48 @@ rootpxe_plan_deploy_disk_operation() {
     export rootpxe_planned_disk_operation rootpxe_planned_target_id
 }
 
+# Build the exact ordered permit set for an mpa deployment.  The image facts
+# are authoritative for disk number and bytes; getHardDisk has already used
+# those bytes to choose $disks in the same order.  This function performs no
+# write and may therefore run before the atomic permit request.
+rootpxe_plan_mpa_disk_permits() {
+    local image_path="$1" facts number bytes disk index=0 planned_id planned_operation
+    local -a image_numbers=() image_bytes=() target_disks=() target_ids=() target_operations=()
+    [[ ${imgType:-} == mpa && ${type:-} == down && -n ${disks:-} ]] || return 1
+    facts=$(rootpxe_fixed_restore_disk_facts "$image_path") || return 1
+    while IFS='|' read -r number bytes; do
+        [[ $number =~ ^[1-9][0-9]*$ && $bytes =~ ^[1-9][0-9]*$ && -s $image_path/d${number}.partitions && -s $image_path/d${number}.mbr ]] || return 1
+        image_numbers+=("$number"); image_bytes+=("$bytes")
+    done <<<"$facts"
+    for disk in $disks; do target_disks+=("$disk"); done
+    (( ${#image_numbers[@]} == ${#target_disks[@]} && ${#image_numbers[@]} > 0 )) || return 1
+    for index in "${!target_disks[@]}"; do
+        disk=${target_disks[$index]}
+        [[ $(blockdev --getsize64 "$disk" 2>/dev/null) == "${image_bytes[$index]}" ]] || return 1
+        rootpxe_plan_deploy_disk_operation "$disk" "$image_path/d${image_numbers[$index]}.partitions" || return 1
+        planned_id=$rootpxe_planned_target_id; planned_operation=$rootpxe_planned_disk_operation
+        target_ids+=("$planned_id"); target_operations+=("$planned_operation")
+    done
+    rootpxe_mpa_permit_args=()
+    if (( ${#target_disks[@]} == 1 )); then
+        rootpxe_mpa_permit_is_batch=no
+        rootpxe_planned_target_id=${target_ids[0]}
+        rootpxe_planned_disk_operation=${target_operations[0]}
+        export rootpxe_mpa_permit_is_batch rootpxe_planned_target_id rootpxe_planned_disk_operation
+        return 0
+    fi
+    [[ -z ${rootpxe_disk_permit_disk_map_file:-} ]] || rm -f -- "$rootpxe_disk_permit_disk_map_file"
+    unset rootpxe_disk_permit_disk_map_file
+    rootpxe_clear_disk_permit
+    for index in "${!target_disks[@]}"; do
+        rootpxe_record_disk_permit_binding "${target_disks[$index]}" "${target_ids[$index]}" "${target_operations[$index]}" || return 1
+        rootpxe_mpa_permit_args+=("${target_ids[$index]}" "${target_operations[$index]}")
+    done
+    rootpxe_mpa_permit_is_batch=yes
+    export rootpxe_mpa_permit_is_batch
+    return 0
+}
+
 # Validate before clearPartitionTables or any other write.  On a matching NVMe
 # LBA format, the externally authorised reformat path may make the disk safe.
 validateImageSectorSize() {
@@ -2139,6 +2374,52 @@ enableWriteCache()  {
     esac
     debugPause
 }
+# Accept only the exact dosfstools 4.2 dirty-bit-only diagnostic observed on
+# PXEOS.  Exit status 1 alone is not sufficient: it also represents other
+# recoverable errors and internal inconsistencies.  LC_ALL=C makes this
+# parser stable; the optional three-line CP850 fallback is emitted by builds
+# whose iconv cannot convert to ANSI_X3.4-1968 in that locale.
+rootpxe_fat_dirty_only_diagnostic() {
+    local output_file="$1"
+    [[ -r $output_file ]] || return 1
+    LC_ALL=C awk '
+        BEGIN { version=dirty=remove=unchanged=stats=0; cp_to=cp_from=cp_internal=0; invalid=0 }
+        /^fsck\.fat 4\.2 \(2021-01-31\)$/ { version++; next }
+        /^Dirty bit is set\. Fs was not properly unmounted and some data may be corrupt\.$/ { dirty++; next }
+        /^ Automatically removing dirty bit\.$/ { remove++; next }
+        /^Leaving filesystem unchanged\.$/ { unchanged++; next }
+        /^Cannot initialize conversion from codepage 850 to ANSI_X3\.4-1968: Invalid argument$/ { cp_to++; next }
+        /^Cannot initialize conversion from ANSI_X3\.4-1968 to codepage 850: Invalid argument$/ { cp_from++; next }
+        /^Using internal CP850 conversion table$/ { cp_internal++; next }
+        /^[^:[:cntrl:]]+: [0-9]+ files, [0-9]+\/[0-9]+ clusters$/ { stats++; next }
+        /^[[:space:]]*$/ { next }
+        { invalid=1 }
+        END { exit !(invalid == 0 && version == 1 && dirty == 1 && remove == 1 && unchanged == 1 && stats == 1 && ((cp_to == 0 && cp_from == 0 && cp_internal == 0) || (cp_to == 1 && cp_from == 1 && cp_internal == 1))) }
+    ' "$output_file"
+}
+
+rootpxe_fat_growth_preflight() {
+    local part="$1" output_file="$2" status mount_state repair_status
+    [[ -n $part && -n $output_file ]] || return 16
+    LC_ALL=C fsck.fat -n "$part" >"$output_file" 2>&1
+    status=$?
+    [[ $status -eq 0 ]] && return 0
+    [[ $status -eq 1 ]] && rootpxe_fat_dirty_only_diagnostic "$output_file" || return "$status"
+    command -v findmnt >/dev/null 2>&1 || return 16
+    findmnt -rn -S "$part" >/dev/null 2>&1
+    mount_state=$?
+    [[ $mount_state -eq 1 ]] || return 16
+    printf '\nPXEOS accepted the exact dirty-bit-only diagnostic; running fsck.fat -a.\n' >>"$output_file"
+    if LC_ALL=C fsck.fat -a "$part" >>"$output_file" 2>&1; then
+        repair_status=0
+    else
+        repair_status=$?
+    fi
+    [[ $repair_status -eq 0 || $repair_status -eq 1 ]] || return "$repair_status"
+    printf '\nPXEOS verifying FAT after automatic repair.\n' >>"$output_file"
+    LC_ALL=C fsck.fat -n "$part" >>"$output_file" 2>&1
+}
+
 # Expands partitions, as needed/capable
 #
 # $1 is the partition
@@ -2146,6 +2427,7 @@ enableWriteCache()  {
 expandPartition() {
     local part="$1"
     local fixed="$2"
+    local required_growth="${3:-}"
     [[ -z $part ]] && handleError "No partition passed (${FUNCNAME[0]})\n   Args Passed: $*"
     local disk=""
     local part_number=0
@@ -2256,52 +2538,60 @@ expandPartition() {
                 dots "Resizing $fstype volume ($part)"
                 command -v fsck.fat >/dev/null 2>&1 || { echo "Failed"; debugPause; handleError "FAT filesystem check tool is unavailable for $part (${FUNCNAME[0]})"; }
                 command -v pxeosfatgrow >/dev/null 2>&1 || { echo "Failed"; debugPause; handleError "FAT grow tool is unavailable for $part (${FUNCNAME[0]})"; }
-                fsck.fat -n "$part" >/tmp/pxeosfatgrow-fsck.txt 2>&1 || { echo "Failed"; debugPause; handleError "FAT filesystem check failed before growth for $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/pxeosfatgrow-fsck.txt)\n   Args Passed: $*"; }
+                rootpxe_fat_growth_preflight "$part" /tmp/pxeosfatgrow-fsck.txt || { echo "Failed"; debugPause; handleError "FAT filesystem check failed before growth for $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/pxeosfatgrow-fsck.txt)\n   Args Passed: $*"; }
                 pxeosfatgrow "$part" >/tmp/pxeosfatgrow.txt 2>&1 || { echo "Failed"; debugPause; handleError "Could not grow FAT filesystem on $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/pxeosfatgrow.txt)\n   Args Passed: $*"; }
-                fsck.fat -n "$part" >/tmp/pxeosfatgrow-fsck.txt 2>&1 || { echo "Failed"; debugPause; handleError "FAT filesystem check failed after growth for $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/pxeosfatgrow-fsck.txt)\n   Args Passed: $*"; }
+                LC_ALL=C fsck.fat -n "$part" >/tmp/pxeosfatgrow-fsck.txt 2>&1 || { echo "Failed"; debugPause; handleError "FAT filesystem check failed after growth for $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/pxeosfatgrow-fsck.txt)\n   Args Passed: $*"; }
                 echo "Done"
             fi
             ;;
         xfs)
             if [[ $type == "down" ]]; then
+                local xfs_mount=""
                 dots "Attempting to resize $fstype volume ($part)"
 
                 # The resolved deployment layout already owns partition
                 # geometry.  Do not overwrite it with a later 100% end or
                 # infer free space from a second partition-table scan.
-                    if [[ ! -d /tmp/xfs ]]; then
-                        mkdir /tmp/xfs >>/tmp/xfslog.txt 2>&1
-                        if [[ $? -gt 0 ]]; then
-                            echo "Failed"
-                            debugPause
-                            handleError "Could not create /tmp/xfs (${FUNCNAME[0]})\n   Info: $(cat /tmp/xfslog.txt)\n   Args Passed: $*"
-                        fi
-                    fi
-                    mount -t xfs $part /tmp/xfs >>/tmp/xfslog.txt 2>&1
-                    if [[ $? -gt 0 ]]; then
+                    xfs_mount=$(mktemp -d /tmp/rootpxe-xfs-grow.XXXXXX) || {
                         echo "Failed"
                         debugPause
-                        handleError "Could not mount $part to /tmp/xfs (${FUNCNAME[0]})\n   Info: $(cat /tmp/xfslog.txt)\n   Args Passed: $*"
-                    fi
-                    xfs_growfs /tmp/xfs >>/tmp/xfslog.txt 2>&1
+                        handleError "Could not create XFS grow mountpoint (${FUNCNAME[0]})\n   Args Passed: $*"
+                    }
+                    mount -t xfs -o rw,nouuid "$part" "$xfs_mount" >>/tmp/xfslog.txt 2>&1
                     if [[ $? -gt 0 ]]; then
-                        umount /tmp/xfs >>/tmp/xfslog.txt 2>&1 || true
+                        rmdir "$xfs_mount" >/dev/null 2>&1 || true
+                        echo "Failed"
+                        debugPause
+                        handleError "Could not mount $part for XFS growth (${FUNCNAME[0]})\n   Info: $(cat /tmp/xfslog.txt)\n   Args Passed: $*"
+                    fi
+                    xfs_growfs "$xfs_mount" >>/tmp/xfslog.txt 2>&1
+                    if [[ $? -gt 0 ]]; then
+                        umount "$xfs_mount" >>/tmp/xfslog.txt 2>&1 || true
+                        rmdir "$xfs_mount" >/dev/null 2>&1 || true
                         echo "Failed"
                         debugPause
                         handleError "Could not grow XFS partition $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/xfslog.txt)\n   Args Passed: $*"
                     fi
-                    umount /tmp/xfs >>/tmp/xfslog.txt 2>&1
+                    umount "$xfs_mount" >>/tmp/xfslog.txt 2>&1
                     if [[ $? -gt 0 ]]; then
+                        umount "$xfs_mount" >>/tmp/xfslog.txt 2>&1 || true
                         echo Failed
                         debugPause
-                        handleError "Could not unmount $part from /tmp/xfs (${FUNCNAME[0]})\n   Info: $(cat /tmp/xfslog.txt)\n   Args Passed: $*"
+                        handleError "Could not unmount $part from $xfs_mount (${FUNCNAME[0]})\n   Info: $(cat /tmp/xfslog.txt)\n   Args Passed: $*"
                     fi
+                    rmdir "$xfs_mount" >/dev/null 2>&1 || { echo Failed; debugPause; handleError "Could not clean XFS grow mountpoint (${FUNCNAME[0]})\n   Args Passed: $*"; }
                     echo "Done"
             fi
             ;;
         *)
-            rootpxe_console_message INFO "Not expanding $part: $fstype is not supported."
-            debugPause
+            if [[ $required_growth == required ]]; then
+                echo "Failed"
+                debugPause
+                handleError "Could not expand $part: $fstype is not supported for a required filesystem growth (${FUNCNAME[0]})\n   Args Passed: $*"
+            else
+                rootpxe_console_message INFO "Not expanding $part: $fstype is not supported."
+                debugPause
+            fi
             ;;
     esac
     debugPause
@@ -2830,7 +3120,8 @@ writeImage()  {
     local source_exitcode=0
     local source_file=""
     local source_files=()
-    [[ -z $target ]] && handleError "No target to place image passed (${FUNCNAME[0]})\n   Args Passed: $*"
+    [[ -z $target ]] && handleError "No target to place image passed (${FUNCNAME[0]})"
+    rootpxe_validate_runtime_img_format || handleError "PXEOS_STAGE=restore CODE=IMAGE_FORMAT_INVALID REASON=unsupported_or_missing_format"
     mkfifo /tmp/pigz1 || handleError "PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_SETUP_FAILED REASON=unable_to_create_restore_fifo"
     case $mc in
         yes)
@@ -2861,7 +3152,7 @@ writeImage()  {
         5|6)
             # ZSTD Compressed image.
             rootpxe_console_message INFO 'Imaging with Partclone (zstd).'
-            if ( set -o pipefail; zstdmt -dc </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" --ignore_crc -O "${target}" -Nf 1 ); then
+            if ( set -o pipefail; zstdmt -dc </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" -O "${target}" -Nf 1 ); then
                 exitcode=0
             else
                 exitcode=$?
@@ -2870,13 +3161,11 @@ writeImage()  {
         3|4)
             # Uncompressed partclone
             rootpxe_console_message INFO 'Imaging with Partclone (uncompressed).'
-            if ( set -o pipefail; cat </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" --ignore_crc -O "${target}" -Nf 1 ); then
+            if ( set -o pipefail; cat </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" -O "${target}" -Nf 1 ); then
                 exitcode=0
             else
                 exitcode=$?
             fi
-            # If this fails, try from compressed form.
-            #[[ ! $? -eq 0 ]] && zstdmt -dc </tmp/pigz1 | partclone.restore --ignore_crc -O ${target} -N -f 1 || true
             ;;
         1)
             # Partimage
@@ -2891,14 +3180,11 @@ writeImage()  {
         0|2)
             # GZIP Compressed partclone
             rootpxe_console_message INFO 'Imaging with Partclone (gzip).'
-            #zstdmt -dc </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" --ignore_crc -O ${target} -N -f 1
-            if ( set -o pipefail; pigz -dc </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" --ignore_crc -O "${target}" -N -f 1 ); then
+            if ( set -o pipefail; pigz -dc </tmp/pigz1 | partclone.restore -n "Storage Location $storage, Image name $img" -O "${target}" -N -f 1 ); then
                 exitcode=0
             else
                 exitcode=$?
             fi
-            # If this fails, try uncompressed form.
-            #[[ ! $? -eq 0 ]] && cat </tmp/pigz1 | partclone.restore -O ${target} --ignore_crc -N -f 1 || true
             ;;
     esac
     if wait "$source_pid"; then
@@ -4023,7 +4309,7 @@ getHardDisk() {
     local devs
     devs=$(lsblk -dpno KNAME,SIZE -I 3,8,9,179,202,253,259 | awk '$2 != "0B" && !seen[$1]++ { print $1 }')
 
-    if [[ -n $fdrive ]]; then
+    if [[ -n ${fdrive:-} && ( ${imgType:-} != mpa || ${type:-} != down ) ]]; then
         local found_match=0
         for spec in ${fdrive//,/ }; do
             local spec_resolved spec_norm spec_normalized matched
@@ -4070,63 +4356,58 @@ getHardDisk() {
 
         disks=$(echo "$disks $devs" | xargs)   # add unmatched devices for completeness
 
-    elif [[ "x$imgType" == "xmpa" ]]; then
-        # Multi-disk image: keep enumeration order
-        disks="$devs"
-        if [[ "x$type" == "xdown" ]]; then
-            # Expected disk sizes from image (d1.size, d2.size, ...)
-            local sizefiles expected_sizes=()
-            sizefiles=$(ls -1 "${imagePath}"/d*.size 2>/dev/null | sort -V)
-
-            if [[ -n "$sizefiles" ]]; then
-                local f exp
-                for f in $sizefiles; do
-                    # file format: d1: 123456789
-                    exp="$(awk -F: '{gsub(/[[:space:]]/,"",$2); print $2}' "$f")"
-                    [[ -n "$exp" ]] && expected_sizes+=("$exp")
-                done
-
-                # Actual disks (keep lsblk order)
-                local actual_disks=()
-                for d in $devs; do actual_disks+=("$d"); done
-
-                # Build mapping in d1,d2,... order
-                local mapped=() used=" "
-                local i match candidates
-
-                for i in "${!expected_sizes[@]}"; do
-                    exp="${expected_sizes[$i]}"
-                    match=""
-                    candidates=0
-
-                    # Exact match pass
-                    for d in "${actual_disks[@]}"; do
-                        [[ "$used" == *" $d "* ]] && continue
-                        if [[ "$(blockdev --getsize64 "$d" 2>/dev/null)" == "$exp" ]]; then
-                            match="$d"
-                            candidates=$((candidates+1))
-                        fi
-                    done
-
-                    if [[ $candidates -eq 1 ]]; then
-                        mapped+=("$match")
-                        used+=" $match "
-                        continue
-                    fi
-
-                    # A multi-disk image has no safe enumeration fallback:
-                    # a same-sized or missing disk would receive another
-                    # disk's partition table and payload.
-                    handleError "Could not uniquely match disk for expected size $exp (mpa deployment requires one exact target per captured disk)."
-                done
-
-                if [[ ${#mapped[@]} -gt 0 ]]; then
-                    disks="${mapped[*]}"
-                    hd="${mapped[0]}"
-                    return 0
+    elif [[ "x$imgType" == "xmpa" && "x$type" == "xdown" ]]; then
+        # mpa target selection is a positional image-to-device binding, never
+        # a best-effort inventory enumeration.  Every captured disk requires
+        # a continuous size fact and its own partition-table inputs before a
+        # permit can be requested.
+        local -a expected_sizes=() actual_disks=() mapped=()
+        local facts number exp expected_number=1 d match candidates used=" " spec spec_resolved requested=0 selected_index candidate_index candidate_size candidate_uuid candidate_kv candidate_serial candidate_wwn selector_matches
+        facts=$(rootpxe_fixed_restore_disk_facts "$imagePath") || { handleError 'MPA deployment has missing, invalid, or ambiguous disk inventory metadata.'; return 1; }
+        while IFS='|' read -r number exp; do
+            [[ $number == "$expected_number" && $exp =~ ^[1-9][0-9]*$ && -s ${imagePath}/d${number}.mbr ]] || { handleError "MPA deployment is missing complete partition-table metadata for disk ${expected_number}."; return 1; }
+            expected_sizes+=("$exp")
+            expected_number=$((expected_number + 1))
+        done <<<"$facts"
+        (( ${#expected_sizes[@]} > 0 )) || { handleError 'MPA deployment has no target disk facts.'; return 1; }
+        for d in $devs; do actual_disks+=("$d"); done
+        for exp in "${expected_sizes[@]}"; do
+            match=""; candidates=0
+            for d in "${actual_disks[@]}"; do
+                [[ $used == *" $d "* ]] && continue
+                if [[ $(blockdev --getsize64 "$d" 2>/dev/null) == "$exp" ]]; then
+                    match="$d"; candidates=$((candidates + 1))
                 fi
-            fi
+            done
+            [[ $candidates -eq 1 ]] || { handleError "Could not uniquely match disk for expected size $exp (mpa deployment requires one exact target per captured disk)."; return 1; }
+            mapped+=("$match"); used+=" $match "
+        done
+        disks="${mapped[*]}"
+        hd="${mapped[0]}"
+        # fdrive may narrow the leading positions of the already-proven mpa
+        # mapping.  It cannot append a device, reorder an image position, or
+        # turn an unproven size/identity into a target selection.
+        if [[ -n ${fdrive:-} ]]; then
+            for spec in ${fdrive//,/ }; do
+                spec_resolved=$(resolve_path "$spec")
+                selector_matches=0; selected_index=-1
+                for candidate_index in "${!mapped[@]}"; do
+                    d=${mapped[$candidate_index]}
+                    candidate_size=$(normalize "$(blockdev --getsize64 "$d" 2>/dev/null)")
+                    candidate_uuid=$(normalize "$(blkid -s UUID -o value "$d" 2>/dev/null)")
+                    candidate_kv=$(lsblk -pdPno SERIAL,WWN "$d" 2>/dev/null || :)
+                    candidate_serial=$(normalize "$(sed -n 's/.*SERIAL="\([^"]*\)".*/\1/p' <<<"$candidate_kv")")
+                    candidate_wwn=$(normalize "$(sed -n 's/.*WWN="\([^"]*\)".*/\1/p' <<<"$candidate_kv")")
+                    if [[ $spec_resolved == "$d" || $(normalize "$spec") == "$candidate_size" || $(normalize "$spec") == "$candidate_uuid" || $(normalize "$spec") == "$candidate_serial" || $(normalize "$spec") == "$candidate_wwn" ]]; then
+                        selector_matches=$((selector_matches + 1)); selected_index=$candidate_index
+                    fi
+                done
+                [[ $selector_matches -eq 1 && $selected_index -eq $requested ]] || { handleError "MPA Host Primary Disk selector does not match the mapped disk order: $spec."; return 1; }
+                requested=$((requested + 1))
+            done
+            [[ $requested -le ${#mapped[@]} ]] || { handleError 'MPA Host Primary Disk selector has too many mapped targets.'; return 1; }
         fi
+        return 0
     else
         if [[ -n $largesize ]]; then
             # Auto-select largest available drive
@@ -4325,15 +4606,16 @@ correctVistaMBR() {
 #
 # $1 is the string to inform what went wrong
 handleError() {
-    local str="$1"
+    local str="$1" safe_str
     local parts=""
     local part=""
     printf '\n[ERROR] Operation failed.\n'
     printf '[INFO]  Init version: %s\n' "$initversion"
     printf '\n[INFO]  Error details:\n'
-    printf '%b\n' "$str" | sed 's/^/        /'
+    safe_str=$(rootpxe_redact_diagnostic "$str")
+    printf '%b\n' "$safe_str" | sed 's/^/        /'
     printf '\n[INFO]  Kernel variables and settings:\n'
-    cat /proc/cmdline | sed 's/ad.*=.* //g' | sed 's/^/        /'
+    rootpxe_redact_diagnostic "$*" | sed 's/^/        /'
     printf '\n'
     #
     # expand the file systems in the restored partitions
@@ -4354,7 +4636,7 @@ handleError() {
         esac
     fi
     if rootpxe_require_task_context; then
-        rootpxe_error_wait_for_retry "$str" "PXEOS_ERROR"
+        rootpxe_error_wait_for_retry "$safe_str" "PXEOS_ERROR"
         return_code=$?
         exit "$return_code"
     fi
@@ -4833,13 +5115,17 @@ restorePartitionTablesAndBootLoaders() {
     local sector_partition_file=""
     sfdiskPartitionFileName "$imagePath" "$disk_number"
     sector_partition_file="$sfdiskoriginalpartitionfilename"
+    # Resolve and validate the actual selected boot/table artifact before a
+    # sector-size reformat or table clear.  The top-level preflight protects
+    # ordinary downloads, but this function is also called by compatibility
+    # paths and must never clear a target first and discover a missing MBR.
+    MBRFileName "$imagePath" "$disk_number" "tmpMBR"
+    [[ -r $tmpMBR && -s $tmpMBR ]] || handleError "Image Store Corrupt: Unable to locate readable MBR (${FUNCNAME[0]})\n   Args Passed: $*"
     validateImageSectorSize "$disk" "$sector_partition_file"
     clearPartitionTables "$disk"
     majorDebugEcho "Partition table should be empty now."
     majorDebugShowCurrentPartitionTable "$disk" "$disk_number"
     majorDebugPause
-    MBRFileName "$imagePath" "$disk_number" "tmpMBR"
-    [[ ! -f $tmpMBR ]] && handleError "Image Store Corrupt: Unable to locate MBR (${FUNCNAME[0]})\n   Args Passed: $*"
     local table_type=""
     getDesiredPartitionTableType "$imagePath" "$disk_number"
     majorDebugEcho "Trying to restore to $table_type partition table."
@@ -5216,6 +5502,102 @@ rootpxe_expansion_fixed_partitions() {
     printf '%s' "$filtered"
 }
 
+# An authenticated deployment layout has already resolved the final physical
+# geometry before any target-disk write.  Internal filesystem growth must use
+# that result, rather than the capture-time fixed list: a fixed mode can grow,
+# while an original-mode partition can move after an earlier partition grows.
+# Return 2 when no deployment layout is active so the legacy restore path can
+# retain its capture-time fixed-list behavior.  Any incomplete or malformed
+# active layout fails closed.
+rootpxe_expansion_active_partitions() {
+    local schema_file="${originalSchemaFile:-}" resolved_file="${rootpxe_resolved_layout_file:-}"
+    [[ -z $schema_file && -z $resolved_file ]] && return 2
+    [[ -r $schema_file && -r $resolved_file ]] || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+
+    jq -ner --slurpfile schema "$schema_file" --slurpfile resolved "$resolved_file" '
+        ($schema[0].partitions // null) as $captured |
+        if ($captured|type) != "array" or ($captured|length) == 0 then error("captured partitions missing") else . end |
+        if ([ $captured[] | .number ] | all(type == "number" and . >= 1 and floor == .) | not) then error("captured partition number invalid") else . end |
+        if ([ $captured[].number ] | unique | length) != ($captured|length) then error("captured partition number duplicate") else . end |
+        ([$captured[] | {key:(.number|tostring), value:.}] | from_entries) as $captured_by_number |
+        ($resolved[0] // null) as $resolved |
+        if ($resolved|type) != "array" then error("resolved partitions missing") else . end |
+        if ([ $resolved[] | .number ] | all(type == "number" and . >= 1 and floor == .) | not) then error("resolved partition number invalid") else . end |
+        if ([ $resolved[].number ] | unique | length) != ($resolved|length) then error("resolved partition number duplicate") else . end |
+        if ([ $captured[].number ] | sort) != ([ $resolved[].number ] | sort) then error("resolved partition identity mismatch") else . end |
+        [ $resolved[] |
+          .number as $number |
+          ($captured_by_number[($number|tostring)] // error("resolved partition absent from schema")) as $source |
+          if $source.kind == "extended" then empty
+          elif (($source.originalSectors|type) != "number" or $source.originalSectors <= 0 or $source.originalSectors != ($source.originalSectors|floor)
+                or (.resolvedSectors|type) != "number" or .resolvedSectors <= 0 or .resolvedSectors != (.resolvedSectors|floor)) then
+              error("resolved leaf geometry invalid")
+          elif .resolvedSectors < $source.originalSectors then error("resolved leaf shrinks")
+          elif $source.role == "swap" or $source.fs == "swap" or $source.role == "lvm_pv" or $source.fs == "LVM2_member"
+             or ((($source.fs // "") == "") and ((($source.typeGuid // "")|ascii_downcase) == "e3c9e316-0b5c-4db8-817d-f92df00215ae" or (($source.typeGuid // "")|ascii_downcase) == "21686148-6449-6e6f-744e-656564454649")) then empty
+          elif .resolvedSectors > $source.originalSectors then $number
+          else empty
+          end
+        ] | join(":")
+    ' 2>/dev/null
+}
+
+rootpxe_expansion_partition_is_listed() {
+    local part_number="$1" partition_list="$2"
+    [[ $part_number =~ ^[1-9][0-9]*$ ]] || return 1
+    case ":$partition_list:" in
+        *":$part_number:"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# A larger partition is safe only when PXEOS can also grow the filesystem
+# after imaging it.  Run this from the authenticated resolved layout before
+# requesting a destructive disk permit.
+rootpxe_validate_growth_capability() {
+    local schema_file="$1" resolved_file="$2" rows row number fs role type_guid logical_sector
+    [[ -r $schema_file && -r $resolved_file ]] || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    rows=$(jq -r --slurpfile resolved "$resolved_file" '
+        . as $schema |
+        ($resolved[0] // []) as $resolved |
+        .partitions[] as $source |
+        ($resolved[] | select(.number == $source.number)) as $actual |
+        select($actual.resolvedSectors > $source.originalSectors) |
+        {number:$source.number,fs:($source.fs // ""),role:($source.role // ""),typeGuid:(($source.typeGuid // "")|ascii_downcase),logicalSectorBytes:($schema.logicalSectorBytes // null)} | @json
+    ' "$schema_file") || return 1
+    while IFS= read -r row; do
+        [[ -n $row ]] || continue
+        number=$(jq -er '.number | if type == "number" and . >= 1 and floor == . then tostring else error("number") end' <<<"$row") || return 1
+        fs=$(jq -er '.fs | strings' <<<"$row") || return 1
+        role=$(jq -er '.role | strings' <<<"$row") || return 1
+        type_guid=$(jq -er '.typeGuid | strings' <<<"$row") || return 1
+        logical_sector=$(jq -r '.logicalSectorBytes | if type == "number" and floor == . and . > 0 then tostring else "" end' <<<"$row") || return 1
+        [[ -n $number ]] || continue
+        case "$fs:$role:$type_guid" in
+            ext2:*|ext3:*|ext4:*) command -v resize2fs >/dev/null 2>&1 && command -v e2fsck >/dev/null 2>&1 || return 1 ;;
+            ntfs:*) command -v ntfsresize >/dev/null 2>&1 || return 1 ;;
+            btrfs:*) command -v btrfs >/dev/null 2>&1 || return 1 ;;
+            f2fs:*) command -v resize.f2fs >/dev/null 2>&1 || return 1 ;;
+            # pxeosfatgrow validates and edits FAT BPB fields in 512-byte
+            # sectors.  This is a source-schema capability gate before the
+            # permit; the post-restore FAT diagnostic remains authoritative
+            # for BPB and filesystem consistency.
+            vfat:*|fat:*) [[ $logical_sector == 512 ]] && command -v fsck.fat >/dev/null 2>&1 && command -v pxeosfatgrow >/dev/null 2>&1 || return 1 ;;
+            xfs:*) command -v xfs_growfs >/dev/null 2>&1 || return 1 ;;
+            swap:*|*:swap:*|LVM2_member:*|*:lvm_pv:*) : ;;
+            :msr:e3c9e316-0b5c-4db8-817d-f92df00215ae|:boot:21686148-6449-6e6f-744e-656564454649) : ;;
+            *) return 1 ;;
+        esac
+    done <<<"$rows"
+    return 0
+}
+
+# Validate payload availability before any target-table write.  A missing
+# partition image must never be converted into the historical silent skip.
+
+
 performRestore() {
     local disks="$1"
     local disk=""
@@ -5229,10 +5611,25 @@ performRestore() {
     local part_number=0
     local restoreparts=""
     local sfdiskoriginalpartitionfilename=""
-    local expansion_fixed_size_partitions
+    local expansion_fixed_size_partitions expansion_partitions="" expansion_plan_active=no expansion_plan_status
     expansion_fixed_size_partitions=$(rootpxe_expansion_fixed_partitions "$fixed_size_partitions")
+    if [[ $imgType =~ [Nn] ]]; then
+        if expansion_partitions=$(rootpxe_expansion_active_partitions); then
+            expansion_plan_status=0
+        else
+            expansion_plan_status=$?
+        fi
+        case $expansion_plan_status in
+            0) expansion_plan_active=yes ;;
+            2) ;;
+            *) handleError "Could not determine internal filesystem growth from the validated deployment layout (${FUNCNAME[0]})"; return 1 ;;
+        esac
+    fi
     [[ $imgType =~ [Nn] ]] && local tmpebrfilename=""
     for disk in $disks; do
+        if [[ ${imgType:-} == mpa && ${rootpxe_mpa_permit_is_batch:-no} == yes ]]; then
+            rootpxe_activate_disk_permit_binding "$disk" deploy_write || handleError "Disk permit binding changed before restore (${FUNCNAME[0]})"
+        fi
         sfdiskoriginalpartitionfilename=""
         sfdiskOriginalPartitionFileName "$imagePath" "$disk_number"
         getValidRestorePartitions "$disk" "$disk_number" "$imagePath" "$restoreparts"
@@ -5242,7 +5639,13 @@ performRestore() {
             [[ $imgType =~ [Nn] ]] && tmpEBRFileName "$disk_number" "$part_number"
             restorePartition "$restorepart" "$disk_number" "$imagePath" "$mc"
             [[ $imgType =~ [Nn] ]] && restoreEBR "$restorepart" "$tmpebrfilename"
-            [[ $imgType =~ [Nn] ]] && expandPartition "$restorepart" "$expansion_fixed_size_partitions"
+            if [[ $imgType =~ [Nn] ]]; then
+                if [[ $expansion_plan_active == yes ]]; then
+                    rootpxe_expansion_partition_is_listed "$part_number" "$expansion_partitions" && expandPartition "$restorepart" "" required
+                else
+                    expandPartition "$restorepart" "$expansion_fixed_size_partitions"
+                fi
+            fi
             [[ $osid == +([5-7]) && $imgType =~ [Nn] ]] && fixWin7boot "$restorepart"
         done
         restoreparts=""

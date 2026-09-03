@@ -21,6 +21,8 @@ assert_file_text() { [[ -f $1 && $(<"$1") == "$2" ]] || fail "$3"; }
 # temporary test copy so the exercised functions use an isolated filesystem.
 sed \
     -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' \
+    -e 's|^\. /usr/share/pxeos/lib/restore-preflight.sh$|:|' \
+    -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' \
     -e 's|/storage|${ROOTPXE_TEST_STORAGE}|g' \
     "$funcs" >"$tmp/funcs.sh"
 
@@ -378,6 +380,7 @@ rootpxe_clear_capture_marker() {
     : > "${MOCK_MARKER_CLEARED:?}"
 }
 rootpxe_cleanup_task_json() { : > "${MOCK_JSON_CLEARED:?}"; }
+rootpxe_capture_resume_cleanup() { :; }
 rootpxe_console_message() { printf '%-7s %s\n' "[$1]" "$2"; }
 dots() { :; }
 debugPause() { :; }
@@ -452,7 +455,11 @@ exit 0
 EOF
 chmod +x "$tmp/bin/nproc" "$tmp/bin/pigz" "$tmp/bin/split"
 
-sed 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' "$funcs" > "$tmp/funcs.sh"
+sed \
+    -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' \
+    -e 's|^\. /usr/share/pxeos/lib/restore-preflight.sh$|:|' \
+    -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' \
+    "$funcs" > "$tmp/funcs.sh"
 set +u
 PATH="$tmp/bin:$PATH"
 source "$tmp/funcs.sh" 2>/dev/null

@@ -246,6 +246,8 @@ chmod +x "$tmp/mock"/*
 # funcs.sh 在设备端按绝对路径 source 分区库和读取 /proc/cmdline；测试时均改到临时路径。
 : >"$tmp/proc-cmdline"
 sed -e "s|^\. /usr/share/pxeos/lib/partition-funcs.sh|. \"$partition_funcs\"|" \
+    -e "s|^\. /usr/share/pxeos/lib/restore-preflight.sh|. \"$overlay/usr/share/pxeos/lib/restore-preflight.sh\"|" \
+    -e "s|^\. /usr/share/pxeos/lib/capture-recovery.sh|. \"$overlay/usr/share/pxeos/lib/capture-recovery.sh\"|" \
     -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" "$funcs" >"$tmp/funcs.sh"
 export PATH="$tmp/mock:$PATH"
 export ismajordebug=0
@@ -451,6 +453,118 @@ done
 ! grep -q '^grow:' "$tmp/fat-pre_fail-trace" || fail fat-pre-failure-must-not-grow
 [[ $(grep -Fc 'fsck:-n /dev/mockfat' "$tmp/fat-grow_fail-trace") -eq 1 ]] || fail fat-grow-failure-must-not-postcheck
 [[ $(grep -Fc 'fsck:-n /dev/mockfat' "$tmp/fat-post_fail-trace") -eq 2 ]] || fail fat-post-failure-must-check-twice
+
+# 已验证布局仅把实际变大的叶子分区传给第三参数为 required 的扩容
+# 路径。此时未知文件系统不能只记录 INFO 后返回成功，否则分区表已
+# 变大而内部文件系统仍是旧大小；历史/非 required 路径保持原有跳过。
+set +e
+(
+    UNKNOWN_TRACE="$tmp/unknown-required-trace"; : >"$UNKNOWN_TRACE"; export UNKNOWN_TRACE
+    debugPause() { :; }
+    getDiskFromPartition() { disk=/dev/mockdisk; }
+    getPartitionNumber() { part_number=7; }
+    fsTypeSetting() { fstype=unsupported; }
+    runPartprobe() { printf 'UNEXPECTED:partprobe\n' >>"$UNKNOWN_TRACE"; }
+    rootpxe_console_message() { printf 'console:%s\n' "$*" >>"$UNKNOWN_TRACE"; }
+    handleError() { printf 'error:%s\n' "$*" >>"$UNKNOWN_TRACE"; exit 91; }
+    type=down
+    expandPartition /dev/mockunknown '' required
+)
+unknown_status=$?
+set -e
+[[ $unknown_status -eq 91 ]] || fail unknown-required-growth-must-fail
+grep -q '^error:' "$tmp/unknown-required-trace" || fail unknown-required-growth-error-report
+! grep -Fq UNEXPECTED: "$tmp/unknown-required-trace" || fail unknown-required-growth-must-not-partprobe
+
+# dosfstools 4.2 returns 1 for a dirty bit and also for unrelated corruption.
+# Only the fully pinned dirty-only transcript may reach automatic repair.
+cat >"$tmp/fat-dirty-only.log" <<'EOF'
+fsck.fat 4.2 (2021-01-31)
+Dirty bit is set. Fs was not properly unmounted and some data may be corrupt.
+ Automatically removing dirty bit.
+
+Leaving filesystem unchanged.
+/tmp/fat-dirty.img: 1 files, 0/24519 clusters
+EOF
+rootpxe_fat_dirty_only_diagnostic "$tmp/fat-dirty-only.log" || fail fat-dirty-only-diagnostic-must-pass
+sed '/Leaving filesystem unchanged/i FATs differ but appear to be intact.\n  Using first FAT.' "$tmp/fat-dirty-only.log" >"$tmp/fat-dirty-plus-corruption.log"
+rootpxe_fat_dirty_only_diagnostic "$tmp/fat-dirty-plus-corruption.log" && fail fat-dirty-plus-corruption-must-fail
+
+# FAT growth must repair only the pinned dirty-bit diagnostic.  fsck.fat -a
+# may itself return 1 after a successful repair, but 2+ and a failed postcheck
+# stay fatal; a mounted target and any extra diagnostic never reach -a.
+for fat_preflight_case in dirty_ok repair_two mounted post_fail dirty_corruption; do
+    set +e
+    (
+        FAT_PREFLIGHT_CASE=$fat_preflight_case
+        FAT_PREFLIGHT_TRACE="$tmp/fat-preflight-$fat_preflight_case.trace"
+        FAT_PREFLIGHT_LOG="$tmp/fat-preflight-$fat_preflight_case.log"
+        : >"$FAT_PREFLIGHT_TRACE"
+        fsck.fat() {
+            printf 'fsck:%s\n' "$*" >>"$FAT_PREFLIGHT_TRACE"
+            case "$1:${FAT_PREFLIGHT_CALLS:-0}" in
+                -n:0)
+                    FAT_PREFLIGHT_CALLS=1
+                    printf '%s\n' 'fsck.fat 4.2 (2021-01-31)'
+                    if [[ $FAT_PREFLIGHT_CASE == dirty_corruption ]]; then
+                        printf '%s\n' 'FATs differ but appear to be intact.' '  Using first FAT.'
+                    fi
+                    printf '%s\n%s\n\n%s\n' \
+                        'Dirty bit is set. Fs was not properly unmounted and some data may be corrupt.' \
+                        ' Automatically removing dirty bit.' \
+                        'Leaving filesystem unchanged.'
+                    printf '%s\n' '/tmp/fat-dirty.img: 1 files, 0/24519 clusters'
+                    return 1
+                    ;;
+                -a:1)
+                    FAT_PREFLIGHT_CALLS=2
+                    [[ $FAT_PREFLIGHT_CASE == repair_two ]] && return 2
+                    return 1
+                    ;;
+                -n:2)
+                    FAT_PREFLIGHT_CALLS=3
+                    [[ $FAT_PREFLIGHT_CASE == post_fail ]] && return 8
+                    return 0
+                    ;;
+            esac
+            return 9
+        }
+        findmnt() {
+            printf 'findmnt:%s\n' "$*" >>"$FAT_PREFLIGHT_TRACE"
+            [[ $FAT_PREFLIGHT_CASE == mounted ]] && return 0
+            return 1
+        }
+        rootpxe_fat_growth_preflight /dev/mockfat "$FAT_PREFLIGHT_LOG"
+    )
+    fat_preflight_status=$?
+    set -e
+    case $fat_preflight_case in
+        dirty_ok)
+            [[ $fat_preflight_status -eq 0 ]] || fail fat-preflight-dirty-ok
+            grep -Fqx 'fsck:-a /dev/mockfat' "$tmp/fat-preflight-$fat_preflight_case.trace" || fail fat-preflight-dirty-must-repair
+            [[ $(grep -Fc 'fsck:-n /dev/mockfat' "$tmp/fat-preflight-$fat_preflight_case.trace") -eq 2 ]] || fail fat-preflight-dirty-must-postcheck
+            ;;
+        repair_two)
+            [[ $fat_preflight_status -eq 2 ]] || fail fat-preflight-repair-two-must-fail
+            grep -Fqx 'fsck:-a /dev/mockfat' "$tmp/fat-preflight-$fat_preflight_case.trace" || fail fat-preflight-repair-two-must-attempt-repair
+            [[ $(grep -Fc 'fsck:-n /dev/mockfat' "$tmp/fat-preflight-$fat_preflight_case.trace") -eq 1 ]] || fail fat-preflight-repair-two-must-not-postcheck
+            ;;
+        mounted)
+            [[ $fat_preflight_status -eq 16 ]] || fail fat-preflight-mounted-must-fail
+            ! grep -Fq 'fsck:-a ' "$tmp/fat-preflight-$fat_preflight_case.trace" || fail fat-preflight-mounted-must-not-repair
+            ;;
+        post_fail)
+            [[ $fat_preflight_status -eq 8 ]] || fail fat-preflight-postcheck-must-fail
+            grep -Fqx 'fsck:-a /dev/mockfat' "$tmp/fat-preflight-$fat_preflight_case.trace" || fail fat-preflight-postcheck-must-repair
+            [[ $(grep -Fc 'fsck:-n /dev/mockfat' "$tmp/fat-preflight-$fat_preflight_case.trace") -eq 2 ]] || fail fat-preflight-postcheck-must-run
+            ;;
+        dirty_corruption)
+            [[ $fat_preflight_status -eq 1 ]] || fail fat-preflight-corruption-must-fail
+            ! grep -Fq 'fsck:-a ' "$tmp/fat-preflight-$fat_preflight_case.trace" || fail fat-preflight-corruption-must-not-repair
+            ! grep -Fq 'findmnt:' "$tmp/fat-preflight-$fat_preflight_case.trace" || fail fat-preflight-corruption-must-not-check-mount
+            ;;
+    esac
+done
 
 # Native FAT16/32 regular-image tests are explicitly environment-gated.
 # They never run against a block device and report SKIP until a Linux toolchain
@@ -783,6 +897,9 @@ unit: sectors
 sector-size: 512
 /dev/sda1 : start=        2048, size=      524288, type=83
 EOF
+rootpxe_verify_disk_permit_binding(){ return 1; }
+if rootpxe_build_partition_inventory "$tmp/capture" mpa /dev/nvme0n1 "/dev/nvme0n1 /dev/sda"; then fail mpa-must-require-fixed-permit-binding; fi
+rootpxe_verify_disk_permit_binding(){ return 0; }
 rootpxe_build_partition_inventory "$tmp/capture" mpa /dev/nvme0n1 "/dev/nvme0n1 /dev/sda" || fail mpa
 jq -e '[.disks[].number] == [1,2] and .disks[0].partitionTable == "gpt" and .disks[1].partitionTable == "mbr"' "$rootpxe_partition_inventory_file" >/dev/null || fail mpa-order
 rm -f "$tmp/capture/d1.partitions"
@@ -1820,21 +1937,19 @@ grep -Fqx 'sleep:5' "$tmp/retry.out" || fail 'abnormal error-wait callback must 
 # immediate-reboot failure this contract prevents.
 upload="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.upload"
 download="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.download"
-for script in "$upload" "$download"; do
-    grep -Fq 'if rootpxe_wait_for_disk_permit ' "$script" || fail "$script does not collect permit failures with if/else"
-done
-[[ $(grep -Fc 'if rootpxe_wait_for_disk_permit ' "$download") -eq 2 ]] || fail 'download must protect both normal and resume permit paths'
+grep -Fq 'if rootpxe_wait_for_disk_permit ' "$upload" || fail "$upload does not collect permit failures with if/else"
+[[ $(grep -Fc 'rootpxe_wait_for_disk_permit_batch' "$download") -eq 2 ]] || fail 'download must request an atomic permit for both mpa paths'
+[[ $(grep -Fc 'permit_result=$?' "$download") -eq 2 ]] || fail 'download must collect permit failures for both mpa paths'
 [[ $(grep -hFc '20) exit 2' "$upload" "$download" | awk '{ total += $1 } END { print total }') -eq 3 ]] || fail 'all permit callers must preserve error-wait terminal action'
 ! grep -Fq '*) printf '\''%s\n'\'' reboot' "$upload" "$download" || fail 'permit callers retain an immediate-reboot catch-all'
 
-# Run only the three permit gates extracted from the top-level scripts.  A
+# Run the two deployment permit gates extracted from the top-level script.  A
 # completed attention wait (20) must stop before image work, hostname
 # customization, or the resume post-deploy script. The snippets never receive a grant and therefore do
 # not write /tmp state, mount storage, or touch a disk.
-awk '/^capture_target_id=/ { armed = 1 } armed && /^while :; do/ { copy = 1 } copy { print } copy && /^done$/ { getline; print; exit }' "$upload" >"$tmp/upload-gate.sh"
-awk '/^rootpxe_plan_deploy_disk_operation/ { armed = 1 } armed && /^while :; do/ { copy = 1 } copy { print } copy && /^done$/ { getline; print; exit }' "$download" >"$tmp/download-gate.sh"
-awk '/^if \[\[ \$\{resumeStage:-\} == customizing_hostname \|\| \$\{resumeStage:-\} == post_deploy_script \]\]/ { copy = 1 } /^if \[\[ \$\{imgType:-\}/ { exit } copy' "$download" >"$tmp/resume-gate.sh"
-for snippet in "$tmp/upload-gate.sh" "$tmp/download-gate.sh" "$tmp/resume-gate.sh"; do
+awk '/^rootpxe_validate_restore_artifacts/ { armed = 1 } armed && /^while :; do/ { copy = 1 } copy { print } copy && /^done$/ { exit }' "$download" >"$tmp/download-gate.sh"
+awk '/^if \[\[ \$\{resumeStage:-\} == customizing_hostname \|\| \$\{resumeStage:-\} == post_deploy_script \]\]/ { copy = 1 } copy && /^if \[\[ \$\{imgType:-\}/ { exit } copy { print }' "$download" >"$tmp/resume-gate.sh"
+for snippet in "$tmp/download-gate.sh" "$tmp/resume-gate.sh"; do
     [[ -s $snippet ]] || fail "empty dynamic permit gate: $snippet"
     bash -n "$snippet" || fail "invalid dynamic permit gate: $snippet"
 done
@@ -1858,6 +1973,7 @@ expect_terminal_gate() {
             return 20
         }
         sleep() { printf 'sleep:%s\n' "$1"; }
+        rootpxe_console_message() { :; }
         rootpxe_run_pre_deploy_script() { printf 'UNEXPECTED:pre-deploy\n'; return 0; }
         rootpxe_run_post_deploy_script() { printf 'UNEXPECTED:post-deploy\n'; return 0; }
         rootpxe_stage() { printf 'UNEXPECTED:stage\n'; return 0; }
@@ -1871,7 +1987,6 @@ expect_terminal_gate() {
     grep -Fqx 'sleep:5' "$tmp/$name.out" || fail "$name did not safely retry an unknown permit result"
 }
 
-expect_terminal_gate upload "$tmp/upload-gate.sh" ''
 expect_terminal_gate download "$tmp/download-gate.sh" ''
 expect_terminal_gate resume "$tmp/resume-gate.sh" customizing_hostname
 

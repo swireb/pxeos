@@ -227,6 +227,8 @@ EOF
 chmod +x "$tmp/legacy-bin/curl" "$tmp/legacy-bin/dmidecode"
 : >"$tmp/proc-cmdline"
 sed -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' \
+    -e 's|^\. /usr/share/pxeos/lib/restore-preflight.sh$|:|' \
+    -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' \
     -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" \
     "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/legacy-funcs.sh"
 cat >"$tmp/legacy-runtime.sh" <<EOF
@@ -549,7 +551,7 @@ case "$*" in
   *'changeHostname'*) echo true ;;
   *'resumeStage'*) echo customizing_hostname ;;
   *'schemaRevision'*) echo 2 ;;
-  *'.schemaHash // empty'*) echo $SCHEMAHASH ;;
+  *'.schemaHash // empty'*) echo "${SCHEMAHASH:-hash}" ;;
   *'schemaHash'*) echo hash ;;
   *'.logicalSectorBytes'*) echo $SCHEMA_SECTOR ;;
   *'.originalDiskBytes'*) echo ${SCHEMA_ORIGINAL:-102400000} ;;
@@ -808,7 +810,7 @@ case " $* " in
 esac
 EOF
 chmod +x $tmp/mock/*
-sed -e "s|^\. /usr/share/pxeos/lib/partition-funcs.sh|. \"$overlay/usr/share/pxeos/lib/partition-funcs.sh\"|" -e "s|</proc/cmdline|<$tmp/cmdline|" -e "s|/ntfs/|$tmp/ntfs/|g" -e "s| /ntfs\([ ;)]\)| $tmp/ntfs\1|g" -e "s|mountpoint=/linuxroot|mountpoint=$tmp/linuxroot|g" -e "s|/linuxroot/|$tmp/linuxroot/|g" -e "s| /linuxroot\([ ;)]\)| $tmp/linuxroot\1|g" $funcs >$tmp/funcs.sh
+sed -e "s|^\. /usr/share/pxeos/lib/partition-funcs.sh|. \"$overlay/usr/share/pxeos/lib/partition-funcs.sh\"|" -e "s|^\. /usr/share/pxeos/lib/restore-preflight.sh|. \"$overlay/usr/share/pxeos/lib/restore-preflight.sh\"|" -e "s|^\. /usr/share/pxeos/lib/capture-recovery.sh|. \"$overlay/usr/share/pxeos/lib/capture-recovery.sh\"|" -e "s|</proc/cmdline|<$tmp/cmdline|" -e "s|/ntfs/|$tmp/ntfs/|g" -e "s| /ntfs\([ ;)]\)| $tmp/ntfs\1|g" -e "s|mountpoint=/linuxroot|mountpoint=$tmp/linuxroot|g" -e "s|/linuxroot/|$tmp/linuxroot/|g" -e "s| /linuxroot\([ ;)]\)| $tmp/linuxroot\1|g" $funcs >$tmp/funcs.sh
 : >$tmp/cmdline
 : >$tmp/mount-trace
 MOUNT_TRACE=$tmp/mount-trace; export MOUNT_TRACE
@@ -1456,7 +1458,7 @@ getPartitionNumber() { part_number=${1##*mock}; }
 tmpEBRFileName() { :; }
 restorePartition() { :; }
 restoreEBR() { :; }
-expandPartition() { printf '%s|%s\n' "$1" "$2" >>$EXPAND_TRACE; }
+expandPartition() { printf '%s|%s|%s\n' "$1" "$2" "${3:-}" >>$EXPAND_TRACE; }
 restoreUUIDInformation() { :; }
 makeAllSwapSystems() { :; }
 expansion_schema=$tmp/expansion-schema.json
@@ -1472,13 +1474,83 @@ originalSchemaFile=$expansion_schema
 rootpxe_resolved_layout_file=$expansion_plan
 MODE=layout_apply; export MODE
 performRestore /dev/mock $tmp all 0 || fail active-layout-restore
-grep -Fqx '/dev/mock1|2:3' $EXPAND_TRACE || fail active-layout-expanded-must-expand-ntfs
-grep -Fqx '/dev/mock2|2:3' $EXPAND_TRACE || fail active-layout-original-must-remain-fixed
+grep -Fqx '/dev/mock1||required' $EXPAND_TRACE || fail active-layout-expanded-must-expand-ntfs
+[[ $(wc -l <$EXPAND_TRACE) -eq 1 ]] || fail active-layout-original-must-skip
 : >$EXPAND_TRACE
 unset rootpxe_resolved_layout_file originalSchemaFile MODE
 performRestore /dev/mock $tmp all 0 || fail legacy-restore
-grep -Fqx '/dev/mock1|1:2:3' $EXPAND_TRACE || fail legacy-first-fixed-list-must-remain
-grep -Fqx '/dev/mock2|1:2:3' $EXPAND_TRACE || fail legacy-second-fixed-list-must-remain
+grep -Fqx '/dev/mock1|1:2:3|' $EXPAND_TRACE || fail legacy-first-fixed-list-must-remain
+grep -Fqx '/dev/mock2|1:2:3|' $EXPAND_TRACE || fail legacy-second-fixed-list-must-remain
+
+# 对 task/image 运行时已验证的六分区计划，真实 resolver 负责重新计算
+# 后续起始位置；sfdisk 重写必须保留每个分区号和 UUID。内部扩容只可
+# 调度 p3/p4：它们是 fixed 模式但实际由 20GiB 增至 30GiB。
+six_schema=$tmp/six-schema.json
+six_layout=$tmp/six-layout.json
+six_template=$tmp/six-template.partitions
+cat >$six_schema <<'EOF'
+{"version":1,"partitionTable":"gpt","originalDiskBytes":107374182400,"logicalSectorBytes":512,"physicalSectorBytes":512,"partitions":[{"number":1,"startSectors":2048,"originalSectors":1024000,"minSectors":1024000,"typeGuid":"C12A7328-F81F-11D2-BA4B-00A0C93EC93B","flags":[],"role":"efi","resizable":false,"fs":"fat","uuid":"0FA0-6096","partuuid":"11111111-1111-1111-1111-111111111111","artifact":"d1p1.img"},{"number":2,"startSectors":1026048,"originalSectors":2097152,"minSectors":2097152,"typeGuid":"0FC63DAF-8483-4772-8E79-3D69D8477DE4","flags":[],"role":"data","resizable":true,"fs":"xfs","uuid":"xfs-two","partuuid":"22222222-2222-2222-2222-222222222222","artifact":"d1p2.img"},{"number":3,"startSectors":3123200,"originalSectors":41943040,"minSectors":41943040,"typeGuid":"0FC63DAF-8483-4772-8E79-3D69D8477DE4","flags":[],"role":"data","resizable":true,"fs":"xfs","uuid":"xfs-three","partuuid":"33333333-3333-3333-3333-333333333333","artifact":"d1p3.img"},{"number":4,"startSectors":45066240,"originalSectors":41943040,"minSectors":41943040,"typeGuid":"0FC63DAF-8483-4772-8E79-3D69D8477DE4","flags":[],"role":"data","resizable":true,"fs":"xfs","uuid":"xfs-four","partuuid":"44444444-4444-4444-4444-444444444444","artifact":"d1p4.img"},{"number":5,"startSectors":87009280,"originalSectors":4194304,"minSectors":4194304,"typeGuid":"0657FD6D-A4AB-43C4-84E5-0933C84B4F4F","flags":[],"role":"swap","resizable":false,"fs":"swap","uuid":"swap-five","partuuid":"55555555-5555-5555-5555-555555555555","artifact":""},{"number":6,"startSectors":91203584,"originalSectors":118509568,"minSectors":118509568,"typeGuid":"0FC63DAF-8483-4772-8E79-3D69D8477DE4","flags":[],"role":"data","resizable":true,"fs":"xfs","uuid":"xfs-six","partuuid":"66666666-6666-6666-6666-666666666666","artifact":"d1p6.img"}]}
+EOF
+MODE=layout_apply; TARGET_BYTES=161061273600; export MODE TARGET_BYTES
+SCHEMAHASH=$(rootpxe_canonical_json_hash "$six_schema")
+schemaHash=$SCHEMAHASH; schemaRevision=1
+printf '{"version":1,"schemaHash":"%s","partitions":[{"number":1,"mode":"original"},{"number":2,"mode":"original"},{"number":3,"mode":"fixed","fixedBytes":32212254720},{"number":4,"mode":"fixed","fixedBytes":32212254720},{"number":5,"mode":"original"},{"number":6,"mode":"original"}]}' "$SCHEMAHASH" >$six_layout
+rootpxe_validate_deployment_layout /dev/mock "$six_schema" "$six_layout" || fail six-layout-resolve
+six_plan=$rootpxe_resolved_layout_file
+"$REAL_JQ" -e '
+  (map(select(.number == 4))[0] | .startSectors == 66037760 and .resolvedSectors == 62914560) and
+  (map(select(.number == 5))[0] | .startSectors == 128952320 and .resolvedSectors == 4194304) and
+  (map(select(.number == 6))[0] | .startSectors == 133146624 and .resolvedSectors == 118509568)
+' "$six_plan" >/dev/null || fail six-layout-reflow
+cat >$six_template <<'EOF'
+label: gpt
+label-id: 77777777-7777-7777-7777-777777777777
+device: /dev/mock
+unit: sectors
+first-lba: 34
+last-lba: 209715166
+sector-size: 512
+
+/dev/mock1 : start=        2048, size=     1024000, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, uuid=11111111-1111-1111-1111-111111111111, name="EFI System Partition"
+/dev/mock2 : start=     1026048, size=     2097152, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=22222222-2222-2222-2222-222222222222, name="XFS original"
+/dev/mock3 : start=     3123200, size=    41943040, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=33333333-3333-3333-3333-333333333333, name="XFS fixed 3"
+/dev/mock4 : start=    45066240, size=    41943040, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=44444444-4444-4444-4444-444444444444, name="XFS fixed 4"
+/dev/mock5 : start=    87009280, size=     4194304, type=0657FD6D-A4AB-43C4-84E5-0933C84B4F4F, uuid=55555555-5555-5555-5555-555555555555, name="swap"
+/dev/mock6 : start=    91203584, size=   118509568, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=66666666-6666-6666-6666-666666666666, name="XFS tail"
+EOF
+six_applied=$tmp/six-applied.partitions
+LAYOUT_APPLIED=$six_applied; LAYOUT_SFDISK_MODE=canonical; LAYOUT_SFDISK_ARGS=$tmp/six-sfdisk-args; LAYOUT_PARTPROBE_TRACE=$tmp/six-partprobe; LAYOUT_SLEEP_TRACE=$tmp/six-sleep
+export LAYOUT_APPLIED LAYOUT_SFDISK_MODE LAYOUT_SFDISK_ARGS LAYOUT_PARTPROBE_TRACE LAYOUT_SLEEP_TRACE
+rootpxe_deployment_layout_changed=yes
+rootpxe_apply_deployment_layout /dev/mock "$six_template" || fail six-layout-apply
+grep -Fq '/dev/mock4 : start=    66037760, size=    62914560' "$six_applied" || fail six-layout-p4-geometry
+grep -Fq '/dev/mock5 : start=   128952320, size=     4194304' "$six_applied" || fail six-layout-p5-geometry
+grep -Fq '/dev/mock6 : start=   133146624, size=   118509568' "$six_applied" || fail six-layout-p6-geometry
+grep -Fq 'uuid=44444444-4444-4444-4444-444444444444' "$six_applied" || fail six-layout-p4-uuid
+grep -Fq 'uuid=55555555-5555-5555-5555-555555555555' "$six_applied" || fail six-layout-p5-uuid
+grep -Fq 'uuid=66666666-6666-6666-6666-666666666666' "$six_applied" || fail six-layout-p6-uuid
+EXPAND_TRACE=$tmp/six-expand-trace; : >$EXPAND_TRACE; export EXPAND_TRACE
+getValidRestorePartitions() { restoreparts='/dev/mock1 /dev/mock2 /dev/mock3 /dev/mock4 /dev/mock5 /dev/mock6'; }
+originalSchemaFile=$six_schema
+rootpxe_resolved_layout_file=$six_plan
+fixed_size_partitions=1:2:3:4:5:6
+performRestore /dev/mock $tmp all 0 || fail six-layout-restore
+grep -Fqx '/dev/mock3||required' $EXPAND_TRACE || fail six-layout-p3-must-expand
+grep -Fqx '/dev/mock4||required' $EXPAND_TRACE || fail six-layout-p4-must-expand
+[[ $(wc -l <$EXPAND_TRACE) -eq 2 ]] || fail six-layout-must-skip-unchanged-leaves
+"$REAL_JQ" 'map(select(.number != 6))' "$six_plan" >$tmp/six-plan-missing-leaf.json
+set +e
+(
+    handleError() { printf '%s\n' "$1" >$tmp/six-plan-error; exit 91; }
+    originalSchemaFile=$six_schema
+    rootpxe_resolved_layout_file=$tmp/six-plan-missing-leaf.json
+    performRestore /dev/mock $tmp all 0
+)
+six_plan_status=$?
+set -e
+[[ $six_plan_status -eq 91 ]] || fail six-layout-missing-leaf-must-fail
+grep -Fq 'Could not determine internal filesystem growth' $tmp/six-plan-error || fail six-layout-missing-leaf-error
+unset originalSchemaFile rootpxe_resolved_layout_file fixed_size_partitions schemaHash schemaRevision SCHEMAHASH six_schema six_layout six_template six_plan six_applied TARGET_BYTES MODE LAYOUT_APPLIED LAYOUT_SFDISK_MODE LAYOUT_SFDISK_ARGS LAYOUT_PARTPROBE_TRACE LAYOUT_SLEEP_TRACE
 
 # Resume is deliberately before layout validation and must not reinvoke image
 # restoration after a hostname or post-deploy-script attention retry. Execute the
@@ -1533,9 +1605,9 @@ grep -Fqx complete $tmp/resume-post-trace || fail resume-post-complete
 
 # Keep the ordering assertion as a cheap guard against accidental future
 # movement of the early resume branch.
-resume=$(grep -n RESUME_TARGET_IDENTITY_UNAVAILABLE $download | cut -d: -f1)
-layout=$(grep -n pre_permit_validation_failed $download | cut -d: -f1)
-[[ $resume -lt $layout ]] || fail resume-order
+resume=$(grep -n -F 'resume_target_id=$(rootpxe_disk_stable_identity "$hd")' "$download" | cut -d: -f1)
+layout=$(grep -n -F 'REASON=pre_permit_validation_failed' "$download" | cut -d: -f1)
+[[ $resume =~ ^[1-9][0-9]*$ && $layout =~ ^[1-9][0-9]*$ && $resume -lt $layout ]] || fail resume-order
 pre_safe=$(grep -n "resumeStage:-} == pre_deploy_script" $download || true)
 [[ -z $pre_safe ]] || fail pre-deploy-stage-must-not-bypass-imaging
 permit=$(grep -n "rootpxe_wait_for_disk_permit \"\$rootpxe_planned_target_id\"" $download | cut -d: -f1)
@@ -1634,7 +1706,9 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 awk '/^rootpxe_console_message\(\)/ { copy = 1 } /^# Appends dots/ { exit } copy' "$funcs" >"$tmp/console.sh"
 awk '/^dots\(\)/ { copy = 1 } /^# Enables write caching/ { exit } copy' "$funcs" >"$tmp/dots.sh"
+awk '/^rootpxe_redact_diagnostic\(\)/ { copy = 1 } /^# Return at most/ { exit } copy' "$funcs" >"$tmp/redact.sh"
 awk '/^handleError\(\)/ { copy = 1 } /^# Re-reads the partition table/ { exit } copy' "$funcs" >"$tmp/handlers.sh"
+printf '. "%s"\n' "$tmp/redact.sh" >>"$tmp/handlers.sh"
 awk '/^displayBanner\(\)/ { copy = 1 } /^# Gets all system mac addresses except for loopback/ { exit } copy' "$funcs" >"$tmp/banner.sh"
 awk '/^pxeos_init_message\(\)/ { copy = 1 } /^# SSH/ { exit } copy' "$overlay/etc/init.d/S99pxeos" >"$tmp/init-console.sh"
 awk '/^display_registration_response\(\)/ { copy = 1 } /^disks=/{ exit } copy' "$overlay/bin/pxeos.auto.reg" >"$tmp/auto-registration-response.sh"
@@ -1644,6 +1718,7 @@ awk '/^display_registration_response\(\)/ { copy = 1 } /^disks=/{ exit } copy' "
 [[ -s $tmp/init-console.sh ]] || fail 'init console formatter was not extracted'
 [[ -s $tmp/auto-registration-response.sh ]] || fail 'automatic registration response formatter was not extracted'
 [[ -s $tmp/manual-registration-response.sh ]] || fail 'manual registration response formatter was not extracted'
+must_not_have "$tmp/handlers.sh" '/proc/cmdline'
 
 (
     . "$tmp/init-console.sh"
@@ -1697,7 +1772,6 @@ set +e
 (
     initversion=test-init
     isdebug=""
-    cat() { [[ $1 == /proc/cmdline ]] && { printf 'mock_cmdline=1\n'; return; }; command cat "$@"; }
     rootpxe_require_task_context() { return 1; }
     rootpxe_error_wait_for_retry() { printf 'unexpected retry callback\n' >&2; return 99; }
     usleep() { printf 'usleep:%s\n' "$1"; }
@@ -1706,7 +1780,8 @@ set +e
     . "$tmp/dots.sh"
     . "$tmp/handlers.sh"
     dots 'Mounting File System'
-    handleError $'Mock failure details\nMock failure detail line two' ''
+    task_token=mock-task-token
+    handleError $'Mock failure details token=mock-task-token\nMock failure detail line two' ''
 ) >"$tmp/error.out" 2>&1
 error_status=$?
 set -e
@@ -1714,7 +1789,7 @@ set -e
 [[ $(sed -n '2p' "$tmp/error.out") == '[ERROR] Operation failed.' ]] || fail 'handleError must start on a new ERROR line after dots'
 grep -Fqx '[INFO]  Init version: test-init' "$tmp/error.out" || fail 'handleError init version format'
 grep -Fqx '[INFO]  Error details:' "$tmp/error.out" || fail 'handleError error-details section'
-grep -Fqx '        Mock failure details' "$tmp/error.out" || fail 'handleError must preserve and indent error detail'
+grep -Fqx '        Mock failure details token=[REDACTED]' "$tmp/error.out" || fail 'handleError must redact and indent error detail'
 grep -Fqx '        Mock failure detail line two' "$tmp/error.out" || fail 'handleError must preserve multiline error detail'
 awk '
     $0 == "        Mock failure detail line two" {
@@ -1727,7 +1802,6 @@ awk '
     END { exit found ? 0 : 1 }
 ' "$tmp/error.out" || fail 'handleError must separate error details from kernel diagnostics'
 grep -Fqx '[INFO]  Kernel variables and settings:' "$tmp/error.out" || fail 'handleError diagnostics section'
-grep -Fqx '        mock_cmdline=1' "$tmp/error.out" || fail 'handleError must preserve and indent cmdline diagnostics'
 grep -Fqx '[WARN]  System will reboot in 60s.' "$tmp/error.out" || fail 'handleError reboot notice'
 grep -Fqx 'usleep:60000000' "$tmp/error.out" || fail 'handleError retry wait changed'
 ! grep -Fq '###' "$tmp/error.out" || fail 'handleError must not render hash decoration'
@@ -1736,7 +1810,6 @@ set +e
 (
     initversion=test-init
     isdebug=""
-    cat() { [[ $1 == /proc/cmdline ]] && { printf 'mock_cmdline=1\n'; return; }; command cat "$@"; }
     rootpxe_require_task_context() { return 0; }
     rootpxe_error_wait_for_retry() { printf 'retry-callback:%s:%s\n' "$1" "$2"; return 2; }
     usleep() { printf 'unexpected-usleep:%s\n' "$1"; }
@@ -1903,13 +1976,12 @@ must_not_have "$overlay/bin/pxeos.upload" 'Using Image'
 must_not_have "$overlay/bin/pxeos.download" 'Using Image'
 must_not_have "$overlay/bin/pxeos.download" 'Preparing Partition layout'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_prompt INFO "${*:-Press Enter to continue.}"'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" "rootpxe_console_message WARN 'XFS partition cannot be expanded.'"
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message INFO "Not expanding $part: $fstype is not supported."'
 must_not_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'Failed, XFS partition cannot be expanded'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" "rootpxe_console_message WARN 'Cleared a corrupted partition table.'"
 must_not_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'Done, but cleared corrupted partition.'
 must_have "$overlay/bin/pxeos.nonimgcomplete" "rootpxe_console_message INFO 'Database update skipped: no task ID.'"
 must_not_have "$overlay/bin/pxeos.nonimgcomplete" 'Skipped (no taskid)'
-grep -B1 -F "rootpxe_console_message WARN 'XFS partition cannot be expanded.'" "$overlay/usr/share/pxeos/lib/funcs.sh" | grep -Fq 'echo "Skipped"' || fail 'XFS dots result must remain short'
 grep -B1 -F "rootpxe_console_message WARN 'Cleared a corrupted partition table.'" "$overlay/usr/share/pxeos/lib/funcs.sh" | grep -Fq 'echo "Done"' || fail 'corrupted-table dots result must remain short'
 grep -B1 -F "rootpxe_console_message INFO 'Database update skipped: no task ID.'" "$overlay/bin/pxeos.nonimgcomplete" | grep -Fq 'echo "Skipped"' || fail 'no-task-id dots result must remain short'
 must_fit '[INFO]  Stopping interface eth0.'
