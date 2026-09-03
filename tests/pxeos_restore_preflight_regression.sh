@@ -62,6 +62,40 @@ expect_ok rootpxe_validate_restore_artifacts "$n" n all "$n/schema.json"
 expect_ok rootpxe_validate_restore_artifacts "$n" n 1 "$n/schema.json"
 expect_ok rootpxe_validate_restore_artifacts "$n" n 2 "$n/schema.json"
 expect_ok rootpxe_validate_restore_artifacts "$n" n 3 "$n/schema.json"
+
+# Go canonical JSON omits an optional empty Artifact field.  A swap partition
+# is still an exact no-payload exception, while the ordinary data artifact
+# remains mandatory.
+cat >"$n/canonical-omitted-swap-artifact-schema.json" <<'JSON'
+{"version":2,"partitionTable":"mbr","logicalSectorBytes":512,"originalDiskBytes":16777216,"partitions":[
+ {"number":1,"kind":"primary","startSectors":8,"role":"data","fs":"ext4","artifact":"d1p1.img"},
+ {"number":2,"kind":"primary","startSectors":16,"role":"swap","fs":"swap"},
+ {"number":3,"kind":"extended","startSectors":32,"role":"extended_container","fs":"","artifact":""}]}
+JSON
+expect_ok rootpxe_validate_restore_artifacts "$n" n all "$n/canonical-omitted-swap-artifact-schema.json"
+
+cat >"$n/canonical-omitted-extended-fields-schema.json" <<'JSON'
+{"version":2,"partitionTable":"mbr","logicalSectorBytes":512,"originalDiskBytes":16777216,"partitions":[
+ {"number":1,"kind":"primary","startSectors":8,"role":"data","fs":"ext4","artifact":"d1p1.img"},
+ {"number":2,"kind":"primary","startSectors":16,"role":"swap","fs":"swap"},
+ {"number":3,"kind":"extended","startSectors":32,"role":"extended_container"}]}
+JSON
+expect_ok rootpxe_validate_restore_artifacts "$n" n all "$n/canonical-omitted-extended-fields-schema.json"
+
+cat >"$n/data-omitted-artifact-schema.json" <<'JSON'
+{"version":2,"partitionTable":"mbr","logicalSectorBytes":512,"originalDiskBytes":16777216,"partitions":[
+ {"number":1,"kind":"primary","startSectors":8,"role":"data","fs":"ext4"},
+ {"number":2,"kind":"primary","startSectors":16,"role":"swap","fs":"swap"}]}
+JSON
+expect_fail rootpxe_validate_restore_artifacts "$n" n all "$n/data-omitted-artifact-schema.json"
+
+cat >"$n/swap-nonstring-artifact-schema.json" <<'JSON'
+{"version":2,"partitionTable":"mbr","logicalSectorBytes":512,"originalDiskBytes":16777216,"partitions":[
+ {"number":1,"kind":"primary","startSectors":8,"role":"data","fs":"ext4","artifact":"d1p1.img"},
+ {"number":2,"kind":"primary","startSectors":16,"role":"swap","fs":"swap","artifact":42}]}
+JSON
+expect_fail rootpxe_validate_restore_artifacts "$n" n all "$n/swap-nonstring-artifact-schema.json"
+
 rm "$n/d1p1.img"
 expect_fail rootpxe_validate_restore_artifacts "$n" n all "$n/schema.json"
 expect_fail rootpxe_validate_restore_artifacts "$n" n 1 "$n/schema.json"
@@ -95,6 +129,10 @@ file "$n/d1p1.lvm.pv.meta"
 file "$n/d1p1.lvm.vg.cfg"
 file "$n/d1p1.lvm.lv.root.img"
 expect_ok rootpxe_validate_restore_artifacts "$n" n all "$n/lvm-schema.json"
+jq 'del(.lvm.vgs[0].lvs[1].artifact)' "$n/lvm-schema.json" >"$n/lvm-omitted-swap-artifact-schema.json"
+expect_ok rootpxe_validate_restore_artifacts "$n" n all "$n/lvm-omitted-swap-artifact-schema.json"
+jq '.lvm.vgs[0].lvs[1].artifact=42' "$n/lvm-schema.json" >"$n/lvm-nonstring-swap-artifact-schema.json"
+expect_fail rootpxe_validate_restore_artifacts "$n" n all "$n/lvm-nonstring-swap-artifact-schema.json"
 rm "$n/d1p1.lvm.vg.cfg"
 expect_fail rootpxe_validate_restore_artifacts "$n" n all "$n/lvm-schema.json"
 file "$n/d1p1.lvm.vg.cfg"

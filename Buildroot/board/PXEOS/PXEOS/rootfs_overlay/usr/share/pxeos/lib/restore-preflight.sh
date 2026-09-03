@@ -315,16 +315,34 @@ rootpxe_preflight_n_artifacts() {
     rootpxe_preflight_regular_file "$schema_file" || return 1
     rows=$(jq -er '
       . as $schema |
+      def omitted_or_empty_artifact:
+        (has("artifact") | not) or ((.artifact|type) == "string" and .artifact == "");
+      def omitted_or_empty_extended_fs:
+        (has("fs") | not) or ((.fs|type) == "string" and .fs == "");
+      def exact_swap_no_payload:
+        .role == "swap" and .fs == "swap" and omitted_or_empty_artifact;
+      def exact_extended_no_payload:
+        .kind == "extended" and .role == "extended_container" and
+        omitted_or_empty_extended_fs and omitted_or_empty_artifact;
+      def exact_lvm_pv_no_payload:
+        (.role == "lvm_pv" or .fs == "LVM2_member") and omitted_or_empty_artifact;
+      def valid_partition_shape:
+        (.number|type) == "number" and .number >= 1 and .number == (.number|floor) and
+        (.role|type) == "string" and
+        (if (.kind == "extended" and .role == "extended_container" and (has("fs") | not))
+         then true else (.fs|type) == "string" end) and
+        (if ((exact_swap_no_payload or exact_extended_no_payload or exact_lvm_pv_no_payload) and (has("artifact") | not))
+         then true else (.artifact|type) == "string" end);
       if (($schema.version == 1 or $schema.version == 2) and
           ($schema.partitionTable == "mbr" or $schema.partitionTable == "gpt") and
           (($schema.partitions|type) == "array") and ($schema.partitions|length > 0) and
           ([$schema.partitions[].number] | all(type == "number" and . >= 1 and floor == .)) and
           ([$schema.partitions[].number] | unique | length) == ($schema.partitions|length) and
-          ([$schema.partitions[] | select((.role|type) != "string" or (.fs|type) != "string" or (.artifact|type) != "string")] | length) == 0)
+          ([$schema.partitions[] | select(valid_partition_shape | not)] | length) == 0)
       then $schema.partitions[] else error("invalid schema") end |
-      if (.role == "swap" and .fs == "swap" and .artifact == "") then ["skip",.number,""]
-      elif (.kind == "extended" and .role == "extended_container" and .artifact == "") then ["skip",.number,""]
-      elif ((.role == "lvm_pv" or .fs == "LVM2_member") and .artifact == "") then ["pv",.number,""]
+      if exact_swap_no_payload then ["skip",.number,""]
+      elif exact_extended_no_payload then ["skip",.number,""]
+      elif exact_lvm_pv_no_payload then ["pv",.number,""]
       elif (.artifact|length) > 0 then ["payload",.number,.artifact]
       else error("missing required partition artifact") end | @tsv
     ' "$schema_file") || return 1
@@ -355,7 +373,7 @@ rootpxe_preflight_n_artifacts() {
           if ($lvm|type) != "object" or $lvm.version != 1 or $lvm.captureMode != "per_lv" or $lvm.resizePolicy != "grow_only" or
              (($lvm.pvs|type) != "array") or ($lvm.pvs|length) == 0 or (($lvm.vgs|type) != "array") or ($lvm.vgs|length) == 0 or
              (all($lvm.pvs[]; (.partitionNumber|positive_integer) and (.artifact|type) == "string" and (.artifact|length) > 0 and (.vgConfigArtifact|type) == "string" and (.vgConfigArtifact|length) > 0 and pv_is_declared) | not) or
-             (all($lvm.vgs[]; (.lvs|type) == "array" and (.lvs|length) > 0 and all(.lvs[]; if .fs == "swap" then (.role == "swap" and .artifact == "" and (.swapUuid|type) == "string" and (.swapUuid|length) > 0) else ((.artifact|type) == "string" and (.artifact|length) > 0) end)) | not)
+             (all($lvm.vgs[]; (.lvs|type) == "array" and (.lvs|length) > 0 and all(.lvs[]; if .fs == "swap" then (.role == "swap" and ((has("artifact") | not) or ((.artifact|type) == "string" and .artifact == "")) and (.swapUuid|type) == "string" and (.swapUuid|length) > 0) else ((.artifact|type) == "string" and (.artifact|length) > 0) end)) | not)
           then error("invalid lvm restore artifacts")
           else ($lvm.pvs[] | .artifact, .vgConfigArtifact), ($lvm.vgs[].lvs[] | select(.fs != "swap") | .artifact)
           end
