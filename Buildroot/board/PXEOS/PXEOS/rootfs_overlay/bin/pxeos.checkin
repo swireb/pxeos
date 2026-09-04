@@ -436,10 +436,6 @@ checkin_rootpxe() {
     fi
     rootpxe_console_message INFO "Storage protocol: ${protocol^^}"
     rootpxe_safe_relative_path "$img" >/dev/null || handleError "Invalid image path ($0)"
-    # Health is a separate best-effort inventory update.  It runs after the
-    # authenticated task context is established, while $mac is still the
-    # task MAC (the deployment inventory later temporarily changes it).
-    rootpxe_send_disk_health || true
     rootpxe_console_message INFO 'Check-in completed.'
     debugPause
 }

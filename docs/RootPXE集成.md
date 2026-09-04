@@ -31,10 +31,11 @@
 
 ## 磁盘健康上报
 
-- PXEOS 在部署和捕获任务完成认证 checkin 后，使用任务的原始 MAC 向既有 `inventory` 接口单独发送一次 `diskHealth` 表单字段；它不复用部署阶段旧硬件 inventory 临时改写 MAC 的流程。数据格式为 `version=1` 与最多 64 个物理盘条目。仅枚举 `lsblk` 的 `TYPE=disk`，因此 loop、光驱、device-mapper、md 等设备不会作为物理盘上报。
+- PXEOS 在部署和捕获任务完成认证 checkin 且完成任务选盘后，使用任务的原始 MAC 向既有 inventory 接口单独发送一次 diskHealth 表单字段；它不复用部署阶段旧硬件 inventory 临时改写 MAC 的流程。数据格式为 version=1 与最多 64 个任务磁盘条目。单盘 n、N、mps、dd 只传 hd；mpa 捕获只传有分区的实际源盘，mpa 部署只传已映射目标盘。lsblk 只接收这些显式设备查询接口类型，不枚举整机，也不探测未参与任务的 NBD、loop、光驱、device-mapper 或 md。
 - SATA/SAS 使用 `smartctl -a -j`；NVMe 还使用 `nvme smart-log -o json`。只上传归一化后的型号、序列号、SMART 结论、温度、通电时长、寿命、备用空间、关键告警和错误计数，不上传原始 SMART JSON。计数为十进制字符串，整个 JSON 不超过 128 KiB；型号/序列号、设备名和诊断消息分别有 256、128、512 字符上限。
 - 只有明确成功的 SMART/NVMe 健康证据才标记 `healthy`。SMART 失败或 NVMe `critical_warning` 非零为 `failed`；坏扇区、介质错误或 `percentage_used >= 100` 为 `warning`。工具缺失、超时、读取错误或畸形 JSON 标记为 `unknown`，不会伪装成健康。`percentage_used` 是 NVMe 已使用寿命百分比，可超过 100，不是健康评分。
 - 采集和上报均是有时限的 best-effort 行为：单次工具读取采用 3 秒软超时和 1 秒强制终止，总采集预算约 30 秒，网络请求也有连接和总超时。任何健康采集、解析或 HTTP 上报失败只记录本地告警并继续原有部署/捕获流程；原有的无可用磁盘、容量、许可和 I/O 失败规则不因此改变。
+- 未传入任务磁盘、lsblk 或报告校验失败时不会上报空报告，避免覆盖已有快照；主机的已有健康度只在后续任务成功提交新快照后替换。已发布捕获载荷的 finish 续跑不重新选盘，也不补做健康采集。
 
 ## NVMe、permit 与验证边界
 

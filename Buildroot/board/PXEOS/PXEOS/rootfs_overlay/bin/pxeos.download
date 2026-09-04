@@ -92,6 +92,17 @@ putDataBack() {
     esac
 }
 findHDDInfo
+# Health is an informational task snapshot.  The mapped mpa target set is
+# already resolved by findHDDInfo; a single image always reports only $hd.
+if [[ ${imgType:-} == mpa ]]; then
+    rootpxe_task_disks=()
+    for disk in $disks; do
+        rootpxe_task_disks+=("$disk")
+    done
+    rootpxe_send_disk_health "${rootpxe_task_disks[@]}" || true
+else
+    rootpxe_send_disk_health "$hd" || true
+fi
 sector_metadata="$imagePath/d1.partitions"
 if [[ ${resumeStage:-} == customizing_hostname || ${resumeStage:-} == post_deploy_script ]]; then
     # A retry after disk writes only replays the existing deploy-write permit

@@ -170,15 +170,32 @@ rootpxe_disk_health_unknown_record() {
 }
 
 rootpxe_collect_disk_health() {
-    local lsblk_file rows_file output_file device tran row count=0 started elapsed budget
-    local -a disk_rows=()
+    local lsblk_file rows_file output_file device tran selected_device selected_tran count=0 started elapsed budget
+    local -a selected_disks=()
+    local -A selected_seen=()
+    # A report belongs to the task disk set.  In particular, never fall back
+    # to enumerating the machine when the caller has no selected disk.
+    (( $# > 0 )) || return 1
     command -v lsblk >/dev/null 2>&1 || return 1
     command -v jq >/dev/null 2>&1 || return 1
+    for device in "$@"; do
+        [[ $device == /dev/* && $device != *$'\n'* ]] || continue
+        [[ -n ${selected_seen[$device]+x} ]] && continue
+        selected_seen[$device]=1
+        selected_disks+=("$device")
+        (( ${#selected_disks[@]} >= 64 )) && break
+    done
+    (( ${#selected_disks[@]} > 0 )) || return 1
     lsblk_file=$(mktemp /tmp/rootpxe-lsblk.XXXXXX) || return 1
     rows_file=$(mktemp /tmp/rootpxe-disk-health.XXXXXX) || { rm -f -- "$lsblk_file"; return 1; }
     output_file=$(mktemp /tmp/rootpxe-disk-health-json.XXXXXX) || { rm -f -- "$lsblk_file" "$rows_file"; return 1; }
     chmod 600 "$lsblk_file" "$rows_file" "$output_file" 2>/dev/null || true
-    if ! rootpxe_disk_health_run "$lsblk_file" lsblk --json --output PATH,TYPE,TRAN; then
+    budget=${rootpxe_disk_health_budget_seconds:-30}
+    [[ $budget =~ ^[0-9]+$ ]] || budget=30
+    started=$SECONDS
+    # Limit lsblk itself to the selected devices.  This gets transport facts
+    # without turning a task report into a whole-host inventory sweep.
+    if ! rootpxe_disk_health_run "$lsblk_file" lsblk --json --output PATH,TYPE,TRAN "${selected_disks[@]}"; then
         rm -f -- "$lsblk_file" "$rows_file" "$output_file"
         return 1
     fi
@@ -186,13 +203,13 @@ rootpxe_collect_disk_health() {
         rm -f -- "$lsblk_file" "$rows_file" "$output_file"
         return 1
     }
-    mapfile -t disk_rows < <(jq -r '.. | objects | select(.type? == "disk" and (.path? | type) == "string" and (.path | test("^/dev/(loop|ram|zram|dm-|md)"; "i") | not)) | [.path, (.tran // "")] | @tsv' "$lsblk_file" 2>/dev/null | awk '!seen[$1]++' | head -n 64)
-    budget=${rootpxe_disk_health_budget_seconds:-30}
-    [[ $budget =~ ^[0-9]+$ ]] || budget=30
-    started=$SECONDS
-    for row in "${disk_rows[@]}"; do
-        IFS=$'\t' read -r device tran <<<"$row"
-        [[ -n $device ]] || continue
+    for device in "${selected_disks[@]}"; do
+        tran=""
+        while IFS=$'\t' read -r selected_device selected_tran; do
+            [[ $selected_device == "$device" ]] || continue
+            tran="${selected_tran%$'\r'}"
+            break
+        done < <(jq -r '.. | objects | select((.path? | type) == "string") | [.path, (.tran // "")] | @tsv' "$lsblk_file" 2>/dev/null)
         elapsed=$((SECONDS - started))
         if (( elapsed >= budget )); then
             rootpxe_disk_health_unknown_record "$device" "$tran" 'collection time limit reached' >>"$rows_file" || true
@@ -212,8 +229,9 @@ rootpxe_collect_disk_health() {
 rootpxe_send_disk_health() {
     local disk_health
     case "${taskType:-}" in deploy|capture) ;; *) return 0 ;; esac
+    (( $# > 0 )) || return 0
     rootpxe_require_task_context >/dev/null 2>&1 || return 0
-    disk_health=$(rootpxe_collect_disk_health) || {
+    disk_health=$(rootpxe_collect_disk_health "$@") || {
         declare -F rootpxe_console_message >/dev/null 2>&1 && rootpxe_console_message WARN 'Disk health inventory was not collected.'
         return 0
     }
