@@ -138,6 +138,23 @@ rootpxe_apply_json_capture_backup_name() {
     captureBackupName="$name"
 }
 
+# The health report is a host snapshot, independent from an image's chosen
+# source or target disk.  Only a successful lsblk enumeration with zero real
+# disks is a task error; tool, parsing, and upload failures remain best effort.
+rootpxe_report_disk_health_after_checkin() {
+    local health_result
+    if rootpxe_send_disk_health; then
+        health_result=0
+    else
+        health_result=$?
+    fi
+    case $health_result in
+        0) return 0 ;;
+        2) handleError 'PXEOS_STAGE=inventory CODE=NO_DISKS_DETECTED REASON=no_physical_disks' ;;
+        *) return 0 ;;
+    esac
+}
+
 rootpxe_validate_json_storage() {
     protocol=${protocol,,}
     [[ -n ${storage_server:-} && $storage_server != *$'\n'* && $storage_server != *$'\r'* ]] || return 1
@@ -436,6 +453,7 @@ checkin_rootpxe() {
     fi
     rootpxe_console_message INFO "Storage protocol: ${protocol^^}"
     rootpxe_safe_relative_path "$img" >/dev/null || handleError "Invalid image path ($0)"
+    rootpxe_report_disk_health_after_checkin
     rootpxe_console_message INFO 'Check-in completed.'
     debugPause
 }

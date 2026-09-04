@@ -44,13 +44,14 @@ EOF
 cat >"$tmp/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >"$PXEOS_CURL_ARGS"
+[[ -z ${PXEOS_EVENT_TRACE:-} ]] || printf 'inventory\n' >>"$PXEOS_EVENT_TRACE"
 [[ ${PXEOS_CURL_RC:-0} == 0 ]] || exit "$PXEOS_CURL_RC"
 printf '{"success":true}\n'
 EOF
 chmod +x "$tmp/bin"/*
 
 cat >"$tmp/lsblk.json" <<'JSON'
-{"blockdevices":[{"path":"/dev/sda","type":"disk","tran":"sata"},{"path":"/dev/sdb","type":"disk","tran":"sas"},{"path":"/dev/nvme0n1","type":"disk","tran":"nvme"},{"path":"/dev/vda","type":"disk"},{"path":"/dev/nbd0","type":"disk"},{"path":"/dev/loop0","type":"loop"},{"path":"/dev/zram0","type":"disk"},{"path":"/dev/ram0","type":"disk"},{"path":"/dev/md0","type":"disk"},{"path":"/dev/dm-0","type":"lvm"},{"path":"/dev/sr0","type":"rom"}]}
+{"blockdevices":[{"path":"/dev/sda","type":"disk","tran":"sata","size":1000},{"path":"/dev/sda1","type":"part","size":900},{"path":"/dev/nbd0","type":"disk","size":1000},{"path":"/dev/sdb","type":"disk","tran":"sas","size":"2000"},{"path":"/dev/nvme0n1","type":"disk","tran":"nvme","size":3000},{"path":"/dev/vda","type":"disk","size":4000},{"path":"/dev/loop0","type":"loop","size":1000},{"path":"/dev/zram0","type":"disk","size":1000},{"path":"/dev/ram0","type":"disk","size":1000},{"path":"/dev/md0","type":"disk","size":1000},{"path":"/dev/dm-0","type":"disk","size":1000},{"path":"/dev/mapper/vg0","type":"disk","size":1000},{"path":"/dev/sr0","type":"disk","size":1000},{"path":"/dev/mmcblk0boot0","type":"disk","size":1000},{"path":"/dev/sdc","type":"disk","tran":"sata","size":0},{"path":"/dev/sda","type":"disk","tran":"sata","size":1000}]}
 JSON
 cat >"$tmp/smart-sda.json" <<'JSON'
 {"model_name":"SATA model","serial_number":"SATA serial","smart_status":{"passed":true},"temperature":{"current":35},"power_on_time":{"hours":123},"ata_smart_attributes":{"table":[{"id":5,"raw":{"value":0}},{"id":197,"raw":{"value":0}},{"id":198,"raw":{"value":0}}]}}
@@ -77,12 +78,12 @@ PXEOS_SMART_NVME="$tmp/smart-nvme.json" PXEOS_NVME_JSON="$tmp/nvme.json" \
 bash -s -- "$library" "$tmp/health.json" <<'EOF'
 set -euo pipefail
 . "$1"
-rootpxe_collect_disk_health /dev/sda /dev/sdb /dev/nvme0n1 >"$2"
-jq -e '.version == 1 and (.disks|length) == 3' "$2" >/dev/null
+rootpxe_collect_disk_health >"$2"
+jq -e '.version == 1 and (.disks|length) == 4 and [.disks[].device] == ["/dev/sda", "/dev/sdb", "/dev/nvme0n1", "/dev/vda"]' "$2" >/dev/null
 jq -e '.disks[] | select(.transport == "sata") | .status == "healthy" and .smartPassed == true and .temperatureC == 35 and .powerOnHours == 123' "$2" >/dev/null
 jq -e '.disks[] | select(.transport == "sas") | .status == "failed" and .reallocatedSectors == "9"' "$2" >/dev/null
 jq -e '.disks[] | select(.transport == "nvme") | .status == "warning" and .percentageUsed == 101 and .availableSpare == 91 and .mediaErrors == "18446744073709551615"' "$2" >/dev/null
-jq -e '[.disks[].transport] | index("unknown") | not' "$2" >/dev/null
+jq -e '.disks[] | select(.device == "/dev/vda") | .transport == "unknown" and .status == "healthy"' "$2" >/dev/null
 [[ $(wc -c <"$2") -le 131072 ]]
 EOF
 
@@ -95,7 +96,7 @@ PATH="$tmp/no-smart:$PATH" PXEOS_LSBLK_JSON="$tmp/lsblk.json" PXEOS_NVME_JSON="$
 bash -s -- "$library" "$tmp/missing-smart.json" <<'EOF'
 set -euo pipefail
 . "$1"
-rootpxe_collect_disk_health /dev/sda /dev/sdb /dev/nvme0n1 >"$2"
+rootpxe_collect_disk_health >"$2"
 jq -e '.disks[] | select(.transport == "sata") | .status == "unknown"' "$2" >/dev/null
 EOF
 
@@ -103,7 +104,7 @@ PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$tmp/lsblk.json" PXEOS_SMART_SDA="$tmp/s
 bash -s -- "$library" "$tmp/tool-timed-out.json" <<'EOF'
 set -euo pipefail
 . "$1"
-rootpxe_collect_disk_health /dev/sda /dev/sdb /dev/nvme0n1 >"$2"
+rootpxe_collect_disk_health >"$2"
 jq -e '.disks[] | select(.transport == "sata") | .status == "unknown" and (.message | contains("timed out"))' "$2" >/dev/null
 EOF
 
@@ -114,40 +115,24 @@ PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$tmp/lsblk.json" PXEOS_SMART_SDA="$tmp/s
 bash -s -- "$library" "$tmp/nvme-nonzero.json" <<'EOF'
 set -euo pipefail
 . "$1"
-rootpxe_collect_disk_health /dev/nvme0n1 >"$2"
+rootpxe_collect_disk_health >"$2"
 jq -e '.disks[] | select(.transport == "nvme") | .status == "failed" and .criticalWarning == 1' "$2" >/dev/null
 EOF
-
-# A health report must be based on an actual task disk.  Calling the helper
-# without one neither queries lsblk nor uploads an empty report that would
-# replace a previous task snapshot.
-: >"$tmp/curl-empty.args"
-: >"$tmp/lsblk-empty.args"
-PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$tmp/lsblk.json" PXEOS_LSBLK_ARGS="$tmp/lsblk-empty.args" PXEOS_CURL_ARGS="$tmp/curl-empty.args" \
-bash -s -- "$library" <<'EOF'
-set -euo pipefail
-. "$1"
-taskType=deploy; taskid=7; task_token=token; mac='aa:bb:cc:dd:ee:ff'; rootpxe_api='https://example.invalid/service/'
-rootpxe_require_task_context() { return 0; }
-rootpxe_send_disk_health
-EOF
-[[ ! -s $tmp/curl-empty.args ]] || fail 'missing task disk uploaded an empty report'
-[[ ! -s $tmp/lsblk-empty.args ]] || fail 'missing task disk enumerated disks'
 
 PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$tmp/lsblk.json" PXEOS_SMART_SDA="$tmp/smart-sda.json" PXEOS_SMART_SDB="$tmp/smart-sdb.json" PXEOS_SMART_NVME="$tmp/smart-nvme.json" PXEOS_NVME_JSON="$tmp/nvme.json" \
 bash -s -- "$library" "$tmp/budget.json" <<'EOF'
 set -euo pipefail
 . "$1"
 rootpxe_disk_health_budget_seconds=0
-rootpxe_collect_disk_health /dev/sda /dev/sdb /dev/nvme0n1 >"$2"
-jq -e '(.disks|length) == 3 and all(.disks[]; .status == "unknown" and (.message | contains("time limit")))' "$2" >/dev/null
+rootpxe_collect_disk_health >"$2"
+jq -e '(.disks|length) == 4 and all(.disks[]; .status == "unknown" and (.message | contains("time limit")))' "$2" >/dev/null
 EOF
 
 PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$tmp/lsblk.json" PXEOS_SMART_SDA="$tmp/smart-history.json" PXEOS_SMART_SDA_RC=128 PXEOS_SMART_SDB="$tmp/sas-warning.json" PXEOS_SMART_NVME="$tmp/smart-nvme.json" PXEOS_NVME_JSON="$tmp/nvme.json" \
 bash -s -- "$library" "$tmp/sas-and-history.json" <<'EOF'
 set -euo pipefail
 . "$1"
-rootpxe_collect_disk_health /dev/sda /dev/sdb /dev/nvme0n1 >"$2"
+rootpxe_collect_disk_health >"$2"
 jq -e '.disks[] | select(.transport == "sata") | .status == "warning"' "$2" >/dev/null
 jq -e '.disks[] | select(.transport == "sas") | .status == "warning" and (.message | contains("SAS error counters"))' "$2" >/dev/null
 EOF
@@ -159,7 +144,7 @@ PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$tmp/lsblk.json" PXEOS_SMART_SDA="$tmp/i
 bash -s -- "$library" "$tmp/unknown.json" <<'EOF'
 set -euo pipefail
 . "$1"
-rootpxe_collect_disk_health /dev/sda /dev/sdb /dev/nvme0n1 >"$2"
+rootpxe_collect_disk_health >"$2"
 jq -e '.disks[] | select(.transport == "sata") | .status == "unknown" and (.message | type == "string")' "$2" >/dev/null
 EOF
 
@@ -171,7 +156,7 @@ set -euo pipefail
 . "$1"
 taskType="$2"; taskid=7; task_token=token; mac='aa:bb:cc:dd:ee:ff'; rootpxe_api='https://example.invalid/service/'
 rootpxe_require_task_context() { [[ $taskid == 7 && $task_token == token ]]; }
-rootpxe_send_disk_health /dev/sda /dev/sdb /dev/nvme0n1
+rootpxe_send_disk_health
 EOF
     grep -Fqx -- 'diskHealth={"version":1,"disks"' "$tmp/curl-$task_type.args" && fail 'curl mock unexpectedly split JSON'
     grep -Fq -- 'diskHealth=' "$tmp/curl-$task_type.args" || fail "$task_type did not upload diskHealth"
@@ -189,7 +174,7 @@ set -euo pipefail
 . "$1"
 taskType="$2"; taskid=7; task_token=token; mac='aa:bb:cc:dd:ee:ff'; rootpxe_api='https://example.invalid/service/'
 rootpxe_require_task_context() { return 0; }
-rootpxe_send_disk_health /dev/sda /dev/sdb /dev/nvme0n1
+rootpxe_send_disk_health
 task_continued=1
 [[ $task_continued == 1 ]]
 EOF
@@ -203,107 +188,166 @@ set -euo pipefail
 . "$1"
 taskType=deploy; taskid=7; task_token=token; mac='aa:bb:cc:dd:ee:ff'; rootpxe_api='https://example.invalid/service/'
 rootpxe_require_task_context() { return 0; }
-rootpxe_send_disk_health /dev/sda /dev/sdb /dev/nvme0n1
+if rootpxe_send_disk_health; then
+    false
+else
+    [[ $? -eq 1 ]]
+fi
 task_continued=1
 [[ $task_continued == 1 ]]
 EOF
 [[ ! -s $tmp/curl-invalid-lsblk.args ]] || fail 'malformed lsblk replaced a prior health report with an empty report'
 
-# Explicit selections work no matter whether the task primary disk is SATA or
-# NVMe, and only selected disks are queried.  NBD is deliberately present in
-# lsblk above but must remain untouched.
+# Every recognized physical disk is reported in lsblk order.  The task's
+# selected source/target must not narrow this snapshot; NBD and other
+# pseudo-devices never reach SMART or nvme-cli.
 : >"$tmp/tool-trace"
-: >"$tmp/lsblk-selected.args"
-PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$tmp/lsblk.json" PXEOS_LSBLK_ARGS="$tmp/lsblk-selected.args" PXEOS_TOOL_TRACE="$tmp/tool-trace" PXEOS_SMART_SDA="$tmp/smart-sda.json" PXEOS_SMART_SDB="$tmp/smart-sdb.json" PXEOS_SMART_NVME="$tmp/smart-nvme.json" PXEOS_NVME_JSON="$tmp/nvme.json" \
-bash -s -- "$library" "$tmp/selected.json" <<'EOF'
+: >"$tmp/lsblk-all.args"
+PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$tmp/lsblk.json" PXEOS_LSBLK_ARGS="$tmp/lsblk-all.args" PXEOS_TOOL_TRACE="$tmp/tool-trace" PXEOS_SMART_SDA="$tmp/smart-sda.json" PXEOS_SMART_SDB="$tmp/smart-sdb.json" PXEOS_SMART_NVME="$tmp/smart-nvme.json" PXEOS_NVME_JSON="$tmp/nvme.json" \
+bash -s -- "$library" "$tmp/all-disks.json" <<'EOF'
 set -euo pipefail
 . "$1"
-rootpxe_collect_disk_health /dev/nvme0n1 /dev/nvme0n1 /dev/sda >"$2"
-jq -e '(.disks | length) == 2 and ([.disks[].device] | sort) == ["/dev/nvme0n1", "/dev/sda"]' "$2" >/dev/null
+rootpxe_collect_disk_health >"$2"
+jq -e '(.disks | length) == 4 and [.disks[].device] == ["/dev/sda", "/dev/sdb", "/dev/nvme0n1", "/dev/vda"]' "$2" >/dev/null
 jq -e '.disks[] | select(.device == "/dev/nvme0n1") | .transport == "nvme" and .status == "warning"' "$2" >/dev/null
 jq -e '.disks[] | select(.device == "/dev/sda") | .transport == "sata" and .status == "healthy"' "$2" >/dev/null
 EOF
-grep -Fxq 'smartctl:/dev/nvme0n1' "$tmp/tool-trace" || fail 'selected NVMe was not read'
-grep -Fxq 'nvme:/dev/nvme0n1' "$tmp/tool-trace" || fail 'selected NVMe did not use nvme-cli'
-grep -Fxq 'smartctl:/dev/sda' "$tmp/tool-trace" || fail 'selected SATA disk was not read'
-! grep -Fq '/dev/sdb' "$tmp/tool-trace" || fail 'unselected SATA/SAS disk was read'
-! grep -Fq '/dev/nbd0' "$tmp/tool-trace" || fail 'unselected NBD disk was read'
-grep -Fq '/dev/nvme0n1' "$tmp/lsblk-selected.args" || fail 'selected NVMe was not passed to lsblk'
-grep -Fq '/dev/sda' "$tmp/lsblk-selected.args" || fail 'selected SATA disk was not passed to lsblk'
-! grep -Fq '/dev/nbd0' "$tmp/lsblk-selected.args" || fail 'NBD was passed to lsblk'
+grep -Fxq 'smartctl:/dev/nvme0n1' "$tmp/tool-trace" || fail 'NVMe was not read'
+grep -Fxq 'nvme:/dev/nvme0n1' "$tmp/tool-trace" || fail 'NVMe did not use nvme-cli'
+grep -Fxq 'smartctl:/dev/sda' "$tmp/tool-trace" || fail 'SATA disk was not read'
+grep -Fxq 'smartctl:/dev/sdb' "$tmp/tool-trace" || fail 'SAS disk was not read'
+grep -Fxq 'smartctl:/dev/vda' "$tmp/tool-trace" || fail 'virtual disk without TRAN was not read'
+! grep -Fq '/dev/nbd0' "$tmp/tool-trace" || fail 'NBD was read'
+! grep -Fq '/dev/mapper/vg0' "$tmp/tool-trace" || fail 'device-mapper was read'
+! grep -Fq '/dev/sdc' "$tmp/tool-trace" || fail 'zero-size disk was read'
+grep -Fq -- '--bytes' "$tmp/lsblk-all.args" || fail 'lsblk did not request numeric disk sizes'
 
-# A selected virtual/SCSI disk may omit TRAN.  Scope still comes from the
-# task; preserve the existing SMART attempt instead of silently skipping it.
-: >"$tmp/unknown-transport-trace"
-PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$tmp/lsblk.json" PXEOS_TOOL_TRACE="$tmp/unknown-transport-trace" PXEOS_SMART_SDA="$tmp/smart-sda.json" PXEOS_NVME_JSON="$tmp/nvme.json" \
-bash -s -- "$library" "$tmp/unknown-transport.json" <<'EOF'
+# The actual post-checkin wrapper turns only a successful empty enumeration
+# into the existing task-error path.  The empty snapshot must reach inventory
+# before handleError, even when that upload itself fails.
+checkin_health_block="$tmp/checkin-health.sh"
+awk '/^rootpxe_report_disk_health_after_checkin\(\)/ { copy=1 } copy { print } copy && /^}/ { exit }' "$checkin" >"$checkin_health_block"
+[[ -s $checkin_health_block ]] || fail 'post-checkin health wrapper missing'
+cat >"$tmp/no-disks.json" <<'JSON'
+{"blockdevices":[{"path":"/dev/nbd0","type":"disk","size":1000},{"path":"/dev/sdc","type":"disk","size":0},{"path":"/dev/loop0","type":"loop","size":1000}]}
+JSON
+: >"$tmp/empty-events"
+: >"$tmp/curl-empty.args"
+set +e
+PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$tmp/no-disks.json" PXEOS_CURL_ARGS="$tmp/curl-empty.args" PXEOS_EVENT_TRACE="$tmp/empty-events" \
+bash -s -- "$library" "$checkin_health_block" "$tmp/empty-events" <<'EOF'
 set -euo pipefail
 . "$1"
-rootpxe_collect_disk_health /dev/vda >"$2"
-jq -e '(.disks | length) == 1 and .disks[0].device == "/dev/vda" and .disks[0].transport == "unknown" and .disks[0].status == "healthy"' "$2" >/dev/null
+. "$2"
+taskType=deploy; taskid=7; task_token=token; mac='aa:bb:cc:dd:ee:ff'; rootpxe_api='https://example.invalid/service/'
+rootpxe_require_task_context() { return 0; }
+event_file="$3"
+handleError() { printf 'error\n' >>"$event_file"; return 77; }
+rootpxe_report_disk_health_after_checkin
 EOF
-grep -Fxq 'smartctl:/dev/vda' "$tmp/unknown-transport-trace" || fail 'selected unknown-transport disk skipped smartctl'
-! grep -Fq 'nvme:/dev/vda' "$tmp/unknown-transport-trace" || fail 'unknown transport incorrectly used nvme-cli'
+empty_status=$?
+set -e
+[[ $empty_status -eq 77 ]] || fail 'confirmed no-disk did not enter the task error path'
+[[ $(<"$tmp/empty-events") == $'inventory\nerror' ]] || fail 'empty disk report was not uploaded before task error'
+grep -Fq -- 'diskHealth={"version":1,"disks":[]}' "$tmp/curl-empty.args" || fail 'empty physical disk report was not uploaded'
 
+: >"$tmp/empty-upload-failure-events"
+: >"$tmp/curl-empty-upload-failure.args"
+set +e
+PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$tmp/no-disks.json" PXEOS_CURL_ARGS="$tmp/curl-empty-upload-failure.args" PXEOS_EVENT_TRACE="$tmp/empty-upload-failure-events" PXEOS_CURL_RC=28 \
+bash -s -- "$library" "$checkin_health_block" "$tmp/empty-upload-failure-events" <<'EOF'
+set -euo pipefail
+. "$1"
+. "$2"
+taskType=capture; taskid=7; task_token=token; mac='aa:bb:cc:dd:ee:ff'; rootpxe_api='https://example.invalid/service/'
+rootpxe_require_task_context() { return 0; }
+event_file="$3"
+handleError() { printf 'error\n' >>"$event_file"; return 77; }
+rootpxe_report_disk_health_after_checkin
+EOF
+empty_upload_failure_status=$?
+set -e
+[[ $empty_upload_failure_status -eq 77 ]] || fail 'no-disk capture did not fail after health upload failure'
+[[ $(<"$tmp/empty-upload-failure-events") == $'inventory\nerror' ]] || fail 'no-disk upload failure did not precede task error'
+grep -Fq -- 'diskHealth={"version":1,"disks":[]}' "$tmp/curl-empty-upload-failure.args" || fail 'failed empty-report upload did not attempt the snapshot'
+
+# A failed enumeration remains informational and never masquerades as no disk.
+: >"$tmp/invalid-events"
+: >"$tmp/curl-invalid-enumeration.args"
+set +e
+PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$tmp/invalid-lsblk.json" PXEOS_CURL_ARGS="$tmp/curl-invalid-enumeration.args" PXEOS_EVENT_TRACE="$tmp/invalid-events" \
+bash -s -- "$library" "$checkin_health_block" "$tmp/invalid-events" <<'EOF'
+set -euo pipefail
+. "$1"
+. "$2"
+taskType=capture; taskid=7; task_token=token; mac='aa:bb:cc:dd:ee:ff'; rootpxe_api='https://example.invalid/service/'
+rootpxe_require_task_context() { return 0; }
+event_file="$3"
+handleError() { printf 'error\n' >>"$event_file"; return 77; }
+rootpxe_report_disk_health_after_checkin
+EOF
+invalid_status=$?
+set -e
+[[ $invalid_status -eq 0 ]] || fail 'invalid lsblk incorrectly failed the task'
+[[ ! -s $tmp/invalid-events ]] || fail 'invalid lsblk incorrectly called inventory or task error'
+[[ ! -s $tmp/curl-invalid-enumeration.args ]] || fail 'invalid lsblk uploaded an empty report'
+
+cat >"$tmp/missing-size-lsblk.json" <<'JSON'
+{"blockdevices":[{"path":"/dev/sda","type":"disk"}]}
+JSON
+cat >"$tmp/malformed-node-lsblk.json" <<'JSON'
+{"blockdevices":[{}]}
+JSON
+for malformed_lsblk in "$tmp/missing-size-lsblk.json" "$tmp/malformed-node-lsblk.json"; do
+    : >"$tmp/malformed-events"
+    : >"$tmp/curl-malformed.args"
+    set +e
+    PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$malformed_lsblk" PXEOS_CURL_ARGS="$tmp/curl-malformed.args" PXEOS_EVENT_TRACE="$tmp/malformed-events" \
+    bash -s -- "$library" "$checkin_health_block" "$tmp/malformed-events" <<'EOF'
+set -euo pipefail
+. "$1"
+. "$2"
+taskType=deploy; taskid=7; task_token=token; mac='aa:bb:cc:dd:ee:ff'; rootpxe_api='https://example.invalid/service/'
+rootpxe_require_task_context() { return 0; }
+event_file="$3"
+handleError() { printf 'error\n' >>"$event_file"; return 77; }
+rootpxe_report_disk_health_after_checkin
+EOF
+    malformed_status=$?
+    set -e
+    [[ $malformed_status -eq 0 ]] || fail 'malformed lsblk node incorrectly failed the task'
+    [[ ! -s $tmp/malformed-events ]] || fail 'malformed lsblk node incorrectly called inventory or task error'
+    [[ ! -s $tmp/curl-malformed.args ]] || fail 'malformed lsblk node uploaded an empty report'
+done
+
+# A valid nonempty enumeration whose per-disk serialization fails is not an
+# empty host. It must neither upload [] nor enter the task-error path.
+: >"$tmp/serialization-events"
+: >"$tmp/curl-serialization.args"
+set +e
+PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$tmp/lsblk.json" PXEOS_CURL_ARGS="$tmp/curl-serialization.args" PXEOS_EVENT_TRACE="$tmp/serialization-events" \
+bash -s -- "$library" "$checkin_health_block" "$tmp/serialization-events" <<'EOF'
+set -euo pipefail
+. "$1"
+. "$2"
+taskType=capture; taskid=7; task_token=token; mac='aa:bb:cc:dd:ee:ff'; rootpxe_api='https://example.invalid/service/'
+rootpxe_require_task_context() { return 0; }
+rootpxe_disk_health_collect_disk() { return 1; }
+rootpxe_disk_health_unknown_record() { return 1; }
+event_file="$3"
+handleError() { printf 'error\n' >>"$event_file"; return 77; }
+rootpxe_report_disk_health_after_checkin
+EOF
+serialization_status=$?
+set -e
+[[ $serialization_status -eq 0 ]] || fail 'per-disk serialization failure incorrectly failed the task'
+[[ ! -s $tmp/serialization-events ]] || fail 'per-disk serialization failure incorrectly called inventory or task error'
+[[ ! -s $tmp/curl-serialization.args ]] || fail 'per-disk serialization failure uploaded an empty report'
+
+# The top-level task scripts no longer narrow health reporting after source or
+# target selection, so every capture/deploy image type uses the same snapshot.
 upload="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.upload"
 download="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.download"
-! grep -Fq 'rootpxe_send_disk_health' "$checkin" || fail 'checkin still reports disk health before disk selection'
-grep -Fq 'rootpxe_send_disk_health "${rootpxe_capture_disks[@]}"' "$upload" || fail 'mpa capture does not report filtered source disks'
-grep -Fq 'rootpxe_send_disk_health "$hd"' "$upload" || fail 'single capture does not report its source disk'
-grep -Fq 'rootpxe_send_disk_health "${rootpxe_task_disks[@]}"' "$download" || fail 'mpa deployment does not report mapped target disks'
-grep -Fq 'rootpxe_send_disk_health "$hd"' "$download" || fail 'single deployment does not report its target disk'
-
-# Run the real top-level selection fragments with harmless stubs.  A single
-# task must keep using hd even when another disk appears first in the broader
-# discovery list; mpa receives only its already mapped/capture-filtered set.
-upload_health_block="$tmp/upload-health.sh"
-awk '/^findHDDInfo$/ { copy=1 } copy && /^# Do not clear staging/ { exit } copy { print }' "$upload" >"$upload_health_block"
-[[ -s $upload_health_block ]] || fail 'capture health selection block missing'
-: >"$tmp/upload-health-events"
-for selected_type in n N mps dd; do
-    case "$selected_type" in n|mps) selected_disk=/dev/sda ;; *) selected_disk=/dev/nvme0n1 ;; esac
-    (
-        imgType="$selected_type" hd="$selected_disk" disks='/dev/sda /dev/nbd0'
-        findHDDInfo(){ :; }
-        rootpxe_send_disk_health(){ printf '%s:%s\n' "$imgType" "$*" >>"$tmp/upload-health-events"; return 1; }
-        . "$upload_health_block"
-        capture_continued=1
-        [[ $capture_continued == 1 ]]
-    )
-done
-[[ $(<"$tmp/upload-health-events") == $'n:/dev/sda\nN:/dev/nvme0n1\nmps:/dev/sda\ndd:/dev/nvme0n1' ]] || fail 'single capture did not use hd or health failure gated capture'
-: >"$tmp/upload-health-events"
-(
-    imgType=mpa hd=/dev/sda disks='/dev/sda /dev/nbd0 /dev/nvme0n1'
-    findHDDInfo(){ :; }
-    getPartitions(){ [[ $1 == /dev/nbd0 ]] && parts= || parts="${1}p1"; }
-    rootpxe_send_disk_health(){ printf 'mpa:%s\n' "$*" >>"$tmp/upload-health-events"; }
-    . "$upload_health_block"
-)
-[[ $(<"$tmp/upload-health-events") == 'mpa:/dev/sda /dev/nvme0n1' ]] || fail 'mpa capture included a non-partitioned disk'
-
-download_health_block="$tmp/download-health.sh"
-awk '/^findHDDInfo$/ { copy=1 } copy && /^sector_metadata=/ { exit } copy { print }' "$download" >"$download_health_block"
-[[ -s $download_health_block ]] || fail 'deployment health selection block missing'
-: >"$tmp/download-health-events"
-for selected_type in n N mps dd; do
-    case "$selected_type" in n|mps) selected_disk=/dev/sda ;; *) selected_disk=/dev/nvme0n1 ;; esac
-    (
-        imgType="$selected_type" hd="$selected_disk" disks='/dev/sda /dev/nbd0'
-        findHDDInfo(){ :; }
-        rootpxe_send_disk_health(){ printf '%s:%s\n' "$imgType" "$*" >>"$tmp/download-health-events"; return 1; }
-        . "$download_health_block"
-        deploy_continued=1
-        [[ $deploy_continued == 1 ]]
-    )
-done
-[[ $(<"$tmp/download-health-events") == $'n:/dev/sda\nN:/dev/nvme0n1\nmps:/dev/sda\ndd:/dev/nvme0n1' ]] || fail 'single deployment did not use hd or health failure gated deployment'
-: >"$tmp/download-health-events"
-(
-    imgType=mpa hd=/dev/sdb disks='/dev/sdb /dev/nvme0n1'
-    findHDDInfo(){ :; }
-    rootpxe_send_disk_health(){ printf 'mpa:%s\n' "$*" >>"$tmp/download-health-events"; }
-    . "$download_health_block"
-)
-[[ $(<"$tmp/download-health-events") == 'mpa:/dev/sdb /dev/nvme0n1' ]] || fail 'mpa deployment did not use mapped target set'
+! grep -Fq 'rootpxe_send_disk_health' "$upload" || fail 'capture still narrows disk health to selected disks'
+! grep -Fq 'rootpxe_send_disk_health' "$download" || fail 'deployment still narrows disk health to selected disks'
 printf 'PASS: PXEOS disk health regression\n'

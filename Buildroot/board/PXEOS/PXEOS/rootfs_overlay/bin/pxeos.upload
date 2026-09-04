@@ -41,13 +41,6 @@ if [[ ${imgType:-} == mpa ]]; then
     rootpxe_capture_disks_string="${rootpxe_capture_disks[*]}"
     export rootpxe_capture_disks_string
 fi
-# Health is an informational task snapshot.  Capture after the source set is
-# resolved, so a single image uses $hd and mpa excludes non-partitioned disks.
-if [[ ${imgType:-} == mpa ]]; then
-    rootpxe_send_disk_health "${rootpxe_capture_disks[@]}" || true
-else
-    rootpxe_send_disk_health "$hd" || true
-fi
 # Do not clear staging or probe a writable source filesystem before the
 # applicable permit succeeds.  Preserve the established single-disk request
 # for n/mps/dd retries; mpa alone requires one atomic binding for every disk.
