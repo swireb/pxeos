@@ -172,7 +172,7 @@ beginUpload() {
                 handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_SETUP_FAILED REASON=unable_to_start_capture_writer"
             fi
             rootpxe_partclone_progress_start_collector
-            if LC_ALL=C partclone.imager -c -s "$hd" -O /tmp/pigz1 -f 1 -a0 2>"$rootpxe_partclone_progress_fifo"; then
+            if LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.imager "${rootpxe_partclone_progress_args[@]}" -c -s "$hd" -O /tmp/pigz1 -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"; then
                 capture_exitcode=0
             else
                 capture_exitcode=$?

@@ -476,7 +476,7 @@ rootpxe_capture_lvm_volumes() {
                 return 1
             fi
             rootpxe_partclone_progress_start_collector
-            if [[ $fs == xfs ]]; then LC_ALL=C partclone.xfs -cs "$lv_path" -O "$fifo" -f 1 -a0 2>"$rootpxe_partclone_progress_fifo"; else LC_ALL=C partclone.extfs -cs "$lv_path" -O "$fifo" -f 1 -a0 2>"$rootpxe_partclone_progress_fifo"; fi
+            if [[ $fs == xfs ]]; then LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.xfs "${rootpxe_partclone_progress_args[@]}" -cs "$lv_path" -O "$fifo" -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"; else LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.extfs "${rootpxe_partclone_progress_args[@]}" -cs "$lv_path" -O "$fifo" -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"; fi
             producer=$?; rootpxe_partclone_progress_wait; progress_decoder=$?; rootpxe_wait_for_writer "$rootpxe_last_writer_pid"; writer=$?
             [[ $producer -eq 0 ]] || { printf '%s|%s\n' LVM_LV_PARTCLONE_FAILED "lv_${lv_name}_${fs}" >"$rootpxe_lvm_capture_status_file"; rm -f "$fifo"; return 1; }
             [[ $progress_decoder -eq 0 ]] || { printf '%s|%s\n' LVM_LV_PARTCLONE_FAILED "lv_${lv_name}_${fs}_progress" >"$rootpxe_lvm_capture_status_file"; rm -f "$fifo"; return 1; }
@@ -3176,7 +3176,7 @@ writeImage()  {
         5|6)
             # ZSTD Compressed image.
             rootpxe_console_message INFO 'Imaging with Partclone (zstd).'
-            if ( set -o pipefail; zstdmt -dc </tmp/pigz1 | LC_ALL=C partclone.restore -n "Storage Location $storage, Image name $img" -O "${target}" -f 1 2>"$rootpxe_partclone_progress_fifo" ); then
+            if ( set -o pipefail; zstdmt -dc </tmp/pigz1 | LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.restore "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -O "${target}" -f 1 2>"$rootpxe_partclone_progress_stderr_target" ); then
                 exitcode=0
             else
                 exitcode=$?
@@ -3185,7 +3185,7 @@ writeImage()  {
         3|4)
             # Uncompressed partclone
             rootpxe_console_message INFO 'Imaging with Partclone (uncompressed).'
-            if ( set -o pipefail; cat </tmp/pigz1 | LC_ALL=C partclone.restore -n "Storage Location $storage, Image name $img" -O "${target}" -f 1 2>"$rootpxe_partclone_progress_fifo" ); then
+            if ( set -o pipefail; cat </tmp/pigz1 | LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.restore "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -O "${target}" -f 1 2>"$rootpxe_partclone_progress_stderr_target" ); then
                 exitcode=0
             else
                 exitcode=$?
@@ -3204,7 +3204,7 @@ writeImage()  {
         0|2)
             # GZIP Compressed partclone
             rootpxe_console_message INFO 'Imaging with Partclone (gzip).'
-            if ( set -o pipefail; pigz -dc </tmp/pigz1 | LC_ALL=C partclone.restore -n "Storage Location $storage, Image name $img" -O "${target}" -f 1 2>"$rootpxe_partclone_progress_fifo" ); then
+            if ( set -o pipefail; pigz -dc </tmp/pigz1 | LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.restore "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -O "${target}" -f 1 2>"$rootpxe_partclone_progress_stderr_target" ); then
                 exitcode=0
             else
                 exitcode=$?
@@ -5278,7 +5278,7 @@ savePartition() {
                 handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_SETUP_FAILED REASON=unable_to_start_capture_writer"
             fi
             rootpxe_partclone_progress_start_collector
-            if LC_ALL=C partclone.$fstype -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -f 1 2>"$rootpxe_partclone_progress_fifo"; then
+            if LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.$fstype "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -f 1 2>"$rootpxe_partclone_progress_stderr_target"; then
                 exitcode=0
             else
                 exitcode=$?
@@ -5331,7 +5331,7 @@ savePartition() {
                         handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_SETUP_FAILED REASON=unable_to_start_capture_writer"
                     fi
                     rootpxe_partclone_progress_start_collector
-                    if LC_ALL=C partclone.$fstype -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -f 1 -a0 2>"$rootpxe_partclone_progress_fifo"; then
+                    if LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.$fstype "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"; then
                         exitcode=0
                     else
                         exitcode=$?
