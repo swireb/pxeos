@@ -71,6 +71,15 @@ JSON
 cat >"$tmp/smart-history.json" <<'JSON'
 {"smartctl":{"exit_status":128},"smart_status":{"passed":true}}
 JSON
+cat >"$tmp/sata-smart-unavailable.json" <<'JSON'
+{"smartctl":{"version":[7,5],"exit_status":4},"device":{"name":"/dev/sda","info_name":"/dev/sda [SAT]","type":"sat","protocol":"ATA"},"model_name":"VMware Virtual IDE Hard Drive","serial_number":"00000000000000000001","smart_support":{"available":false}}
+JSON
+cat >"$tmp/sata-smart-disabled.json" <<'JSON'
+{"model_name":"SATA model","smart_support":{"available":true,"enabled":false}}
+JSON
+cat >"$tmp/sata-smart-no-conclusion.json" <<'JSON'
+{"model_name":"SATA model","serial_number":"SATA serial"}
+JSON
 
 PATH="$tmp/bin:$PATH" \
 PXEOS_LSBLK_JSON="$tmp/lsblk.json" PXEOS_SMART_SDA="$tmp/smart-sda.json" PXEOS_SMART_SDB="$tmp/smart-sdb.json" PXEOS_SMART_SDB_RC=8 \
@@ -85,6 +94,33 @@ jq -e '.disks[] | select(.transport == "sas") | .status == "failed" and .realloc
 jq -e '.disks[] | select(.transport == "nvme") | .status == "warning" and .percentageUsed == 101 and .availableSpare == 91 and .mediaErrors == "18446744073709551615"' "$2" >/dev/null
 jq -e '.disks[] | select(.device == "/dev/vda") | .transport == "unknown" and .status == "healthy"' "$2" >/dev/null
 [[ $(wc -c <"$2") -le 131072 ]]
+EOF
+
+# VMware virtual ATA/SATA disks can identify as SATA in lsblk and still omit
+# SMART health evidence. They remain unknown with an actionable reason; they
+# are never guessed healthy or probed with a forced ATA device type.
+PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$tmp/lsblk.json" PXEOS_SMART_SDA="$tmp/sata-smart-unavailable.json" PXEOS_SMART_SDA_RC=4 PXEOS_SMART_SDB="$tmp/smart-sdb.json" PXEOS_SMART_NVME="$tmp/smart-nvme.json" PXEOS_NVME_JSON="$tmp/nvme.json" \
+bash -s -- "$library" "$tmp/sata-smart-unavailable-health.json" <<'EOF'
+set -euo pipefail
+. "$1"
+rootpxe_collect_disk_health >"$2"
+jq -e '.disks[] | select(.transport == "sata") | .status == "unknown" and .model == "VMware Virtual IDE Hard Drive" and (.message | contains("设备未提供可用的 SMART 支持")) and (.message | contains("SMART 读取失败"))' "$2" >/dev/null
+EOF
+
+PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$tmp/lsblk.json" PXEOS_SMART_SDA="$tmp/sata-smart-disabled.json" PXEOS_SMART_SDB="$tmp/smart-sdb.json" PXEOS_SMART_NVME="$tmp/smart-nvme.json" PXEOS_NVME_JSON="$tmp/nvme.json" \
+bash -s -- "$library" "$tmp/sata-smart-disabled-health.json" <<'EOF'
+set -euo pipefail
+. "$1"
+rootpxe_collect_disk_health >"$2"
+jq -e '.disks[] | select(.transport == "sata") | .status == "unknown" and (.message | contains("SMART 未启用"))' "$2" >/dev/null
+EOF
+
+PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$tmp/lsblk.json" PXEOS_SMART_SDA="$tmp/sata-smart-no-conclusion.json" PXEOS_SMART_SDB="$tmp/smart-sdb.json" PXEOS_SMART_NVME="$tmp/smart-nvme.json" PXEOS_NVME_JSON="$tmp/nvme.json" \
+bash -s -- "$library" "$tmp/sata-smart-no-conclusion-health.json" <<'EOF'
+set -euo pipefail
+. "$1"
+rootpxe_collect_disk_health >"$2"
+jq -e '.disks[] | select(.transport == "sata") | .status == "unknown" and (.message | contains("SMART 未提供健康结论"))' "$2" >/dev/null
 EOF
 
 # Missing smartctl, a timeout exit, and an NVMe command failure with usable
@@ -105,7 +141,7 @@ bash -s -- "$library" "$tmp/tool-timed-out.json" <<'EOF'
 set -euo pipefail
 . "$1"
 rootpxe_collect_disk_health >"$2"
-jq -e '.disks[] | select(.transport == "sata") | .status == "unknown" and (.message | contains("timed out"))' "$2" >/dev/null
+jq -e '.disks[] | select(.transport == "sata") | .status == "unknown" and (.message | contains("SMART 超时"))' "$2" >/dev/null
 EOF
 
 cat >"$tmp/nvme-critical.json" <<'JSON'
@@ -134,7 +170,7 @@ set -euo pipefail
 . "$1"
 rootpxe_collect_disk_health >"$2"
 jq -e '.disks[] | select(.transport == "sata") | .status == "warning"' "$2" >/dev/null
-jq -e '.disks[] | select(.transport == "sas") | .status == "warning" and (.message | contains("SAS error counters"))' "$2" >/dev/null
+jq -e '.disks[] | select(.transport == "sas") | .status == "warning" and (.message | contains("SAS 错误计数非零"))' "$2" >/dev/null
 EOF
 
 cat >"$tmp/invalid-smart.json" <<'EOF'

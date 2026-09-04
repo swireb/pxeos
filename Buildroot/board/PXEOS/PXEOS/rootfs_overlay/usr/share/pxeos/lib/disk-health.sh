@@ -18,16 +18,38 @@ rootpxe_disk_health_run() {
 
 rootpxe_disk_health_message_for_result() {
     local tool="$1" result="$2" parsed="$3"
+    local label="$tool"
+    case "$tool" in
+        smartctl) label="SMART" ;;
+        nvme) label="NVMe 健康读取" ;;
+    esac
     case "$result" in
-        0) [[ $parsed == 1 ]] || printf '%s output is invalid' "$tool" ;;
-        124) printf '%s timed out' "$tool" ;;
-        125) printf 'timeout is unavailable' ;;
+        0) [[ $parsed == 1 ]] || printf '%s 输出无效' "$label" ;;
+        124) printf '%s 超时' "$label" ;;
+        125) printf '超时工具不可用' ;;
+        126) printf '%s 工具不可用' "$label" ;;
         *)
             if [[ $parsed != 1 ]]; then
-                printf '%s data is unavailable' "$tool"
+                printf '%s 数据不可用' "$label"
+            elif [[ $tool == smartctl && $result =~ ^[0-9]+$ && $((result & 7)) -ne 0 ]]; then
+                printf 'SMART 读取失败'
+            elif [[ $tool == nvme ]]; then
+                printf 'NVMe 健康读取返回错误'
             fi
             ;;
     esac
+}
+
+rootpxe_disk_health_smart_assessment_message() {
+    local smart_file="$1" parsed="$2"
+    [[ $parsed == 1 ]] || return 0
+    jq -r '
+        if (.smart_status.passed? | type) == "boolean" then empty
+        elif .smart_support.available? == false then "设备未提供可用的 SMART 支持"
+        elif .smart_support.available? == true and .smart_support.enabled? == false then "SMART 未启用"
+        else "SMART 未提供健康结论"
+        end
+    ' "$smart_file" 2>/dev/null || true
 }
 
 rootpxe_disk_health_collect_disk() {
@@ -68,7 +90,10 @@ rootpxe_disk_health_collect_disk() {
         fi
     fi
 
-    smart_message=$(rootpxe_disk_health_message_for_result smartctl "$smart_rc" "$smart_parsed")
+    smart_message=$(printf '%s\n%s\n' \
+        "$(rootpxe_disk_health_message_for_result smartctl "$smart_rc" "$smart_parsed")" \
+        "$(rootpxe_disk_health_smart_assessment_message "$smart_file" "$smart_parsed")" | \
+        awk 'NF { if (seen++) printf "; "; printf "%s", $0 }')
     nvme_message=""
     [[ ${tran,,} == nvme ]] && nvme_message=$(rootpxe_disk_health_message_for_result nvme "$nvme_rc" "$nvme_parsed")
     message=$(printf '%s\n%s\n' "$smart_message" "$nvme_message" | awk 'NF { if (seen++) printf "; "; printf "%s", $0 }')
@@ -140,7 +165,7 @@ rootpxe_disk_health_collect_disk() {
         (($passed == true and $smart_read_issue == 0 and $smart_rc == 0) or ($transport == "nvme" and $nvme_parsed == 1 and $nvme_rc == 0 and $critical == 0)) as $healthy_evidence |
         ((if ($message | length) > 0 then ($message | rtrimstr("\n") | .[0:512]) else "" end)) as $base_message |
         (($sas_grown | positive) or ($sas_read_errors | positive) or ($sas_write_errors | positive) or ($sas_verify_errors | positive) or ($sas_non_medium_errors | positive)) as $sas_problem |
-        (if $sas_problem then (($base_message + (if ($base_message | length) > 0 then "; " else "" end) + "SAS error counters are nonzero") | .[0:512]) else $base_message end) as $final_message |
+        (if $sas_problem then (($base_message + (if ($base_message | length) > 0 then "; " else "" end) + "SAS 错误计数非零") | .[0:512]) else $base_message end) as $final_message |
         {device:$device, transport:$transport,
          status:(if $failed then "failed" elif $warning then "warning" elif $healthy_evidence then "healthy" else "unknown" end)}
         + (if $model != null then {model:$model} else {} end)
