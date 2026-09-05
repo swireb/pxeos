@@ -3166,7 +3166,7 @@ writeImage()  {
         [[ -n $file ]] || handleError "No source file passed (${FUNCNAME[0]})\n   Args Passed: $*"
         # Validate every split source before the progress decoder or reader is
         # started, so an early failure cannot leave either FIFO endpoint open.
-        mapfile -t source_files < <(compgen -G "$file")
+        mapfile -t source_files < <(compgen -G "$file" | LC_ALL=C sort)
         [[ ${#source_files[@]} -gt 0 ]] || handleError "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_UNAVAILABLE REASON=image_source_glob_has_no_regular_files"
         for source_file in "${source_files[@]}"; do
             [[ -f $source_file && -r $source_file ]] || handleError "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_UNAVAILABLE REASON=image_source_is_not_readable"
@@ -4035,33 +4035,27 @@ fixWin7boot() {
         return
     fi
     dots "Backing up and replacing BCD"
-    mv /bcdstore/Boot/BCD{,.bak} >/dev/null 2>&1
-    case $? in
-        0)
-            ;;
-        *)
-            echo "Failed"
-            debugPause
-            umount /bcdstore >/dev/null 2>&1
-            rootpxe_console_message WARN 'Could not create backup.'
-            return
-            ;;
-    esac
-    cp /usr/share/pxeos/BCD /bcdstore/Boot/BCD >/dev/null 2>&1
-    case $? in
-        0)
-            echo "Done"
-            debugPause
-            umount /bcdstore >/dev/null 2>&1
-            ;;
-        *)
-            echo "Failed"
-            debugPause
-            umount /bcdstore >/dev/null 2>&1
-            rootpxe_console_message WARN 'Could not copy the BCD file.'
-            return
-            ;;
-    esac
+    local bcd=/bcdstore/Boot/BCD backup=/bcdstore/Boot/BCD.bak replacement=""
+    replacement=$(mktemp /bcdstore/Boot/.BCD.rootpxe-new.XXXXXX) || {
+        echo "Failed"; debugPause; umount /bcdstore >/dev/null 2>&1
+        handleError "PXEOS_STAGE=restore CODE=BCD_REPLACE_FAILED REASON=unable_to_create_staged_replacement"; return 1
+    }
+    if ! cp /usr/share/pxeos/BCD "$replacement" >/dev/null 2>&1 || ! cmp -s /usr/share/pxeos/BCD "$replacement"; then
+        rm -f -- "$replacement"
+        echo "Failed"; debugPause; umount /bcdstore >/dev/null 2>&1
+        handleError "PXEOS_STAGE=restore CODE=BCD_REPLACE_FAILED REASON=unable_to_stage_replacement"; return 1
+    fi
+    if ! cp "$bcd" "$backup" >/dev/null 2>&1 || ! cmp -s "$bcd" "$backup"; then
+        rm -f -- "$replacement"; echo "Failed"; debugPause; umount /bcdstore >/dev/null 2>&1
+        handleError "PXEOS_STAGE=restore CODE=BCD_REPLACE_FAILED REASON=unable_to_backup_original"; return 1
+    fi
+    if ! mv "$replacement" "$bcd" >/dev/null 2>&1; then
+        rm -f -- "$replacement"
+        echo "Failed"; debugPause; umount /bcdstore >/dev/null 2>&1
+        handleError "PXEOS_STAGE=restore CODE=BCD_REPLACE_FAILED REASON=unable_to_activate_replacement"; return 1
+    fi
+    echo "Done"
+    debugPause
     umount /bcdstore >/dev/null 2>&1
 }
 # Clears out windows hiber and page files
@@ -4410,7 +4404,7 @@ getHardDisk() {
 
         [[ $found_match -eq 0 ]] && handleError "Fatal: No valid drives found for 'Host Primary Disk'='$fdrive'."
 
-        disks=$(echo "$disks $devs" | xargs)   # add unmatched devices for completeness
+        disks=$(echo "$disks" | xargs)
 
     elif [[ "x$imgType" == "xmpa" && "x$type" == "xdown" ]]; then
         # mpa target selection is a positional image-to-device binding, never
@@ -4464,6 +4458,11 @@ getHardDisk() {
             [[ $requested -le ${#mapped[@]} ]] || { handleError 'MPA Host Primary Disk selector has too many mapped targets.'; return 1; }
         fi
         return 0
+    elif [[ "x$imgType" == "xmpa" && "x$type" == "xup" ]]; then
+        # Capture the complete fixed-image candidate list unless the task
+        # explicitly constrained it through fdrive.
+        disks=$(echo "$devs" | xargs)
+        [[ -z $disks ]] && handleError "Could not determine a suitable disk automatically."
     else
         if [[ -n $largesize ]]; then
             # Auto-select largest available drive
@@ -4754,11 +4753,39 @@ escapeItem() {
 #
 # $1 The fifo name (file in file out)
 # $2 The file to upload into on the server
+rootpxe_prepare_capture_output_path() {
+    local base="$1" output="$2" relative parent current segment
+    local -a _rootpxe_output_parts=()
+    [[ -d $base && ! -L $base && $output == "$base/"* ]] || return 1
+    relative=${output#"$base/"}
+    rootpxe_safe_relative_path "$relative" >/dev/null || return 1
+    parent=$(dirname "$relative") || return 1
+    current="$base"
+    [[ $parent == . ]] || {
+        IFS=/ read -r -a _rootpxe_output_parts <<< "$parent"
+        for segment in "${_rootpxe_output_parts[@]}"; do
+            [[ -d $current && ! -L $current ]] || return 1
+            current="$current/$segment"
+            if [[ -e $current ]]; then
+                [[ -d $current && ! -L $current ]] || return 1
+            else
+                mkdir "$current" || return 1
+                [[ -d $current && ! -L $current ]] || return 1
+            fi
+        done
+    }
+}
+
 uploadFormat() {
     local fifo="$1"
     local file="$2"
     [[ -z $fifo ]] && handleError "Missing file in file out (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $file ]] && handleError "Missing file name to store (${FUNCNAME[0]})\n   Args Passed: $*"
+    # Only whole-disk dd uses a server-provided nested image name.  Partition
+    # captures retain their existing prepared-directory contract.
+    if [[ ${imgType:-} == dd && -n ${imagePath:-} ]]; then
+        rootpxe_prepare_capture_output_path "$imagePath" "$file" || { handleError "PXEOS_STAGE=capture CODE=CAPTURE_ARTIFACT_PATH_INVALID REASON=unsafe_or_unavailable_output_parent"; return 1; }
+    fi
     if [[ ! -e $fifo ]]; then
         mkfifo "$fifo" >/dev/null 2>&1 || handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_SETUP_FAILED REASON=unable_to_create_capture_fifo"
     fi

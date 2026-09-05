@@ -282,6 +282,14 @@ rootpxe_display_metadata_collect_windows() {
     while IFS=$'\t' read -r drive volume; do
         drive=${drive//$'\r'/}
         volume=${volume//$'\r'/}
+        if [[ ${#volume} -ne 48 && ${#volume} -ne 24 ]]; then
+            # MountedDevices also holds legal UTF-16 device names for optical
+            # and removable media.  They have no partition identity, so skip
+            # the whole drive row instead of associating it with a candidate.
+            [[ $volume =~ ^([0-9a-f]{2}00)+$ ]] && continue
+            : >"${rootpxe_display_metadata_drive_rows:-/dev/null}"
+            return 1
+        fi
         matches=0; matched=""
         for identity in $identities; do
             [[ $identity == p:* ]] || continue

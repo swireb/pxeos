@@ -75,7 +75,18 @@ REG
     }
     sfdisk() { echo 'label-id: 0x78563412'; }
     cat() { { [[ $1 == /sys/class/block/mockdisk1/start ]] || [[ $mode == ambiguous-map && $1 == /sys/class/block/mockdisk2/start ]]; } && echo 2048 || command cat "$@"; }
-    if [[ $mode == success ]]; then
+    if [[ $mode == mixed-device ]]; then
+      reged() { local output; output=$(last_arg "$@"); command cat >"$output" <<'REG'
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SYSTEM\MountedDevices]
+"\\DosDevices\\C:"=hex:12,34,56,78,00,00,10,00,00,00,00,00
+"\\DosDevices\\D:"=hex:5c,00,5c,00,3f,00,3f,00,5c,00,55,00,53,00,42,00
+REG
+      }
+      rootpxe_display_metadata_collect_windows 'p:1:1|/dev/mockdisk1 p:1:2|/dev/mockdisk2'
+      diff -u <(printf '%s\n' $'p:1:1\tC:') "$rows"
+    elif [[ $mode == success ]]; then
       rootpxe_display_metadata_collect_windows 'p:1:1|/dev/mockdisk1 p:1:2|/dev/mockdisk2'
       diff -u <(printf '%s\n' $'p:1:1\tC:' $'p:1:2\tD:') "$rows"
       inventory >"$inv"; rootpxe_display_metadata_file="$d/m.json"
@@ -94,6 +105,7 @@ run case_lvm physical || fail physical-root-lv-home
 run case_lvm lv || fail lv-root
 run case_lvm multi || fail multi-root
 run case_windows success || fail windows-mbr-gpt
+run case_windows mixed-device || fail windows-mbr-with-unrelated-utf16-device
 run case_windows no-hive || fail windows-no-hive
 run case_windows double-hive || fail windows-double-hive
 run case_windows ambiguous-map || fail windows-ambiguous-map

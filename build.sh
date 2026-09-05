@@ -104,6 +104,19 @@ if ! installDependencies "$installDep"; then
 fi
 
 cd "$buildPath" || exit 1
+buildPath="$(pwd -P)"
+
+rootpxe_build_apply_patch_once() {
+    local patch_file="$1"
+    [[ -r $patch_file ]] || return 1
+    if patch --batch --forward --dry-run -p1 < "$patch_file" >/dev/null; then
+        patch --batch --forward -p1 < "$patch_file"
+    elif patch --batch --force --reverse --dry-run -p1 < "$patch_file" >/dev/null; then
+        echo 'Patch already applied.'
+    else
+        return 1
+    fi
+}
 
 
 function buildFilesystem() {
@@ -125,11 +138,10 @@ function buildFilesystem() {
         echo "Done"
     fi
     cd "fssource$arch" || { echo "Couldn't change directory to fssource$arch"; exit 1; }
-    if [[ -f ../patch/filesystem/fs.patch ]]; then
+    if [[ -f $PROJECT_DIRECTORY/patch/filesystem/fs.patch ]]; then
         dots " * Applying filesystem patch"
         echo
-        patch -p1 < ../patch/filesystem/fs.patch
-        if [[ $? -ne 0 ]]; then
+        if ! rootpxe_build_apply_patch_once "$PROJECT_DIRECTORY/patch/filesystem/fs.patch"; then
             echo "Failed"
             exit 1
         fi
@@ -139,13 +151,13 @@ function buildFilesystem() {
     fi
     dots "Preparing code"
     if [[ ! -f .packConfDone ]]; then
-        cat ../Buildroot/package/newConf.in >> package/Config.in
+        cat "$PROJECT_DIRECTORY/Buildroot/package/newConf.in" >> package/Config.in
         touch .packConfDone
     fi
-    rsync -avPrI ../Buildroot/ . > /dev/null
+    rsync -avPrI "$PROJECT_DIRECTORY/Buildroot/" . > /dev/null
     sed -i "s/^export initversion=[0-9][0-9]*$/export initversion=$(date +%Y%m%d)/" board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh
     if [[ ! -f .config ]]; then
-        cp "../configs/fs$arch.config" .config
+        cp "$PROJECT_DIRECTORY/configs/fs$arch.config" .config
         case "${arch}" in
             x64)
                 make oldconfig
@@ -274,7 +286,9 @@ function buildFilesystem() {
             initfile='arm_init.cpio.gz'
             ;;
     esac
-    [[ ! -f $compiledfile ]] && echo 'File not found.' || cp "$compiledfile" "$initfile" && sha256sum "$initfile" > "${initfile}.sha256"
+    [[ -f $compiledfile ]] || { echo 'File not found.'; cd ..; return 1; }
+    cp "$compiledfile" "$initfile" || { cd ..; return 1; }
+    sha256sum "$initfile" > "${initfile}.sha256" || { cd ..; return 1; }
     cd ..
 }
 
@@ -319,13 +333,12 @@ function buildKernel() {
     dots "Preparing kernel source"
     cd "kernelsource$arch" || { echo "Couldn't change directory to kernelsource$arch"; exit 2; }
     make mrproper
-    cp "../configs/kernel$arch.config" .config
+    cp "$PROJECT_DIRECTORY/configs/kernel$arch.config" .config
     echo "Done"
-    if [[ -f ../patch/kernel/linux.patch ]]; then
+    if [[ -f $PROJECT_DIRECTORY/patch/kernel/linux.patch ]]; then
         dots " * Applying patch"
         echo
-        patch -p1 < ../patch/kernel/linux.patch
-        if [[ $? -ne 0 ]]; then
+        if ! rootpxe_build_apply_patch_once "$PROJECT_DIRECTORY/patch/kernel/linux.patch"; then
             echo "Failed"
             exit 1
         fi
@@ -435,7 +448,9 @@ function buildKernel() {
             kernelfile='arm_Image'
             ;;
     esac
-    [[ ! -f $compiledfile ]] && echo 'File not found.' || cp "$compiledfile" "$kernelfile" && sha256sum "$kernelfile" > "${kernelfile}.sha256"
+    [[ -f $compiledfile ]] || { echo 'File not found.'; cd ..; return 1; }
+    cp "$compiledfile" "$kernelfile" || { cd ..; return 1; }
+    sha256sum "$kernelfile" > "${kernelfile}.sha256" || { cd ..; return 1; }
     cd ..
 }
 
@@ -448,7 +463,7 @@ function dots() {
 
 function addKernelPackages() {
     local source_kernel_package_dir="$PROJECT_DIRECTORY/KernelPackages"
-    local target_kernel_dir="$PROJECT_DIRECTORY/kernelsource$arch"
+    local target_kernel_dir="$buildPath/kernelsource$arch"
 
     find "$source_kernel_package_dir" -type f | while read -r source_file; do
         # Get the relative path from the package directory to the source file

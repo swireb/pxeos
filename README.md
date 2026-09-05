@@ -2,6 +2,16 @@
 
 PXEOS 的协议、安全、硬件与故障处理说明已按主题拆分；本页只保留构建入口、构建安全提示与文档索引。
 
+## 创建 USB 镜像
+
+`create-usb-image.sh` 的第一个参数是发布目录（提供 `bzImage` 与 `init.xz`），并且必须提供一个本地启动资产目录：
+
+```sh
+./create-usb-image.sh https://example.invalid/pxeos-release --boot-assets /path/to/boot-assets
+```
+
+该目录必须包含由操作者从合法构建产物取得并自行核验的 `memdisk`、`memtest.bin`、`ipxe.krn` 和 `ipxe.efi`。脚本会在创建临时镜像、写入或挂载任何设备前检查这些普通文件；缺失、HTML/文本内容或非 EFI 格式的 `ipxe.efi` 会立即失败。
+
 ## Build Help
 
 ```sh

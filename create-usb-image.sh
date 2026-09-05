@@ -2,13 +2,37 @@
 
 set -e
 
-dl_url=$1
+dl_url=${1:-}
+boot_assets_dir=${2:-}
 
-if [ -z "$dl_url" ]; then
-    echo "Usage: $0 <base URL for downloading bzImage and init.xz>"
-    echo "Example: $0 https://github.com/rootpxe/pxeos/releases/download/20231208"
+if [ -z "$dl_url" ] || [ -z "$boot_assets_dir" ]; then
+    echo "Usage: $0 <base URL for downloading bzImage and init.xz> --boot-assets <directory>"
+    echo "       $0 <base URL for downloading bzImage and init.xz> <boot-assets-directory>"
+    echo "The directory must contain verified memdisk, memtest.bin, ipxe.krn, and ipxe.efi assets."
     exit 1
 fi
+
+if [ "$boot_assets_dir" = "--boot-assets" ]; then
+    boot_assets_dir=${3:-}
+fi
+[ -n "$boot_assets_dir" ] || { echo "Usage: $0 <base URL> --boot-assets <directory>" >&2; exit 1; }
+
+validate_boot_asset() {
+    local asset path mime magic
+    asset="$1"
+    path="$boot_assets_dir/$asset"
+    [ -s "$path" ] && [ ! -L "$path" ] || { echo "Missing or empty boot asset: $asset" >&2; return 1; }
+    mime=$(file -b --mime-type "$path") || return 1
+    case "$mime" in text/*|application/json|application/xml|text/html) echo "Invalid boot asset (text/HTML): $asset" >&2; return 1;; esac
+    if [ "$asset" = ipxe.efi ]; then
+        magic=$(od -An -tx1 -N2 "$path" | tr -d '[:space:]') || return 1
+        [ "$magic" = 4d5a ] || { echo "Invalid EFI boot asset: $asset" >&2; return 1; }
+    fi
+}
+
+for boot_asset in memdisk memtest.bin ipxe.krn ipxe.efi; do
+    validate_boot_asset "$boot_asset" || exit 1
+done
 
 if [ -f /tmp/pxeoskern.img ]; then
     echo Nuking old PXEOS Debug image
@@ -37,10 +61,9 @@ grub-install --removable --no-nvram --no-uefi-secure-boot --efi-directory=/mnt -
 echo Download the PXEOS kernels and inits
 wget -P /mnt/boot/ ${dl_url}/bzImage
 wget -P /mnt/boot/ ${dl_url}/init.xz
-wget -P /mnt/boot/ https://github.com/rootpxe/rootpxe/blob/main/src/ipxe/memdisk
-wget -P /mnt/boot/ https://github.com/rootpxe/rootpxe/blob/main/src/ipxe/memtest.bin
-wget -P /mnt/boot/ https://github.com/rootpxe/rootpxe/blob/main/src/ipxe/ipxe.krn
-wget -P /mnt/boot/ https://github.com/rootpxe/rootpxe/blob/main/src/ipxe/ipxe.efi
+for boot_asset in memdisk memtest.bin ipxe.krn ipxe.efi; do
+    cp "$boot_assets_dir/$boot_asset" "/mnt/boot/$boot_asset"
+done
 
 cat > /mnt/boot/README.txt << 'EOF'
 
