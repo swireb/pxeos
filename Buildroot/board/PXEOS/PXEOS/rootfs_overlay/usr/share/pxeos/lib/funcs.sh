@@ -3,6 +3,12 @@ export initversion=19800101
 . /usr/share/pxeos/lib/partition-funcs.sh
 . /usr/share/pxeos/lib/restore-preflight.sh
 . /usr/share/pxeos/lib/capture-recovery.sh
+rootpxe_display_metadata_lib=/usr/share/pxeos/lib/display-metadata.sh
+[[ -r $rootpxe_display_metadata_lib ]] || rootpxe_display_metadata_lib="$(dirname "${BASH_SOURCE[0]}")/display-metadata.sh"
+[[ -r $rootpxe_display_metadata_lib ]] && . "$rootpxe_display_metadata_lib"
+rootpxe_windows_display_registry_lib=/usr/share/pxeos/lib/windows-display-registry.sh
+[[ -r $rootpxe_windows_display_registry_lib ]] || rootpxe_windows_display_registry_lib="$(dirname "${BASH_SOURCE[0]}")/windows-display-registry.sh"
+[[ -r $rootpxe_windows_display_registry_lib ]] && . "$rootpxe_windows_display_registry_lib"
 rootpxe_progress_lib=/usr/share/pxeos/lib/partclone-progress.sh
 [[ -r $rootpxe_progress_lib ]] || rootpxe_progress_lib="$(dirname "${BASH_SOURCE[0]}")/partclone-progress.sh"
 . "$rootpxe_progress_lib"
@@ -449,6 +455,18 @@ rootpxe_capture_lvm_volumes() {
         return 1
     fi
     vg_active=yes
+    if declare -F rootpxe_display_metadata_collect_lvm >/dev/null 2>&1; then
+        if rootpxe_display_metadata_collect_lvm; then
+            :
+        else
+            display_lvm_status=$?
+            if [[ $display_lvm_status -eq 2 ]]; then
+                printf '%s|%s\n' DISPLAY_METADATA_CLEANUP_FAILED read_only_probe_cleanup_failed >"$rootpxe_lvm_capture_status_file"
+                return 1
+            fi
+            rootpxe_console_message WARN 'LVM capture display metadata was unavailable; continuing without optional source mappings.'
+        fi
+    fi
     pvdisplay -m --units b "$rootpxe_lvm_pv_path" >"$stage/$pv_artifact" 2>/dev/null || return 1
     vgcfgbackup -f "$stage/$vg_artifact" "$rootpxe_lvm_vg_name" >/dev/null 2>&1 || return 1
     : >"$stage/d1.lvm.capture.tsv" || return 1
@@ -745,6 +763,11 @@ rootpxe_build_partition_inventory() {
     chmod 600 "$rootpxe_partition_inventory_file"
     jq -n --rawfile disks "$inventory_rows" '{version:1,disks:($disks|split("\n")|map(select(length>0)|fromjson))}' >"$rootpxe_partition_inventory_file" || { rm -f "$inventory_rows" "$rootpxe_partition_inventory_file"; unset rootpxe_partition_inventory_file; return 1; }
     rm -f "$inventory_rows"
+    # Optional presentation facts must never invalidate the already verified
+    # physical inventory that capture and restore rely on.
+    if declare -F rootpxe_display_metadata_merge_inventory >/dev/null 2>&1; then
+        rootpxe_display_metadata_merge_inventory "$rootpxe_partition_inventory_file" || rootpxe_console_message WARN 'Capture display metadata could not be merged; continuing with physical inventory only.'
+    fi
     jq -e '.version == 1 and ((.disks|type) == "array" and (.disks|length) > 0) and ([.disks[] | select(.number < 1 or (.partitionTable != "gpt" and .partitionTable != "mbr" and .partitionTable != "none") or .originalDiskBytes <= 0 or .logicalSectorBytes <= 0 or .physicalSectorBytes < .logicalSectorBytes or (.partitionTable == "none" and (.partitions|length) != 0))] | length == 0)' "$rootpxe_partition_inventory_file" >/dev/null || { rm -f "$rootpxe_partition_inventory_file"; unset rootpxe_partition_inventory_file; return 1; }
     export rootpxe_partition_inventory_file
 }
@@ -763,8 +786,8 @@ rootpxe_cleanup_deployment_partition_file() {
 
 rootpxe_cleanup_task_json() {
     rootpxe_cleanup_deployment_partition_file
-    rm -f -- "${deploymentLayoutFile:-}" "${originalSchemaFile:-}" "${preDeployScriptFile:-}" "${postDeployScriptFile:-}" "${rootpxe_original_schema_file:-}" "${rootpxe_partition_inventory_file:-}"
-    unset deploymentLayoutFile originalSchemaFile preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 rootpxe_original_schema_file rootpxe_partition_inventory_file
+    rm -f -- "${deploymentLayoutFile:-}" "${originalSchemaFile:-}" "${preDeployScriptFile:-}" "${postDeployScriptFile:-}" "${rootpxe_original_schema_file:-}" "${rootpxe_partition_inventory_file:-}" "${rootpxe_display_metadata_file:-}"
+    unset deploymentLayoutFile originalSchemaFile preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 rootpxe_original_schema_file rootpxe_partition_inventory_file rootpxe_display_metadata_file rootpxe_display_metadata_identities
 }
 
 rootpxe_cleanup_session() {

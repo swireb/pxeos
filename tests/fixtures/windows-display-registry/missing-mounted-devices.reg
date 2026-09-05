@@ -1,0 +1,5 @@
+REGEDIT4
+
+[HKEY_LOCAL_MACHINE\SYSTEM\SomethingElse]
+"\\DosDevices\\Z:"=hex:01,02,03,04
+

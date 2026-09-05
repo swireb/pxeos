@@ -73,6 +73,18 @@ case $permit_result in
     20) exit 2 ;;
     *) handleError "PXEOS_STAGE=permit CODE=DISK_PERMIT_DENIED REASON=capture_binding_not_confirmed" ;;
 esac
+# Source mount and drive mappings are display-only facts, but they must be
+# sampled before capture can activate/deactivate LVM or otherwise alter source
+# visibility.  A failed probe is safe to omit; an unmount failure is not.
+if declare -F rootpxe_display_metadata_begin >/dev/null 2>&1; then
+    if rootpxe_display_metadata_begin "$hd" "${rootpxe_capture_disks_string:-$hd}" "${imgType:-}"; then
+        :
+    else
+        display_metadata_status=$?
+        [[ $display_metadata_status -eq 2 ]] && handleError "PXEOS_STAGE=capture_display_metadata CODE=DISPLAY_METADATA_CLEANUP_FAILED REASON=read_only_probe_cleanup_failed"
+        rootpxe_console_message WARN 'Capture display metadata was unavailable; continuing without optional source mappings.'
+    fi
+fi
 prepareUploadLocation "$imagePath"
 printf '%s\n' "$taskid" > "$imagePath/.rootpxe-capture-taskid" || handleError "Could not initialize capture task marker ($0)"
 rootpxe_console_message INFO "Using image: $img."

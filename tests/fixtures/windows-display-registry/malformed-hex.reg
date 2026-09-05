@@ -1,0 +1,4 @@
+REGEDIT4
+
+[HKEY_LOCAL_MACHINE\SYSTEM\MountedDevices]
+"\\DosDevices\\C:"=hex:01,0g,03

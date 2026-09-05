@@ -1,0 +1,6 @@
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SYSTEM\MountedDevices]
+"\\DosDevices\\c:"=hex:12,34,56,78,9a,bc,de,f0,00,11,22,33
+"\\DosDevices\\D:"=hex:44,4d,49,4f,3a,49,44,3a,00,11,22,33,44,55,\
+  66,77,88,99,aa,bb,cc,dd,ee,ff
