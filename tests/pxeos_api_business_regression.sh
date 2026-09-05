@@ -47,6 +47,16 @@ export PATH
 
 flat_smb='{"taskId":42,"type":"capture","pxeType":"up","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"changeHostname":false,"captureBackupName":"demo-backup-20260830T104527123Z","storage":"192.0.2.10:share/images","protocol":"smb","storageip":"192.0.2.10","exportPath":"share/images","smbUsername":"test-user","smbPassword":"pa%ss\\word","smbDomain":"WORKGROUP"}'
 rootpxe_apply_json_checkin "$flat_smb" || fail '平铺 SMB JSON 被拒绝'
+# Old servers do not advertise progressProtocolVersions, so PXEOS must retain
+# its existing v1 reporter instead of sending incomplete v2 snapshots.
+[[ ${rootpxe_partition_progress_enabled:-} == no && ${progress_attempt:-} == 1 ]] || fail '旧服务端响应错误启用了 v2 分区进度'
+v2_progress=$(jq '.progressProtocolVersions=[1,2] | .progressAttempt=4' <<<"$flat_smb")
+rootpxe_apply_json_checkin "$v2_progress" || fail '携带 v2 能力和 attempt 的响应被拒绝'
+[[ $rootpxe_partition_progress_enabled == yes && $progress_attempt == 4 ]] || fail 'v2 能力或 progress attempt 未被保留'
+bad_progress_attempt=$(jq '.progressProtocolVersions=[1,2] | .progressAttempt=0' <<<"$flat_smb")
+rootpxe_apply_json_checkin "$bad_progress_attempt" && fail '无效 progress attempt 被接受'
+unset v2_progress bad_progress_attempt
+rootpxe_apply_json_checkin "$flat_smb" || fail '平铺 SMB JSON 在 v2 校验后被拒绝'
 [[ $protocol == smb ]] || fail "平铺 protocol 解析错误: ${protocol@Q}"
 [[ $storage_server == 192.0.2.10 ]] || fail "平铺 server 解析错误: ${storage_server@Q}"
 [[ $storage_export == share/images && -z ${storage_share:-} ]] || fail '平铺 SMB 必须仅保留完整相对 exportPath'
@@ -231,6 +241,8 @@ sed -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' \
     -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' \
     -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" \
     "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/legacy-funcs.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/disk-health.sh" "$tmp/disk-health.sh"
 cat >"$tmp/legacy-runtime.sh" <<EOF
 ismajordebug=0
 . "$tmp/legacy-funcs.sh"
@@ -243,6 +255,7 @@ dots() { :; }
 handleError() { return 97; }
 EOF
 sed -e "s|^\. /usr/share/pxeos/lib/funcs.sh$|. \"$tmp/legacy-runtime.sh\"|" \
+    -e "s|^\. /usr/share/pxeos/lib/disk-health.sh$|. \"$tmp/disk-health.sh\"|" \
     -e "s|/tmp/pxeos.shutdown|$tmp/pxeos.shutdown|g" \
     -e "s|/proc/cmdline|$tmp/proc-cmdline|g" \
     "$checkin" >"$tmp/legacy-checkin.sh"
@@ -811,6 +824,7 @@ esac
 EOF
 chmod +x $tmp/mock/*
 sed -e "s|^\. /usr/share/pxeos/lib/partition-funcs.sh|. \"$overlay/usr/share/pxeos/lib/partition-funcs.sh\"|" -e "s|^\. /usr/share/pxeos/lib/restore-preflight.sh|. \"$overlay/usr/share/pxeos/lib/restore-preflight.sh\"|" -e "s|^\. /usr/share/pxeos/lib/capture-recovery.sh|. \"$overlay/usr/share/pxeos/lib/capture-recovery.sh\"|" -e "s|</proc/cmdline|<$tmp/cmdline|" -e "s|/ntfs/|$tmp/ntfs/|g" -e "s| /ntfs\([ ;)]\)| $tmp/ntfs\1|g" -e "s|mountpoint=/linuxroot|mountpoint=$tmp/linuxroot|g" -e "s|/linuxroot/|$tmp/linuxroot/|g" -e "s| /linuxroot\([ ;)]\)| $tmp/linuxroot\1|g" $funcs >$tmp/funcs.sh
+cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
 : >$tmp/cmdline
 : >$tmp/mount-trace
 MOUNT_TRACE=$tmp/mount-trace; export MOUNT_TRACE

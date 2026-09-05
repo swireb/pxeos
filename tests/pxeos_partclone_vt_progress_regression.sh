@@ -91,8 +91,15 @@ rootpxe_partclone_progress_wait || fail 'cleared-screen observer wait failed'
 rootpxe_partclone_progress_prepare "$tmp/progress.fifo" || fail 'VT prepare failed'
 snapshot 'Data Block Process:' '42.50%'
 rootpxe_partclone_progress_start_collector
-sleep 0.2
-assert_eq "$(rootpxe_partclone_progress_next_pct "$ROOTPXE_PROGRESS_STATUS_FILE" "$run" 0)" 42 'Data Block Process next row must update progress'
+# The observer samples asynchronously.  Polling keeps this offline fixture
+# deterministic on slow CI hosts without extending the production interval.
+vt_pct=0
+for _ in {1..10}; do
+    vt_pct=$(rootpxe_partclone_progress_next_pct "$ROOTPXE_PROGRESS_STATUS_FILE" "$run" 0)
+    [[ $vt_pct == 42 ]] && break
+    sleep 0.1
+done
+assert_eq "$vt_pct" 42 'Data Block Process next row must update progress'
 rootpxe_partclone_progress_wait || fail 'GUI observer wait failed'
 
 # A fresh generation clears a previous 100; bitmap and total-block screens

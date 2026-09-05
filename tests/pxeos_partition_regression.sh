@@ -1346,7 +1346,16 @@ for command_failure in PVS_FAIL VGS_FAIL LVS_FAIL; do
   unset "$command_failure"
 done
 rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" || fail preflight-after-command-failure
+progress_trace="$tmp/lvm-progress-trace"
+rootpxe_partition_progress_item() { printf '%s|%s|%s\n' "$1" "$2" "${3:--}" >>"$progress_trace"; }
+: >"$progress_trace"
 export E2FSCK_RC=1; rootpxe_capture_lvm_volumes "$tmp/image" || fail legal-capture-e2fsck-fixed; unset E2FSCK_RC
+grep -Fq 'd1:p1|preparing|-' "$progress_trace" || fail lvm-capture-parent-preparing
+grep -Fq 'd1:p1|running|-' "$progress_trace" || fail lvm-capture-parent-running
+grep -Fq 'd1:p1|completed|-' "$progress_trace" || fail lvm-capture-parent-completed
+capture_parent_done=$(grep -n -F 'd1:p1|completed|-' "$progress_trace" | tail -n 1 | cut -d: -f1)
+capture_child_done=$(grep -n -E 'd1:p1:lv:.*\|(completed)\|' "$progress_trace" | tail -n 1 | cut -d: -f1)
+[[ $capture_parent_done =~ ^[0-9]+$ && $capture_child_done =~ ^[0-9]+$ && $capture_parent_done -gt $capture_child_done ]] || fail lvm-capture-parent-must-finish-after-children
 [[ -s "$tmp/image/d1.lvm.schema.json" && -f "$tmp/image/d1p1.lvm.pv.meta" && -f "$tmp/image/d1p1.lvm.vg.cfg" && -f "$tmp/image/d1p1.lvm.lv.root.img" && ! -e "$tmp/image/d1p1.lvm.lv.swap.img" && ! -e "$tmp/image/d1.lv.lv-root.img" ]] || fail readable-lvm-artifacts
 jq -e '.version == 1 and .captureMode == "per_lv" and .resizePolicy == "grow_only" and ([.vgs[].lvs[] | select(.fs == "swap" and .artifact != "")] | length) == 0' "$tmp/image/d1.lvm.schema.json" >/dev/null || fail lvm-v1-schema
 ! grep -Fq -- '--nosuffix' "$LVM_TRACE" || fail capture-must-not-use-unsupported-pvdisplay-option
@@ -1487,7 +1496,14 @@ rootpxe_resolved_lvm_layout_file="$tmp/casefold-plan.json"; : >"$LVM_TRACE"
 rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail restore-casefold-lv-must-fail
 [[ ! -s "$LVM_TRACE" ]] || fail restore-casefold-lv-wrote-before-validation
 rootpxe_resolved_lvm_layout_file="$tmp/plan.json"
+: >"$progress_trace"
 rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock || fail permitted-restore
+grep -Fq 'd1:p1|preparing|-' "$progress_trace" || fail lvm-restore-parent-preparing
+grep -Fq 'd1:p1|running|-' "$progress_trace" || fail lvm-restore-parent-running
+grep -Fq 'd1:p1|completed|-' "$progress_trace" || fail lvm-restore-parent-completed
+restore_parent_done=$(grep -n -F 'd1:p1|completed|-' "$progress_trace" | tail -n 1 | cut -d: -f1)
+restore_child_done=$(grep -n -E 'd1:p1:lv:.*\|(completed)\|' "$progress_trace" | tail -n 1 | cut -d: -f1)
+[[ $restore_parent_done =~ ^[0-9]+$ && $restore_child_done =~ ^[0-9]+$ && $restore_parent_done -gt $restore_child_done ]] || fail lvm-restore-parent-must-finish-after-children
 for marker in pvcreate vgcfgrestore writeImage; do grep -Fq "$marker:" "$LVM_TRACE" || fail "missing-$marker"; done
 grep -Fq 'd1p1.lvm.lv.root.img' "$LVM_TRACE" || fail restore-readable-lv-artifact
 

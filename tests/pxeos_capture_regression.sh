@@ -520,6 +520,7 @@ set +e
     imgFormat=2
     PIGZ_COMP=-6
     writer_pids=()
+    mkdir -p "$tmp/capture-image"
     savePartition /dev/mockp1 1 "$tmp/capture-image"
 )
 prepare_rc=$?
@@ -529,18 +530,37 @@ assert_eq "$prepare_rc" 97 'capture writer 准备失败必须升级为任务失�
 grep -Fq 'PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_SETUP_FAILED' "$tmp/capture-prepare-error" || fail 'capture writer 准备失败必须使用稳定错误码'
 pass 'capture prepare failure starts no pipeline subprocess'
 
-# 进度状态/FIFO准备本身失败时，writer 准备函数也不得被调用。
-export MOCK_ERROR_FILE="$tmp/capture-progress-prepare-error" MOCK_UPLOAD_FORMAT_CALLED="$tmp/upload-format-called" MOCK_COLLECTOR_STARTED="$tmp/collector-started"
+# 进度状态文件持久化失败只是遥测故障：真实 clone/writer 仍必须完成。
+cat > "$tmp/bin/partclone.extfs" <<'EOF'
+#!/bin/sh
+fifo=''
+previous=''
+for arg in "$@"; do
+    [ "$previous" = '-O' ] && fifo="$arg"
+    previous="$arg"
+done
+: "${MOCK_CLONE_STARTED:?}"
+: > "$MOCK_CLONE_STARTED"
+printf 'payload' > "$fifo"
+exit 0
+EOF
+chmod +x "$tmp/bin/partclone.extfs"
+export MOCK_CLONE_STARTED="$tmp/telemetry-clone-started" MOCK_UPLOAD_FORMAT_CALLED="$tmp/upload-format-called"
 set +e
 (
     source "$tmp/funcs.sh" 2>/dev/null
-    handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 98; }
+    handleError() { printf '%s\n' "$1" > "$tmp/capture-telemetry-error"; exit 98; }
     getPartitionNumber() { part_number=1; }
     fsTypeSetting() { fstype=extfs; }
     getPartType() { parttype=0x83; }
     debugPause() { :; }
-    uploadFormat() { : > "$MOCK_UPLOAD_FORMAT_CALLED"; return 0; }
-    rootpxe_partclone_progress_start_collector() { : > "$MOCK_COLLECTOR_STARTED"; }
+    uploadFormat() {
+        : > "$MOCK_UPLOAD_FORMAT_CALLED"
+        rm -f "$1"; mkfifo "$1"
+        cat "$1" > "$2.000" &
+        rootpxe_last_writer_pid=$!
+        writer_pids=("$rootpxe_last_writer_pid")
+    }
     ROOTPXE_PROGRESS_STATUS_FILE="$tmp/no-such-progress-dir/status.pxeos"
     export ROOTPXE_PROGRESS_STATUS_FILE
     imgPartitionType=all
@@ -549,14 +569,15 @@ set +e
     imgFormat=2
     PIGZ_COMP=-6
     writer_pids=()
+    mkdir -p "$tmp/capture-image"
     savePartition /dev/mockp1 1 "$tmp/capture-image"
 )
-progress_prepare_rc=$?
+progress_telemetry_rc=$?
 set -e
-assert_eq "$progress_prepare_rc" 98 'progress 准备失败必须升级为任务失败'
-[[ ! -e "$MOCK_UPLOAD_FORMAT_CALLED" && ! -e "$MOCK_COLLECTOR_STARTED" && ! -e "$MOCK_CLONE_STARTED" && ! -e "$MOCK_COMPRESSOR_STARTED" && ! -e "$MOCK_SPLIT_STARTED" ]] || fail 'progress 准备失败后不得启动 writer/collector/pipeline'
-grep -Fq 'PXEOS_STAGE=capture CODE=CAPTURE_PROGRESS_SETUP_FAILED' "$tmp/capture-progress-prepare-error" || fail 'progress 准备失败必须使用稳定错误码'
-pass 'progress prepare failure starts no writer or collector'
+assert_eq "$progress_telemetry_rc" 0 'progress telemetry persistence failure must not fail capture'
+[[ -e "$MOCK_UPLOAD_FORMAT_CALLED" && -e "$MOCK_CLONE_STARTED" && -f "$tmp/capture-image/d1p1.img" ]] || fail 'telemetry failure must not skip the real capture pipeline'
+[[ ! -e "$tmp/capture-telemetry-error" ]] || fail 'telemetry persistence failure must not call handleError'
+pass 'progress telemetry failure keeps capture writer and producer successful'
 
 # savePartition 必须在移动产物、进入下一分区前同步等待 writer；其失败会进入
 # RootPXE attention，而不是落到最终 imgcomplete 成功回调。
@@ -600,6 +621,7 @@ set +e
     ROOTPXE_PROGRESS_STATUS_FILE="$tmp/capture-progress"
     export ROOTPXE_PROGRESS_STATUS_FILE
     writer_pids=()
+    mkdir -p "$tmp/capture-image"
     savePartition /dev/mockp1 1 "$tmp/capture-image"
 ) 
 save_rc=$?

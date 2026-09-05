@@ -22,35 +22,98 @@ esac
 prog_stage="running"
 case "${type:-}" in
     down|[Dd][Oo][Ww][Nn]) prog_stage=restore ;;
-    up|[Uu][Pp]) prog_stage=upload_complete ;;
+    up|[Uu][Pp]) prog_stage=capture ;;
 esac
 
-usleep 3000000
-last_pct=0
-while :; do
-    tmpfile="/tmp/status.pxeos"
-    [[ -z $mac ]] && continue
+rootpxe_progress_sleep() { command -v usleep >/dev/null 2>&1 && usleep 3000000 || sleep 3; }
+rootpxe_progress_apply_events() {
+    local snapshot_file=/tmp/pxeos.partition-progress.json events_dir=/tmp/pxeos.partition-progress.events event tmp event_type key event_status event_percent event_message event_run event_generation
+    [[ -r $snapshot_file && -d $events_dir ]] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    for event in "$events_dir"/event-*.json; do
+        [[ -f $event ]] || continue
+        event_type=$(jq -r '.event // ""' "$event" 2>/dev/null) || continue
+        case $event_type in
+            current)
+                event_key=$(jq -r '.key // ""' "$event" 2>/dev/null); event_run=$(jq -r '.run // ""' "$event" 2>/dev/null); event_generation=$(jq -r '.generation // ""' "$event" 2>/dev/null)
+                if [[ -n $event_key && $event_run == "$progress_run_id" && $event_generation =~ ^[0-9]+$ ]]; then active_key=$event_key; active_generation=$event_generation; last_pct=0; fi
+                rm -f -- "$event"
+                ;;
+            clear) active_key=''; active_generation=''; last_pct=0; rm -f -- "$event" ;;
+            item)
+                key=$(jq -r '.key // ""' "$event" 2>/dev/null); event_status=$(jq -r '.status // ""' "$event" 2>/dev/null); event_percent=$(jq -c '.percent' "$event" 2>/dev/null); event_message=$(jq -r '.message // ""' "$event" 2>/dev/null)
+                [[ -n $key && $event_status =~ ^(pending|preparing|running|finalizing|completed|skipped|failed|cancelled)$ ]] || { rm -f -- "$event"; continue; }
+                tmp="${snapshot_file}.tmp"
+                if jq -c --arg key "$key" --arg status "$event_status" --arg message "$event_message" --argjson percent "$event_percent" '(.items[] | select(.key==$key)) |= (.status=$status | .message=$message | (if $percent == null then del(.progress) else .progress=$percent end) | .sequence=(.sequence+1))' "$snapshot_file" >"$tmp" 2>/dev/null && mv "$tmp" "$snapshot_file"; then
+                    rootpxe_progress_send_snapshot
+                else
+                    rm -f -- "$tmp"
+                fi
+                rm -f -- "$event"
+                ;;
+            *) rm -f -- "$event" ;;
+        esac
+    done
+}
+rootpxe_progress_sample_current() {
+    local record prefix run generation pct message snapshot_file=/tmp/pxeos.partition-progress.json tmp
+    [[ -n ${active_key:-} && ${active_generation:-} =~ ^[0-9]+$ && -r $snapshot_file ]] || return 0
     case $progress_mode in
         partclone)
-            IFS= read -r status <"$tmpfile" || status=''
-            pct=$(rootpxe_partclone_progress_next_pct "$tmpfile" "$progress_run_id" "$last_pct") || pct=$last_pct
+            IFS= read -r record </tmp/status.pxeos || return 0; IFS='|' read -r prefix run generation pct message <<<"$record"
+            [[ $prefix == PXEOS_PROGRESS_V1 && $run == "$progress_run_id" && $generation == "$active_generation" && $pct =~ ^[0-9]{1,3}$ && $pct -le 100 ]] || return 0
             ;;
-        partimage)
-            status=$(rootpxe_partimage_progress_status_line "$tmpfile")
-            pct=$(rootpxe_partimage_progress_next_pct "$tmpfile" "$last_pct") || pct=$last_pct
-            ;;
+        partimage) pct=$(rootpxe_partimage_progress_next_pct /tmp/status.pxeos "$last_pct") || return 0 ;;
     esac
+    [[ $pct =~ ^[0-9]{1,3}$ && $pct -ge ${last_pct:-0} && $pct != "${last_pct:-0}" ]] || return 0
+    tmp="${snapshot_file}.tmp"
+    jq -c --arg key "$active_key" --argjson pct "$pct" '(.items[] | select(.key==$key)) |= (if .status == "running" then .progress=$pct | .message="数据复制中" | .sequence=(.sequence+1) else . end)' "$snapshot_file" >"$tmp" 2>/dev/null && mv "$tmp" "$snapshot_file" || { rm -f -- "$tmp"; return 0; }
     last_pct=$pct
-    b64=$(printf '%s' "$status" | base64)
-    curl -Lks \
-        --data-urlencode "taskid=$taskid" \
-        --data-urlencode "token=$task_token" \
-        --data-urlencode "mac=$mac" \
-        --data-urlencode "sysuuid=$sysuuid" \
-        --data-urlencode "progress=$pct" \
-        --data-urlencode "stage=$prog_stage" \
-        --data-urlencode "message=$b64" \
-        "${api_base}progress" >/dev/null 2>&1 || true
-    usleep 3000000
+}
+rootpxe_progress_heartbeat_active_item() {
+    local snapshot_file=/tmp/pxeos.partition-progress.json tmp
+    [[ -n ${active_key:-} && -r $snapshot_file ]] || return 1
+    tmp="${snapshot_file}.tmp"
+    # The backend treats a higher sequence with unchanged state/progress as a
+    # heartbeat: it refreshes progressUpdatedAt without creating a task log.
+    jq -c --arg key "$active_key" '(.items[] | select(.key==$key)) |= (.sequence=(.sequence+1))' "$snapshot_file" >"$tmp" 2>/dev/null && mv "$tmp" "$snapshot_file" || { rm -f -- "$tmp"; return 1; }
+    return 0
+}
+rootpxe_progress_send_snapshot() {
+    local snapshot_file=/tmp/pxeos.partition-progress.json snapshot
+    [[ -r $snapshot_file ]] || return 0
+    snapshot=$(cat "$snapshot_file" 2>/dev/null) || return 0
+    [[ -n $snapshot ]] || return 0
+    curl -Lks --connect-timeout 3 --max-time 8 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "progressProtocol=2" --data-urlencode "stage=$prog_stage" --data-urlencode "snapshot=$snapshot" "${api_base}progress" >/dev/null 2>&1 || true
+    return 0
+}
+rootpxe_progress_sleep
+last_pct=0; last_snapshot_hash=""; last_snapshot_sent=0; active_key=''; active_generation=''
+while :; do
+    [[ -n $mac ]] || { rootpxe_progress_sleep; continue; }
+    rootpxe_progress_apply_events; rootpxe_progress_sample_current
+    snapshot_file=/tmp/pxeos.partition-progress.json; now=$(date +%s)
+    if [[ -r $snapshot_file ]]; then
+        snapshot=$(cat "$snapshot_file" 2>/dev/null); snapshot_hash=$(printf '%s' "$snapshot" | sha256sum 2>/dev/null | awk '{print $1}')
+        if [[ -n $snapshot_hash && $snapshot_hash != "$last_snapshot_hash" ]]; then
+            rootpxe_progress_send_snapshot
+            last_snapshot_hash="$snapshot_hash"; last_snapshot_sent=$now
+        elif [[ -n $snapshot_hash && $((now-last_snapshot_sent)) -ge 15 ]]; then
+            # Do not churn every 3-second sampling cycle.  A living active
+            # item sends exactly one sequence-only heartbeat every 15 seconds.
+            if rootpxe_progress_heartbeat_active_item; then
+                rootpxe_progress_send_snapshot
+                last_snapshot_hash=$(cat "$snapshot_file" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')
+            fi
+            # With no active item there is no synthetic heartbeat.  Record the
+            # check time to avoid retrying the same inactive snapshot every 3s.
+            last_snapshot_sent=$now
+        fi
+    else
+        case $progress_mode in partclone) pct=$(rootpxe_partclone_progress_next_pct /tmp/status.pxeos "$progress_run_id" "$last_pct") || pct=$last_pct ;; partimage) pct=$(rootpxe_partimage_progress_next_pct /tmp/status.pxeos "$last_pct") || pct=$last_pct ;; esac
+        last_pct=$pct; b64=$(printf '%s' "${message:-}" | base64)
+        curl -Lks --connect-timeout 3 --max-time 8 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "sysuuid=$sysuuid" --data-urlencode "progress=$pct" --data-urlencode "stage=$prog_stage" --data-urlencode "message=$b64" "${api_base}progress" >/dev/null 2>&1 || true
+    fi
+    rootpxe_progress_sleep
 done
 IFS=$oIFS

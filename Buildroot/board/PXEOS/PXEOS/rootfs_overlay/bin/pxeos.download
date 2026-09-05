@@ -1,6 +1,7 @@
 #!/bin/bash
 . /usr/share/pxeos/lib/funcs.sh
 . /bin/pxeos.checkin
+rootpxe_partition_progress_initialize_runtime
 . /bin/pxeos.mount
 . /bin/pxeos.checkmount
 . /bin/pxeos.checkimgvar
@@ -21,7 +22,10 @@ layPartSize="-1s"
 progress_mode=partclone
 if [[ ${imgLegacy:-${imgFormat:-}} == 1 ]]; then
     progress_mode=partimage
+    # Partimage has no Partclone decoder generation.  Keep a stable generation
+    # so the partition reporter can bind its legacy status samples to this run.
     rootpxe_partclone_progress_run_id=partimage-legacy
+    rootpxe_partclone_progress_generation=0
 else
     rootpxe_partclone_progress_initialize || handleError "PXEOS_STAGE=restore CODE=RESTORE_PROGRESS_SETUP_FAILED REASON=unable_to_initialize_partclone_progress"
 fi
@@ -208,6 +212,13 @@ if [[ ${imgType:-} == [Nn] ]]; then
     rootpxe_restore_deployment_boot_code "$hd" 1 "$imagePath" "$originalSchemaFile" || handleError "PXEOS_STAGE=layout_apply CODE=BOOT_CODE_RESTORE_FAILED REASON=boot_code_metadata_invalid"
 fi
 [[ $nombr -ne 1 ]] && rootpxe_stage prepare_partitions "partition layout prepared"
+# Build one immutable, full plan only after the permitted target layout exists.
+# Raw dd remains a single disk item because it has no safe internal boundaries.
+case ${imgType:-} in
+    dd) rootpxe_partition_progress_plan_whole_disk "$hd" 1 ;;
+    mpa) rootpxe_partition_progress_plan_disks $disks ;;
+    n|mps) rootpxe_partition_progress_plan_disk "$hd" 1 ;;
+esac
 if [[ $imgPartitionType != mbr ]]; then
     # LVM PVs have no raw dNpN payload.  Restore ordinary image partitions
     # first when present, then reconstruct the permitted LVM metadata/LVs.

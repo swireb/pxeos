@@ -84,4 +84,26 @@ assert_eq "$(rootpxe_partimage_progress_next_pct "$ROOTPXE_PROGRESS_STATUS_FILE"
 assert_eq "$(rootpxe_partimage_progress_next_pct "$ROOTPXE_PROGRESS_STATUS_FILE" 73)" 73 'empty Partimage sample must retain progress'
 pass 'legacy Partimage progress remains separate'
 
+# Snapshot persistence is only telemetry: a write error must not turn a
+# successful Partclone reader/producer/writer pipeline into a failed task.
+ROOTPXE_PROGRESS_STATUS_FILE="$tmp/missing/status.pxeos"
+if ! rootpxe_partclone_progress_write 99 partclone_progress; then
+    fail 'telemetry status-file write must be best effort'
+fi
+pass 'telemetry write failure does not fail the imaging pipeline'
+
+# A disappeared console must not stop draining Partclone stderr: returning
+# early would back-pressure the producer and falsely fail the capture.
+ROOTPXE_PROGRESS_STATUS_FILE="$tmp/console-failure.status"
+rootpxe_partclone_progress_initialize
+console_run=$rootpxe_partclone_progress_run_id
+console_fifo="$tmp/console-failure.fifo"
+mkfifo "$console_fifo"
+( printf 'Elapsed: 00:00:03, Remaining: 00:00:04, Completed:  42.50%%,   1.00MB/s,\r' >"$console_fifo" ) &
+console_writer=$!
+rootpxe_partclone_progress_decode "$console_fifo" 2>/dev/full || fail 'decoder must continue when console stderr is unavailable'
+wait "$console_writer" || fail 'console-failure fixture writer was back-pressured'
+assert_eq "$(rootpxe_partclone_progress_next_pct "$ROOTPXE_PROGRESS_STATUS_FILE" "$console_run" 0)" 42 'decoder must retain samples after console failure'
+pass 'console failure remains a non-blocking telemetry fault'
+
 printf 'PASS: Partclone official progress regression\n'

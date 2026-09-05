@@ -219,6 +219,9 @@ rootpxe_apply_json_checkin() {
     rootpxe_json_assign "$document" errorMsg '.error' || return 1
     [[ -z $errorMsg ]] || handleError "RootPXE checkin failed: $errorMsg ($0)"
     rootpxe_json_assign "$document" taskid '.taskId // .taskid' || return 1
+    rootpxe_json_assign "$document" progress_attempt '.progressAttempt // .progress_attempt // 1' || return 1
+    [[ $progress_attempt =~ ^[1-9][0-9]*$ ]] || return 1
+    rootpxe_partition_progress_enabled=$(jq -r 'if ((.progressProtocolVersions // []) | index(2)) then "yes" else "no" end' <<<"$document" 2>/dev/null) || return 1
     rootpxe_json_assign_text "$document" execution_token '.executionToken // .execution_token' || return 1
     rootpxe_json_assign_text "$document" taskType '.type' || return 1
     rootpxe_json_assign_text "$document" pxe_type '.pxeType // .pxe_type' || return 1
@@ -436,7 +439,7 @@ checkin_rootpxe() {
     imgType=${img_type:-${imgType:-}}; imgPartitionType=${img_partition_type:-${imgPartitionType:-}}
     imgFormat=${img_format:-${imgFormat:-}}; PIGZ_COMP=${pigz_comp:-${PIGZ_COMP:-}}; hostName=${hostName:-${host_name:-}}
     [[ -z ${changeHostname:-} || ${changeHostname:-} == true || ${changeHostname:-} == false ]] || handleError "Invalid changeHostname ($0)"
-    export taskType type pxeType imgType imgPartitionType imgFormat PIGZ_COMP hostName changeHostname resumeStage schemaRevision schemaHash captureBackupName preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256
+    export taskType type pxeType imgType imgPartitionType imgFormat PIGZ_COMP hostName changeHostname progress_attempt rootpxe_partition_progress_enabled resumeStage schemaRevision schemaHash captureBackupName preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256
     protocol=${protocol,,}
     [[ $protocol == nfs || $protocol == smb ]] || handleError "Invalid storage protocol ($0)"
     storage_server=${storage_server:-$storageip}

@@ -1,6 +1,7 @@
 #!/bin/bash
 . /usr/share/pxeos/lib/funcs.sh
 . /bin/pxeos.checkin
+rootpxe_partition_progress_initialize_runtime
 . /bin/pxeos.mount
 . /bin/pxeos.checkmount
 . /bin/pxeos.checkmountdrivesize
@@ -99,6 +100,7 @@ rootpxe_capture_single_disk() {
     parts=""
     getPartitions "$hd"
     [[ ${#parts} -gt 0 ]] || handleError "No partitions found ($0)\n   Args Passed: $*"
+    rootpxe_partition_progress_plan_disk "$hd" 1
 
     dots "Saving original partition table"
     savePartitionTablesAndBootLoaders "$hd" 1 "$imagePath" "$osid" "$imgPartitionType"
@@ -124,6 +126,7 @@ beginUpload() {
             parts=""
             getPartitions "$hd"
             [[ ${#parts} -lt 1 ]] && handleError "No partitions found ($0)\n   Args Passed: $*"
+            rootpxe_partition_progress_plan_disk "$hd" 1
             rootpxe_console_message INFO "Processing disk device: $hd."
             debugPause
             savePartitionTablesAndBootLoaders "$hd" 1 "$imagePath" "$osid" "$imgPartitionType"
@@ -135,6 +138,7 @@ beginUpload() {
             ;;
         mpa)
             disk_number=1
+            rootpxe_partition_progress_plan_disks "${rootpxe_capture_disks[@]}"
             for disk in "${rootpxe_capture_disks[@]}"; do
                 rootpxe_verify_disk_permit_binding "$disk" capture_read_write || handleError "PXEOS_STAGE=permit CODE=CAPTURE_BINDING_CHANGED REASON=source_disk_identity_changed"
                 parts=""
@@ -160,6 +164,8 @@ beginUpload() {
             ;;
         dd)
             rootpxe_verify_disk_permit_binding "$hd" capture_read_write || handleError "PXEOS_STAGE=permit CODE=CAPTURE_BINDING_CHANGED REASON=source_disk_identity_changed"
+            rootpxe_partition_progress_plan_whole_disk "$hd" 1
+            rootpxe_partition_progress_item "d1:disk" preparing 0 "准备整盘抓取"
             imgpart="$imagePath/$img"
             # A raw image may be intentionally unpartitioned.  Keep a best
             # effort sfdisk dump for the read-only inventory but never turn a
@@ -176,6 +182,8 @@ beginUpload() {
                 rm -f /tmp/pigz1 >/dev/null 2>&1 || true
                 handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_SETUP_FAILED REASON=unable_to_start_capture_writer"
             fi
+            rootpxe_partition_progress_item "d1:disk" running 0 "开始整盘复制"
+            rootpxe_partition_progress_current_item "d1:disk"
             rootpxe_partclone_progress_start_collector
             if LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.imager "${rootpxe_partclone_progress_args[@]}" -c -s "$hd" -O /tmp/pigz1 -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"; then
                 capture_exitcode=0
@@ -201,6 +209,8 @@ beginUpload() {
                 handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_FAILED REASON=storage_writer_or_compressor_failed"
             fi
             rm /tmp/pigz1 >/dev/null 2>&1 || handleError "PXEOS_STAGE=capture CODE=CAPTURE_ARTIFACT_FINALIZE_FAILED REASON=unable_to_cleanup_capture_fifo"
+            rootpxe_partition_progress_item "d1:disk" completed 100 "整盘抓取完成"
+            rootpxe_partition_progress_clear_current_item
             clearScreen
             ;;
     esac

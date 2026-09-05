@@ -10,9 +10,13 @@ rootpxe_partclone_progress_write() {
     [[ ${rootpxe_partclone_progress_run_id:-} =~ ^[A-Za-z0-9._-]{8,128}$ ]] || return 1
     [[ ${rootpxe_partclone_progress_generation:-} =~ ^[0-9]+$ ]] || return 1
     [[ $pct =~ ^[0-9]{1,3}$ && $pct -le 100 ]] || return 1
+    # Progress persistence is telemetry.  A full /tmp or transient status
+    # file failure must not turn a successful reader/producer/writer pipeline
+    # into a failed imaging task.
     printf 'PXEOS_PROGRESS_V1|%s|%s|%s|%s\n' \
         "$rootpxe_partclone_progress_run_id" "$rootpxe_partclone_progress_generation" "$pct" "$message" \
-        >"$ROOTPXE_PROGRESS_STATUS_FILE"
+        >"$ROOTPXE_PROGRESS_STATUS_FILE" 2>/dev/null || true
+    return 0
 }
 
 rootpxe_partclone_progress_initialize() {
@@ -71,12 +75,16 @@ rootpxe_partclone_progress_sample_pct() {
 }
 
 rootpxe_partclone_progress_decode() {
-    local fifo="$1" line='' char pct
+    local fifo="$1" line='' char pct console_unavailable=no
     # Read one byte at a time so a pipe-buffered text transformer cannot defer
     # status until Partclone exits.  The retained parser buffer is capped;
     # console stderr still receives every byte and image stdout is untouched.
+    # Console rendering is telemetry too: if it disappears, keep draining the
+    # FIFO so it cannot back-pressure Partclone or change writer semantics.
     while IFS= read -r -d '' -n 1 char; do
-        printf '%s' "$char" >&2 || return 1
+        if [[ $console_unavailable != yes ]]; then
+            printf '%s' "$char" >&2 || console_unavailable=yes
+        fi
         if [[ $char == $'\r' || $char == $'\n' ]]; then
             if pct=$(rootpxe_partclone_progress_sample_pct "$line"); then
                 rootpxe_partclone_progress_write "$pct" partclone_progress || return 1

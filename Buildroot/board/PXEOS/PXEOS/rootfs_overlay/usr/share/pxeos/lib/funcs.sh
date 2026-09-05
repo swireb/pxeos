@@ -12,6 +12,236 @@ rootpxe_windows_display_registry_lib=/usr/share/pxeos/lib/windows-display-regist
 rootpxe_progress_lib=/usr/share/pxeos/lib/partclone-progress.sh
 [[ -r $rootpxe_progress_lib ]] || rootpxe_progress_lib="$(dirname "${BASH_SOURCE[0]}")/partclone-progress.sh"
 . "$rootpxe_progress_lib"
+# 分区进度是旁路遥测；业务流程仅追加状态事件，statusreporter 是快照唯一写者。
+# 这样采样不会并发覆盖完成状态，缺少 jq、队列写入或上报失败也不影响成像。
+rootpxe_partition_progress_initialize_runtime() {
+    [[ ${rootpxe_partition_progress_enabled:-no} == yes ]] || return 0
+    rm -f -- /tmp/pxeos.partition-progress.json /tmp/pxeos.partition-progress.json.tmp
+    rm -rf -- /tmp/pxeos.partition-progress.events
+    mkdir -p /tmp/pxeos.partition-progress.events >/dev/null 2>&1 || true
+    return 0
+}
+rootpxe_partition_progress_queue_event() {
+    local event="$1" key="${2:-}" status="${3:-}" percent="${4:--}" message="${5:-}" run="${6:-}" generation="${7:-}" dir=/tmp/pxeos.partition-progress.events tmp sequence counter current
+    command -v jq >/dev/null 2>&1 || return 0
+    [[ ${rootpxe_partition_progress_enabled:-no} == yes ]] || return 0
+    mkdir -p "$dir" >/dev/null 2>&1 || return 0
+    counter="$dir/.sequence"; current=$(cat "$counter" 2>/dev/null || true); [[ $current =~ ^[0-9]+$ ]] || current=0
+    sequence=$(printf '%010d' "$((current + 1))")
+    printf '%s\n' "$((current + 1))" >"${counter}.tmp" 2>/dev/null && mv "${counter}.tmp" "$counter" || return 0
+    tmp=$(mktemp "$dir/.event-${sequence}.XXXXXX" 2>/dev/null) || return 0
+    jq -cn --arg event "$event" --arg key "$key" --arg status "$status" --arg message "${message//$'\n'/ }" --arg run "$run" --arg generation "$generation" --argjson percent "$( [[ $percent =~ ^[0-9]{1,3}$ ]] && printf '%s' "$percent" || printf 'null' )" '{event:$event,key:$key,status:$status,percent:$percent,message:$message,run:$run,generation:$generation}' >"$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 0; }
+    mv "$tmp" "$dir/event-${sequence}.json" >/dev/null 2>&1 || rm -f -- "$tmp"
+    return 0
+}
+rootpxe_partition_progress_source_metadata() (
+    # Capture runs before it has published image metadata, so source device
+    # facts are authoritative.  Deployment must instead use immutable schema
+    # or captured MPA sidecars and never inspect an empty/resized target.
+    local disk_number="$1" number="$2" part="$3" source_bytes=0 fs='' role='' schema_kind='' table_file table_size table_sector table_type="" table_meta swap_file is_capture=no
+    [[ ${type:-} =~ ^([Uu][Pp]|up)$ || ${pxeType:-} =~ ^([Uu][Pp]|up)$ ]] && is_capture=yes
+    if [[ $is_capture == yes ]]; then
+        source_bytes=$(blockdev --getsize64 "$part" 2>/dev/null || true)
+        [[ $source_bytes =~ ^[1-9][0-9]*$ ]] || source_bytes=0
+        fs=$(blkid -s TYPE -o value "$part" 2>/dev/null | tr -d '\r\n')
+        getPartType "$part" >/dev/null 2>&1 || true
+        table_type=${parttype:-}
+    else
+        if [[ -r ${originalSchemaFile:-} ]]; then
+            IFS='|' read -r source_bytes fs role schema_kind < <(jq -r --argjson number "$number" '
+              .logicalSectorBytes as $sector |
+              [.partitions[]? | select(.number == $number)][0] as $part |
+              if $part == null then empty else
+                [($part.originalBytes // (($part.originalSectors // 0) * $sector)), ($part.fs // ""), ($part.role // ""), ($part.kind // "")] | join("|")
+              end' "$originalSchemaFile" 2>/dev/null)
+        fi
+        table_file="${imagePath:-}/d${disk_number}.partitions"
+        if [[ ! $source_bytes =~ ^[1-9][0-9]*$ && -r $table_file ]]; then
+            table_meta=$(awk -v wanted="$number" '
+              /^sector-size:[[:space:]]*/ { sector=$2 }
+              /start=/ {
+                name=$1; sub(/:.*/, "", name); suffix=name; sub(/^.*[^0-9]/, "", suffix)
+                if (suffix != wanted) next
+                row=$0; size=""; type=""
+                if (match(row, /size=[[:space:]]*[0-9]+/)) { size=substr(row, RSTART); sub(/^size=[[:space:]]*/, "", size); sub(/[,[:space:]].*$/, "", size) }
+                if (match(row, /type=[[:space:]]*[^,[:space:]]+/)) { type=substr(row, RSTART); sub(/^type=[[:space:]]*/, "", type); sub(/[,[:space:]].*$/, "", type) }
+              }
+              END { if (size ~ /^[1-9][0-9]*$/ && sector ~ /^[1-9][0-9]*$/) printf "%s\t%s\t%s\n", size, sector, type }
+            ' "$table_file" 2>/dev/null)
+            IFS=$'\t' read -r table_size table_sector table_type <<<"$table_meta"
+            [[ $table_size =~ ^[1-9][0-9]*$ && $table_sector =~ ^[1-9][0-9]*$ ]] && source_bytes=$((table_size * table_sector))
+        fi
+        swap_file="${imagePath:-}/d${disk_number}.original.swapuuids"
+        [[ -r $swap_file ]] && awk -v number="$number" '$1 == number || $1 == "a" number { found=1; exit } END { exit(found ? 0 : 1) }' "$swap_file" 2>/dev/null && fs=swap
+    fi
+    case "${role:-$schema_kind}:${schema_kind}:${table_type,,}" in
+        extended_container:*|*:extended:*|*:*:5|*:*:f|*:*:85|*:*:0x5|*:*:0xf|*:*:0x85) schema_kind=container ;;
+        *) schema_kind=partition ;;
+    esac
+    if [[ $fs == swap || $role == swap ]]; then fs=swap; schema_kind=swap; source_bytes=0; fi
+    [[ $source_bytes =~ ^[0-9]+$ ]] || source_bytes=0
+    printf '%s|%s|%s\n' "$source_bytes" "$fs" "$schema_kind"
+)
+rootpxe_partition_progress_plan_disk() (
+    [[ ${rootpxe_partition_progress_enabled:-no} == yes ]] || return 0
+    local disk="$1" disk_number="$2" part number source_bytes fs source_kind items='[]' plan tmp kind item_status item_message lv_name lv_uuid lv_path lv_size lv_fs parent_key
+    command -v jq >/dev/null 2>&1 || return 0
+    [[ ${progress_attempt:-} =~ ^[1-9][0-9]*$ ]] || return 0
+    getPartitions "$disk" || return 0
+    for part in $parts; do
+        getPartitionNumber "$part" || return 0; number=$part_number
+        IFS='|' read -r source_bytes fs source_kind < <(rootpxe_partition_progress_source_metadata "$disk_number" "$number" "$part")
+        kind=$source_kind; [[ $kind == container ]] && source_bytes=0; item_status=pending; item_message=''
+        if [[ ${imgPartitionType:-all} != all && ${imgPartitionType:-} != "$number" ]]; then
+            item_status=skipped; item_message='未选择此分区'
+        elif [[ $kind == container ]]; then
+            item_status=skipped; item_message='扩展分区容器'
+        fi
+        [[ ${rootpxe_lvm_active:-no} == yes && $part == "${rootpxe_lvm_pv_path:-}" ]] && { kind=container; source_bytes=0; item_status=pending; item_message=''; }
+        [[ -r ${rootpxe_resolved_lvm_layout_file:-} ]] && jq -e --argjson number "$number" '.pv.partitionNumber == $number' "$rootpxe_resolved_lvm_layout_file" >/dev/null 2>&1 && { kind=container; source_bytes=0; item_status=pending; item_message=''; }
+        items=$(jq -c --arg key "d${disk_number}:p${number}" --arg label "$part" --arg kind "$kind" --arg fs "$fs" --arg status "$item_status" --arg message "$item_message" --argjson disk "$disk_number" --argjson number "$number" --argjson weight "$source_bytes" '. + [{key:$key,kind:$kind,diskIndex:$disk,partitionNumber:$number,label:$label,filesystem:$fs,weightBytes:$weight,status:$status,sequence:0} + (if ($message|length)>0 then {message:$message} else {} end)]' <<<"$items" 2>/dev/null) || return 0
+        if [[ $kind == container && -r ${rootpxe_lvm_lv_facts_file:-} ]]; then
+            while IFS='|' read -r lv_name lv_uuid lv_path lv_size; do
+                [[ $lv_size =~ ^[1-9][0-9]*$ && -n $lv_uuid ]] || continue
+                lv_fs=$(blkid -s TYPE -o value "$lv_path" 2>/dev/null | tr -d '\r\n')
+                case $lv_fs in ext2|ext3|ext4|xfs) kind=lv ;; swap) kind=swap; lv_size=0 ;; *) continue ;; esac
+                parent_key="d${disk_number}:p${number}"
+                items=$(jq -c --arg key "${parent_key}:lv:${lv_uuid}" --arg parent "$parent_key" --arg label "$lv_path" --arg fs "$lv_fs" --arg kind "$kind" --argjson disk "$disk_number" --argjson number "$number" --argjson weight "$lv_size" '. + [{key:$key,kind:$kind,diskIndex:$disk,partitionNumber:$number,label:$label,filesystem:$fs,weightBytes:$weight,parentKey:$parent,status:"pending",sequence:0}]' <<<"$items" 2>/dev/null) || return 0
+            done <"$rootpxe_lvm_lv_facts_file"
+        elif [[ $kind == container && -r ${rootpxe_resolved_lvm_layout_file:-} ]]; then
+            while IFS=$'\t' read -r lv_name lv_uuid lv_fs lv_size; do
+                lv_size=${lv_size//$'\r'/}
+                [[ $lv_size =~ ^[1-9][0-9]*$ && -n $lv_uuid ]] || continue
+                case $lv_fs in ext2|ext3|ext4|xfs) kind=lv ;; swap) kind=swap; lv_size=0 ;; *) continue ;; esac
+                parent_key="d${disk_number}:p${number}"; lv_path="/dev/$(jq -r '.vg.name' "$rootpxe_resolved_lvm_layout_file" 2>/dev/null)/$lv_name"
+                items=$(jq -c --arg key "${parent_key}:lv:${lv_uuid}" --arg parent "$parent_key" --arg label "$lv_path" --arg fs "$lv_fs" --arg kind "$kind" --argjson disk "$disk_number" --argjson number "$number" --argjson weight "$lv_size" '. + [{key:$key,kind:$kind,diskIndex:$disk,partitionNumber:$number,label:$label,filesystem:$fs,weightBytes:$weight,parentKey:$parent,status:"pending",sequence:0}]' <<<"$items" 2>/dev/null) || return 0
+            done < <(jq -r '.volumes[] | [.name,.uuid,.fs,(.originalBytes // .resolvedBytes)] | @tsv' "$rootpxe_resolved_lvm_layout_file" 2>/dev/null)
+        fi
+    done
+    [[ $items != '[]' ]] || return 0
+    plan="${taskid:-task}-${progress_attempt}-${RANDOM}"; tmp=/tmp/pxeos.partition-progress.json.tmp
+    jq -cn --arg plan "$plan" --argjson attempt "$progress_attempt" --argjson items "$items" '{version:2,planId:$plan,attempt:$attempt,fullPlan:true,items:$items}' >"$tmp" 2>/dev/null || return 0
+    mv "$tmp" /tmp/pxeos.partition-progress.json >/dev/null 2>&1 || rm -f -- "$tmp"
+    return 0
+)
+rootpxe_partition_progress_plan_disks() (
+    [[ ${rootpxe_partition_progress_enabled:-no} == yes ]] || return 0
+    local disk part number source_bytes fs kind items='[]' disk_number=1 tmp plan item_status item_message
+    command -v jq >/dev/null 2>&1 || return 0; [[ ${progress_attempt:-} =~ ^[1-9][0-9]*$ ]] || return 0
+    for disk in "$@"; do
+        getPartitions "$disk" || return 0
+        for part in $parts; do
+            getPartitionNumber "$part" || return 0; number=$part_number
+            IFS='|' read -r source_bytes fs kind < <(rootpxe_partition_progress_source_metadata "$disk_number" "$number" "$part")
+            [[ $kind == container ]] && source_bytes=0
+            item_status=pending; item_message=''
+            if [[ ${imgPartitionType:-all} != all && ${imgPartitionType:-} != "$number" ]]; then item_status=skipped; item_message='未选择此分区'
+            elif [[ $kind == container ]]; then item_status=skipped; item_message='扩展分区容器'; fi
+            items=$(jq -c --arg key "d${disk_number}:p${number}" --arg label "$part" --arg fs "$fs" --arg kind "$kind" --arg status "$item_status" --arg message "$item_message" --argjson disk "$disk_number" --argjson number "$number" --argjson weight "$source_bytes" '. + [{key:$key,kind:$kind,diskIndex:$disk,partitionNumber:$number,label:$label,filesystem:$fs,weightBytes:$weight,status:$status,sequence:0} + (if ($message|length)>0 then {message:$message} else {} end)]' <<<"$items" 2>/dev/null) || return 0
+        done
+        disk_number=$((disk_number+1))
+    done
+    [[ $items != '[]' ]] || return 0; plan="${taskid:-task}-${progress_attempt}-${RANDOM}"; tmp=/tmp/pxeos.partition-progress.json.tmp
+    jq -cn --arg plan "$plan" --argjson attempt "$progress_attempt" --argjson items "$items" '{version:2,planId:$plan,attempt:$attempt,fullPlan:true,items:$items}' >"$tmp" 2>/dev/null || return 0
+    mv "$tmp" /tmp/pxeos.partition-progress.json >/dev/null 2>&1 || rm -f -- "$tmp"
+    return 0
+)
+rootpxe_partition_progress_plan_whole_disk() (
+    [[ ${rootpxe_partition_progress_enabled:-no} == yes ]] || return 0
+    local disk="$1" disk_number="$2" bytes plan tmp
+    command -v jq >/dev/null 2>&1 || return 0; [[ ${progress_attempt:-} =~ ^[1-9][0-9]*$ ]] || return 0
+    bytes=$(blockdev --getsize64 "$disk" 2>/dev/null) || return 0; [[ $bytes =~ ^[1-9][0-9]*$ ]] || return 0
+    plan="${taskid:-task}-${progress_attempt}-${RANDOM}"; tmp=/tmp/pxeos.partition-progress.json.tmp
+    jq -cn --arg plan "$plan" --argjson attempt "$progress_attempt" --arg key "d${disk_number}:disk" --arg label "$disk" --argjson disk "$disk_number" --argjson weight "$bytes" '{version:2,planId:$plan,attempt:$attempt,fullPlan:true,items:[{key:$key,kind:"disk",diskIndex:$disk,label:$label,weightBytes:$weight,status:"pending",sequence:0}]}' >"$tmp" 2>/dev/null || return 0
+    mv "$tmp" /tmp/pxeos.partition-progress.json >/dev/null 2>&1 || rm -f -- "$tmp"
+    return 0
+)
+rootpxe_partition_progress_swap_uuid_saved() {
+    local uuid_file="$1" number="$2" uuid
+    [[ -r $uuid_file && $number =~ ^[1-9][0-9]*$ ]] || return 1
+    uuid=$(awk -v number="$number" '$1 == number { print $2; exit }' "$uuid_file" 2>/dev/null)
+    [[ -n $uuid ]]
+}
+rootpxe_partition_progress_item() {
+    local key="$1" status="$2" percent="${3:--}" message="${4:-}"
+    [[ -n $key && $status =~ ^(pending|preparing|running|finalizing|completed|skipped|failed|cancelled)$ ]] || return 0
+    [[ $percent == - || ( $percent =~ ^[0-9]{1,3}$ && $percent -le 100 ) ]] || return 0
+    rootpxe_partition_progress_queue_event item "$key" "$status" "$percent" "$message"
+    return 0
+}
+rootpxe_partition_progress_current_item() {
+    [[ -n ${1:-} ]] || return 0
+    rootpxe_partition_progress_queue_event current "$1" '' '' '' "${rootpxe_partclone_progress_run_id:-}" "${rootpxe_partclone_progress_generation:-}"
+    return 0
+}
+rootpxe_partition_progress_clear_current_item() { rootpxe_partition_progress_queue_event clear; return 0; }
+rootpxe_partition_progress_send_snapshot() {
+    local snapshot="$1" max_time="${2:-8}" stage api_base payload
+    [[ -r $snapshot ]] || return 0
+    [[ $max_time =~ ^[1-9][0-9]*$ ]] || max_time=8
+    (( max_time > 8 )) && max_time=8
+    [[ ${taskid:-} =~ ^[1-9][0-9]*$ && ${task_token:-${execution_token:-}} =~ ^[A-Za-z0-9._~+/=-]{16,512}$ && -n ${mac:-} ]] || return 0
+    payload=$(cat "$snapshot" 2>/dev/null) || return 0
+    [[ -n $payload ]] || return 0
+    stage=capture; [[ ${type:-} =~ ^([Dd][Oo][Ww][Nn]|down)$ ]] && stage=restore
+    api_base="${pxeapi:-${web:-}}"
+    [[ -n $api_base ]] || return 0
+    curl -Lks --connect-timeout 3 --max-time "$max_time" --data-urlencode "taskid=$taskid" --data-urlencode "token=${task_token:-${execution_token:-}}" --data-urlencode "mac=$mac" --data-urlencode "progressProtocol=2" --data-urlencode "stage=$stage" --data-urlencode "snapshot=$payload" "${api_base}progress" >/dev/null 2>&1 || true
+    return 0
+}
+rootpxe_partition_progress_flush() {
+    local snapshot=/tmp/pxeos.partition-progress.json dir=/tmp/pxeos.partition-progress.events event key status percent message tmp started deadline now remaining milestone_timeout reserve=8 post_milestones=yes
+    [[ -r $snapshot ]] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    # This final handoff happens after completeTasking reaped the reporter.  A
+    # healthy link receives every item milestone.  When telemetry stalls, keep
+    # a 15-second total foreground budget and reserve time for the final state;
+    # remaining events are still merged locally, but do not delay imaging.
+    started=$(date +%s 2>/dev/null || true)
+    [[ $started =~ ^[0-9]+$ ]] && deadline=$((started + 15)) || deadline=
+    if [[ -d $dir ]]; then
+        for event in "$dir"/event-*.json; do
+            [[ -f $event ]] || continue
+            [[ $(jq -r '.event // ""' "$event" 2>/dev/null) == item ]] || { rm -f -- "$event"; continue; }
+            key=$(jq -r '.key // ""' "$event" 2>/dev/null); status=$(jq -r '.status // ""' "$event" 2>/dev/null); percent=$(jq -c '.percent' "$event" 2>/dev/null); message=$(jq -r '.message // ""' "$event" 2>/dev/null)
+            if [[ $post_milestones == yes && -n $deadline ]]; then
+                now=$(date +%s 2>/dev/null || true)
+                if [[ ! $now =~ ^[0-9]+$ ]] || (( now >= deadline )); then
+                    post_milestones=no
+                else
+                    remaining=$((deadline - now))
+                    if (( remaining <= reserve )); then
+                        post_milestones=no
+                    else
+                        milestone_timeout=$((remaining - reserve))
+                        (( milestone_timeout > 8 )) && milestone_timeout=8
+                    fi
+                fi
+            fi
+            tmp="${snapshot}.tmp"
+            if jq -c --arg key "$key" --arg status "$status" --arg message "$message" --argjson percent "$percent" '(.items[] | select(.key==$key)) |= (.status=$status | .message=$message | (if $percent == null then del(.progress) else .progress=$percent end) | .sequence=(.sequence+1))' "$snapshot" >"$tmp" 2>/dev/null && mv "$tmp" "$snapshot"; then
+                [[ $post_milestones == yes ]] && rootpxe_partition_progress_send_snapshot "$snapshot" "${milestone_timeout:-8}"
+            else
+                rm -f -- "$tmp"
+            fi
+            rm -f -- "$event"
+        done
+    fi
+    if [[ -n $deadline ]]; then
+        now=$(date +%s 2>/dev/null || true)
+        if [[ $now =~ ^[0-9]+$ && $now -lt $deadline ]]; then
+            remaining=$((deadline - now)); (( remaining > 8 )) && remaining=8
+            rootpxe_partition_progress_send_snapshot "$snapshot" "$remaining"
+        else
+            # The foreground budget is exhausted.  Retain one short final
+            # best-effort attempt without holding up completion any longer.
+            rootpxe_partition_progress_send_snapshot "$snapshot" 1 &
+        fi
+    else
+        rootpxe_partition_progress_send_snapshot "$snapshot"
+    fi
+    return 0
+}
 REG_LOCAL_MACHINE_XP="/ntfs/WINDOWS/system32/config/system"
 REG_LOCAL_MACHINE_7="/ntfs/Windows/System32/config/SYSTEM"
 # 1 to turn on massive debugging of partition table restoration
@@ -444,6 +674,7 @@ rootpxe_capture_lvm_volumes() {
     rootpxe_lvm_capture_error_reason=unknown
     [[ ${rootpxe_lvm_active:-no} == yes && ${rootpxe_lvm_captured:-no} != yes ]] || return 0
     rootpxe_lvm_is_pv_partition "$rootpxe_lvm_pv_path" || return 1
+    rootpxe_partition_progress_item "d1:p${rootpxe_lvm_pv_number}" preparing - "准备抓取 LVM 物理卷"
     rootpxe_lvm_capture_status_file=$(mktemp /tmp/rootpxe-lvm-capture-status.XXXXXX) || return 1
     stage=$(mktemp -d "$image_path/.rootpxe-lvm.XXXXXX") || { rm -f -- "$rootpxe_lvm_capture_status_file"; return 1; }
     (
@@ -455,6 +686,7 @@ rootpxe_capture_lvm_volumes() {
         return 1
     fi
     vg_active=yes
+    rootpxe_partition_progress_item "d1:p${rootpxe_lvm_pv_number}" running - "正在抓取 LVM 逻辑卷"
     if declare -F rootpxe_display_metadata_collect_lvm >/dev/null 2>&1; then
         if rootpxe_display_metadata_collect_lvm; then
             :
@@ -493,6 +725,8 @@ rootpxe_capture_lvm_volumes() {
                 rm -f "$fifo"
                 return 1
             fi
+            rootpxe_partition_progress_item "d1:p${rootpxe_lvm_pv_number}:lv:${lv_uuid}" running 0 "开始复制逻辑卷"
+            rootpxe_partition_progress_current_item "d1:p${rootpxe_lvm_pv_number}:lv:${lv_uuid}"
             rootpxe_partclone_progress_start_collector
             if [[ $fs == xfs ]]; then LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.xfs "${rootpxe_partclone_progress_args[@]}" -cs "$lv_path" -O "$fifo" -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"; else LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.extfs "${rootpxe_partclone_progress_args[@]}" -cs "$lv_path" -O "$fifo" -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"; fi
             producer=$?; rootpxe_partclone_progress_wait; progress_decoder=$?; rootpxe_wait_for_writer "$rootpxe_last_writer_pid"; writer=$?
@@ -500,6 +734,10 @@ rootpxe_capture_lvm_volumes() {
             [[ $progress_decoder -eq 0 ]] || { printf '%s|%s\n' LVM_LV_PARTCLONE_FAILED "lv_${lv_name}_${fs}_progress" >"$rootpxe_lvm_capture_status_file"; rm -f "$fifo"; return 1; }
             [[ $writer -eq 0 ]] || { printf '%s|%s\n' LVM_LV_WRITER_FAILED "lv_${lv_name}_${fs}" >"$rootpxe_lvm_capture_status_file"; rm -f "$fifo"; return 1; }
             mv "$stage/$artifact.000" "$stage/$artifact" >/dev/null 2>&1 || return 1
+            rootpxe_partition_progress_item "d1:p${rootpxe_lvm_pv_number}:lv:${lv_uuid}" completed 100 "逻辑卷抓取完成"
+            rootpxe_partition_progress_clear_current_item
+        elif [[ $fs == swap ]]; then
+            rootpxe_partition_progress_item "d1:p${rootpxe_lvm_pv_number}:lv:${lv_uuid}" completed - "交换逻辑卷元数据已保存"
         fi
         printf '%s|%s|%s|%s|%s|%s|%s\n' "$lv_name" "$lv_uuid" "$lv_size" "$min_bytes" "$fs" "$artifact" "$swap_uuid" >>"$stage/d1.lvm.capture.tsv" || return 1
     done <"$rootpxe_lvm_lv_facts_file"
@@ -526,9 +764,13 @@ rootpxe_capture_lvm_volumes() {
         IFS='|' read -r rootpxe_lvm_capture_error_code rootpxe_lvm_capture_error_reason <"$rootpxe_lvm_capture_status_file" || true
     fi
     rm -f -- "$rootpxe_lvm_capture_status_file"
-    [[ $rootpxe_lvm_capture_status_rc -eq 0 ]] || return 1
+    if [[ $rootpxe_lvm_capture_status_rc -ne 0 ]]; then
+        rootpxe_partition_progress_item "d1:p${rootpxe_lvm_pv_number}" failed - "LVM 逻辑卷抓取失败"
+        return 1
+    fi
     rootpxe_lvm_captured=yes
     export rootpxe_lvm_captured
+    rootpxe_partition_progress_item "d1:p${rootpxe_lvm_pv_number}" completed - "LVM 物理卷及逻辑卷抓取完成"
 }
 
 # Captured n-type images carry a compact, canonical partition fact record.
@@ -970,7 +1212,7 @@ rootpxe_validate_lvm_deployment_layout() {
 # The PV never has a raw payload: doing so would overwrite the layout just
 # resolved from the immutable task snapshot.
 rootpxe_restore_lvm_volumes() {
-    local rootpxe_restore_status_file rootpxe_restore_status_rc
+    local rootpxe_restore_status_file rootpxe_restore_status_rc plan="${rootpxe_resolved_lvm_layout_file:-}"
     rootpxe_restore_lvm_error_code=LVM_RESTORE_PREFLIGHT_FAILED
     rootpxe_restore_lvm_error_reason=preflight_or_validation
     rootpxe_restore_status_file=$(mktemp /tmp/rootpxe-lvm-restore-status.XXXXXX) || return 1
@@ -982,7 +1224,7 @@ rootpxe_restore_lvm_volumes() {
         printf '%s|%s\n' "$1" "$2" >"$rootpxe_restore_status_file"
         return 1
     }
-    local image_path="$1" target_disk="$2" plan="${rootpxe_resolved_lvm_layout_file:-}" pv vg pv_path pv_meta vg_cfg lv_name lv_uuid lv_fs lv_artifact lv_bytes swap_uuid target_id actual_size current_size pv_original pv_bytes vg_uuid extent lv_list expected_lvs prevalidated_lvs=0 restored_lvs=0 xfs_mount="" vg_active=no vgs_json pvs_json lvs_json
+    local image_path="$1" target_disk="$2" plan="${rootpxe_resolved_lvm_layout_file:-}" pv vg pv_part pv_path parent_progress_key pv_meta vg_cfg lv_name lv_uuid lv_fs lv_artifact lv_bytes swap_uuid target_id actual_size current_size pv_original pv_bytes vg_uuid extent lv_list expected_lvs prevalidated_lvs=0 restored_lvs=0 xfs_mount="" vg_active=no vgs_json pvs_json lvs_json
     local -A seen_lv_names=() seen_artifacts=()
     trap '[[ -n $xfs_mount ]] && umount "$xfs_mount" >/dev/null 2>&1 || true; [[ -n $xfs_mount ]] && rmdir "$xfs_mount" >/dev/null 2>&1 || true; [[ $vg_active == yes && -n $vg && -n $vg_uuid ]] && vgchange -an --select "vg_uuid=$vg_uuid" "$vg" >/dev/null 2>&1 || true; rm -f -- "${lv_list:-}"' EXIT
     [[ ${rootpxe_disk_permit_granted:-no} == yes && -r $plan ]] || { rootpxe_restore_lvm_fail LVM_RESTORE_PERMIT_FAILED permit_or_plan; return 1; }
@@ -990,7 +1232,10 @@ rootpxe_restore_lvm_volumes() {
     [[ ${rootpxe_disk_permit_target_id:-} == "$target_id" && ${rootpxe_disk_permit_operation:-} =~ ^(deploy_write|nvme_format\+deploy_write)$ ]] || { rootpxe_restore_lvm_fail LVM_RESTORE_PERMIT_FAILED target_or_operation; return 1; }
     pv=$(jq -er '.pv.uuid' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED pv_uuid; return 1; }; vg=$(jq -er '.vg.name' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED vg_name; return 1; }
     pv_original=$(jq -er '.pv.originalBytes' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED pv_original_bytes; return 1; }; vg_uuid=$(jq -er '.vg.uuid' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED vg_uuid; return 1; }; extent=$(jq -er '.vg.extentBytes' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED vg_extent_bytes; return 1; }
-    pv_path=$(rootpxe_lvm_partition_path "$target_disk" "$(jq -er '.pv.partitionNumber' "$plan")") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED pv_partition; return 1; }
+    pv_part=$(jq -er '.pv.partitionNumber' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED pv_partition; return 1; }
+    pv_path=$(rootpxe_lvm_partition_path "$target_disk" "$pv_part") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED pv_partition; return 1; }
+    parent_progress_key="d1:p${pv_part}"
+    rootpxe_partition_progress_item "$parent_progress_key" preparing - "准备重建 LVM 物理卷"
     pv_meta=$(jq -er '.pv.artifact' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED pv_artifact; return 1; }; vg_cfg=$(jq -er '.pv.vgConfigArtifact' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED vg_config_artifact; return 1; }
     rootpxe_lvm_safe_identifier "$pv" && rootpxe_lvm_storage_identifier "$vg" && rootpxe_lvm_safe_identifier "$vg_uuid" || { rootpxe_restore_lvm_fail LVM_RESTORE_IDENTIFIER_INVALID pv_or_vg; return 1; }
     rootpxe_safe_relative_path "$pv_meta" >/dev/null && rootpxe_safe_relative_path "$vg_cfg" >/dev/null || { rootpxe_restore_lvm_fail LVM_RESTORE_ARTIFACT_PATH_INVALID pv_or_vg_config; return 1; }
@@ -1052,6 +1297,7 @@ rootpxe_restore_lvm_volumes() {
         return 1
     fi
     vg_active=yes
+    rootpxe_partition_progress_item "$parent_progress_key" running - "正在恢复 LVM 逻辑卷"
     vgs_json=$(vgs --reportformat json -o vg_name,vg_uuid "$vg" 2>/dev/null) || return 1
     rootpxe_lvm_json_jq -e --arg name "$vg" --arg uuid "$vg_uuid" '(.report|type=="array" and length==1 and ((.[0].vg? // [])|type=="array") and ((.[0].vg? // [])|length==1) and .[0].vg[0].vg_name==$name and .[0].vg[0].vg_uuid==$uuid)' <<<"$vgs_json" >/dev/null || return 1
     pvs_json=$(pvs --reportformat json -o pv_name,pv_uuid,vg_name,vg_uuid "$pv_path" 2>/dev/null) || return 1
@@ -1067,8 +1313,16 @@ rootpxe_restore_lvm_volumes() {
         current_size=$(blockdev --getsize64 "/dev/$vg/$lv_name" 2>/dev/null) || { rootpxe_restore_lvm_fail LVM_LV_SIZE_READ_FAILED "lv_${lv_name}"; return 1; }
         [[ $current_size =~ ^[1-9][0-9]*$ && $lv_bytes -ge $current_size ]] || { rootpxe_restore_lvm_fail LVM_LV_SIZE_INVALID "lv_${lv_name}"; return 1; }
         if [[ $lv_bytes -gt $current_size ]]; then lvextend -y -L "${lv_bytes}B" "/dev/$vg/$lv_name" || { rootpxe_restore_lvm_fail LVM_LV_EXTEND_FAILED "lv_${lv_name}"; return 1; }; fi
-        if [[ $lv_fs == swap ]]; then mkswap -U "$swap_uuid" "/dev/$vg/$lv_name" || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_SWAP_RECREATE_FAILED "lv_${lv_name}"; return 1; }; restored_lvs=$((restored_lvs + 1)); continue; fi
+        rootpxe_partition_progress_restore_key="d1:p${pv_part}:lv:${lv_uuid}"
+        if [[ $lv_fs == swap ]]; then
+            mkswap -U "$swap_uuid" "/dev/$vg/$lv_name" || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_SWAP_RECREATE_FAILED "lv_${lv_name}"; return 1; }
+            rootpxe_partition_progress_item "$rootpxe_partition_progress_restore_key" completed - "交换逻辑卷已重建"
+            unset rootpxe_partition_progress_restore_key
+            restored_lvs=$((restored_lvs + 1)); continue
+        fi
+        rootpxe_partition_progress_item "$rootpxe_partition_progress_restore_key" preparing 0 "准备写入逻辑卷"
         writeImage "$image_path/$lv_artifact" "/dev/$vg/$lv_name" no || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_IMAGE_RESTORE_FAILED "lv_${lv_name}_${lv_fs}"; return 1; }
+        rootpxe_partition_progress_item "$rootpxe_partition_progress_restore_key" finalizing 100 "逻辑卷写入完成，正在校验"
         if [[ $lv_fs == xfs ]] && ! rootpxe_xfs_restore_postcheck "/dev/$vg/$lv_name"; then
             case ${rootpxe_xfs_restore_error:-post_restore_inconsistent} in
                 dirty_log_replay_mount_failed) rootpxe_restore_lvm_fail LVM_XFS_DIRTY_LOG_REPLAY_MOUNT_FAILED "lv_${lv_name}" ;;
@@ -1096,15 +1350,23 @@ rootpxe_restore_lvm_volumes() {
         fi
         actual_size=$(blockdev --getsize64 "/dev/$vg/$lv_name" 2>/dev/null) || { rootpxe_restore_lvm_fail LVM_LV_FINAL_SIZE_READ_FAILED "lv_${lv_name}"; return 1; }
         [[ $actual_size == "$lv_bytes" ]] || { rootpxe_restore_lvm_fail LVM_LV_FINAL_SIZE_MISMATCH "lv_${lv_name}"; return 1; }
+        rootpxe_partition_progress_item "$rootpxe_partition_progress_restore_key" completed 100 "逻辑卷恢复完成"
+        rootpxe_partition_progress_clear_current_item
+        unset rootpxe_partition_progress_restore_key
         restored_lvs=$((restored_lvs + 1))
     done <"$lv_list"
-    [[ $restored_lvs -eq $expected_lvs ]]
+    [[ $restored_lvs -eq $expected_lvs ]] || { rootpxe_restore_lvm_fail LVM_LV_LIST_COUNT_FAILED restored; return 1; }
+    rootpxe_partition_progress_item "$parent_progress_key" completed - "LVM 物理卷及逻辑卷恢复完成"
     )
     rootpxe_restore_status_rc=$?
     if [[ $rootpxe_restore_status_rc -ne 0 && -r $rootpxe_restore_status_file ]]; then
         IFS='|' read -r rootpxe_restore_lvm_error_code rootpxe_restore_lvm_error_reason <"$rootpxe_restore_status_file" || true
     fi
     rm -f -- "$rootpxe_restore_status_file"
+    if [[ $rootpxe_restore_status_rc -ne 0 && -r $plan ]]; then
+        pv_part=$(jq -r '.pv.partitionNumber // empty' "$plan" 2>/dev/null)
+        [[ $pv_part =~ ^[1-9][0-9]*$ ]] && rootpxe_partition_progress_item "d1:p${pv_part}" failed - "LVM 恢复失败"
+    fi
     return "$rootpxe_restore_status_rc"
 }
 
@@ -3180,7 +3442,15 @@ writeImage()  {
             fi
             progress_enabled=yes
             ;;
+        1)
+            # Partimage exposes its own status stream.  It still needs an
+            # active item so those samples cannot be assigned to another run.
+            ;;
     esac
+    if [[ -n ${rootpxe_partition_progress_restore_key:-} && $format =~ ^(0|1|2|3|4|5|6)$ ]]; then
+        rootpxe_partition_progress_item "$rootpxe_partition_progress_restore_key" running 0 "开始写入"
+        rootpxe_partition_progress_current_item "$rootpxe_partition_progress_restore_key"
+    fi
     case $mc in
         yes)
             if [[ -z $mcastrdv ]]; then
@@ -3331,7 +3601,7 @@ makeAllSwapSystems() {
     [[ -z $disk_number ]] && handleError "No drive number passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $imagePath ]] && handleError "No image path passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $imgPartitionType ]] && handleError "No image partition type passed (${FUNCNAME[0]})\n   Args Passed: $*"
-    local swapuuidfilename=""
+    local swapuuidfilename="" swap_uuid=""
     swapUUIDFileName "$imagePath" "$disk_number"
     [[ -r "$swapuuidfilename" ]] || return
     local parts=""
@@ -3340,7 +3610,13 @@ makeAllSwapSystems() {
     getPartitions "$disk"
     for part in $parts; do
         getPartitionNumber "$part"
-        [[ $imgPartitionType == all || $imgPartitionType -eq $part_number ]] && makeSwapSystem "$swapuuidfilename" "$part"
+        [[ $imgPartitionType == all || $imgPartitionType -eq $part_number ]] || continue
+        # The capture UUID file identifies actual swap members.  Only publish
+        # metadata completion after makeSwapSystem has recreated that member.
+        swap_uuid=$(awk -v number="$part_number" '$1 == number || $1 == "a" number { print $2; exit }' "$swapuuidfilename")
+        [[ -n $swap_uuid ]] || continue
+        makeSwapSystem "$swapuuidfilename" "$part"
+        rootpxe_partition_progress_item "d${disk_number}:p${part_number}" completed - "交换分区已重建"
     done
     runPartprobe "$disk"
 }
@@ -4555,11 +4831,13 @@ completeTasking() {
             rootpxe_stage upload_complete "capture write finished, notifying server"
             chmod -R 775 "$imagePath" >/dev/null 2>&1 || handleError "PXEOS_STAGE=capture_finalize CODE=CAPTURE_ARTIFACT_PERMISSION_FAILED REASON=unable_to_finalize_storage_artifacts"
             killStatusReporter
+            rootpxe_partition_progress_flush
             . /bin/pxeos.imgcomplete
             ;;
         down)
             rootpxe_stage restore "deploy write finished, running completion"
             killStatusReporter
+            rootpxe_partition_progress_flush
             [[ $capone -eq 1 ]] && exit 0
             [[ ${changeHostname:-false} == true ]] && rootpxe_apply_hostname_for_disk "$hd"
             rootpxe_run_post_deploy_script || handleError "PXEOS_STAGE=post_deploy_script CODE=POST_DEPLOY_SCRIPT_FAILED REASON=${rootpxe_deploy_script_error:-unknown}"
@@ -5278,12 +5556,14 @@ savePartition() {
     local writer_exitcode=0
     local progress_decoder=0
     getPartitionNumber "$part"
+    rootpxe_partition_progress_item "d${disk_number}:p${part_number}" preparing 0 "准备抓取"
     local fstype=""
     local parttype=""
     local imgpart=""
     local fifoname="/tmp/pigz1"
     if [[ $imgPartitionType != all && $imgPartitionType != $part_number ]]; then
         rootpxe_console_message INFO "Skipping partition $part ($part_number)."
+        rootpxe_partition_progress_item "d${disk_number}:p${part_number}" skipped - "未选择抓取"
         debugPause
         return
     fi
@@ -5300,6 +5580,7 @@ savePartition() {
             debugPause
             EBRFileName "$imagePath" "$disk_number" "$part_number"
             touch "$ebrfilename"
+            rootpxe_partition_progress_item "d${disk_number}:p${part_number}" skipped - "扩展分区容器"
             rm -rf "$fifoname" >/dev/null 2>&1
             return
             ;;
@@ -5314,7 +5595,16 @@ savePartition() {
         swap)
             rootpxe_console_message INFO 'Saving swap partition UUID.'
             swapUUIDFileName "$imagePath" "$disk_number"
-            saveSwapUUID "$swapuuidfilename" "$part"
+            if saveSwapUUID "$swapuuidfilename" "$part" && rootpxe_partition_progress_swap_uuid_saved "$swapuuidfilename" "$part_number"; then
+                rootpxe_partition_progress_item "d${disk_number}:p${part_number}" completed - "交换分区元数据已保存"
+            else
+                # Metadata is best effort: report the absent UUID accurately
+                # but never change the capture task's success/failure outcome.
+                rootpxe_partition_progress_item "d${disk_number}:p${part_number}" failed - "未保存交换分区 UUID"
+            fi
+            rootpxe_partition_progress_clear_current_item
+            rm -rf "$fifoname" >/dev/null 2>&1 || true
+            return 0
             ;;
         imager)
             rootpxe_console_message INFO "Using partclone.$fstype."
@@ -5329,6 +5619,8 @@ savePartition() {
                 rm -f "$fifoname" >/dev/null 2>&1 || true
                 handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_SETUP_FAILED REASON=unable_to_start_capture_writer"
             fi
+            rootpxe_partition_progress_item "d${disk_number}:p${part_number}" running 0 "开始复制"
+            rootpxe_partition_progress_current_item "d${disk_number}:p${part_number}"
             rootpxe_partclone_progress_start_collector
             if LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.$fstype "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -f 1 2>"$rootpxe_partclone_progress_stderr_target"; then
                 exitcode=0
@@ -5382,6 +5674,8 @@ savePartition() {
                         rm -f "$fifoname" >/dev/null 2>&1 || true
                         handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_SETUP_FAILED REASON=unable_to_start_capture_writer"
                     fi
+                    rootpxe_partition_progress_item "d${disk_number}:p${part_number}" running 0 "开始复制"
+                    rootpxe_partition_progress_current_item "d${disk_number}:p${part_number}"
                     rootpxe_partclone_progress_start_collector
                     if LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.$fstype "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"; then
                         exitcode=0
@@ -5413,6 +5707,8 @@ savePartition() {
             esac
             ;;
     esac
+    rootpxe_partition_progress_item "d${disk_number}:p${part_number}" completed 100 "抓取完成"
+    rootpxe_partition_progress_clear_current_item
     rm -rf $fifoname >/dev/null 2>&1
 }
 restorePartition() {
@@ -5437,16 +5733,24 @@ restorePartition() {
     local disk=""
     local part_number=0
     local parttype=""
+    local progress_key=""
     local israw=0
     if [[ $imgType == "dd" ]]; then
         israw=1
     fi
     getDiskFromPartition "$part" "$israw"
-    getPartitionNumber "$part"
+    if [[ $imgType == dd ]]; then
+        part_number=0
+        progress_key="d${disk_number}:disk"
+    else
+        getPartitionNumber "$part"
+        progress_key="d${disk_number}:p${part_number}"
+    fi
     getPartType "$part"
     case $parttype in
         5|f|85|0x5|0xf|0x85)
             rootpxe_console_message INFO 'Not deploying extended partition content.'
+            rootpxe_partition_progress_item "$progress_key" skipped - "扩展分区容器"
             runPartprobe "$disk"
             return
             ;;
@@ -5515,10 +5819,22 @@ restorePartition() {
         else
             rootpxe_console_message WARN "Partition file is missing: $imgpart."
         fi
+        rootpxe_partition_progress_item "$progress_key" skipped - "没有可写入的分区镜像"
         runPartprobe "$disk"
         return
     fi
+    rootpxe_partition_progress_restore_key="$progress_key"
+    rootpxe_partition_progress_item "$rootpxe_partition_progress_restore_key" preparing 0 "准备写入"
     writeImage "$imgpart" "$part" "$mc"
+    if [[ $imgType == dd ]]; then
+        rootpxe_partition_progress_item "$rootpxe_partition_progress_restore_key" completed 100 "整盘写入完成"
+        rootpxe_partition_progress_clear_current_item
+        unset rootpxe_partition_progress_restore_key
+    else
+        rootpxe_partition_progress_item "$rootpxe_partition_progress_restore_key" finalizing 100 "写入完成，等待后续处理"
+        rootpxe_partition_progress_last_restored_key="$rootpxe_partition_progress_restore_key"
+        unset rootpxe_partition_progress_restore_key
+    fi
     runPartprobe "$disk"
     resetFlag "$part"
 }
@@ -5544,7 +5860,8 @@ runFixparts() {
 killStatusReporter() {
     [[ -z ${statusReporter:-} ]] && return
     dots "Stopping RootPXE status reporter"
-    kill -9 "$statusReporter" >/dev/null 2>&1 || true
+    kill "$statusReporter" >/dev/null 2>&1 || true
+    wait "$statusReporter" >/dev/null 2>&1 || true
     echo "Done"
     debugPause
 }
@@ -5759,6 +6076,11 @@ performRestore() {
                 fi
             fi
             [[ $osid == +([5-7]) && $imgType =~ [Nn] ]] && fixWin7boot "$restorepart"
+            if [[ -n ${rootpxe_partition_progress_last_restored_key:-} ]]; then
+                rootpxe_partition_progress_item "$rootpxe_partition_progress_last_restored_key" completed 100 "分区恢复完成"
+                rootpxe_partition_progress_clear_current_item
+                unset rootpxe_partition_progress_last_restored_key
+            fi
         done
         restoreparts=""
         rootpxe_console_message INFO "Resetting UUIDs for $disk."
