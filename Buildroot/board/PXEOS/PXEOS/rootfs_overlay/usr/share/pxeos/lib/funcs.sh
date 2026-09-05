@@ -4210,7 +4210,9 @@ removePageFile() {
     esac
 }
 # Sets OS mbr, as needed, and returns the Name
-#    based on the OS id passed.
+#    based on the OS id passed. The service controls which IDs are selectable
+#    for new tasks; historical branches remain only to interpret an already
+#    issued legacy task payload and do not extend the supported OS set.
 #
 # $1 the osid to determine the os and mbr
 determineOS() {
@@ -4222,7 +4224,7 @@ determineOS() {
             mbrfile="/usr/share/pxeos/mbr/xp.mbr"
             ;;
         2)
-            osname="Windows Vista"
+            osname="Windows Vista / Server 2008"
             mbrfile="/usr/share/pxeos/mbr/vista.mbr"
             ;;
         3)
@@ -4234,17 +4236,17 @@ determineOS() {
             mbrfile=""
             ;;
         5)
-            osname="Windows 7"
+            osname="Windows 7 / Server 2008 R2"
             mbrfile="/usr/share/pxeos/mbr/win7.mbr"
             defaultpart2start="206848s"
             ;;
         6)
-            osname="Windows 8"
+            osname="Windows 8 / Server 2012"
             mbrfile="/usr/share/pxeos/mbr/win8.mbr"
             defaultpart2start="718848s"
             ;;
         7)
-            osname="Windows 8.1"
+            osname="Windows 8.1 / Server 2012 R2"
             mbrfile="/usr/share/pxeos/mbr/win8.mbr"
             defaultpart2start="718848s"
             ;;
@@ -4253,11 +4255,11 @@ determineOS() {
             mbrfile=""
             ;;
         9)
-            osname="Windows 10"
+            osname="Windows 10 / Server 2016、2019、2022"
             mbrfile=""
             ;;
         10)
-            osname="Windows 11"
+            osname="Windows 11 / Server 2025"
             mbrfile=""
             ;;
         11)
@@ -4273,7 +4275,7 @@ determineOS() {
             mbrfile=""
             ;;
         99)
-            osname="Other OS"
+            osname="Other"
             mbrfile=""
             ;;
         *)
