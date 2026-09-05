@@ -253,6 +253,177 @@ savePartition /dev/vda2 1 "$tmp" all
 capture_swap_event=$(last_item_event)
 assert_eq "$(jq -r '.status' "$capture_swap_event")" failed 'failed UUID write must not report capture metadata as completed'
 
+# savePartition delegates an LVM PV directly to its dedicated lifecycle.  It
+# must not emit the generic partition preparing=0 sample for a container.
+rootpxe_partition_progress_initialize_runtime
+fsTypeSetting() { fstype=lvm; }
+getPartType() { parttype=8e; }
+getPartitionNumber() { part_number=1; }
+rootpxe_lvm_is_pv_partition() { return 0; }
+handleError() { return 1; }
+rootpxe_capture_lvm_volumes() {
+    rootpxe_partition_progress_item 'd1:p1' preparing - '准备抓取 LVM 物理卷'
+    rootpxe_partition_progress_item 'd1:p1' running - '正在抓取 LVM 逻辑卷'
+    rootpxe_partition_progress_item 'd1:p1' completed - 'LVM 物理卷及逻辑卷抓取完成'
+}
+savePartition /dev/vda1 1 "$tmp" all
+lvm_save_event=$(last_item_event)
+assert_eq "$(jq -r '.percent == null' "$lvm_save_event")" true 'LVM container save entry must not report a generic 0 percent'
+lvm_pv_lifecycle=$(
+    for event in "$tmp/events"/event-*.json; do
+        [[ -f $event ]] || continue
+        jq -r 'select(.event == "item" and .key == "d1:p1") | [.status, (if .percent == null then "null" else (.percent|tostring) end)] | @tsv' "$event"
+    done
+)
+lvm_pv_lifecycle=${lvm_pv_lifecycle//$'\r'/}
+assert_eq "$lvm_pv_lifecycle" $'preparing\tnull\nrunning\tnull\ncompleted\tnull' 'LVM PV must emit the complete null-percent lifecycle'
+
+# LVM filesystem facts must be collected in a short, reversible activation
+# window before planning.  These source LVs begin inactive; both are activated,
+# probed, deactivated, and only then published with an FS column.
+awk '/^rootpxe_lvm_prepare_capture_lv_facts\(\)/ { copy=1 } /^rootpxe_xfs_capture_preflight\(\)/ { exit } copy { print }' "$funcs" >"$tmp/lvm-fs-prepare.sh"
+# shellcheck source=/dev/null
+. "$tmp/lvm-fs-prepare.sh"
+rootpxe_lvm_lv_facts_file="$tmp/lvm-source-facts"
+rootpxe_lvm_vg_name=vg0
+rootpxe_lvm_vg_uuid=vg-1
+rootpxe_lvm_active=yes
+printf 'root|lv-root|/dev/vg0/root|1073741824\nswap|lv-swap|/dev/vg0/swap|106300440576\n' >"$rootpxe_lvm_lv_facts_file"
+lvm_prepare_trace="$tmp/lvm-prepare-trace"
+rootpxe_lvm_json_jq() { jq "$@"; }
+lvm_prepare_reset_facts() { printf 'root|lv-root|/dev/vg0/root|1073741824\nswap|lv-swap|/dev/vg0/swap|106300440576\n' >"$rootpxe_lvm_lv_facts_file"; : >"$lvm_prepare_trace"; }
+lvs() {
+    printf '{"report":[{"lv":[{"lv_uuid":"lv-root","lv_path":"/dev/vg0/root","lv_active":"%s"},{"lv_uuid":"lv-swap","lv_path":"/dev/vg0/swap","lv_active":"%s"}' "${PREP_ROOT_STATE:-inactive}" "${PREP_SWAP_STATE:-inactive}"
+    [[ ${PREP_DUPLICATE:-no} != yes ]] || printf ',{"lv_uuid":"lv-root","lv_path":"/dev/vg0/root-copy","lv_active":"inactive"}'
+    printf ']}]}\n'
+}
+lvchange() { printf '%s\n' "$*" >>"$lvm_prepare_trace"; [[ ${PREP_LVCHANGE_FAIL:-} == "${1:-}" ]] && return 1; [[ ${PREP_LVCHANGE_SIGNAL:-no} == yes && ${1:-} == -ay ]] && kill -TERM "$BASHPID"; return 0; }
+blkid() { [[ ${PREP_BLKID_FAIL:-no} != yes ]] || return 1; case "${*: -1}" in /dev/vg0/root) printf 'ext4\n' ;; /dev/vg0/swap) printf 'swap\n' ;; *) return 1 ;; esac; }
+lvm_prepare_reset_facts
+rootpxe_lvm_prepare_capture_lv_facts
+assert_eq "$(awk -F'|' '$2=="lv-root" {print $5}' "$rootpxe_lvm_lv_facts_file")" ext4 'inactive data LV must publish trusted filesystem facts'
+assert_eq "$(awk -F'|' '$2=="lv-swap" {print $5}' "$rootpxe_lvm_lv_facts_file")" swap 'inactive swap LV must publish trusted filesystem facts'
+assert_eq "$(grep -c -- '-ay' "$lvm_prepare_trace")" 2 'only initially inactive LVs must be activated'
+assert_eq "$(grep -c -- '-an' "$lvm_prepare_trace")" 2 'only prepared inactive LVs must be deactivated'
+
+# Already active volumes stay active; a partial state only toggles the inactive
+# member.  Neither form may change a successful five-field publication.
+lvm_prepare_reset_facts
+PREP_ROOT_STATE=active PREP_SWAP_STATE=active rootpxe_lvm_prepare_capture_lv_facts
+assert_eq "$(wc -l <"$lvm_prepare_trace")" 0 'all-active LV facts must not change activation state'
+lvm_prepare_reset_facts
+PREP_ROOT_STATE=inactive PREP_SWAP_STATE=active rootpxe_lvm_prepare_capture_lv_facts
+assert_eq "$(grep -c -- '-ay' "$lvm_prepare_trace")" 1 'partial LV state must activate only the inactive member'
+assert_eq "$(grep -c -- '-an' "$lvm_prepare_trace")" 1 'partial LV state must deactivate only the member activated here'
+
+# Any preparation failure leaves the original four-field facts untouched and
+# does not leak a partial plan input.  Cleanup failure is equally fatal.
+lvm_prepare_reset_facts
+PREP_BLKID_FAIL=yes rootpxe_lvm_prepare_capture_lv_facts && fail 'filesystem probe failure must reject LVM plan preparation'
+unset PREP_BLKID_FAIL
+assert_eq "$(awk -F'|' 'NR==1 {print NF}' "$rootpxe_lvm_lv_facts_file")" 4 'probe failure must not publish partial facts'
+
+lvm_prepare_reset_facts
+PREP_DUPLICATE=yes rootpxe_lvm_prepare_capture_lv_facts && fail 'duplicate queried LV UUID must reject LVM plan preparation'
+unset PREP_DUPLICATE
+assert_eq "$(awk -F'|' 'NR==1 {print NF}' "$rootpxe_lvm_lv_facts_file")" 4 'duplicate queried LV UUID must not publish partial facts'
+lvm_prepare_reset_facts
+printf 'root-copy|lv-root|/dev/vg0/root-copy|1073741824\n' >>"$rootpxe_lvm_lv_facts_file"
+rootpxe_lvm_prepare_capture_lv_facts && fail 'duplicate source LV UUID must reject LVM plan preparation'
+assert_eq "$(awk -F'|' 'NR==1 {print NF}' "$rootpxe_lvm_lv_facts_file")" 4 'duplicate source LV UUID must not publish partial facts'
+lvm_prepare_reset_facts
+PREP_LVCHANGE_FAIL=-ay rootpxe_lvm_prepare_capture_lv_facts && fail 'activation failure must reject LVM plan preparation'
+unset PREP_LVCHANGE_FAIL
+assert_eq "$(awk -F'|' 'NR==1 {print NF}' "$rootpxe_lvm_lv_facts_file")" 4 'activation failure must not publish partial facts'
+
+lvm_prepare_reset_facts
+PREP_LVCHANGE_SIGNAL=yes rootpxe_lvm_prepare_capture_lv_facts && fail 'activation signal must reject LVM plan preparation'
+unset PREP_LVCHANGE_SIGNAL
+assert_eq "$(awk -F'|' 'NR==1 {print NF}' "$rootpxe_lvm_lv_facts_file")" 4 'signal cleanup must not publish partial facts'
+grep -Eq '^-an /dev/vg0/(root|swap)$' "$lvm_prepare_trace" || fail 'signal cleanup must deactivate a prepared LV'
+awk '$1 == "-an" && $2 !~ /^\/dev\/vg0\/(root|swap)$/ { exit 1 }' "$lvm_prepare_trace" || fail 'signal cleanup must not deactivate an unrelated LV'
+lvm_prepare_reset_facts
+PREP_LVCHANGE_FAIL=-an rootpxe_lvm_prepare_capture_lv_facts && fail 'cleanup failure must reject LVM plan preparation'
+unset PREP_LVCHANGE_FAIL
+assert_eq "$(awk -F'|' 'NR==1 {print NF}' "$rootpxe_lvm_lv_facts_file")" 4 'cleanup failure must not publish facts'
+lvm_prepare_reset_facts
+mv() { return 1; }
+PREP_ROOT_STATE=active PREP_SWAP_STATE=active rootpxe_lvm_prepare_capture_lv_facts && fail 'facts publish failure must reject LVM plan preparation'
+unset -f mv
+assert_eq "$(awk -F'|' 'NR==1 {print NF}' "$rootpxe_lvm_lv_facts_file")" 4 'facts publish failure must retain original facts'
+
+# A plan consumes only the prepared filesystem records: both source LV sizes
+# remain distinct, while swap stays a zero-weight metadata leaf.
+lvm_prepare_reset_facts
+PREP_ROOT_STATE=active PREP_SWAP_STATE=active rootpxe_lvm_prepare_capture_lv_facts
+rootpxe_lvm_pv_path=/dev/vda1; rootpxe_lvm_pv_number=1; rootpxe_lvm_active=yes
+rootpxe_resolved_lvm_layout_file=''; type=down
+getPartitions() { parts='/dev/vda1'; }
+getPartitionNumber() { part_number=1; }
+rootpxe_partition_progress_initialize_runtime
+rootpxe_partition_progress_plan_disk /dev/vda 1
+assert_eq "$(jq -r '.items[]|select(.key=="d1:p1:lv:lv-root")|.weightBytes' "$tmp/snapshot.json")" 1073741824 'prepared data LV must retain 1GiB source weight'
+assert_eq "$(jq -r '.items[]|select(.key=="d1:p1:lv:lv-swap")|.weightBytes' "$tmp/snapshot.json")" 0 'prepared swap LV must not have payload weight'
+assert_eq "$(jq -r '.items[]|select(.key=="d1:p1:lv:lv-swap")|.filesystem' "$tmp/snapshot.json")" swap 'plan must consume prepared swap filesystem fact'
+
+# Capture must refuse to publish a plan containing only an LVM PV container.
+# Missing, empty, or malformed five-field facts leave an existing snapshot
+# untouched, so a previous complete plan cannot be overwritten by a bad retry.
+assert_capture_lvm_facts_rejected() {
+    local label="$1" facts="$2"
+    printf '{"sentinel":"complete-plan"}\n' >"$tmp/snapshot.json"
+    rootpxe_lvm_lv_facts_file="$facts"
+    if rootpxe_partition_progress_plan_disk /dev/vda 1; then fail "$label must reject capture LVM plan"; fi
+    assert_eq "$(cat "$tmp/snapshot.json")" '{"sentinel":"complete-plan"}' "$label must preserve prior snapshot"
+}
+assert_capture_lvm_facts_rejected missing "$tmp/missing-lvm-facts"
+: >"$tmp/empty-lvm-facts"
+assert_capture_lvm_facts_rejected empty "$tmp/empty-lvm-facts"
+printf 'root|lv-root|/dev/vg0/root|1073741824|btrfs\n' >"$tmp/invalid-lvm-facts"
+assert_capture_lvm_facts_rejected invalid "$tmp/invalid-lvm-facts"
+rootpxe_lvm_lv_facts_file="$tmp/lvm-source-facts"
+lvm_prepare_reset_facts
+PREP_ROOT_STATE=active PREP_SWAP_STATE=active rootpxe_lvm_prepare_capture_lv_facts
+
+# With trusted source facts, plan serialization is telemetry only.  The capture
+# call shape below matches pxeos.upload: malformed facts enter handleError, but
+# item/final JSON or atomic publish failures keep imaging alive and preserve a
+# prior complete snapshot.
+real_jq=$(command -v jq)
+jq() {
+    case "${PLAN_JQ_FAIL:-}:${1:-}" in
+        lv-items:-c)
+            for jq_arg in "$@"; do [[ $jq_arg != *parentKey* ]] || return 1; done
+            ;;
+        final-json:-cn) return 1 ;;
+    esac
+    command "$real_jq" "$@"
+}
+capture_plan_handle_error=''
+handleError() { capture_plan_handle_error="$1"; return 1; }
+capture_plan_stage() { rootpxe_partition_progress_plan_disk /dev/vda 1 || handleError 'LVM_PROGRESS_PLAN_FAILED'; }
+assert_capture_plan_telemetry_best_effort() {
+    local label="$1" mode="$2"
+    printf '{"sentinel":"complete-plan"}\n' >"$tmp/snapshot.json"
+    capture_plan_handle_error=''
+    if ! PLAN_JQ_FAIL="$mode" capture_plan_stage; then fail "$label telemetry failure must not stop capture"; fi
+    assert_eq "$capture_plan_handle_error" '' "$label telemetry failure must not call handleError"
+    assert_eq "$(cat "$tmp/snapshot.json")" '{"sentinel":"complete-plan"}' "$label telemetry failure must preserve prior snapshot"
+}
+assert_capture_plan_telemetry_best_effort lv-items lv-items
+assert_capture_plan_telemetry_best_effort final-json final-json
+plan_snapshot_file="$tmp/snapshot.json"
+mv() { [[ ${2:-} == "$plan_snapshot_file" ]] && return 1; command mv "$@"; }
+assert_capture_plan_telemetry_best_effort atomic-publish none
+unset -f mv jq
+rootpxe_lvm_lv_facts_file="$tmp/missing-lvm-facts"
+capture_plan_handle_error=''
+if capture_plan_stage; then fail 'missing source facts must stop capture'; fi
+assert_eq "$capture_plan_handle_error" LVM_PROGRESS_PLAN_FAILED 'missing source facts must enter capture handleError'
+rootpxe_lvm_lv_facts_file="$tmp/lvm-source-facts"
+lvm_prepare_reset_facts
+PREP_ROOT_STATE=active PREP_SWAP_STATE=active rootpxe_lvm_prepare_capture_lv_facts
+
 # LVM has one PV container and leaf logical volumes.  The container carries no
 # weight, while each LV carries its captured source size and parent relation.
 rootpxe_partition_progress_initialize_runtime
@@ -263,7 +434,8 @@ cat >"$tmp/lvm.json" <<'EOF'
 {"pv":{"partitionNumber":1},"vg":{"name":"vg0"},"volumes":[{"name":"root","uuid":"root-uuid","fs":"xfs","originalBytes":1000},{"name":"swap","uuid":"swap-uuid","fs":"swap","originalBytes":200}]}
 EOF
 rootpxe_resolved_lvm_layout_file="$tmp/lvm.json"
-unset originalSchemaFile
+unset originalSchemaFile rootpxe_lvm_active rootpxe_lvm_lv_facts_file
+type=down
 getPartitions() { parts='/dev/vda1'; }
 rootpxe_partition_progress_plan_disk /dev/vda 1
 assert_eq "$(jq -r '.items|length' "$tmp/snapshot.json")" 3 'LVM plan must contain one container plus two leaf volumes'

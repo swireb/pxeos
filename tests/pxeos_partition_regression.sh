@@ -1165,9 +1165,9 @@ vgs() { [[ ${VGS_FAIL:-0} != 1 ]] || return 1; [[ ${LVM_MODE:-ok} != bad-vgs-jso
 lvs() {
   [[ ${LVS_FAIL:-0} != 1 ]] || return 1
   [[ ${LVM_MODE:-ok} != bad-lvs-json ]] || { printf '{bad json\n'; return 0; }
-  [[ ${LVM_MODE:-ok} != casefold ]] || { printf '{"report":[{"lv":[{"vg_name":"vg0","vg_uuid":"vg-1","lv_name":"root","lv_uuid":"lv-root","lv_path":"/dev/vg0/root","lv_size":"67108864","lv_attr":"-wi-a-----","segtype":"linear","origin":null,"pool_lv":null,"data_lv":null,"metadata_lv":null},{"vg_name":"vg0","vg_uuid":"vg-1","lv_name":"ROOT","lv_uuid":"lv-root-upper","lv_path":"/dev/vg0/ROOT","lv_size":"67108864","lv_attr":"-wi-a-----","segtype":"linear","origin":null,"pool_lv":null,"data_lv":null,"metadata_lv":null}]}]}\n'; return 0; }
-  root='{"vg_name":"vg0","vg_uuid":"vg-1","lv_name":"root","lv_uuid":"lv-root","lv_path":"/dev/vg0/root","lv_size":"67108864","lv_attr":"-wi-a-----","segtype":"'"${LVM_SEGTYPE:-linear}"'","origin":null,"pool_lv":null,"data_lv":null,"metadata_lv":null}'
-  swap='{"vg_name":"vg0","vg_uuid":"vg-1","lv_name":"swap","lv_uuid":"lv-swap","lv_path":"/dev/vg0/swap","lv_size":"33554432","lv_attr":"-wi-a-----","segtype":"linear","origin":null,"pool_lv":null,"data_lv":null,"metadata_lv":null}'
+  [[ ${LVM_MODE:-ok} != casefold ]] || { printf '{"report":[{"lv":[{"vg_name":"vg0","vg_uuid":"vg-1","lv_name":"root","lv_uuid":"lv-root","lv_path":"/dev/vg0/root","lv_size":"67108864","lv_attr":"-wi-a-----","segtype":"linear","origin":null,"pool_lv":null,"data_lv":null,"metadata_lv":null,"lv_active":"active"},{"vg_name":"vg0","vg_uuid":"vg-1","lv_name":"ROOT","lv_uuid":"lv-root-upper","lv_path":"/dev/vg0/ROOT","lv_size":"67108864","lv_attr":"-wi-a-----","segtype":"linear","origin":null,"pool_lv":null,"data_lv":null,"metadata_lv":null,"lv_active":"active"}]}]}\n'; return 0; }
+  root='{"vg_name":"vg0","vg_uuid":"vg-1","lv_name":"root","lv_uuid":"lv-root","lv_path":"/dev/vg0/root","lv_size":"67108864","lv_attr":"-wi-a-----","segtype":"'"${LVM_SEGTYPE:-linear}"'","origin":null,"pool_lv":null,"data_lv":null,"metadata_lv":null,"lv_active":"active"}'
+  swap='{"vg_name":"vg0","vg_uuid":"vg-1","lv_name":"swap","lv_uuid":"lv-swap","lv_path":"/dev/vg0/swap","lv_size":"33554432","lv_attr":"-wi-a-----","segtype":"linear","origin":null,"pool_lv":null,"data_lv":null,"metadata_lv":null,"lv_active":"active"}'
   case " $* " in
     *' vg0/root '*) rows=$root ;;
     *' vg0/swap '*) rows=$swap ;;

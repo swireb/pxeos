@@ -100,7 +100,7 @@ rootpxe_capture_single_disk() {
     parts=""
     getPartitions "$hd"
     [[ ${#parts} -gt 0 ]] || handleError "No partitions found ($0)\n   Args Passed: $*"
-    rootpxe_partition_progress_plan_disk "$hd" 1
+    rootpxe_partition_progress_plan_disk "$hd" 1 || handleError "PXEOS_STAGE=capture CODE=LVM_PROGRESS_PLAN_FAILED REASON=complete_lv_filesystem_facts_required"
 
     dots "Saving original partition table"
     savePartitionTablesAndBootLoaders "$hd" 1 "$imagePath" "$osid" "$imgPartitionType"
@@ -217,6 +217,7 @@ beginUpload() {
 }
 if [[ ${imgType:-} == [Nn] ]]; then
     rootpxe_lvm_capture_preflight "$hd" "$imagePath" || handleError "PXEOS_STAGE=capture CODE=LVM_TOPOLOGY_UNSUPPORTED REASON=single_pv_single_vg_linear_lvs_required"
+    rootpxe_lvm_prepare_capture_lv_facts || handleError "PXEOS_STAGE=capture CODE=LVM_LV_FILESYSTEM_PREPARE_FAILED REASON=inactive_lv_probe_or_cleanup_failed"
 fi
 if [[ ${imgType:-} == mps ]]; then
     rootpxe_disk_has_lvm_pv "$hd" && handleError "PXEOS_STAGE=capture CODE=LVM_RAW_UNSUPPORTED REASON=mps_requires_non_lvm_partition_inventory"

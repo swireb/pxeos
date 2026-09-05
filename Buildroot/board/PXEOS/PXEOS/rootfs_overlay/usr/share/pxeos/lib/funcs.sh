@@ -43,7 +43,7 @@ rootpxe_partition_progress_source_metadata() (
     if [[ $is_capture == yes ]]; then
         source_bytes=$(blockdev --getsize64 "$part" 2>/dev/null || true)
         [[ $source_bytes =~ ^[1-9][0-9]*$ ]] || source_bytes=0
-        fs=$(blkid -s TYPE -o value "$part" 2>/dev/null | tr -d '\r\n')
+        fs=$(blkid -s TYPE -o value "$part" 2>/dev/null | tr -d '\r\n' || true)
         getPartType "$part" >/dev/null 2>&1 || true
         table_type=${parttype:-}
     else
@@ -97,14 +97,24 @@ rootpxe_partition_progress_plan_disk() (
         elif [[ $kind == container ]]; then
             item_status=skipped; item_message='扩展分区容器'
         fi
+        # Capture plans are immutable. A PV without every prepared LV fact
+        # would publish a misleading container-only denominator, so reject it
+        # before adding any item or replacing the prior snapshot.
+        if [[ ${rootpxe_lvm_active:-no} == yes && $part == "${rootpxe_lvm_pv_path:-}" ]]; then
+            [[ -r ${rootpxe_lvm_lv_facts_file:-} ]] || return 1
+            awk -F'|' 'NF == 5 && $1 != "" && $2 != "" && $3 ~ /^\/dev\// && $4 ~ /^[1-9][0-9]*$/ && $5 ~ /^(ext2|ext3|ext4|xfs|swap)$/ && !seen_uuid[$2]++ && !seen_path[$3]++ { count++; next } { bad=1 } END { exit(count > 0 && !bad ? 0 : 1) }' "$rootpxe_lvm_lv_facts_file" || return 1
+        fi
         [[ ${rootpxe_lvm_active:-no} == yes && $part == "${rootpxe_lvm_pv_path:-}" ]] && { kind=container; source_bytes=0; item_status=pending; item_message=''; }
         [[ -r ${rootpxe_resolved_lvm_layout_file:-} ]] && jq -e --argjson number "$number" '.pv.partitionNumber == $number' "$rootpxe_resolved_lvm_layout_file" >/dev/null 2>&1 && { kind=container; source_bytes=0; item_status=pending; item_message=''; }
         items=$(jq -c --arg key "d${disk_number}:p${number}" --arg label "$part" --arg kind "$kind" --arg fs "$fs" --arg status "$item_status" --arg message "$item_message" --argjson disk "$disk_number" --argjson number "$number" --argjson weight "$source_bytes" '. + [{key:$key,kind:$kind,diskIndex:$disk,partitionNumber:$number,label:$label,filesystem:$fs,weightBytes:$weight,status:$status,sequence:0} + (if ($message|length)>0 then {message:$message} else {} end)]' <<<"$items" 2>/dev/null) || return 0
         if [[ $kind == container && -r ${rootpxe_lvm_lv_facts_file:-} ]]; then
-            while IFS='|' read -r lv_name lv_uuid lv_path lv_size; do
-                [[ $lv_size =~ ^[1-9][0-9]*$ && -n $lv_uuid ]] || continue
-                lv_fs=$(blkid -s TYPE -o value "$lv_path" 2>/dev/null | tr -d '\r\n')
-                case $lv_fs in ext2|ext3|ext4|xfs) kind=lv ;; swap) kind=swap; lv_size=0 ;; *) continue ;; esac
+            while IFS='|' read -r lv_name lv_uuid lv_path lv_size lv_fs extra; do
+                # The pre-plan preparation window publishes this complete
+                # five-field record atomically.  Never re-probe an LV here:
+                # an inactive LV would otherwise silently disappear from an
+                # immutable plan.
+                [[ -n $lv_name && -n $lv_uuid && $lv_path == /dev/* && $lv_size =~ ^[1-9][0-9]*$ && -z $extra ]] || return 1
+                case $lv_fs in ext2|ext3|ext4|xfs) kind=lv ;; swap) kind=swap; lv_size=0 ;; *) return 1 ;; esac
                 parent_key="d${disk_number}:p${number}"
                 items=$(jq -c --arg key "${parent_key}:lv:${lv_uuid}" --arg parent "$parent_key" --arg label "$lv_path" --arg fs "$lv_fs" --arg kind "$kind" --argjson disk "$disk_number" --argjson number "$number" --argjson weight "$lv_size" '. + [{key:$key,kind:$kind,diskIndex:$disk,partitionNumber:$number,label:$label,filesystem:$fs,weightBytes:$weight,parentKey:$parent,status:"pending",sequence:0}]' <<<"$items" 2>/dev/null) || return 0
             done <"$rootpxe_lvm_lv_facts_file"
@@ -600,6 +610,87 @@ rootpxe_lvm_capture_preflight() {
     rootpxe_lvm_active=yes
     export rootpxe_lvm_active rootpxe_lvm_facts_file rootpxe_lvm_lv_facts_file rootpxe_lvm_pv_path rootpxe_lvm_pv_number rootpxe_lvm_pv_uuid rootpxe_lvm_vg_name rootpxe_lvm_vg_uuid rootpxe_lvm_pv_bytes rootpxe_lvm_pe_start_bytes rootpxe_lvm_vg_extent_bytes rootpxe_lvm_vg_free_bytes
 }
+rootpxe_lvm_prepare_capture_lv_facts() {
+    local facts="${rootpxe_lvm_lv_facts_file:-}" vg="${rootpxe_lvm_vg_name:-}" vg_uuid="${rootpxe_lvm_vg_uuid:-}"
+    local stage states activated lvs_json prepare_rc=0
+    [[ ${rootpxe_lvm_active:-no} == yes ]] || return 0
+    [[ -r $facts && -n $vg && -n $vg_uuid ]] || return 1
+    # Preflight supplies one immutable candidate per LV. Reject duplicate UUIDs
+    # or paths before any activation so no incomplete plan can be published.
+    awk -F'|' 'NF == 4 && $1 != "" && $2 != "" && $3 ~ /^\/dev\// && $4 ~ /^[1-9][0-9]*$/ && !seen_uuid[$2]++ && !seen_path[$3]++ { count++; next } { bad=1 } END { exit(count > 0 && !bad ? 0 : 1) }' "$facts" || return 1
+    stage=$(mktemp "${facts}.prepared.XXXXXX") || return 1
+    states=$(mktemp /tmp/rootpxe-lvm-lv-states.XXXXXX) || { rm -f -- "$stage"; return 1; }
+    activated=$(mktemp /tmp/rootpxe-lvm-lv-activated.XXXXXX) || { rm -f -- "$stage" "$states"; return 1; }
+    lvs_json=$(mktemp /tmp/rootpxe-lvm-lv-active.XXXXXX) || { rm -f -- "$stage" "$states" "$activated"; return 1; }
+    chmod 600 "$stage" "$states" "$activated" "$lvs_json" || { rm -f -- "$stage" "$states" "$activated" "$lvs_json"; return 1; }
+    (
+        local name uuid path size extra query_uuid query_path active row_count source_count=0 state_count=0 fs cleanup_rc=0
+        rootpxe_lvm_prepare_cleanup() {
+            local prepared_path rc=0
+            while IFS= read -r prepared_path; do
+                [[ -n $prepared_path ]] || continue
+                lvchange -an "$prepared_path" >/dev/null 2>&1 || rc=1
+            done <"$activated"
+            return "$rc"
+        }
+        rootpxe_lvm_prepare_signal() {
+            rootpxe_lvm_prepare_cleanup || true
+            rm -f -- "$stage" "$states" "$activated" "$lvs_json"
+            trap - HUP INT TERM
+            exit 1
+        }
+        trap rootpxe_lvm_prepare_signal HUP INT TERM
+        if ! lvs --reportformat json -o lv_uuid,lv_path,lv_active --select "vg_uuid=$vg_uuid" "$vg" >"$lvs_json" 2>/dev/null || ! rootpxe_lvm_json_jq -e --arg vg "$vg" '
+          (.report|type == "array" and length == 1 and ((.[0].lv? // [])|type == "array") and
+           all((.[0].lv? // [])[]; (.lv_uuid|type == "string" and length > 0) and (.lv_path|type == "string" and startswith("/dev/")) and (.lv_active|IN("active","inactive"))) and
+           ([.[0].lv[].lv_uuid]|unique|length) == (.[0].lv|length) and
+           ([.[0].lv[].lv_path]|unique|length) == (.[0].lv|length))
+        ' "$lvs_json" >/dev/null; then
+            prepare_rc=1
+        elif ! rootpxe_lvm_json_jq -r '.report[0].lv[] | [.lv_uuid,.lv_path,.lv_active] | @tsv' "$lvs_json" >"$states"; then
+            prepare_rc=1
+        fi
+        if [[ $prepare_rc -eq 0 ]]; then
+            state_count=$(wc -l <"$states")
+            [[ $state_count =~ ^[1-9][0-9]*$ ]] || prepare_rc=1
+        fi
+        while [[ $prepare_rc -eq 0 ]] && IFS='|' read -r name uuid path size extra; do
+            [[ -n $name && -n $uuid && $path == /dev/* && $size =~ ^[1-9][0-9]*$ && -z $extra ]] || { prepare_rc=1; break; }
+            source_count=$((source_count + 1))
+            row_count=$(awk -F'\t' -v wanted="$uuid" '$1 == wanted { count++; row=$0 } END { if (count == 1) print row; else exit 1 }' "$states") || { prepare_rc=1; break; }
+            IFS=$'\t' read -r query_uuid query_path active <<<"$row_count"
+            [[ $query_uuid == "$uuid" && $query_path == "$path" ]] || { prepare_rc=1; break; }
+            case $active in
+                active) ;;
+                inactive)
+                    # Record cleanup intent before activation so a signal after
+                    # a successful lvchange still restores the initial state.
+                    printf '%s\n' "$path" >>"$activated" || { prepare_rc=1; break; }
+                    lvchange -ay "$path" >/dev/null 2>&1 || { prepare_rc=1; break; }
+                    ;;
+                *) prepare_rc=1; break ;;
+            esac
+            fs=$(blkid -s TYPE -o value "$path" 2>/dev/null | tr -d '\r\n')
+            case $fs in ext2|ext3|ext4|xfs|swap) ;; *) prepare_rc=1; break ;; esac
+            printf '%s|%s|%s|%s|%s\n' "$name" "$uuid" "$path" "$size" "$fs" >>"$stage" || { prepare_rc=1; break; }
+        done <"$facts"
+        [[ $source_count -eq $state_count && $source_count -gt 0 ]] || prepare_rc=1
+        rootpxe_lvm_prepare_cleanup || cleanup_rc=1
+        if [[ $prepare_rc -ne 0 || $cleanup_rc -ne 0 ]]; then
+            rm -f -- "$stage" "$states" "$activated" "$lvs_json"
+            trap - HUP INT TERM
+            exit 1
+        fi
+        mv "$stage" "$facts" || { rm -f -- "$stage" "$states" "$activated" "$lvs_json"; trap - HUP INT TERM; exit 1; }
+        rm -f -- "$states" "$activated" "$lvs_json"
+        trap - HUP INT TERM
+        exit 0
+    )
+    prepare_rc=$?
+    [[ $prepare_rc -eq 0 ]] || return 1
+    return 0
+}
+
 rootpxe_xfs_capture_preflight() {
     local device="$1" mount_point="" primary_error=""
     rootpxe_xfs_capture_error=""
@@ -674,6 +765,9 @@ rootpxe_capture_lvm_volumes() {
     rootpxe_lvm_capture_error_reason=unknown
     [[ ${rootpxe_lvm_active:-no} == yes && ${rootpxe_lvm_captured:-no} != yes ]] || return 0
     rootpxe_lvm_is_pv_partition "$rootpxe_lvm_pv_path" || return 1
+    if ! awk -F'|' 'NF == 5 && $1 != "" && $2 != "" && $3 ~ /^\/dev\// && $4 ~ /^[1-9][0-9]*$/ && $5 ~ /^(ext2|ext3|ext4|xfs|swap)$/ { found=1; next } { bad=1 } END { exit(found && !bad ? 0 : 1) }' "${rootpxe_lvm_lv_facts_file:-/dev/null}" 2>/dev/null; then
+        rootpxe_lvm_prepare_capture_lv_facts || return 1
+    fi
     rootpxe_partition_progress_item "d1:p${rootpxe_lvm_pv_number}" preparing - "准备抓取 LVM 物理卷"
     rootpxe_lvm_capture_status_file=$(mktemp /tmp/rootpxe-lvm-capture-status.XXXXXX) || return 1
     stage=$(mktemp -d "$image_path/.rootpxe-lvm.XXXXXX") || { rm -f -- "$rootpxe_lvm_capture_status_file"; return 1; }
@@ -702,10 +796,11 @@ rootpxe_capture_lvm_volumes() {
     pvdisplay -m --units b "$rootpxe_lvm_pv_path" >"$stage/$pv_artifact" 2>/dev/null || return 1
     vgcfgbackup -f "$stage/$vg_artifact" "$rootpxe_lvm_vg_name" >/dev/null 2>&1 || return 1
     : >"$stage/d1.lvm.capture.tsv" || return 1
-    while IFS='|' read -r lv_name lv_uuid lv_path lv_size; do
+    while IFS='|' read -r lv_name lv_uuid lv_path lv_size fs extra; do
         artifact=""; swap_uuid=""
-        fs=$(blkid -s TYPE -o value "$lv_path" 2>/dev/null | tr -d '\r\n'); swap_uuid=$(blkid -s UUID -o value "$lv_path" 2>/dev/null | tr -d '\r\n')
+        [[ -n $lv_name && -n $lv_uuid && $lv_path == /dev/* && $lv_size =~ ^[1-9][0-9]*$ && -z $extra ]] || return 1
         case $fs in ext2|ext3|ext4|xfs|swap) ;; *) return 1;; esac
+        swap_uuid=$(blkid -s UUID -o value "$lv_path" 2>/dev/null | tr -d '\r\n')
         # n images preserve the source layout while capturing.  The original
         # logical-volume size is therefore also its minimum deployment size.
         min_bytes="$lv_size"; producer=0; writer=0
@@ -5556,8 +5651,9 @@ savePartition() {
     local writer_exitcode=0
     local progress_decoder=0
     getPartitionNumber "$part"
-    rootpxe_partition_progress_item "d${disk_number}:p${part_number}" preparing 0 "准备抓取"
     local fstype=""
+    fsTypeSetting "$part"
+    [[ $fstype == lvm ]] || rootpxe_partition_progress_item "d${disk_number}:p${part_number}" preparing 0 "准备抓取"
     local parttype=""
     local imgpart=""
     local fifoname="/tmp/pigz1"
@@ -5569,7 +5665,6 @@ savePartition() {
     fi
     rootpxe_console_message INFO "Processing partition: $part ($part_number)."
     debugPause
-    fsTypeSetting "$part"
     getPartType "$part"
     local ebrfilename=""
     local swapuuidfilename=""
@@ -5591,6 +5686,9 @@ savePartition() {
             # LVs.  Never let the generic imager create a raw PV payload.
             rootpxe_lvm_is_pv_partition "$part" || handleError "Unsupported LVM PV topology. (${FUNCNAME[0]})"
             rootpxe_capture_lvm_volumes "$imagePath" || handleError "PXEOS_STAGE=capture CODE=${rootpxe_lvm_capture_error_code:-LVM_CAPTURE_FAILED} REASON=${rootpxe_lvm_capture_error_reason:-unknown}"
+            # LVM reports the PV container and each LV itself with metadata-only
+            # percentages. Do not fall through to the generic payload 100%.
+            return 0
             ;;
         swap)
             rootpxe_console_message INFO 'Saving swap partition UUID.'
