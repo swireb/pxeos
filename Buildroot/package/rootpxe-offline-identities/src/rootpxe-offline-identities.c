@@ -1736,6 +1736,165 @@ static int selftest(void)
     xmlFreeDoc(d);
     return 0;
 }
+static hive_node_h hostname_path(hive_h *hive, hive_node_h start,
+                                 const char *one, const char *two,
+                                 const char *three, const char *four)
+{
+    const char *parts[] = { one, two, three, four, NULL };
+    int i;
+    for (i = 0; parts[i]; i++) {
+        start = hivex_node_get_child(hive, start, parts[i]);
+        if (!start)
+            return 0;
+    }
+    return start;
+}
+
+static int hostname_value_matches(hive_h *hive, hive_node_h node,
+                                  const char *key, const char *hostname)
+{
+    hive_value_h value;
+    hive_type type;
+    size_t size, length, i;
+    unsigned char *data;
+    value = hivex_node_get_value(hive, node, key);
+    if (!value)
+        return -1;
+    data = (unsigned char *)hivex_value_value(hive, value, &type, &size);
+    length = strlen(hostname);
+    if (!data || type != hive_t_string || size != (length + 1) * 2) {
+        free(data);
+        return -1;
+    }
+    for (i = 0; i < length; i++)
+        if (data[2 * i] != (unsigned char)hostname[i] || data[2 * i + 1]) {
+            free(data);
+            return -1;
+        }
+    if (data[2 * length] || data[2 * length + 1]) {
+        free(data);
+        return -1;
+    }
+    free(data);
+    return 0;
+}
+
+static int hostname_dword(hive_h *hive, hive_node_h node, const char *key,
+                          unsigned *result)
+{
+    hive_value_h value;
+    hive_type type;
+    size_t size;
+    unsigned char *data;
+
+    value = node ? hivex_node_get_value(hive, node, key) : 0;
+    data = value ? (unsigned char *)hivex_value_value(hive, value, &type,
+                                                       &size)
+                 : NULL;
+    if (!data || type != hive_t_dword || size != 4) {
+        free(data);
+        return -1;
+    }
+    *result = (unsigned)le32(data);
+    free(data);
+    return *result == 0 || *result > 999 ? -1 : 0;
+}
+
+static int selected_hostname_control_sets(hive_h *hive, hive_node_h root,
+                                          unsigned selected[2], size_t *count)
+{
+    hive_node_h select;
+    char control[16];
+    unsigned current;
+    unsigned fallback;
+
+    select = hivex_node_get_child(hive, root, "Select");
+    if (!select || hostname_dword(hive, select, "Current", &current) ||
+        hostname_dword(hive, select, "Default", &fallback))
+        return -1;
+    selected[0] = current;
+    *count = 1;
+    if (fallback != current)
+        selected[(*count)++] = fallback;
+    for (size_t i = 0; i < *count; i++) {
+        if (snprintf(control, sizeof(control), "ControlSet%03u", selected[i])
+                >= (int)sizeof(control) ||
+            !hivex_node_get_child(hive, root, control))
+            return -1;
+    }
+    return 0;
+}
+
+static int valid_windows_hostname(const char *hostname)
+{
+    size_t i;
+
+    if (!hostname || !*hostname || strlen(hostname) > 15)
+        return 0;
+    for (i = 0; hostname[i]; i++)
+        if (!(hostname[i] == '-' || (hostname[i] >= 'A' && hostname[i] <= 'Z') ||
+              (hostname[i] >= 'a' && hostname[i] <= 'z') ||
+              (hostname[i] >= '0' && hostname[i] <= '9')))
+            return 0;
+    return strspn(hostname, "0123456789") != strlen(hostname);
+}
+
+/* Inspect and verify deliberately use hivex read-only.  The shell-side reged
+ * adapter remains the only writer for Windows hostname fields. */
+static int windows_hostname_inspect_or_verify(const char *system,
+                                              const char *hostname)
+{
+    hive_h *hive = NULL;
+    hive_node_h root;
+    unsigned selected[2];
+    size_t count;
+    size_t i;
+
+    if (!regular(system) || (hostname && !valid_windows_hostname(hostname)))
+        return -1;
+    hive = hivex_open(system, 0);
+    if (!hive)
+        return -1;
+    root = hivex_root(hive);
+    if (!root || selected_hostname_control_sets(hive, root, selected, &count))
+        goto bad;
+    for (i = 0; i < count; i++) {
+        char control[16];
+        hive_node_h current_set;
+        hive_node_h tcp;
+        hive_node_h active;
+        hive_node_h computer;
+
+        if (snprintf(control, sizeof(control), "ControlSet%03u", selected[i])
+                >= (int)sizeof(control))
+            goto bad;
+        current_set = hivex_node_get_child(hive, root, control);
+        if (!current_set)
+            goto bad;
+        if (!hostname) {
+            printf("%s\n", control);
+            continue;
+        }
+        tcp = hostname_path(hive, current_set, "Services", "Tcpip",
+                            "Parameters", NULL);
+        active = hostname_path(hive, current_set, "Control", "ComputerName",
+                               "ActiveComputerName", NULL);
+        computer = hostname_path(hive, current_set, "Control", "ComputerName",
+                                 "ComputerName", NULL);
+        if (!tcp || !active || !computer ||
+            hostname_value_matches(hive, tcp, "Hostname", hostname) ||
+            hostname_value_matches(hive, tcp, "NV Hostname", hostname) ||
+            hostname_value_matches(hive, active, "ComputerName", hostname) ||
+            hostname_value_matches(hive, computer, "ComputerName", hostname))
+            goto bad;
+    }
+    hivex_close(hive);
+    return 0;
+bad:
+    hivex_close(hive);
+    return -1;
+}
+
 int main(int argc, char **argv)
 {
     const char *manifest = NULL;
@@ -1749,6 +1908,10 @@ int main(int argc, char **argv)
         return selftest() ? 1 : 0;
     if (argc >= 2 && !strcmp(argv[1], "efi-repair"))
         return rootpxe_efi_main(argc - 1, argv + 1);
+    if (argc == 3 && !strcmp(argv[1], "windows-hostname-inspect"))
+        return windows_hostname_inspect_or_verify(argv[2], NULL) ? 1 : 0;
+    if (argc == 4 && !strcmp(argv[1], "windows-hostname-verify"))
+        return windows_hostname_inspect_or_verify(argv[2], argv[3]) ? 1 : 0;
     if (argc < 2 || strcmp(argv[1], "windows-repair"))
         die("用法: windows-repair --manifest FILE --plan FILE --result FILE --phase PHASE");
     for (i = 2; i + 1 < argc; i += 2) {

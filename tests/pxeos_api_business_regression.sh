@@ -237,6 +237,7 @@ EOF
 chmod +x "$tmp/legacy-bin/curl" "$tmp/legacy-bin/dmidecode"
 : >"$tmp/proc-cmdline"
 sed -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' \
+    -e 's|^\. /usr/share/pxeos/lib/deployment-identity.sh$|:|' \
     -e 's|^\. /usr/share/pxeos/lib/restore-preflight.sh$|:|' \
     -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' \
     -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" \
@@ -253,6 +254,9 @@ verifyNetworkConnection() { :; }
 determineOS() { :; }
 dots() { :; }
 handleError() { return 97; }
+rootpxe_deployment_identity_linux_capabilities_installed() { return 1; }
+rootpxe_deployment_identity_windows_hostname_capability_installed() { return 1; }
+rootpxe_deployment_identity_windows_sysprep_capability_installed() { return 1; }
 EOF
 sed -e "s|^\. /usr/share/pxeos/lib/funcs.sh$|. \"$tmp/legacy-runtime.sh\"|" \
     -e "s|^\. /usr/share/pxeos/lib/disk-health.sh$|. \"$tmp/disk-health.sh\"|" \
@@ -397,6 +401,26 @@ mapfile -d '' -t cifs_args <"$tmp/cifs.args"
 [[ ${cifs_args[0]} == '//192.0.2.20/share/images' && ${cifs_args[1]} == "$tmp/storage" ]] || fail 'SMB mount argv 未使用完整 share/subdir'
 [[ ${cifs_args[*]} != *vers=* && ${cifs_args[*]} != *sec=* ]] || fail 'SMB mount 不得固定 vers/sec 协商参数'
 [[ ! -e $tmp/nfs.args && ! -e $tmp/mount.credentials ]] || fail 'SMB 分支误走 NFS 或未清理凭据'
+
+# The sourced mount script must retain the caller cleanup trap.
+cat >"$tmp/mount-trap-wrapper.sh" <<EOF
+. "$tmp/mount-funcs.sh"
+private_file="$tmp/initialization.private"
+rootpxe_deployment_identity_cleanup_private() { rm -f -- "\${private_file:-}"; private_file=''; }
+rootpxe_cleanup_session() { rootpxe_cleanup_smb_credentials; rootpxe_deployment_identity_cleanup_private; }
+trap rootpxe_cleanup_session EXIT
+trap 'rootpxe_cleanup_session; exit 143' TERM
+. "$tmp/pxeos.mount"
+kill -TERM \$\$
+EOF
+chmod +x "$tmp/mount-trap-wrapper.sh"
+: >"$tmp/mount-trap.credentials"
+: >"$tmp/initialization.private"
+set +e
+PATH="$tmp/mount-bin:$PATH" MOCK_CIFS_ARGS="$tmp/cifs-trap.args" MOCK_NFS_ARGS="$tmp/nfs-trap.args" protocol=smb storage_server=192.0.2.20 storage_export=share/images smb_credentials_file="$tmp/mount-trap.credentials" type=up capone=0 bash "$tmp/mount-trap-wrapper.sh" >/dev/null 2>&1
+mount_trap_rc=$?
+set -e
+[[ $mount_trap_rc -eq 143 && ! -e $tmp/mount-trap.credentials && ! -e $tmp/initialization.private ]] || fail 'SMB mount 后 TERM 必须停止并清理两类私密文件'
 
 : >"$tmp/leading-slash.credentials"
 set +e
@@ -823,7 +847,7 @@ case " $* " in
 esac
 EOF
 chmod +x $tmp/mock/*
-sed -e "s|^\. /usr/share/pxeos/lib/partition-funcs.sh|. \"$overlay/usr/share/pxeos/lib/partition-funcs.sh\"|" -e "s|^\. /usr/share/pxeos/lib/restore-preflight.sh|. \"$overlay/usr/share/pxeos/lib/restore-preflight.sh\"|" -e "s|^\. /usr/share/pxeos/lib/capture-recovery.sh|. \"$overlay/usr/share/pxeos/lib/capture-recovery.sh\"|" -e "s|</proc/cmdline|<$tmp/cmdline|" -e "s|/ntfs/|$tmp/ntfs/|g" -e "s| /ntfs\([ ;)]\)| $tmp/ntfs\1|g" -e "s|mountpoint=/linuxroot|mountpoint=$tmp/linuxroot|g" -e "s|/linuxroot/|$tmp/linuxroot/|g" -e "s| /linuxroot\([ ;)]\)| $tmp/linuxroot\1|g" $funcs >$tmp/funcs.sh
+sed -e "s|^\. /usr/share/pxeos/lib/partition-funcs.sh|. \"$overlay/usr/share/pxeos/lib/partition-funcs.sh\"|" -e "s|^\. /usr/share/pxeos/lib/deployment-identity.sh|:|" -e "s|^\. /usr/share/pxeos/lib/restore-preflight.sh|. \"$overlay/usr/share/pxeos/lib/restore-preflight.sh\"|" -e "s|^\. /usr/share/pxeos/lib/capture-recovery.sh|. \"$overlay/usr/share/pxeos/lib/capture-recovery.sh\"|" -e "s|</proc/cmdline|<$tmp/cmdline|" -e "s|/ntfs/|$tmp/ntfs/|g" -e "s| /ntfs\([ ;)]\)| $tmp/ntfs\1|g" -e "s|mountpoint=/linuxroot|mountpoint=$tmp/linuxroot|g" -e "s|/linuxroot/|$tmp/linuxroot/|g" -e "s| /linuxroot\([ ;)]\)| $tmp/linuxroot\1|g" $funcs >$tmp/funcs.sh
 cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
 : >$tmp/cmdline
 : >$tmp/mount-trace
@@ -836,6 +860,10 @@ export PATH=$tmp/mock:$PATH
 ismajordebug=0
 isdebug=0
 . $tmp/funcs.sh
+rootpxe_deployment_identity_linux_state_root="$tmp/linuxroot"
+rootpxe_deployment_identity_linux_policy_enabled() { return 1; }
+rootpxe_deployment_identity_windows_policy_enabled() { return 1; }
+rootpxe_deployment_identity_storage_enabled() { return 1; }
 declare -f fsTypeSetting >"$tmp/actual-fsTypeSetting.sh"
 rootpxe_require_task_context() { return 0; }
 rootpxe_require_identity() { return 0; }
@@ -956,33 +984,25 @@ MODE=unique; export MODE
 MODE=ambiguous; export MODE
 rootpxe_find_windows_system_partition /dev/mock && fail ambiguous-windows
 
-# Windows customization must update only the fixed Sysprep file.  Registry is
-# a fallback solely when that file is absent; malformed XML must not fall back.
+# Windows hostname-only customization always uses the offline registry. Sysprep
+# XML is an independent initialization option and must not alter this path.
 rootpxe_stage() { printf '%s\n' "$*" >>$tmp/hostname-stage; }
 rootpxe_change_hostname_registry() { printf '%s\n' "$1" >>$tmp/registry; }
 : >$tmp/registry
 MODE=hostname_xml; export MODE
 changeHostname=true; hostName=PXEHOST
-rootpxe_apply_windows_hostname /dev/mock2 || fail unattend-update
-grep -Fq PXEHOST $tmp/ntfs/Windows/System32/Sysprep/unattend.xml || fail unattend-readback
-[[ ! -s $tmp/registry ]] || fail unattend-registry-fallback
+rootpxe_apply_windows_hostname /dev/mock2 || fail registry-with-unattend
+grep -Fqx /dev/mock2 $tmp/registry || fail registry-with-unattend-not-called
 MODE=hostname_absent; export MODE
 rootpxe_apply_windows_hostname /dev/mock2 || fail registry-fallback
-grep -Fqx /dev/mock2 $tmp/registry || fail registry-not-called
+[[ $(wc -l <$tmp/registry) -eq 2 ]] || fail registry-not-called
 MODE=hostname_xml; export MODE
 osid=9
 rootpxe_apply_hostname_for_disk /dev/mock2 || fail windows-dispatch
 registry_count=$(wc -l <$tmp/registry)
 MODE=hostname_invalid; export MODE
-set +e
-(
-    handleError() { exit 97; }
-    rootpxe_apply_windows_hostname /dev/mock2
-)
-invalid_rc=$?
-set -e
-[[ $invalid_rc -eq 97 ]] || fail invalid-unattend-result
-[[ $(wc -l <$tmp/registry) -eq $registry_count ]] || fail invalid-unattend-registry-fallback
+rootpxe_apply_windows_hostname /dev/mock2 || fail invalid-unattend-must-not-gate-registry
+[[ $(wc -l <$tmp/registry) -eq $((registry_count + 1)) ]] || fail invalid-unattend-registry-not-called
 
 # Linux uses the same deployment hostname contract, but discovers the one
 # actual root filesystem rather than selecting a largest/first partition.
@@ -1581,9 +1601,21 @@ findHDDInfo() { hd=/dev/mock2; printf '%s\n' find >>$RESUME_TRACE; }
 rootpxe_disk_stable_identity() { echo resume-disk-id; }
 rootpxe_wait_for_disk_permit() { printf 'permit:%s:%s\n' "$1" "$2" >>$RESUME_TRACE; }
 rootpxe_stage() { printf 'stage:%s\n' "$*" >>$RESUME_TRACE; }
-rootpxe_apply_hostname_for_disk() { printf 'hostname:%s:%s\n' "$osid" "$1" >>$RESUME_TRACE; }
+rootpxe_apply_hostname_for_disk() { rootpxe_deployment_identity_hostname_result=true; printf 'hostname:%s:%s\n' "$osid" "$1" >>$RESUME_TRACE; }
 rootpxe_run_pre_deploy_script() { printf '%s\n' UNEXPECTED:pre >>$RESUME_TRACE; return 1; }
 rootpxe_run_post_deploy_script() { printf '%s\n' post >>$RESUME_TRACE; }
+# Exercise the production safe-resume branch with an active identity policy.
+# Both customization and post-deploy retries must submit a result for this
+# attempt before imgcomplete can finish it.
+rootpxe_deployment_identity_policy_enabled() { return 0; }
+rootpxe_deployment_identity_private_enabled() { return 1; }
+rootpxe_deployment_identity_linux_policy_enabled() { return 1; }
+rootpxe_deployment_identity_windows_policy_enabled() { return 1; }
+rootpxe_deployment_identity_storage_enabled() { return 1; }
+rootpxe_deployment_identity_request_plan() { printf 'identity-plan:%s\n' "$1" >>$RESUME_TRACE; }
+rootpxe_deployment_identity_request_private() { fail resume-private-unexpected; }
+rootpxe_deployment_identity_report_result() { printf 'identity-result:%s\n' "$*" >>$RESUME_TRACE; }
+rootpxe_deployment_identity_cleanup_private() { printf '%s\n' identity-cleanup >>$RESUME_TRACE; }
 rootpxe_validate_deployment_layout() { fail resume-layout; }
 rootpxe_apply_deployment_layout() { fail resume-layout-apply; }
 rootpxe_plan_deploy_disk_operation() { fail resume-nvme-plan; }
@@ -1601,21 +1633,81 @@ nombr=0
 ) || fail resume-execution
 grep -Fqx permit:resume-disk-id:deploy_write $tmp/resume-trace || fail resume-permit
 grep -Fqx hostname:50:/dev/mock2 $tmp/resume-trace || fail resume-hostname
+grep -Fqx identity-plan:/dev/mock2 $tmp/resume-trace || fail resume-customizing-plan
+grep -Fqx 'identity-result:false true false false false false false' $tmp/resume-trace || fail resume-customizing-result
+grep -Fqx identity-cleanup $tmp/resume-trace || fail resume-customizing-cleanup
 grep -Fqx post $tmp/resume-trace || fail resume-post
 grep -Fqx complete $tmp/resume-trace || fail resume-complete
 
 : >$tmp/resume-post-trace
 RESUME_TRACE=$tmp/resume-post-trace; export RESUME_TRACE
-rootpxe_apply_hostname_for_disk() { fail resume-post-must-not-repeat-hostname; }
+rootpxe_apply_hostname_for_disk() { rootpxe_deployment_identity_hostname_result=true; printf 'hostname:%s:%s\n' "$osid" "$1" >>$RESUME_TRACE; }
 resumeStage=post_deploy_script
-changeHostname=false
+changeHostname=true
 (
     . $resume_script
 ) || fail resume-post-execution
 grep -Fqx permit:resume-disk-id:deploy_write $tmp/resume-post-trace || fail resume-post-permit
+grep -Fqx identity-plan:/dev/mock2 $tmp/resume-post-trace || fail resume-post-plan
+grep -Fqx hostname:50:/dev/mock2 $tmp/resume-post-trace || fail resume-post-hostname
+grep -Fqx 'identity-result:false true false false false false false' $tmp/resume-post-trace || fail resume-post-result
+grep -Fqx identity-cleanup $tmp/resume-post-trace || fail resume-post-cleanup
 grep -Fqx post $tmp/resume-post-trace || fail resume-post-script
 grep -Fqx complete $tmp/resume-post-trace || fail resume-post-complete
 ! grep -Fq UNEXPECTED:pre $tmp/resume-post-trace || fail resume-post-ran-pre
+
+# Randomized storage identifiers have broader boot-reference repairs than the
+# safe resume point can prove. Both resume stages must stop before hostname,
+# post script, result reporting, or any storage setter is reached.
+rootpxe_deployment_identity_storage_enabled() { return 0; }
+for rejected_stage in customizing_hostname post_deploy_script; do
+    rejected_trace="$tmp/resume-storage-${rejected_stage}.trace"
+    rejected_error="$tmp/resume-storage-${rejected_stage}.error"
+    : >"$rejected_trace"
+    RESUME_TRACE="$rejected_trace"; export RESUME_TRACE
+    resumeStage=$rejected_stage
+    changeHostname=true
+    set +e
+    (
+        handleError() { printf '%s\n' "$1" >"$rejected_error"; exit 93; }
+        . "$resume_script"
+    )
+    rejected_rc=$?
+    set -e
+    [[ $rejected_rc -eq 93 ]] || fail "resume-storage-${rejected_stage}-exit"
+    grep -Fqx 'PXEOS_STAGE=deployment_identity_resume CODE=STORAGE_IDENTITY_RESUME_REQUIRES_REDEPLOY' "$rejected_error" || fail "resume-storage-${rejected_stage}-reason"
+    grep -Fqx 'identity-plan:/dev/mock2' "$rejected_trace" || fail "resume-storage-${rejected_stage}-plan"
+    ! grep -Eq '^(hostname:|identity-result:|identity-cleanup|post$|complete$)' "$rejected_trace" || fail "resume-storage-${rejected_stage}-must-not-write-or-report"
+done
+rootpxe_deployment_identity_storage_enabled() { return 1; }
+
+# A legacy hostname-only retry has no deployment identity plan. It must still
+# replay the hostname step at the customization resume point, and must stop if
+# that offline update fails.
+rootpxe_deployment_identity_policy_enabled() { return 1; }
+: >"$tmp/resume-hostname-only.trace"
+RESUME_TRACE="$tmp/resume-hostname-only.trace"; export RESUME_TRACE
+rootpxe_apply_hostname_for_disk() { printf 'hostname-only:%s\n' "$1" >>$RESUME_TRACE; }
+resumeStage=customizing_hostname
+changeHostname=true
+(
+    . "$resume_script"
+) || fail resume-hostname-only-execution
+grep -Fqx 'hostname-only:/dev/mock2' "$tmp/resume-hostname-only.trace" || fail resume-hostname-only-apply
+! grep -Eq '^identity-(plan|result):' "$tmp/resume-hostname-only.trace" || fail resume-hostname-only-must-not-use-identity
+
+: >"$tmp/resume-hostname-only-error"
+set +e
+(
+    handleError() { printf '%s\n' "$1" >"$tmp/resume-hostname-only-error"; exit 94; }
+    rootpxe_apply_hostname_for_disk() { return 1; }
+    . "$resume_script"
+)
+hostname_only_rc=$?
+set -e
+[[ $hostname_only_rc -eq 94 ]] || fail resume-hostname-only-failure-exit
+grep -Fqx 'PXEOS_STAGE=customizing_hostname CODE=HOSTNAME_FAILED' "$tmp/resume-hostname-only-error" || fail resume-hostname-only-failure-reported
+rootpxe_deployment_identity_policy_enabled() { return 0; }
 
 # Keep the ordering assertion as a cheap guard against accidental future
 # movement of the early resume branch.

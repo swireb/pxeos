@@ -4,6 +4,18 @@ sysuuid=${sysuuid,,}
 rootpxe_api="${pxeapi:-$web}"
 rootpxe_require_task_context || handleError "RootPXE: invalid task context ($0)"
 
+# Deploy completion is bound to the frozen identity plan and attempt.  The
+# server deliberately rejects a finish callback without these facts once a
+# task enables any identity initialization option.
+rootpxe_finish_identity_args=()
+if rootpxe_deployment_identity_policy_enabled; then
+    [[ -r ${rootpxe_deployment_identity_plan_file:-} ]] || handleError "PXEOS_STAGE=finish_notify CODE=IDENTITY_PLAN_MISSING"
+    rootpxe_finish_plan_id=$(jq -er '.plan.planId | select(type == "string" and length > 0)' "$rootpxe_deployment_identity_plan_file") || handleError "PXEOS_STAGE=finish_notify CODE=IDENTITY_PLAN_INVALID"
+    rootpxe_finish_plan_hash=$(jq -er '.planHash | select(type == "string" and test("^[a-f0-9]{64}$"))' "$rootpxe_deployment_identity_plan_file") || handleError "PXEOS_STAGE=finish_notify CODE=IDENTITY_PLAN_INVALID"
+    [[ ${progress_attempt:-} =~ ^[1-9][0-9]*$ ]] || handleError "PXEOS_STAGE=finish_notify CODE=IDENTITY_ATTEMPT_INVALID"
+    rootpxe_finish_identity_args=(--data-urlencode "planId=$rootpxe_finish_plan_id" --data-urlencode "planHash=$rootpxe_finish_plan_hash" --data-urlencode "attempt=$progress_attempt")
+fi
+
 count=0
 res=""
 if [[ ${type:-} == "up" ]]; then
@@ -31,6 +43,7 @@ finish_args=(
     --data-urlencode "result=success"
     --data-urlencode "message=pxeos imgcomplete type=$type"
 )
+finish_args+=("${rootpxe_finish_identity_args[@]}")
 [[ -n ${capture_size_bytes:-} ]] && finish_args+=(--data-urlencode "sizeBytes=$capture_size_bytes")
 [[ -n ${rootpxe_partition_inventory_file:-} ]] && finish_args+=(--data-urlencode "partitionInventory=$(cat "$rootpxe_partition_inventory_file")")
 [[ -n ${rootpxe_original_schema_file:-} ]] && finish_args+=(--data-urlencode "originalSchema=$(cat "$rootpxe_original_schema_file")")

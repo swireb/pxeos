@@ -354,6 +354,7 @@ count=0
 [ -f "$count_file" ] && count=$(cat "$count_file")
 count=$((count + 1))
 printf '%s' "$count" > "$count_file"
+if [ -n "${MOCK_CURL_ARGS:-}" ]; then printf '%s\n' "$*" > "$MOCK_CURL_ARGS"; fi
 if [ "${MOCK_CURL_MODE:-transient}" = attention ]; then
     printf '%s\n' ' { "success" : false, "status" : "attention", "error" : "捕获分区清单结构无效" }'
     exit 0
@@ -385,6 +386,7 @@ rootpxe_clear_capture_marker() {
 }
 rootpxe_cleanup_task_json() { : > "${MOCK_JSON_CLEARED:?}"; }
 rootpxe_capture_resume_cleanup() { :; }
+rootpxe_deployment_identity_policy_enabled() { [[ ${MOCK_IDENTITY:-no} == yes ]]; }
 rootpxe_console_message() { printf '%-7s %s\n' "[$1]" "$2"; }
 dots() { :; }
 debugPause() { :; }
@@ -403,6 +405,19 @@ assert_eq "$imgcomplete_rc" 0 '完成回调临时失败后应重试并成功'
 assert_eq "$(cat "$tmp/curl-count")" 2 '完成回调应执行两次 curl'
 [[ -f "$tmp/marker-cleared" && -f "$tmp/json-cleared" ]] || fail '成功后必须执行安全清理'
 pass 'finish retry survives bash errexit'
+
+# Deployment finish is accepted only when it proves the frozen plan and
+# current execution attempt that already produced the identity result.
+identity_plan="$tmp/identity-plan.json"
+printf '%s\n' '{"plan":{"planId":"plan-finish"},"planHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' > "$identity_plan"
+PATH="$tmp/bin:$PATH" BASH_ENV="$tmp/bash_env" MOCK_IDENTITY=yes MOCK_CURL_COUNT="$tmp/identity-curl-count" MOCK_CURL_ARGS="$tmp/identity-curl-args" \
+    MOCK_MARKER_CLEARED="$tmp/identity-marker-cleared" MOCK_JSON_CLEARED="$tmp/identity-json-cleared" \
+    type=down taskid=1 task_token=secret mac=001122334455 web='http://mock/' progress_attempt=3 rootpxe_deployment_identity_plan_file="$identity_plan" \
+    bash -e "$imgcomplete" >"$tmp/identity-finish.out" 2>"$tmp/identity-finish.err"
+grep -Fq 'planId=plan-finish' "$tmp/identity-curl-args" || fail 'identity finish omitted planId'
+grep -Fq 'planHash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$tmp/identity-curl-args" || fail 'identity finish omitted planHash'
+grep -Fq 'attempt=3' "$tmp/identity-curl-args" || fail 'identity finish omitted attempt'
+pass 'identity finish binds frozen plan and attempt'
 
 # 红测：服务端已将任务转为 attention 时，完成回调不能继续重试并掩盖首个错误。
 set +e

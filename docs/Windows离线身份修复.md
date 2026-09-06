@@ -1,6 +1,6 @@
 ## RootPXE 离线身份修复工具
 
-- `rootpxe-offline-identities` 是 PXEOS 内的原生离线修复工具，提供 `windows-repair` 和 `efi-repair` 两个子命令。
+- `rootpxe-offline-identities` 是 PXEOS 内的原生离线修复工具，提供 windows-repair、efi-repair、windows-hostname-inspect 和 windows-hostname-verify 子命令。
 - 它只接受部署任务已经冻结的 manifest 与 plan，不生成磁盘标识、分区 GUID、文件系统 UUID、machine-id 或 SSH 密钥。
 - 普通镜像部署由 PXEOS 自动生成输入并调用本工具，管理员不需要手动注入命令、构造计划或直接写目标磁盘。
 - 管理页面在镜像新增和编辑表单的“部署设置”区域提供“随机化存储标识”和“初始化系统身份”。新增的存储标识、Linux `machine-id` 和 SSH 主机密钥选项默认关闭；既有主机名选项保持原有默认行为。
@@ -13,6 +13,20 @@
 - `efi-repair` 是 Windows 与 Linux 共用的 EFI `Boot####` NVRAM device-path 修复器。它只处理受控的 `efivarfs` 与服务端计划中许可的分区映射。
 - Linux 的磁盘和文件系统 UUID 写入、`fstab`、`crypttab`、GRUB、BLS、`grubenv`、initramfs、`machine-id` 与 SSH 主机密钥由 PXEOS shell 调用其它工具完成，不属于这两个 C 子命令的职责。
 - Cygwin 仅用于 Windows 开发宿主上的原生编译和测试；它不是 PXEOS 运行时依赖，也不替代 Buildroot 目标构建。
+
+## Windows 主机名辅助命令
+
+- windows-hostname-inspect 只读打开 SYSTEM hive，读取 Select\\Current 和 Select\\Default，并按 Current 再 Default 的顺序输出去重后的严格 ControlSetNNN 名称，每行一个。
+- windows-hostname-verify 只读核验每个已选 ControlSet 的四项字符串值：Tcpip 的 Hostname、Tcpip 的 NV Hostname、ComputerName 和 ActiveComputerName。所有值必须与输入名称一致才返回成功。
+- 两个命令拒绝缺失或损坏 Select、无效 ControlSet、损坏 hive、空名称、纯数字名称、超过 15 字符的名称和不合法字符。它们不写 SYSTEM hive。
+- reged 仍是 PXEOS 修改注册表主机名的唯一写入器。shell 仅在 inspect 成功后为每个返回 ControlSet 写入四项，再调用 verify；写入或回读失败会停止部署。
+
+```text
+rootpxe-offline-identities windows-hostname-inspect <SYSTEM>
+rootpxe-offline-identities windows-hostname-verify <SYSTEM> <name>
+```
+
+- 这两个辅助命令不改变 windows-repair 的职责。windows-repair 仍不写 MBR 磁盘签名、GPT 磁盘 GUID、GPT 分区 GUID 或 EFI NVRAM，也不生成任何磁盘标识。
 
 ## 调用顺序与输入边界
 
@@ -75,6 +89,7 @@ rootpxe-offline-identities efi-repair --manifest "$efi_manifest" --plan "$plan_w
 ## Buildroot 集成与架构状态
 
 - Buildroot 包名为 `rootpxe-offline-identities`，编译命令使用 `TARGET_CC`、目标 CFLAGS、目标链接参数和 Buildroot 的 pkg-config。
+- PXEOS checkin 仅在 `jq`、`ntfs-3g`、`reged` 和 `rootpxe-offline-identities` 均可用时声明 `windows-hostname-registry-v1`；仅在 `jq`、`ntfs-3g` 和 `xmlstarlet` 均可用时声明 `windows-sysprep-v1`。服务端据此决定是否接受对应初始化策略。
 - 包依赖 `json-c`、`libxml2` 与 `libhivex`，安装目标为 `/usr/sbin/rootpxe-offline-identities`。`hivex.pc` 与上游 minimal hive 是主机侧合成回归的构建和 fixture 依赖，不是 PXEOS 运行时发现路径。
 - 已接入构建配置的 x86 为 `configs/fsx86.config`，目标架构为 i386。
 - 已接入构建配置的 x86_64 为 `configs/fsx64.config`，目标架构为 x86_64。
@@ -89,3 +104,5 @@ rootpxe-offline-identities efi-repair --manifest "$efi_manifest" --plan "$plan_w
 - 上述证据不包含完整 Buildroot 三架构交叉构建、真实 EFI 变量写入、Windows 或 Linux 克隆盘启动、BIOS/MBR、UEFI/GPT、LVM、恢复环境或盘符映射的实机验证。
 - 既有捕获回归中有四项 POSIX 符号链接断言因宿主能力被跳过；这不是本轮运行结果，也不能补足实机验证。
 - 对生产磁盘的任何直接调用都需要由正常部署任务提供已冻结 plan、受控挂载和可恢复备份；本说明不提供绕过该链路的写盘操作方法。
+- 本次在 Cygwin 主机环境以严格警告编译原生工具并运行 selftest；真实 hivex fixture 由真实 reged 写入两个 ControlSet 的八项主机名值，再由 inspect 和 verify 验证。既有 Windows BCD、SYSTEM 与 XML 生命周期回归也已通过。
+- 上述是离线工具与 fixture 证据，不包含真实 Windows 部署、重启或域策略环境验证。

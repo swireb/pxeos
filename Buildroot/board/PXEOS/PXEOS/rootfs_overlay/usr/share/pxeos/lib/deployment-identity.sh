@@ -4,7 +4,42 @@
 
 rootpxe_deployment_identity_policy_enabled() {
     [[ -r ${deploymentIdentityPolicyFile:-} ]] || return 1
-    jq -e '.version == 1 and ((.randomizeStorageIdentifiers == true) or (.systemIdentity.machineId == true) or (.systemIdentity.sshHostKeys == true))' "$deploymentIdentityPolicyFile" >/dev/null 2>&1
+    jq -e '.version == 1 and ((.randomizeStorageIdentifiers == true) or (.systemIdentity.machineId == true) or (.systemIdentity.sshHostKeys == true) or (.systemIdentity.sshLoginPublicKeys == true) or (.systemIdentity.rootPassword == true) or (.systemIdentity.sysprep == true))' "$deploymentIdentityPolicyFile" >/dev/null 2>&1
+}
+
+rootpxe_deployment_identity_private_enabled() {
+    [[ -r ${deploymentIdentityPolicyFile:-} ]] || return 1
+    jq -e '.version == 1 and ((.systemIdentity.sshLoginPublicKeys == true) or (.systemIdentity.rootPassword == true) or (.systemIdentity.sysprep == true))' "$deploymentIdentityPolicyFile" >/dev/null 2>&1
+}
+
+rootpxe_deployment_identity_request_private() {
+    local api="${pxeapi:-${web:-}}" request response body code file
+    rootpxe_deployment_identity_private_enabled || return 0
+    [[ -n $api && ${taskid:-} =~ ^[1-9][0-9]*$ && -n ${task_token:-} && -n ${mac:-} && ${progress_attempt:-} =~ ^[1-9][0-9]*$ ]] || return 1
+    api="${api%/}/"
+    request=$(jq -cn --argjson taskId "$taskid" --arg token "$task_token" --arg mac "$mac" --argjson attempt "$progress_attempt" '{taskId:$taskId,token:$token,mac:$mac,attempt:$attempt}') || return 1
+    response=$(curl -Lks --connect-timeout 10 --max-time 30 -H 'Content-Type: application/json' --data-binary "$request" -w $'\n%{http_code}' "${api}deployment-initialization" 2>/dev/null) || return 1
+    code=${response##*$'\n'}; body=${response%$'\n'*}
+    [[ $code == 200 ]] || return 1
+    file=$(mktemp /tmp/rootpxe-deployment-initialization.XXXXXX) || return 1
+    chmod 0600 "$file" || { rm -f -- "$file"; return 1; }
+    printf '%s' "$body" >"$file" || { rm -f -- "$file"; return 1; }
+    jq -e '.version == 1 and ((.sshLoginPublicKeys|type) == "array") and ((.rootPasswordHash|type) == "string") and ((.unattendXml|type) == "string")' "$file" >/dev/null 2>&1 || { rm -f -- "$file"; return 1; }
+    rootpxe_deployment_initialization_private_file="$file"; export rootpxe_deployment_initialization_private_file
+}
+
+rootpxe_deployment_identity_cleanup_private() {
+    local file="${rootpxe_deployment_initialization_private_file:-}"
+    if [[ -n $file ]]; then
+        [[ -f $file && ! -L $file && $file == /tmp/rootpxe-deployment-initialization.* ]] && rm -f -- "$file"
+    fi
+    unset rootpxe_deployment_initialization_private_file
+}
+
+rootpxe_deployment_identity_private_value() {
+    local filter="$1" file="${rootpxe_deployment_initialization_private_file:-}"
+    [[ -r $file && ! -L $file ]] || return 1
+    jq -er "$filter" "$file"
 }
 
 rootpxe_deployment_identity_storage_enabled() {
@@ -28,6 +63,20 @@ rootpxe_deployment_identity_linux_capabilities_installed() {
     # only by images containing every executable used by their apply/readback
     # paths.  A policy is never silently accepted by an older PXEOS ISO.
     for tool in jq sgdisk sfdisk partprobe tune2fs xfs_admin mkswap lvchange ssh-keygen chroot rootpxe-offline-identities; do
+        command -v "$tool" >/dev/null 2>&1 || return 1
+    done
+}
+
+rootpxe_deployment_identity_windows_hostname_capability_installed() {
+    local tool
+    for tool in jq ntfs-3g reged rootpxe-offline-identities; do
+        command -v "$tool" >/dev/null 2>&1 || return 1
+    done
+}
+
+rootpxe_deployment_identity_windows_sysprep_capability_installed() {
+    local tool
+    for tool in jq ntfs-3g xmlstarlet; do
         command -v "$tool" >/dev/null 2>&1 || return 1
     done
 }
@@ -980,11 +1029,11 @@ rootpxe_deployment_identity_windows_apply_repair() {
 }
 
 rootpxe_deployment_identity_report_result() {
-    local storage="$1" hostname="$2" machine_id="$3" ssh_host_keys="$4" api request response http_code
+    local storage="$1" hostname="$2" machine_id="$3" ssh_host_keys="$4" ssh_login_public_keys="$5" root_password="$6" sysprep="$7" api request response http_code
     rootpxe_deployment_identity_policy_enabled || return 0
     [[ -r ${rootpxe_deployment_identity_plan_file:-} ]] || return 1
     api="${pxeapi:-${web:-}}"; [[ -n $api ]] || return 1
-    request=$(jq -cn --argjson taskId "$taskid" --arg token "$task_token" --arg mac "$mac" --arg planId "$(jq -r '.plan.planId' "$rootpxe_deployment_identity_plan_file")" --arg planHash "$(jq -r '.planHash' "$rootpxe_deployment_identity_plan_file")" --argjson attempt "$progress_attempt" --argjson storage "$storage" --argjson hostname "$hostname" --argjson machineId "$machine_id" --argjson sshHostKeys "$ssh_host_keys" '{taskId:$taskId,token:$token,mac:$mac,planId:$planId,planHash:$planHash,attempt:$attempt,result:{storage:$storage,hostname:$hostname,machineId:$machineId,sshHostKeys:$sshHostKeys}}') || return 1
+    request=$(jq -cn --argjson taskId "$taskid" --arg token "$task_token" --arg mac "$mac" --arg planId "$(jq -r '.plan.planId' "$rootpxe_deployment_identity_plan_file")" --arg planHash "$(jq -r '.planHash' "$rootpxe_deployment_identity_plan_file")" --argjson attempt "$progress_attempt" --argjson storage "$storage" --argjson hostname "$hostname" --argjson machineId "$machine_id" --argjson sshHostKeys "$ssh_host_keys" --argjson sshLoginPublicKeys "$ssh_login_public_keys" --argjson rootPassword "$root_password" --argjson sysprep "$sysprep" '{taskId:$taskId,token:$token,mac:$mac,planId:$planId,planHash:$planHash,attempt:$attempt,result:{storage:$storage,hostname:$hostname,machineId:$machineId,sshHostKeys:$sshHostKeys,sshLoginPublicKeys:$sshLoginPublicKeys,rootPassword:$rootPassword,sysprep:$sysprep}}') || return 1
     response=$(curl -Lks --connect-timeout 10 --max-time 30 -H 'Content-Type: application/json' --data-binary "$request" -w $'\n%{http_code}' "${api}deployment-identity-result" 2>/dev/null) || return 1
     http_code=${response##*$'\n'}
     [[ $http_code =~ ^2[0-9][0-9]$ ]]
@@ -1013,6 +1062,55 @@ rootpxe_deployment_identity_key_pair_valid() {
     read -r rendered_type rendered_material ignored <<<"$rendered"
     read -r public_type public_material ignored <"$public"
     [[ $rendered_type =~ ^(ssh-(rsa|ed25519)|ecdsa-sha2-nistp256)$ && $rendered_material =~ ^[A-Za-z0-9+/]+={0,2}$ && $public_type == "$rendered_type" && $public_material == "$rendered_material" ]]
+}
+
+# Resolve the normal root AuthorizedKeysFile setting without executing a
+# target-side service.  Standard non-recursive /etc/ssh Include snippets are
+# supported; Match and arbitrary paths fail closed because their effective
+# value cannot be established safely in the offline target.
+rootpxe_deployment_identity_root_authorized_keys_relative() {
+    local root="$1" ssh_dir config file line directive value extra include_path index result=''
+    local -a config_files include_matches
+    ssh_dir="$root/etc/ssh"; config="$ssh_dir/sshd_config"
+    [[ -d $ssh_dir && ! -L $ssh_dir ]] || return 1
+    [[ ! -e $config ]] && { printf '%s\n' '.ssh/authorized_keys'; return 0; }
+    rootpxe_deployment_identity_safe_target_file "$root" "$config" || return 1
+    config_files=("$config")
+    for ((index=0; index<${#config_files[@]}; index++)); do
+        file=${config_files[$index]}
+        rootpxe_deployment_identity_safe_target_file "$root" "$file" || return 1
+        while IFS= read -r line || [[ -n $line ]]; do
+            line=${line%%#*}; line=${line//$'\r'/}
+            read -r directive value extra <<<"$line"; directive=${directive,,}
+            [[ -n $directive ]] || continue
+            case $directive in
+                match) return 1 ;;
+                authorizedkeysfile)
+                    [[ -n $value && -z $extra ]] || return 1
+                    # Offline parsing cannot safely reproduce every sshd
+                    # Match precedence edge case.  Multiple identical values
+                    # are harmless; conflicting values must fail rather than
+                    # claim a key was installed at a path sshd may not read.
+                    [[ -z $result || $result == "$value" ]] || return 1
+                    result=$value
+                    ;;
+                include)
+                    (( index == 0 )) || return 1
+                    [[ $value == /etc/ssh/* && -n $value && -z $extra ]] || return 1
+                    include_path="$root$value"; include_matches=()
+                    while IFS= read -r file; do include_matches+=("$file"); done < <(compgen -G "$include_path" || true)
+                    for file in "${include_matches[@]}"; do
+                        [[ $file == "$ssh_dir/"* ]] || return 1
+                        rootpxe_deployment_identity_safe_target_file "$root" "$file" || return 1
+                        config_files+=("$file")
+                    done
+                    ;;
+            esac
+        done <"$file"
+    done
+    [[ -n $result ]] || result='.ssh/authorized_keys'
+    [[ $result == '.ssh/authorized_keys' || $result == '.ssh/authorized_keys2' ]] || return 1
+    printf '%s\n' "$result"
 }
 
 # Read the active HostKey policy, including supported /etc/ssh include files.
@@ -1125,7 +1223,11 @@ rootpxe_deployment_identity_linux_system_in_root() {
     rootpxe_deployment_identity_safe_target_dir "$root" var/lib/rootpxe || return 1
     marker="$root/var/lib/rootpxe/deployment-identity-v1"
     if rootpxe_deployment_identity_reuse_linux_system_identity "$root" "$marker" "$plan"; then
-        return 0
+        # Private login initialization is independently frozen.  A marker from
+        # an earlier attempt only proves machine-id/host-key work; it must not
+        # skip public-key or root-password application and result reporting.
+        rootpxe_deployment_identity_linux_login_in_root "$root"
+        return $?
     fi
     machine_id=$(jq -r '.plan.systemIdentity.machineId // empty' "$plan" 2>/dev/null | tr '[:upper:]' '[:lower:]') || return 1
     if jq -e '.systemIdentity.machineId == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1; then
@@ -1174,8 +1276,112 @@ rootpxe_deployment_identity_linux_system_in_root() {
         for key in "${rootpxe_deployment_identity_ssh_keys[@]}"; do rootpxe_deployment_identity_key_pair_valid "$ssh_dir/ssh_host_${key}_key" "$ssh_dir/ssh_host_${key}_key.pub" || return 1; done
         rootpxe_deployment_identity_ssh_host_keys_result=true
     fi
+	rootpxe_deployment_identity_linux_login_in_root "$root" || return 1
     [[ ! -e $marker || ( -f $marker && ! -L $marker ) ]] || return 1
     marker_tmp=$(mktemp "$root/var/lib/rootpxe/.deployment-identity-v1.XXXXXX") || return 1
     jq -cn --arg planHash "$(jq -r '.planHash' "$plan")" --argjson machineId "${rootpxe_deployment_identity_machine_id_result:-false}" --argjson sshHostKeys "${rootpxe_deployment_identity_ssh_host_keys_result:-false}" '{version:1,planHash:$planHash,machineId:$machineId,sshHostKeys:$sshHostKeys}' >"$marker_tmp" || { rm -f -- "$marker_tmp"; return 1; }
     chmod 0600 "$marker_tmp" && mv -f -- "$marker_tmp" "$marker" || { rm -f -- "$marker_tmp"; return 1; }
+}
+
+# PXEOS cannot apply the target SELinux policy to a file from its own mount
+# namespace.  Preserve metadata for replacements and, for an enabled target
+# policy, request the distribution's first-boot relabel for new files.
+rootpxe_deployment_identity_request_selinux_relabel() {
+    local root="$1" config="$1/etc/selinux/config" mode marker="$1/.autorelabel" service
+    [[ -d $root && ! -L $root ]] || return 1
+    [[ ! -e $config ]] && return 0
+    rootpxe_deployment_identity_safe_target_file "$root" "$config" || return 1
+    mode=$(awk -F= 'BEGIN{IGNORECASE=1} /^[[:space:]]*SELINUX[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print tolower($2); exit}' "$config") || return 1
+    case $mode in
+        disabled|'') return 0 ;;
+        enforcing|permissive) ;;
+        *) return 1 ;;
+    esac
+    # Do not assume that every enabled policy honours .autorelabel.  Rocky/RHEL
+    # images expose the relabel service (or fixfiles); unknown targets fail
+    # before changing credentials rather than reporting a false success.
+    service="$root/usr/lib/systemd/system/selinux-autorelabel-mark.service"
+    [[ -x $root/sbin/fixfiles || -x $root/usr/sbin/fixfiles || ( -f $service && ! -L $service ) ]] || return 1
+    if [[ -e $marker ]]; then
+        [[ -f $marker && ! -L $marker ]] || return 1
+        return 0
+    fi
+    : >"$marker" || return 1
+    chmod 600 "$marker" || return 1
+    [[ -f $marker && ! -L $marker ]]
+}
+
+rootpxe_deployment_identity_linux_login_in_root() {
+	local root="$1" private="${rootpxe_deployment_initialization_private_file:-}" home home_relative authorized authorized_relative parent keys_tmp line key_blob hash shadow shadow_tmp root_line root_hash today ssh_config last_byte
+	[[ -r $private && ! -L $private ]] || { rootpxe_deployment_identity_private_enabled || return 0; return 1; }
+	if jq -e '.systemIdentity.sshLoginPublicKeys == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1; then
+		rootpxe_deployment_identity_safe_target_file "$root" "$root/etc/passwd" || return 1
+		home=$(awk -F: '$1=="root" {print $6; exit}' "$root/etc/passwd" 2>/dev/null) || return 1
+		[[ $home == /* && $home != / && $home != *".."* ]] || return 1
+		home_relative=${home#/}
+		authorized_relative='.ssh/authorized_keys'
+		authorized_relative=$(rootpxe_deployment_identity_root_authorized_keys_relative "$root") || return 1
+		# Do not claim success for a server whose root login uses an arbitrary
+		# AuthorizedKeysFile path or an Include file we cannot safely resolve.
+		[[ $authorized_relative == '.ssh/authorized_keys' || $authorized_relative == '.ssh/authorized_keys2' ]] || return 1
+		authorized="$root$home/$authorized_relative"
+		parent=$(dirname "$authorized")
+		rootpxe_deployment_identity_safe_target_dir "$root" "$home_relative/.ssh" || return 1
+		[[ -d "$root$home" && ! -L "$root$home" && -d $parent && ! -L $parent && ( ! -e $authorized || ( -f "$authorized" && ! -L "$authorized" ) ) ]] || return 1
+		[[ ! -e $authorized ]] || rootpxe_deployment_identity_safe_target_file "$root" "$authorized" || return 1
+		rootpxe_deployment_identity_request_selinux_relabel "$root" || return 1
+		chmod 0700 "$parent" || return 1
+		keys_tmp=$(mktemp "$parent/.authorized_keys.rootpxe.XXXXXX") || return 1
+		[[ ! -e $authorized ]] || cp -a -- "$authorized" "$keys_tmp" || { rm -f -- "$keys_tmp"; return 1; }
+		last_byte=$(tail -c 1 "$keys_tmp" 2>/dev/null | od -An -tu1 | tr -d '[:space:]')
+		if [[ -s $keys_tmp && $last_byte != 10 ]]; then
+			printf '\n' >>"$keys_tmp" || { rm -f -- "$keys_tmp"; return 1; }
+		fi
+		while IFS= read -r line; do
+			[[ -n $line && ${#line} -le 16384 ]] || { rm -f -- "$keys_tmp"; return 1; }
+			case "$line" in
+				ssh-rsa\ *|ssh-ed25519\ *|ecdsa-sha2-nistp256\ *|ecdsa-sha2-nistp384\ *|ecdsa-sha2-nistp521\ *) ;;
+				*) rm -f -- "$keys_tmp"; return 1 ;;
+			esac
+			key_blob=$(awk '{print $2; exit}' <<<"$line")
+			[[ $key_blob =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || { rm -f -- "$keys_tmp"; return 1; }
+			awk -v blob="$key_blob" '$0 !~ /^[[:space:]]*#/ {for (i=1;i<NF;i++) if ($i ~ /^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521)$/ && $(i+1)==blob) found=1} END{exit found?0:1}' "$keys_tmp" || printf '%s\n' "$line" >>"$keys_tmp" || { rm -f -- "$keys_tmp"; return 1; }
+		done < <(jq -r '.sshLoginPublicKeys[]' "$private")
+		[[ -s $keys_tmp ]] || { rm -f -- "$keys_tmp"; return 1; }
+		chmod 0600 "$keys_tmp" && mv -f -- "$keys_tmp" "$authorized" || { rm -f -- "$keys_tmp"; return 1; }
+		awk 'NF >= 2 {ok=1} END{exit ok?0:1}' "$authorized" || return 1
+		command -v restorecon >/dev/null 2>&1 && restorecon "$parent" "$authorized" >/dev/null 2>&1 || true
+		rootpxe_deployment_identity_ssh_login_public_keys_result=true
+	fi
+	if jq -e '.systemIdentity.rootPassword == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1; then
+		hash=$(jq -r '.rootPasswordHash' "$private" 2>/dev/null) || return 1
+		rootpxe_deployment_identity_safe_target_file "$root" "$root/etc/shadow" || return 1
+		rootpxe_deployment_identity_request_selinux_relabel "$root" || return 1
+		[[ $hash == '$6$'* && ${#hash} -le 512 ]] || return 1
+		root_line=$(awk -F: '$1=="root" {count++; line=$0} END {if(count==1) print line; else exit 1}' "$root/etc/shadow") || return 1
+		[[ -n $root_line ]] || return 1
+		root_hash=${root_line#*:}; root_hash=${root_hash%%:*}
+		# Keep account expiry and the other aging controls untouched. A new hash
+		# needs a current last-change day so images with 0 do not force an
+		# immediate password change on the first login. A retried frozen hash
+		# preserves the first successful day and remains idempotent.
+		if [[ $root_hash == "$hash" ]]; then
+			awk -F: -v replacement="$hash" '$1=="root" && $2==replacement {ok=1} END {exit ok?0:1}' "$root/etc/shadow" || return 1
+			rootpxe_deployment_identity_root_password_result=true
+			return 0
+		fi
+		today=$(( $(date -u +%s) / 86400 )) || return 1
+		[[ $today =~ ^[1-9][0-9]*$ ]] || return 1
+		shadow_tmp=$(mktemp "$root/etc/.shadow.rootpxe.XXXXXX") || return 1
+		cp -a -- "$root/etc/shadow" "$shadow_tmp" || { rm -f -- "$shadow_tmp"; return 1; }
+		awk -F: -v replacement="$hash" -v last_change="$today" 'BEGIN{OFS=FS} $1=="root" {$2=replacement; $3=last_change} {print}' "$root/etc/shadow" >"$shadow_tmp.new" || { rm -f -- "$shadow_tmp" "$shadow_tmp.new"; return 1; }
+		cat "$shadow_tmp.new" >"$shadow_tmp" || { rm -f -- "$shadow_tmp" "$shadow_tmp.new"; return 1; }
+		rm -f -- "$shadow_tmp.new"
+		awk -F: -v replacement="$hash" -v last_change="$today" '$1=="root" && $2==replacement && $3==last_change {ok=1} END {exit ok?0:1}' "$shadow_tmp" || { rm -f -- "$shadow_tmp"; return 1; }
+		mv -f -- "$shadow_tmp" "$root/etc/shadow" || { rm -f -- "$shadow_tmp"; return 1; }
+		command -v restorecon >/dev/null 2>&1 && restorecon "$root/etc/shadow" >/dev/null 2>&1 || true
+		awk -F: -v replacement="$hash" -v last_change="$today" '$1=="root" && $2==replacement && $3==last_change {ok=1} END {exit ok?0:1}' "$root/etc/shadow" || return 1
+		rootpxe_deployment_identity_root_password_result=true
+	fi
+	return 0
 }

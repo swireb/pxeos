@@ -1,6 +1,13 @@
 #!/bin/bash
 . /usr/share/pxeos/lib/funcs.sh
 . /bin/pxeos.checkin
+rootpxe_download_cleanup_initialization_private() {
+    rootpxe_deployment_identity_cleanup_private
+}
+# The private initialization payload remains needed through finish reporting,
+# then must be removed on both normal completion and every task exit/signal.
+trap rootpxe_download_cleanup_initialization_private EXIT
+trap 'rootpxe_download_cleanup_initialization_private; exit 143' INT TERM
 rootpxe_partition_progress_initialize_runtime
 . /bin/pxeos.mount
 . /bin/pxeos.checkmount
@@ -149,10 +156,44 @@ if [[ ${resumeStage:-} == customizing_hostname || ${resumeStage:-} == post_deplo
         done
         rootpxe_activate_disk_permit_binding "$hd" deploy_write || handleError "PXEOS_STAGE=${resumeStage} CODE=RESUME_TARGET_BINDING_CHANGED"
     fi
-    if [[ ${resumeStage:-} == customizing_hostname ]]; then
-        [[ ${changeHostname:-false} == true ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=RESUME_CONTRACT_INVALID REASON=hostname_change_not_enabled"
+    if rootpxe_deployment_identity_policy_enabled; then
+        # Both safe resume points need a result bound to the current attempt.
+        # The post-deploy resume can follow an interruption before the prior
+        # result POST, so only reloading the plan would make imgcomplete fail
+        # its server-side result gate. Reapply the frozen, idempotent settings
+        # under the existing deploy permit and submit a fresh result.
+        if [[ ${imgType:-} == mpa ]]; then
+            rootpxe_deployment_identity_request_plan $disks || handleError "PXEOS_STAGE=deployment_identity_plan CODE=IDENTITY_PLAN_REJECTED"
+        else
+            rootpxe_deployment_identity_request_plan "$hd" || handleError "PXEOS_STAGE=deployment_identity_plan CODE=IDENTITY_PLAN_REJECTED"
+        fi
+        if rootpxe_deployment_identity_private_enabled; then
+            rootpxe_deployment_identity_request_private || handleError "PXEOS_STAGE=system_initialization CODE=INITIALIZATION_PRIVATE_CONFIG_UNAVAILABLE"
+        fi
+        if rootpxe_deployment_identity_storage_enabled; then
+            # Storage randomization changes references outside the raw disk
+            # identifiers (Windows BCD/MountedDevices/EFI and Linux boot
+            # references). A safe resume cannot prove every repair completed,
+            # so require a fresh deployment instead of rewriting identifiers
+            # or manufacturing a successful result for this attempt.
+            handleError "PXEOS_STAGE=deployment_identity_resume CODE=STORAGE_IDENTITY_RESUME_REQUIRES_REDEPLOY"
+        fi
+        if [[ ${resumeStage:-} == customizing_hostname ]] && [[ ${changeHostname:-false} != true ]] && ! rootpxe_deployment_identity_linux_policy_enabled && ! { rootpxe_deployment_identity_windows_policy_enabled && jq -e '.systemIdentity.sysprep == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1; }; then
+            handleError "PXEOS_STAGE=customizing_hostname CODE=RESUME_CONTRACT_INVALID REASON=system_initialization_not_enabled"
+        fi
         rootpxe_stage customizing_hostname "resume permit confirmed"
-        rootpxe_apply_hostname_for_disk "$hd"
+        if [[ ${changeHostname:-false} == true ]] || rootpxe_deployment_identity_linux_policy_enabled || { rootpxe_deployment_identity_windows_policy_enabled && jq -e '.systemIdentity.sysprep == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1; }; then
+            rootpxe_apply_hostname_for_disk "$hd" || handleError "PXEOS_STAGE=system_initialization CODE=SYSTEM_INITIALIZATION_FAILED"
+        fi
+
+        rootpxe_deployment_identity_report_result "${rootpxe_deployment_identity_storage_result:-false}" "${rootpxe_deployment_identity_hostname_result:-false}" "${rootpxe_deployment_identity_machine_id_result:-false}" "${rootpxe_deployment_identity_ssh_host_keys_result:-false}" "${rootpxe_deployment_identity_ssh_login_public_keys_result:-false}" "${rootpxe_deployment_identity_root_password_result:-false}" "${rootpxe_deployment_identity_sysprep_result:-false}" || handleError "PXEOS_STAGE=deployment_identity_result CODE=IDENTITY_RESULT_REJECTED"
+        rootpxe_deployment_identity_cleanup_private
+    elif [[ ${resumeStage:-} == customizing_hostname && ${changeHostname:-false} == true ]]; then
+        # Hostname-only tasks do not require the extended identity plan or
+        # private payload, but their safe resume point still has to apply the frozen
+        # task hostname before moving on to the post-deploy stage.
+        rootpxe_stage customizing_hostname "resume permit confirmed"
+        rootpxe_apply_hostname_for_disk "$hd" || handleError "PXEOS_STAGE=customizing_hostname CODE=HOSTNAME_FAILED"
     fi
     rootpxe_run_post_deploy_script || handleError "PXEOS_STAGE=post_deploy_script CODE=POST_DEPLOY_SCRIPT_FAILED REASON=${rootpxe_deploy_script_error:-unknown}"
     . /bin/pxeos.imgcomplete

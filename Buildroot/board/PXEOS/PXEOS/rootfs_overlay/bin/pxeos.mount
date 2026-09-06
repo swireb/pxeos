@@ -30,7 +30,6 @@ case ${protocol:-} in
         fi
         if [[ -n ${smb_credentials_file:-} ]]; then
             rootpxe_cleanup_smb_credentials
-            trap - EXIT INT TERM
         fi
         ;;
     nfs|"")

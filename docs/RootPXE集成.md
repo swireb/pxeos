@@ -1,4 +1,4 @@
-# RootPXE 集成
+## RootPXE 集成
 
 以下为当前 PXEOS 运行时已实现的协议适配；服务端 Schema、任务快照、disk permit 以及管理端入口必须与此保持一致。它不代表已经完成真实磁盘环境验收。默认凭据和敏感信息边界见[安全配置](安全配置.md)，硬件构建边界见[硬件兼容性](硬件兼容性.md)。
 
@@ -14,7 +14,25 @@
 
 - `rootpxe-offline-identities` 的 Windows 与 EFI 子命令职责、三阶段输入约束、结果解释、构建接入、架构验证边界和 Windows EFI 已知契约问题见 [离线身份修复工具](Windows离线身份修复.md)。
 
-- PXEOS JSON checkin 读取服务端冻结的 `deploymentIdentityPolicy`。启用新的存储标识、Linux `machine-id` 或 SSH 主机密钥策略时，必须在任何部署脚本、分区表或镜像写入之前取得磁盘许可和身份计划；重试带当前 `progressAttempt`，计划响应必须回显完全相同的拓扑。仅计算机名称保持既有 `changeHostname` 兼容流程，不需要身份计划。运行时仅在对应工具链真实存在时声明 Linux capability；不具备完整链路的 PXEOS 不会接收该策略。
+- PXEOS JSON checkin 读取服务端冻结的 deploymentIdentityPolicy。启用存储标识、Linux 系统唯一标识、SSH 服务器身份、SSH 登录公钥、root 密码或 Windows Sysprep 时，服务端会按对应 capability 门禁拒绝不支持的运行镜像。仅计算机名称保持既有 changeHostname 兼容流程，不需要身份计划。
+- 需要计划的任务必须在任何部署脚本、分区表或镜像写入前取得磁盘许可和身份计划；重试携带当前 progressAttempt，计划响应必须回显完全相同的拓扑。运行时仅在对应工具链真实存在时声明 capability。
+
+## 初始化系统与私密任务快照
+
+- 部署策略可分别启用 Linux 系统唯一标识、SSH 服务器身份、计算机名称、SSH 登录公钥和 root 密码，或 Windows 计算机名称和 Sysprep 应答文件覆盖。
+- PXEOS 只在策略启用私密初始化项时，从认证的私密任务接口读取裁剪后的任务快照。该接口响应禁止缓存，任务外或未启用私密项的请求会被拒绝。
+- Linux SSH 登录公钥由 PXEOS 追加至 root 的现有已授权密钥文件并去重；它不改写 sshd 策略。root 密码以服务端提供的密码哈希替换 shadow 中 root 的第二字段，保留其余账户状态字段。
+- Windows Sysprep 将完整 XML 写到固定的 unattend.xml 路径但不执行 Sysprep。xml 模式原样使用任务 XML；platform 模式只在任务副本的 specialize Shell-Setup ComputerName 安全唯一时替换为冻结名称。
+- Windows 注册表改名不依赖 Sysprep 开关。PXEOS 使用只读原生 hostname inspect 找到 Current 和 Default ControlSet，交由 reged 写入四项主机名，再用只读 verify 核验。
+- 部署 checkin 对需要名称的策略仅使用冻结 taskHostname。冻结名称缺失会返回冲突并要求重新创建任务，不读取实时主机名称。
+
+```text
+POST /service/pxeos/deployment-initialization
+rootpxe-offline-identities windows-hostname-inspect <SYSTEM>
+rootpxe-offline-identities windows-hostname-verify <SYSTEM> <name>
+```
+
+- 服务端以 windows-hostname-registry-v1 和 windows-sysprep-v1 分别作为 Windows 注册表主机名和 Sysprep 的 capability 门禁名称。checkin 在 `jq`、`ntfs-3g`、`reged` 与 `rootpxe-offline-identities` 都存在时声明前者，在 `jq`、`ntfs-3g` 与 `xmlstarlet` 都存在时声明后者，避免把源码存在误报为运行镜像支持；完整 Buildroot 交叉构建仍待验证。
 - 存储随机化不会从旧目标盘读取标识：`n` 镜像使用冻结 `originalSchema` 和 `schemaHash`；固定、多盘和 dd 镜像使用冻结 `partitionInventory` 和 `partitionInventoryHash`，每个磁盘都有许可的 `targetBinding`、`sourceDiskNumber` 及对应 `dN.partitions` 中的旧磁盘标识。缺少或不一致的冻结元数据在写盘前拒绝。当前固定/多盘 inventory 无法证明 LVM 逻辑卷的文件系统映射时同样拒绝；LVM PV/VG UUID 从不修改。
 - Linux 在恢复后按计划修改 GPT/MBR 磁盘与分区标识以及 ext2/3/4、XFS、swap UUID，精确更新 `fstab`、`crypttab`、GRUB 和 BLS 的 `UUID=`/`PARTUUID=` 引用，以及 GRUB `search --fs-uuid`。MBR 的 `签名:分区号` 冻结标识会转换为启动配置使用的 `签名-两位十六进制分区号`。存在 `grubenv` 时，PXEOS 仅通过目标系统的 `grub2-editenv` 或 `grub-editenv` 更新并读回 `kernelopts`，缺少目标工具或出现不安全 grubenv 会失败，不直接改写固定长度文件；受计划设备约束挂载独立 `/boot`、`/boot/efi`，并使用目标系统的 dracut、update-initramfs 或 mkinitcpio 重建 initramfs。缺少支持的工具失败，不会带着旧引用启动。冻结 schema 或 inventory 识别为 EFI 的分区只有在受控挂载中确有 EFI 可执行文件时才进入 EFI 修复；首次改 UUID 前，PXEOS 将所有计划分区的源、目标几何（目标几何取自 `sfdisk --json` 的实际逻辑扇区）和新旧标识写入目标根目录 `.rootpxe-offline-identities/<planId>/efi/manifest.json`，随后执行 native `efi-repair preflight`。改 UUID 并以同一路径重挂目标根后，才执行 `apply` 和 `verify`。未访问到 efivarfs 或 native 未匹配 NVRAM HD() 节点时，受控 ESP 必须包含当前架构的标准 `EFI/BOOT/BOOTX64.EFI`、`BOOTAA64.EFI` 或 `BOOTIA32.EFI` fallback；仅存在 GRUB 或 Windows loader 不能证明成功。纯 BIOS 镜像不调用 EFI 修复。
 - Windows 在唯一受控 NTFS 系统卷生成 manifest，并将该稳定挂载根同时写入 `windowsRoot` 与 EFI `stateRoot`。含真实受控 ESP loader 的 UEFI 路径以此 manifest 执行 native EFI `preflight`、写盘后的 `apply` 和 `verify`；apply 只确认原生写入结果可用，只有 verify 的 `verified:true` 才是 EFI 变量读回证明。Windows EFI 缺少 `efivarfs` 或未匹配 NVRAM HD() 节点时，同样只接受受控 ESP 中当前架构的标准 fallback。
@@ -37,6 +55,7 @@
 - 部署认证 JSON 使用 `preDeployScript`/`preDeployScriptSha256` 和 `postDeployScript`/`postDeployScriptSha256` 两组字段；每组是独立脚本文本及其 SHA-256，单套上限为 64 KiB UTF-8 字节。前置脚本在目标盘身份确认并取得 `deploy_write` permit 后、任何 NVMe format、分区布局或镜像 restore 前执行；后置脚本在 restore、扩容和主机名定制后执行。每套脚本先独立复核 SHA-256，再写入独立的 `0700` 临时文件，并用 `env -i /bin/bash` 运行；临时文件不会写入镜像存储。
 - 脚本进程只得到受控 `PATH`，以及 `ROOTPXE_TASK_ID`、`ROOTPXE_IMAGE_PATH`、`ROOTPXE_TARGET_DISK`、`ROOTPXE_HOSTNAME`、`ROOTPXE_OS_ID`。任务 token、SMB 凭据和其他父进程变量不会传入，调用方也不得依赖 `source` 或 `eval` 解释未受信任内容。捕获任务携带任一脚本或 hash 字段会被拒绝。
 - 前置脚本的失败阶段为 `pre_deploy_script`，它不是安全恢复点，重试必须回到完整部署路径。安全续跑白名单只有 `customizing_hostname` 与 `post_deploy_script`：主机名失败以 `resumeStage=customizing_hostname` 恢复时仅重放 permit、定制主机名并执行后置脚本；后置脚本失败以 `resumeStage=post_deploy_script` 恢复时仅重放 permit 和后置脚本。两种恢复路径均不重新验证/应用布局、不计划 NVMe format，也不重新写镜像；任一脚本失败都不会报告任务成功。
+- 启用随机化存储标识的任务不使用上述续跑路径。若在 customizing_hostname 或 post_deploy_script 中断，PXEOS 会在目标写入前以 `STORAGE_IDENTITY_RESUME_REQUIRES_REDEPLOY` 明确失败，并要求重新创建部署任务；只有不含存储标识随机化的初始化系统任务可按冻结配置续跑。
 - 重捕获时，PXEOS 仅接受 RootPXE 下发的安全 `captureBackupName`，将旧正式镜像原子移动到 `/storage/backup/<captureBackupName>`。该目录可见、不得覆盖同名目录，并且必须与正式镜像和捕获暂存目录处于同一文件系统；首次捕获没有旧正式镜像时不会创建备份。
 
 ## 磁盘健康上报

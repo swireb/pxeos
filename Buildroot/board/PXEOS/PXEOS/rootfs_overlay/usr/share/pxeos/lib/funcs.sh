@@ -1133,6 +1133,9 @@ rootpxe_cleanup_task_json() {
 rootpxe_cleanup_session() {
     rootpxe_cleanup_smb_credentials
     rootpxe_cleanup_task_json
+    if declare -F rootpxe_deployment_identity_cleanup_private >/dev/null 2>&1; then
+        rootpxe_deployment_identity_cleanup_private
+    fi
 }
 
 # Resolve a task snapshot only; editing an image default can never alter this
@@ -1728,7 +1731,9 @@ rootpxe_prepare_smb_credentials() {
     smb_credentials_file="$file"
     export smb_credentials_file
     rootpxe_clear_smb_plaintext
-    trap rootpxe_cleanup_smb_credentials EXIT INT TERM
+    trap rootpxe_cleanup_session EXIT
+    trap 'rootpxe_cleanup_session; exit 130' INT
+    trap 'rootpxe_cleanup_session; exit 143' TERM
 }
 
 # The server owns the cancellation fence. This must run before any image
@@ -4164,6 +4169,7 @@ rootpxe_apply_linux_hostname_for_disk() {
         rm -f "$hosts_tmp"
         [[ -n $expected_hash && $expected_hash == "$actual_hash" ]] || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTS_READBACK_FAILED"; }
         fi
+        rootpxe_deployment_identity_hostname_result=true
     fi
     if rootpxe_deployment_identity_linux_policy_enabled; then
         rootpxe_deployment_identity_linux_system_in_root "$mountpoint" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_SYSTEM_IDENTITY_FAILED"; }
@@ -4198,181 +4204,88 @@ rootpxe_apply_windows_hostname_for_disk() {
     esac
 }
 
-# Changes Windows hostname after restore and before the post-deploy script. The fixed
-# Sysprep path is authoritative; registry fallback is allowed only if it does
-# not exist, never after malformed/ambiguous XML.
-rootpxe_apply_windows_hostname() {
-    local part="$1" unattend count component_count xml_path
-    [[ ${changeHostname:-false} == true ]] || return 0
-    [[ -n ${hostName:-} && $hostName =~ ^[A-Za-z0-9-]{1,15}$ && ! $hostName =~ ^[0-9]+$ ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=INVALID_HOSTNAME REASON=windows_name_policy"
-    rootpxe_stage customizing_hostname "code=HOSTNAME_STARTED"
-    mkdir -p /ntfs || handleError "PXEOS_STAGE=customizing_hostname CODE=NTFS_MOUNTPOINT_FAILED"
-    umount /ntfs >/dev/null 2>&1 || true
-    ntfs-3g -o remove_hiberfile,rw "$part" /ntfs >/tmp/ntfs-mount-output 2>&1 || handleError "PXEOS_STAGE=customizing_hostname CODE=NTFS_MOUNT_FAILED REASON=unable_to_mount_windows"
-    # Fixed logical Windows path only.  Do not search arbitrary unattend files.
-    xml_path=/ntfs/Windows/System32/Sysprep/unattend.xml
-    [[ -f $xml_path ]] || xml_path=""
-    if [[ -z $xml_path ]]; then
-        umount /ntfs >/dev/null 2>&1 || true
-        rootpxe_change_hostname_registry "$part" || handleError "PXEOS_STAGE=customizing_hostname CODE=REGISTRY_WRITE_FAILED"
-        rootpxe_stage customizing_hostname "code=HOSTNAME_COMPLETE method=registry"
-        return 0
-    fi
-    command -v xmlstarlet >/dev/null 2>&1 || handleError "PXEOS_STAGE=customizing_hostname CODE=XMLSTARLET_UNAVAILABLE"
-    count=$(xmlstarlet sel -t -v "count(/*[local-name()='unattend']/*[local-name()='settings'][@pass='specialize']/*[local-name()='component'][@name='Microsoft-Windows-Shell-Setup']/*[local-name()='ComputerName'])" "$xml_path" 2>/dev/null) || handleError "PXEOS_STAGE=customizing_hostname CODE=UNATTEND_XML_INVALID"
-    component_count=$(xmlstarlet sel -t -v "count(/*[local-name()='unattend']/*[local-name()='settings'][@pass='specialize']/*[local-name()='component'][@name='Microsoft-Windows-Shell-Setup'])" "$xml_path" 2>/dev/null) || handleError "PXEOS_STAGE=customizing_hostname CODE=UNATTEND_XML_INVALID"
-    [[ $count =~ ^[0-9]+$ && $component_count =~ ^[0-9]+$ && $component_count -eq 1 && $count -le 1 ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=UNATTEND_COMPONENT_AMBIGUOUS"
-    if [[ $count -eq 1 ]]; then
-        xmlstarlet ed -L -u "/*[local-name()='unattend']/*[local-name()='settings'][@pass='specialize']/*[local-name()='component'][@name='Microsoft-Windows-Shell-Setup']/*[local-name()='ComputerName']" -v "$hostName" "$xml_path" >/dev/null 2>&1 || handleError "PXEOS_STAGE=customizing_hostname CODE=UNATTEND_WRITE_FAILED"
-    else
-        xmlstarlet ed -L -N u='urn:schemas-microsoft-com:unattend' -s "/*[local-name()='unattend']/*[local-name()='settings'][@pass='specialize']/*[local-name()='component'][@name='Microsoft-Windows-Shell-Setup']" -t elem -n u:ComputerName -v "$hostName" "$xml_path" >/dev/null 2>&1 || handleError "PXEOS_STAGE=customizing_hostname CODE=UNATTEND_WRITE_FAILED"
-    fi
-    [[ $(xmlstarlet sel -t -v "string(/*[local-name()='unattend']/*[local-name()='settings'][@pass='specialize']/*[local-name()='component'][@name='Microsoft-Windows-Shell-Setup']/*[local-name()='ComputerName'])" "$xml_path" 2>/dev/null) == "$hostName" ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=UNATTEND_READBACK_FAILED"
-    umount /ntfs >/dev/null 2>&1 || true
-    rootpxe_stage customizing_hostname "code=HOSTNAME_COMPLETE method=unattend"
+# v2 Windows hostname path.  `reged` remains the sole writer; the native
+# helper only selects real ControlSet values and verifies all written values.
+rootpxe_change_hostname_registry() {
+    local part="$1" hive hostname controls control script rc
+    [[ ${changeHostname:-false} == true && -n ${hostName:-} && -d /ntfs && ! -L /ntfs ]] || return 1
+    hive=/ntfs/Windows/System32/config/SYSTEM
+    [[ -f $hive && ! -L $hive ]] || return 1
+    hostname="$hostName"
+    mapfile -t controls < <(rootpxe-offline-identities windows-hostname-inspect "$hive") || return 1
+    [[ ${#controls[@]} -gt 0 ]] || return 1
+    script=$(mktemp /tmp/rootpxe-reged-hostname.XXXXXX) || return 1
+    chmod 0600 "$script" || { rm -f -- "$script"; return 1; }
+    for control in "${controls[@]}"; do
+        [[ $control =~ ^ControlSet[0-9]{3}$ ]] || { rm -f -- "$script"; return 1; }
+        for key in "\\${control}\\Services\\Tcpip\\Parameters\\NV Hostname" "\\${control}\\Services\\Tcpip\\Parameters\\Hostname" "\\${control}\\Control\\ComputerName\\ActiveComputerName\\ComputerName" "\\${control}\\Control\\ComputerName\\ComputerName\\ComputerName"; do
+            printf 'ed %s\n%s\n' "$key" "$hostname" >>"$script" || { rm -f -- "$script"; return 1; }
+        done
+    done
+    printf 'q\ny\n' >>"$script" || { rm -f -- "$script"; return 1; }
+    reged -e "$hive" <"$script" >/dev/null 2>&1; rc=$?
+    rm -f -- "$script"
+    # reged returns 0, 1, or 2 after an interactive hive edit depending on
+    # whether data was changed.  The native read-only verifier is the actual
+    # success condition and rejects every incomplete write.
+    [[ $rc -ge 0 && $rc -le 2 ]] || return 1
+    rootpxe-offline-identities windows-hostname-verify "$hive" "$hostname"
 }
 
-# Registry fallback used only when the fixed Sysprep unattend file is absent.
-rootpxe_change_hostname_registry() {
-    local part="$1"
-    [[ -z $part ]] && handleError "No partition passed (${FUNCNAME[0]})\n   Args Passed: $*"
-    [[ ${changeHostname:-false} != true || -z ${hostName:-} ]] && return
-    local hostname="$hostName"
-    REG_HOSTNAME_KEY1="\ControlSet001\Services\Tcpip\Parameters\NV Hostname"
-    REG_HOSTNAME_KEY2="\ControlSet001\Services\Tcpip\Parameters\Hostname"
-    REG_HOSTNAME_KEY3="\ControlSet001\Services\Tcpip\Parameters\NV HostName"
-    REG_HOSTNAME_KEY4="\ControlSet001\Services\Tcpip\Parameters\HostName"
-    REG_HOSTNAME_KEY5="\ControlSet001\Control\ComputerName\ActiveComputerName\ComputerName"
-    REG_HOSTNAME_KEY6="\ControlSet001\Control\ComputerName\ComputerName\ComputerName"
-    REG_HOSTNAME_KEY7="\ControlSet001\services\Tcpip\Parameters\NV Hostname"
-    REG_HOSTNAME_KEY8="\ControlSet001\services\Tcpip\Parameters\Hostname"
-    REG_HOSTNAME_KEY9="\ControlSet001\services\Tcpip\Parameters\NV HostName"
-    REG_HOSTNAME_KEY10="\ControlSet001\services\Tcpip\Parameters\HostName"
-    REG_HOSTNAME_KEY11="\CurrentControlSet\Services\Tcpip\Parameters\NV Hostname"
-    REG_HOSTNAME_KEY12="\CurrentControlSet\Services\Tcpip\Parameters\Hostname"
-    REG_HOSTNAME_KEY13="\CurrentControlSet\Services\Tcpip\Parameters\NV HostName"
-    REG_HOSTNAME_KEY14="\CurrentControlSet\Services\Tcpip\Parameters\HostName"
-    REG_HOSTNAME_KEY15="\CurrentControlSet\Control\ComputerName\ActiveComputerName\ComputerName"
-    REG_HOSTNAME_KEY16="\CurrentControlSet\Control\ComputerName\ComputerName\ComputerName"
-    REG_HOSTNAME_KEY17="\CurrentControlSet\services\Tcpip\Parameters\NV Hostname"
-    REG_HOSTNAME_KEY18="\CurrentControlSet\services\Tcpip\Parameters\Hostname"
-    REG_HOSTNAME_KEY19="\CurrentControlSet\services\Tcpip\Parameters\NV HostName"
-    REG_HOSTNAME_KEY20="\CurrentControlSet\services\Tcpip\Parameters\HostName"
-    dots "Mounting directory"
-    if [[ ! -d /ntfs ]]; then
-        mkdir -p /ntfs >/dev/null 2>&1
-        if [[ ! $? -eq 0 ]]; then
-            echo "Failed"
-            debugPause
-                    handleError "Could not create mount location (${FUNCNAME[0]})\n    Args Passed: $*"
-        fi
-    fi
-    umount /ntfs >/dev/null 2>&1
-    ntfs-3g -o remove_hiberfile,rw $part /ntfs >/tmp/ntfs-mount-output 2>&1
-    case $? in
-        0)
-            echo "Done"
-            debugPause
-            ;;
-        *)
-            echo "Failed"
-            debugPause
-                    handleError "Could not mount $part (${FUNCNAME[0]})\n    Args Passed: $*\n    Reason: $(cat /tmp/ntfs-mount-output | tr -d \\0)"
-            ;;
-    esac
-    if [[ ! -f /usr/share/pxeos/lib/EOFREG ]]; then
-        key1="$REG_HOSTNAME_KEY1"
-        key2="$REG_HOSTNAME_KEY2"
-        key3="$REG_HOSTNAME_KEY3"
-        key4="$REG_HOSTNAME_KEY4"
-        key5="$REG_HOSTNAME_KEY5"
-        key6="$REG_HOSTNAME_KEY6"
-        key7="$REG_HOSTNAME_KEY7"
-        key8="$REG_HOSTNAME_KEY8"
-        key9="$REG_HOSTNAME_KEY9"
-        key10="$REG_HOSTNAME_KEY10"
-        key11="$REG_HOSTNAME_KEY11"
-        key12="$REG_HOSTNAME_KEY12"
-        key13="$REG_HOSTNAME_KEY13"
-        key14="$REG_HOSTNAME_KEY14"
-        key15="$REG_HOSTNAME_KEY15"
-        key16="$REG_HOSTNAME_KEY16"
-        key17="$REG_HOSTNAME_KEY17"
-        key18="$REG_HOSTNAME_KEY18"
-        key19="$REG_HOSTNAME_KEY19"
-        key20="$REG_HOSTNAME_KEY20"
-        case $osid in
-            1)
-                regfile="$REG_LOCAL_MACHINE_XP"
-                ;;
-            2|4|[5-7]|9|10|11)
-                regfile="$REG_LOCAL_MACHINE_7"
-                ;;
-        esac
-        echo "ed $key1" >/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key2" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key3" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key4" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key5" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key6" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key7" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key8" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key9" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key10" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key11" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key12" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key13" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key14" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key15" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key16" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key17" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key18" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key19" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "ed $key20" >>/usr/share/pxeos/lib/EOFREG
-        echo "$hostname" >>/usr/share/pxeos/lib/EOFREG
-        echo "q" >> /usr/share/pxeos/lib/EOFREG
-        echo "y" >> /usr/share/pxeos/lib/EOFREG
-        echo >> /usr/share/pxeos/lib/EOFREG
-    fi
-    if [[ -e $regfile ]]; then
-        dots "Changing hostname"
-        reged -e $regfile < /usr/share/pxeos/lib/EOFREG >/dev/null 2>&1
-        case $? in
-            [0-2])
-                echo "Done"
-                debugPause
-                ;;
-            *)
-                echo "Failed"
-                debugPause
-                umount /ntfs >/dev/null 2>&1
-                rootpxe_console_message WARN 'Failed to change hostname.'
-                return
-                ;;
-        esac
-    fi
-    rm -rf /usr/share/pxeos/lib/EOFREG
-    umount /ntfs >/dev/null 2>&1
+rootpxe_validate_windows_hostname() {
+    local value="$1"
+    [[ $value =~ ^[A-Za-z0-9-]{1,15}$ && ! $value =~ ^[0-9]+$ ]]
 }
+
+rootpxe_apply_windows_hostname() {
+    local part="$1" sysprep=0 mode='' xml_path source_xml xml_tmp rows architecture count expected_hash actual_hash
+    [[ ${changeHostname:-false} == true ]] && rootpxe_validate_windows_hostname "${hostName:-}" || [[ ${changeHostname:-false} != true ]] || return 1
+    [[ -r ${deploymentIdentityPolicyFile:-} ]] && jq -e '.systemIdentity.sysprep == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1 && sysprep=1
+    [[ ${changeHostname:-false} == true || $sysprep -eq 1 ]] || return 0
+    if [[ $sysprep -eq 1 ]]; then
+        mode=$(jq -r '.systemIdentity.sysprepComputerNameMode // "xml"' "$deploymentIdentityPolicyFile") || return 1
+        [[ $mode == xml || $mode == platform ]] || return 1
+        [[ $mode != platform ]] || rootpxe_validate_windows_hostname "${hostName:-}" || return 1
+        source_xml="${rootpxe_deployment_initialization_private_file:-}"
+        [[ -r $source_xml && ! -L $source_xml ]] || return 1
+    fi
+    rootpxe_stage customizing_hostname "code=WINDOWS_INITIALIZATION_STARTED"
+    mkdir -p /ntfs || return 1
+    umount /ntfs >/dev/null 2>&1 || true
+    ntfs-3g -o remove_hiberfile,rw "$part" /ntfs >/tmp/ntfs-mount-output 2>&1 || return 1
+    if [[ ${changeHostname:-false} == true ]]; then
+        rootpxe_change_hostname_registry "$part" || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
+        rootpxe_deployment_identity_hostname_result=true
+    fi
+    if [[ $sysprep -eq 1 ]]; then
+        xml_path=/ntfs/Windows/System32/Sysprep/unattend.xml
+        [[ -d ${xml_path%/*} && ! -L ${xml_path%/*} && ( ! -e $xml_path || ( -f $xml_path && ! -L $xml_path ) ) ]] || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
+        xml_tmp=$(mktemp "${xml_path%/*}/.unattend.rootpxe.XXXXXX") || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
+        chmod 0600 "$xml_tmp" && jq -j '.unattendXml' "$source_xml" >"$xml_tmp" || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
+        command -v xmlstarlet >/dev/null 2>&1 && xmlstarlet val -w "$xml_tmp" >/dev/null 2>&1 || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
+        if [[ $mode == platform ]]; then
+            rows=$(xmlstarlet sel -t -m "/*[local-name()='unattend' and namespace-uri()='urn:schemas-microsoft-com:unattend']/*[local-name()='settings' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@pass='specialize']/*[local-name()='component' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@name='Microsoft-Windows-Shell-Setup']" -v "concat(@processorArchitecture,'|',count(*[local-name()='ComputerName' and namespace-uri()='urn:schemas-microsoft-com:unattend']))" -n "$xml_tmp" 2>/dev/null) || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
+            [[ -n $rows ]] && awk -F'|' 'NF==2 && $1!="" && ($2==0 || $2==1) && !seen[$1]++ {next} {exit 1}' <<<"$rows" || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
+            while IFS='|' read -r architecture count; do
+                if [[ $count -eq 0 ]]; then
+                    xmlstarlet ed -L -s "/*[local-name()='unattend' and namespace-uri()='urn:schemas-microsoft-com:unattend']/*[local-name()='settings' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@pass='specialize']/*[local-name()='component' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@name='Microsoft-Windows-Shell-Setup'][@processorArchitecture='$architecture']" -t elem -n ComputerName -v "$hostName" "$xml_tmp" >/dev/null 2>&1 || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
+                else
+                    xmlstarlet ed -L -u "/*[local-name()='unattend' and namespace-uri()='urn:schemas-microsoft-com:unattend']/*[local-name()='settings' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@pass='specialize']/*[local-name()='component' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@name='Microsoft-Windows-Shell-Setup'][@processorArchitecture='$architecture']/*[local-name()='ComputerName' and namespace-uri()='urn:schemas-microsoft-com:unattend']" -v "$hostName" "$xml_tmp" >/dev/null 2>&1 || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
+                fi
+            done <<<"$rows"
+            [[ $(xmlstarlet sel -t -m "/*[local-name()='unattend' and namespace-uri()='urn:schemas-microsoft-com:unattend']/*[local-name()='settings' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@pass='specialize']/*[local-name()='component' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@name='Microsoft-Windows-Shell-Setup']/*[local-name()='ComputerName' and namespace-uri()='urn:schemas-microsoft-com:unattend']" -v . -n "$xml_tmp" 2>/dev/null | sort -u) == "$hostName" ]] || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
+        fi
+        expected_hash=$(sha256sum "$xml_tmp" 2>/dev/null | awk '{print $1}') || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
+        [[ $expected_hash =~ ^[0-9a-fA-F]{64}$ ]] || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
+        mv -f -- "$xml_tmp" "$xml_path" || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
+        actual_hash=$(sha256sum "$xml_path" 2>/dev/null | awk '{print $1}') || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
+        [[ $actual_hash == "$expected_hash" ]] || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
+        rootpxe_deployment_identity_sysprep_result=true
+    fi
+    umount /ntfs >/dev/null 2>&1 || return 1
+    rootpxe_stage customizing_hostname "code=WINDOWS_INITIALIZATION_COMPLETE"
+}
+
 # Fixes windows 7/8 boot, though may need
 #    to be updated to only impact windows 7
 #    in which case we need a more dynamic method
@@ -4943,6 +4856,9 @@ completeTasking() {
             killStatusReporter
             rootpxe_partition_progress_flush
             [[ $capone -eq 1 ]] && exit 0
+            if rootpxe_deployment_identity_policy_enabled; then
+                rootpxe_deployment_identity_request_plan "$hd" || handleError "PXEOS_STAGE=deployment_identity_plan CODE=IDENTITY_PLAN_REJECTED"
+            fi
             if rootpxe_deployment_identity_storage_enabled && [[ ${osid:-} == 50 ]]; then
                 rootpxe_deployment_identity_linux_storage_preflight "$hd" || handleError "PXEOS_STAGE=deployment_identity_preflight CODE=LINUX_STORAGE_REFERENCE_PRECHECK_FAILED"
                 if [[ ${imgType:-} == mpa ]]; then
@@ -4961,14 +4877,17 @@ completeTasking() {
                 rootpxe_deployment_identity_windows_apply_repair || handleError "PXEOS_STAGE=deployment_identity_apply CODE=WINDOWS_STORAGE_REFERENCE_REPAIR_FAILED"
                 rootpxe_deployment_identity_storage_result=true
             fi
-            if [[ ${changeHostname:-false} == true ]] || rootpxe_deployment_identity_linux_policy_enabled; then
-                rootpxe_apply_hostname_for_disk "$hd"
-                [[ ${changeHostname:-false} == true ]] && rootpxe_deployment_identity_hostname_result=true
+            if rootpxe_deployment_identity_private_enabled; then
+                rootpxe_deployment_identity_request_private || handleError "PXEOS_STAGE=system_initialization CODE=INITIALIZATION_PRIVATE_CONFIG_UNAVAILABLE"
+            fi
+            if [[ ${changeHostname:-false} == true ]] || rootpxe_deployment_identity_linux_policy_enabled || ( rootpxe_deployment_identity_windows_policy_enabled && jq -e '.systemIdentity.sysprep == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1 ); then
+                rootpxe_apply_hostname_for_disk "$hd" || handleError "PXEOS_STAGE=system_initialization CODE=SYSTEM_INITIALIZATION_FAILED"
             fi
             rootpxe_run_post_deploy_script || handleError "PXEOS_STAGE=post_deploy_script CODE=POST_DEPLOY_SCRIPT_FAILED REASON=${rootpxe_deploy_script_error:-unknown}"
             if rootpxe_deployment_identity_policy_enabled; then
-                rootpxe_deployment_identity_report_result "${rootpxe_deployment_identity_storage_result:-false}" "${rootpxe_deployment_identity_hostname_result:-false}" "${rootpxe_deployment_identity_machine_id_result:-false}" "${rootpxe_deployment_identity_ssh_host_keys_result:-false}" || handleError "PXEOS_STAGE=deployment_identity_result CODE=IDENTITY_RESULT_REJECTED"
+                rootpxe_deployment_identity_report_result "${rootpxe_deployment_identity_storage_result:-false}" "${rootpxe_deployment_identity_hostname_result:-false}" "${rootpxe_deployment_identity_machine_id_result:-false}" "${rootpxe_deployment_identity_ssh_host_keys_result:-false}" "${rootpxe_deployment_identity_ssh_login_public_keys_result:-false}" "${rootpxe_deployment_identity_root_password_result:-false}" "${rootpxe_deployment_identity_sysprep_result:-false}" || handleError "PXEOS_STAGE=deployment_identity_result CODE=IDENTITY_RESULT_REJECTED"
             fi
+            rootpxe_deployment_identity_cleanup_private
             . /bin/pxeos.imgcomplete
             ;;
     esac
@@ -5070,6 +4989,9 @@ handleError() {
     local str="$1" safe_str
     local parts=""
     local part=""
+    # A fetched initialization payload may contain an XML credential or a
+    # password hash.  Remove it before any retry wait, diagnostics, or reboot.
+    declare -F rootpxe_deployment_identity_cleanup_private >/dev/null 2>&1 && rootpxe_deployment_identity_cleanup_private
     printf '\n[ERROR] Operation failed.\n'
     printf '[INFO]  Init version: %s\n' "$initversion"
     printf '\n[INFO]  Error details:\n'

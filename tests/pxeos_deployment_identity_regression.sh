@@ -37,6 +37,12 @@ cat >"$tmp/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >"$ROOTPXE_CURL_ARGS"
 while (($#)); do [[ $1 == --data-binary ]] && { printf '%s' "$2" >"$ROOTPXE_CURL_BODY"; break; }; shift; done
+endpoint="${!#}"
+if [[ $endpoint == *deployment-initialization ]]; then
+  printf '%s\n' '{"version":1,"sshLoginPublicKeys":[],"rootPasswordHash":"","unattendXml":""}'
+  printf '\n200'
+  exit 0
+fi
 topology=$(jq -c '.topology' "$ROOTPXE_CURL_BODY")
 jq -cn --argjson topology "$topology" '{plan:{version:1,planId:"plan-1",topology:$topology,disks:[{targetDevice:"/dev/mock0",partitionTable:"gpt",diskGuid:"cccccccc-cccc-cccc-cccc-cccccccccccc",partitions:[{targetDevice:"/dev/mock0p1",filesystem:"ext4",partitionGuid:"dddddddd-dddd-dddd-dddd-dddddddddddd",filesystemUuid:"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"}]}]},planHash:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",attempt:3}'
 printf '\n200'
@@ -153,6 +159,12 @@ deploymentIdentityPolicyFile="$tmp/policy"; printf '%s\n' '{"version":1,"randomi
 rootpxe_disk_permit_granted=yes; rootpxe_disk_permit_target_id=wwn:stable-target
 
 . "$lib"
+printf '%s\n' '{"version":1,"randomizeStorageIdentifiers":false,"systemIdentity":{"sshLoginPublicKeys":true}}' >"$deploymentIdentityPolicyFile"
+rootpxe_deployment_identity_request_private || fail 'private initialization request did not use task token and attempt'
+jq -e '.taskId == 17 and .token == "token" and .attempt == 3' "$ROOTPXE_CURL_BODY" >/dev/null || fail 'private initialization request used stale context fields'
+rootpxe_deployment_identity_cleanup_private
+[[ -z ${rootpxe_deployment_initialization_private_file:-} ]] || fail 'private initialization file was not cleared'
+printf '%s\n' '{"version":1,"randomizeStorageIdentifiers":true,"systemIdentity":{"hostname":false,"machineId":false,"sshHostKeys":false}}' >"$deploymentIdentityPolicyFile"
 real_key_dir="$tmp/real-key"; mkdir -p "$real_key_dir"
 "$real_ssh_keygen" -q -t ed25519 -C rootpxe-regression-comment -N '' -f "$real_key_dir/key" || fail 'real ssh-keygen fixture failed'
 read -r real_key_type real_key_material _ <"$real_key_dir/key.pub"
@@ -343,6 +355,43 @@ grep -Fq "chroot $linux_root /usr/bin/dracut -f --kver target-kernel" "$tmp/comm
 [[ $(grep -c '^ssh-keygen ' "$tmp/commands") == 3 ]] || fail 'expected first SSH key generation'
 rootpxe_deployment_identity_linux_system_in_root "$linux_root" || fail 'same plan identity reuse failed'
 [[ $(grep -c '^ssh-keygen ' "$tmp/commands") == 3 ]] || fail 'same plan generated new SSH keys'
+# SSH login keys and a root password are applied only to the discovered root.
+# A new password resets lastchg but preserves account-expiry/aging fields; the
+# same frozen hash retry keeps that first date and must not duplicate the key.
+login_root="$tmp/linux-login-root"; mkdir -p "$login_root/etc/ssh/sshd_config.d" "$login_root/etc/selinux" "$login_root/usr/lib/systemd/system" "$login_root/root"
+printf 'root:x:0:0:root:/root:/bin/bash\n' >"$login_root/etc/passwd"
+printf 'root:!$6$old$placeholder:0:1:99999:7:::\n' >"$login_root/etc/shadow"
+printf 'SELINUX=enforcing\n' >"$login_root/etc/selinux/config"
+: >"$login_root/usr/lib/systemd/system/selinux-autorelabel-mark.service"
+printf 'Include /etc/ssh/sshd_config.d/*.conf\n' >"$login_root/etc/ssh/sshd_config"
+printf 'AuthorizedKeysFile .ssh/authorized_keys\n' >"$login_root/etc/ssh/sshd_config.d/10-root-login.conf"
+mkdir -p "$login_root/root/.ssh"
+printf 'ssh-ed25519 EXISTINGBLOBE existing-key-ending-e' >"$login_root/root/.ssh/authorized_keys"
+printf '%s\n' '{"version":1,"systemIdentity":{"sshLoginPublicKeys":true,"rootPassword":true}}' >"$deploymentIdentityPolicyFile"
+login_private="$tmp/linux-login-private.json"
+printf '%s\n' '{"version":1,"sshLoginPublicKeys":["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7yE5q7MdhqWNsZnKZqRppDi0n0QzQnQbE0SgP5Gux5 rootpxe"],"rootPasswordHash":"$6$rootpxe$Lhp4izUSzzQETtZbEnNO4CB4Vxr0P4oxgk4Tpfeb8sYcBy89enWzHqfqujY43g6iG2cpB0SQRlAUK3YhSnLOx/"}' >"$login_private"
+chmod 0600 "$login_private"
+rootpxe_deployment_initialization_private_file="$login_private"
+rootpxe_deployment_identity_linux_login_in_root "$login_root" || fail 'linux SSH login or root password initialization failed'
+login_lastchg=$(awk -F: '$1=="root" {print $3}' "$login_root/etc/shadow")
+[[ $login_lastchg =~ ^[1-9][0-9]*$ ]] || fail 'root password did not update lastchg'
+[[ $(awk -F: '$1=="root" {print $4":"$5":"$6":"$7":"$8":"$9}' "$login_root/etc/shadow") == '1:99999:7:::' ]] || fail 'root account aging fields changed'
+[[ -f $login_root/.autorelabel && ! -L $login_root/.autorelabel ]] || fail 'SELinux target relabel was not requested'
+[[ $(grep -c 'AAAAC3NzaC1lZDI1NTE5AAAAIE7yE5q7MdhqWNsZnKZqRppDi0n0QzQnQbE0SgP5Gux5' "$login_root/root/.ssh/authorized_keys") == 1 ]] || fail 'SSH login public key was not written once'
+[[ $(tail -c 1 "$login_root/root/.ssh/authorized_keys" | od -An -tu1 | tr -d '[:space:]') == 10 ]] || fail 'SSH login key append did not add an exact newline after a final e byte'
+rootpxe_deployment_identity_linux_login_in_root "$login_root" || fail 'same root password retry failed'
+[[ $(awk -F: '$1=="root" {print $3}' "$login_root/etc/shadow") == "$login_lastchg" ]] || fail 'same root password retry changed lastchg'
+[[ $(grep -c 'AAAAC3NzaC1lZDI1NTE5AAAAIE7yE5q7MdhqWNsZnKZqRppDi0n0QzQnQbE0SgP5Gux5' "$login_root/root/.ssh/authorized_keys") == 1 ]] || fail 'same SSH public key retry duplicated the key'
+# The remaining storage/EFI fixture relies on the storage policy from the
+# earlier deployment.  Do not let this isolated login-initialization case
+# change the behavior of later regression coverage.
+printf '%s\n' '{"version":1,"randomizeStorageIdentifiers":true,"systemIdentity":{"hostname":false,"machineId":true,"sshHostKeys":true}}' >"$deploymentIdentityPolicyFile"
+# A standard Include is supported, but conflicting effective file paths must
+# not silently choose the later root-file directive over an earlier snippet.
+conflicting_sshd="$tmp/conflicting-sshd"; mkdir -p "$conflicting_sshd/etc/ssh/sshd_config.d"
+printf 'Include /etc/ssh/sshd_config.d/*.conf\nAuthorizedKeysFile .ssh/authorized_keys\n' >"$conflicting_sshd/etc/ssh/sshd_config"
+printf 'AuthorizedKeysFile .ssh/authorized_keys2\n' >"$conflicting_sshd/etc/ssh/sshd_config.d/10-conflict.conf"
+if rootpxe_deployment_identity_root_authorized_keys_relative "$conflicting_sshd" >/dev/null; then fail 'conflicting AuthorizedKeysFile order was accepted'; fi
 # Standard non-recursive Include snippets select only the configured host key;
 # recursive Include and unknown paths fail before any key replacement.
 ssh_root="$tmp/ssh-config-root"; mkdir -p "$ssh_root/etc/ssh/sshd_config.d"
