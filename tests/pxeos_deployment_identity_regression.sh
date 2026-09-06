@@ -434,7 +434,7 @@ rootpxe_deployment_identity_windows_preflight || fail 'Windows matched-zero EFI 
 unset ROOTPXE_EFI_MATCHED
 : >"$tmp/commands"
 rootpxe_deployment_identity_windows_preflight || fail 'Windows preflight with omitted ReAgent.xml failed'
-jq -e --arg efiVarFs "$rootpxe_deployment_identity_efi_var_fs" '.efiVarFs == $efiVarFs and (.volumes | length) == 2 and (.reAgentXml | length) == 0' "$rootpxe_deployment_identity_windows_manifest_file" >/dev/null || fail 'Windows manifest omitted full mounted geometry or empty ReAgent list'
+jq -e --arg root "$rootpxe_deployment_identity_windows_root" --arg efiVarFs "$rootpxe_deployment_identity_efi_var_fs" '.stateRoot == $root and .efiVarFs == $efiVarFs and (.volumes | length) == 2 and (.reAgentXml | length) == 0' "$rootpxe_deployment_identity_windows_manifest_file" >/dev/null || fail 'Windows manifest omitted the EFI state root, full mounted geometry or empty ReAgent list'
 : >"$tmp/commands"
 rootpxe_deployment_identity_windows_apply_repair || fail 'Windows repair with omitted ReAgent.xml failed'
 windows_apply_line=$(grep -n '^windows apply$' "$tmp/commands" | cut -d: -f1)

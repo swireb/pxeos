@@ -858,7 +858,7 @@ rootpxe_deployment_identity_windows_manifest() {
     bcd_json=$(jq -cn '$ARGS.positional' --args "${rootpxe_deployment_identity_windows_bcd[@]}") || return 1
     xml_json=$(jq -cn '$ARGS.positional' --args "${rootpxe_deployment_identity_windows_xml[@]}") || return 1
     efi_var_fs="${rootpxe_deployment_identity_efi_var_fs:-/sys/firmware/efi/efivars}"
-    jq -cn --arg windowsRoot "$rootpxe_deployment_identity_windows_root" --arg systemHive "$rootpxe_deployment_identity_windows_root/Windows/System32/config/SYSTEM" --arg efiVarFs "$efi_var_fs" --argjson volumes "$map" --argjson bcdStores "$bcd_json" --argjson reAgentXml "$xml_json" '{version:1,windowsRoot:$windowsRoot,systemHive:$systemHive,efiVarFs:$efiVarFs,volumes:$volumes,bcdStores:$bcdStores,reAgentXml:$reAgentXml}' >"$manifest" || { rm -f "$manifest"; return 1; }
+    jq -cn --arg windowsRoot "$rootpxe_deployment_identity_windows_root" --arg stateRoot "$rootpxe_deployment_identity_windows_root" --arg systemHive "$rootpxe_deployment_identity_windows_root/Windows/System32/config/SYSTEM" --arg efiVarFs "$efi_var_fs" --argjson volumes "$map" --argjson bcdStores "$bcd_json" --argjson reAgentXml "$xml_json" '{version:1,windowsRoot:$windowsRoot,stateRoot:$stateRoot,systemHive:$systemHive,efiVarFs:$efiVarFs,volumes:$volumes,bcdStores:$bcdStores,reAgentXml:$reAgentXml}' >"$manifest" || { rm -f "$manifest"; return 1; }
     chmod 600 "$manifest" || { rm -f "$manifest"; return 1; }
     rootpxe_deployment_identity_windows_manifest_file="$manifest"
 }
@@ -960,6 +960,8 @@ rootpxe_deployment_identity_windows_efi_phase() {
         jq -e '.version==1 and .efi.available==true and (.efi.matched|type)=="number"' "$result" >/dev/null || return 1
         matched=$(jq -er '.efi.matched' "$result") || return 1
         [[ $matched -gt 0 ]] || rootpxe_deployment_identity_windows_efi_fallback_present
+    elif [[ $phase == apply ]]; then
+        jq -e '.version==1 and .efi.available==true and ((.efi.updated|type)=="number")' "$result" >/dev/null
     else
         jq -e '.version==1 and .efi.available==true and .efi.verified==true and ((.efi.updated|type)=="number")' "$result" >/dev/null
     fi
