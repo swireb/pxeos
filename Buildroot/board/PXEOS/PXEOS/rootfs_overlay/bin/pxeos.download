@@ -199,6 +199,17 @@ if [[ ${imgType:-} == mpa && ${rootpxe_mpa_permit_is_batch:-no} == yes ]]; then
         rootpxe_verify_disk_permit_binding "$disk" deploy_write || handleError "PXEOS_STAGE=permit CODE=DISK_PERMIT_BINDING_CHANGED REASON=target_disk_identity_or_operation_mismatch"
     done
 fi
+# Freeze the identity plan only after every target has an active permit, but
+# before a deployment script, partition table, NVMe format or payload writer
+# can change the target. Storage plans use the frozen single-disk schema or
+# frozen multi-disk inventory, never a target table read at deployment time.
+if rootpxe_deployment_identity_policy_enabled; then
+    if [[ ${imgType:-} == mpa ]]; then
+        rootpxe_deployment_identity_request_plan $disks
+    else
+        rootpxe_deployment_identity_request_plan "$hd"
+    fi || handleError "PXEOS_STAGE=deployment_identity_plan CODE=IDENTITY_PLAN_FAILED REASON=source_metadata_or_permit_binding_invalid"
+fi
 rootpxe_run_pre_deploy_script || handleError "PXEOS_STAGE=pre_deploy_script CODE=PRE_DEPLOY_SCRIPT_FAILED REASON=${rootpxe_deploy_script_error:-unknown}"
 rootpxe_stage init "pxeos download started, storage mounted"
 [[ $nombr -eq 1 ]] && rootpxe_console_message INFO 'Skipping partition layout: single-partition restore.' || preparePartitions

@@ -1,0 +1,5 @@
+config BR2_PACKAGE_LIBHIVEX
+	bool "libhivex"
+	help
+	  Read and write Windows Registry hive files.  PXEOS uses the C library
+	  only; language bindings and interactive tools are not installed.

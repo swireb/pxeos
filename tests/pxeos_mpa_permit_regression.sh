@@ -12,7 +12,7 @@ fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 # checkin/mount flow.  All destructive commands are replaced by event writers
 # to ordinary temp files.
 test_funcs="$tmp/funcs.sh"
-sed -e '/partition-funcs\.sh/d' -e '/restore-preflight\.sh/d' -e '/capture-recovery\.sh/d' "$funcs" >"$test_funcs"
+sed -e '/partition-funcs\.sh/d' -e '/restore-preflight\.sh/d' -e '/capture-recovery\.sh/d' -e '/deployment-identity\.sh/d' "$funcs" >"$test_funcs"
 cp "$progress_lib" "$tmp/partclone-progress.sh"
 download_functions="$tmp/download-functions.sh"
 awk '/^preparePartitions\(\)/,/^findHDDInfo$/{ if ($0 ~ /^findHDDInfo$/) exit; print }' "$download" >"$download_functions"

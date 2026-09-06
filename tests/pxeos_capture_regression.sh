@@ -24,6 +24,7 @@ sed \
     -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' \
     -e 's|^\. /usr/share/pxeos/lib/restore-preflight.sh$|:|' \
     -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' \
+    -e 's|^\. /usr/share/pxeos/lib/deployment-identity.sh$|:|' \
     -e 's|/storage|${ROOTPXE_TEST_STORAGE}|g' \
     "$funcs" >"$tmp/funcs.sh"
 cp "$progress_lib" "$tmp/partclone-progress.sh"
@@ -462,6 +463,7 @@ sed \
     -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' \
     -e 's|^\. /usr/share/pxeos/lib/restore-preflight.sh$|:|' \
     -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' \
+    -e 's|^\. /usr/share/pxeos/lib/deployment-identity.sh$|:|' \
     "$funcs" > "$tmp/funcs.sh"
 cp "$progress_lib" "$tmp/partclone-progress.sh"
 set +u

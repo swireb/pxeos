@@ -1,0 +1,8 @@
+config BR2_PACKAGE_ROOTPXE_OFFLINE_IDENTITIES
+	bool "RootPXE Windows offline identity repair"
+	select BR2_PACKAGE_JSON_C
+	select BR2_PACKAGE_LIBXML2
+	select BR2_PACKAGE_LIBHIVEX
+	help
+	  Repair BCD device records, SYSTEM MountedDevices and ReAgent.xml after
+	  PXEOS changes the identity of an offline Windows disk.

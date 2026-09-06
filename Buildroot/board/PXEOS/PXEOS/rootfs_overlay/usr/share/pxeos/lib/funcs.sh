@@ -3,6 +3,7 @@ export initversion=19800101
 . /usr/share/pxeos/lib/partition-funcs.sh
 . /usr/share/pxeos/lib/restore-preflight.sh
 . /usr/share/pxeos/lib/capture-recovery.sh
+. /usr/share/pxeos/lib/deployment-identity.sh
 rootpxe_display_metadata_lib=/usr/share/pxeos/lib/display-metadata.sh
 [[ -r $rootpxe_display_metadata_lib ]] || rootpxe_display_metadata_lib="$(dirname "${BASH_SOURCE[0]}")/display-metadata.sh"
 [[ -r $rootpxe_display_metadata_lib ]] && . "$rootpxe_display_metadata_lib"
@@ -797,10 +798,12 @@ rootpxe_capture_lvm_volumes() {
     vgcfgbackup -f "$stage/$vg_artifact" "$rootpxe_lvm_vg_name" >/dev/null 2>&1 || return 1
     : >"$stage/d1.lvm.capture.tsv" || return 1
     while IFS='|' read -r lv_name lv_uuid lv_path lv_size fs extra; do
-        artifact=""; swap_uuid=""
+        artifact=""; swap_uuid=""; filesystem_uuid=""
         [[ -n $lv_name && -n $lv_uuid && $lv_path == /dev/* && $lv_size =~ ^[1-9][0-9]*$ && -z $extra ]] || return 1
         case $fs in ext2|ext3|ext4|xfs|swap) ;; *) return 1;; esac
-        swap_uuid=$(blkid -s UUID -o value "$lv_path" 2>/dev/null | tr -d '\r\n')
+        filesystem_uuid=$(blkid -s UUID -o value "$lv_path" 2>/dev/null | tr -d '\r\n')
+        [[ -n $filesystem_uuid ]] || return 1
+        [[ $fs == swap ]] && swap_uuid="$filesystem_uuid"
         # n images preserve the source layout while capturing.  The original
         # logical-volume size is therefore also its minimum deployment size.
         min_bytes="$lv_size"; producer=0; writer=0
@@ -834,11 +837,11 @@ rootpxe_capture_lvm_volumes() {
         elif [[ $fs == swap ]]; then
             rootpxe_partition_progress_item "d1:p${rootpxe_lvm_pv_number}:lv:${lv_uuid}" completed - "交换逻辑卷元数据已保存"
         fi
-        printf '%s|%s|%s|%s|%s|%s|%s\n' "$lv_name" "$lv_uuid" "$lv_size" "$min_bytes" "$fs" "$artifact" "$swap_uuid" >>"$stage/d1.lvm.capture.tsv" || return 1
+        printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$lv_name" "$lv_uuid" "$lv_size" "$min_bytes" "$fs" "$artifact" "$swap_uuid" "$filesystem_uuid" >>"$stage/d1.lvm.capture.tsv" || return 1
     done <"$rootpxe_lvm_lv_facts_file"
     pv_min_bytes="$rootpxe_lvm_pv_bytes"
     jq -n --arg pv_uuid "$rootpxe_lvm_pv_uuid" --arg vg_uuid "$rootpxe_lvm_vg_uuid" --arg vg_name "$rootpxe_lvm_vg_name" --arg pv_artifact "$pv_artifact" --arg vg_artifact "$vg_artifact" --argjson part "$rootpxe_lvm_pv_number" --argjson pv_bytes "$rootpxe_lvm_pv_bytes" --argjson pv_min "$pv_min_bytes" --argjson pe_start "$rootpxe_lvm_pe_start_bytes" --argjson extent "$rootpxe_lvm_vg_extent_bytes" --argjson free "$rootpxe_lvm_vg_free_bytes" --rawfile lvs "$stage/d1.lvm.capture.tsv" '
-      {version:1,captureMode:"per_lv",resizePolicy:"grow_only",pvs:[{partitionNumber:$part,uuid:$pv_uuid,vgUuid:$vg_uuid,originalBytes:$pv_bytes,minBytes:$pv_min,peStartBytes:$pe_start,artifact:$pv_artifact,vgConfigArtifact:$vg_artifact}],vgs:[{name:$vg_name,uuid:$vg_uuid,extentBytes:$extent,pvPartitionNumbers:[$part],originalFreeBytes:$free,lvs:($lvs|split("\n")|map(select(length>0)|split("|")|{name:.[0],uuid:.[1],layout:"linear",originalBytes:(.[2]|tonumber),minBytes:(.[3]|tonumber),fs:.[4],role:(if .[4]=="swap" then "swap" else "data" end),resizable:(.[4] != "swap"),artifact:.[5],swapUuid:(if .[4]=="swap" then .[6] else "" end)}))}]} ' >"$stage/d1.lvm.schema.json" || return 1
+      {version:1,captureMode:"per_lv",resizePolicy:"grow_only",pvs:[{partitionNumber:$part,uuid:$pv_uuid,vgUuid:$vg_uuid,originalBytes:$pv_bytes,minBytes:$pv_min,peStartBytes:$pe_start,artifact:$pv_artifact,vgConfigArtifact:$vg_artifact}],vgs:[{name:$vg_name,uuid:$vg_uuid,extentBytes:$extent,pvPartitionNumbers:[$part],originalFreeBytes:$free,lvs:($lvs|split("\n")|map(select(length>0)|split("|")|{name:.[0],uuid:.[1],layout:"linear",originalBytes:(.[2]|tonumber),minBytes:(.[3]|tonumber),fs:.[4],role:(if .[4]=="swap" then "swap" else "data" end),resizable:(.[4] != "swap"),artifact:.[5],swapUuid:(if .[4]=="swap" then .[6] else "" end)} + (if .[7] == "" then {} else {filesystemUuid:.[7]} end))}]} ' >"$stage/d1.lvm.schema.json" || return 1
     jq -e '.version == 1 and .captureMode == "per_lv" and .resizePolicy == "grow_only" and (.pvs|length) == 1 and (.vgs|length) == 1' "$stage/d1.lvm.schema.json" >/dev/null || return 1
     rm -f -- "$stage/d1.lvm.capture.tsv" || return 1
     [[ ! -e "$image_path/d1.lvm.schema.json" && ! -e "$image_path/$pv_artifact" && ! -e "$image_path/$vg_artifact" && ! -e "$image_path/d1p${rootpxe_lvm_pv_number}.img" && ! -e "$image_path/d1p${rootpxe_lvm_pv_number}.img.000" ]] || return 1
@@ -1123,8 +1126,8 @@ rootpxe_cleanup_deployment_partition_file() {
 
 rootpxe_cleanup_task_json() {
     rootpxe_cleanup_deployment_partition_file
-    rm -f -- "${deploymentLayoutFile:-}" "${originalSchemaFile:-}" "${preDeployScriptFile:-}" "${postDeployScriptFile:-}" "${rootpxe_original_schema_file:-}" "${rootpxe_partition_inventory_file:-}" "${rootpxe_display_metadata_file:-}"
-    unset deploymentLayoutFile originalSchemaFile preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 rootpxe_original_schema_file rootpxe_partition_inventory_file rootpxe_display_metadata_file rootpxe_display_metadata_identities
+    rm -f -- "${deploymentLayoutFile:-}" "${originalSchemaFile:-}" "${partitionInventoryFile:-}" "${preDeployScriptFile:-}" "${postDeployScriptFile:-}" "${rootpxe_original_schema_file:-}" "${rootpxe_partition_inventory_file:-}" "${rootpxe_display_metadata_file:-}"
+    unset deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 rootpxe_original_schema_file rootpxe_partition_inventory_file rootpxe_display_metadata_file rootpxe_display_metadata_identities
 }
 
 rootpxe_cleanup_session() {
@@ -4076,10 +4079,10 @@ rootpxe_validate_linux_hostname() {
 }
 
 rootpxe_apply_linux_hostname_for_disk() {
-    local disk="$1" root_spec root_device root_fs root_lvm_name root_lvm_uuid root_subvolid root_lvm_activated=no rc mountpoint=/linuxroot options
+    local disk="$1" root_spec root_device root_fs root_lvm_name root_lvm_uuid root_subvolid root_lvm_activated=no rc mountpoint="${rootpxe_deployment_identity_linux_state_root:-/tmp/rootpxe-identity-root}" options
     local hostname_path hosts_path old_hostname actual_hostname hosts_tmp expected_hash actual_hash hostname_exists=0
-    [[ ${changeHostname:-false} == true ]] || return 0
-    rootpxe_validate_linux_hostname "${hostName:-}" || handleError "PXEOS_STAGE=customizing_hostname CODE=INVALID_LINUX_HOSTNAME REASON=linux_name_policy"
+    [[ ${changeHostname:-false} == true ]] || rootpxe_deployment_identity_linux_policy_enabled || return 0
+    [[ ${changeHostname:-false} != true ]] || rootpxe_validate_linux_hostname "${hostName:-}" || handleError "PXEOS_STAGE=customizing_hostname CODE=INVALID_LINUX_HOSTNAME REASON=linux_name_policy"
     root_spec=$(rootpxe_find_linux_root_filesystem "$disk")
     rc=$?
     case $rc in
@@ -4118,20 +4121,21 @@ rootpxe_apply_linux_hostname_for_disk() {
     options=$(rootpxe_linux_mount_options rw "$root_fs" "$root_subvolid") || handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"
     mount -t "$root_fs" -o "$options" "$root_device" "$mountpoint" >/tmp/rootpxe-linux-mount-output 2>&1 || { rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_MOUNT_FAILED"; }
     rootpxe_linux_paths_safe_for_write "$mountpoint" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_PATH_UNSAFE"; }
-    hostname_path="$mountpoint/etc/hostname"
-    hosts_path="$mountpoint/etc/hosts"
-    old_hostname=""
-    if [[ -f $hostname_path ]]; then
-        hostname_exists=1
-        old_hostname=$(head -n 1 "$hostname_path" 2>/dev/null | tr -d '\r\n')
-    fi
-    printf '%s\n' "$hostName" >"$hostname_path" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTNAME_WRITE_FAILED"; }
-    if [[ $hostname_exists -eq 0 ]]; then
-        chmod 0644 "$hostname_path" && chown root:root "$hostname_path" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTNAME_MODE_FAILED"; }
-    fi
-    actual_hostname=$(cat "$hostname_path" 2>/dev/null | tr -d '\r\n')
-    [[ $actual_hostname == "$hostName" ]] || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTNAME_READBACK_FAILED"; }
-    if [[ -n $old_hostname && -f $hosts_path ]]; then
+    if [[ ${changeHostname:-false} == true ]]; then
+        hostname_path="$mountpoint/etc/hostname"
+        hosts_path="$mountpoint/etc/hosts"
+        old_hostname=""
+        if [[ -f $hostname_path ]]; then
+            hostname_exists=1
+            old_hostname=$(head -n 1 "$hostname_path" 2>/dev/null | tr -d '\r\n')
+        fi
+        printf '%s\n' "$hostName" >"$hostname_path" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTNAME_WRITE_FAILED"; }
+        if [[ $hostname_exists -eq 0 ]]; then
+            chmod 0644 "$hostname_path" && chown root:root "$hostname_path" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTNAME_MODE_FAILED"; }
+        fi
+        actual_hostname=$(cat "$hostname_path" 2>/dev/null | tr -d '\r\n')
+        [[ $actual_hostname == "$hostName" ]] || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTNAME_READBACK_FAILED"; }
+        if [[ -n $old_hostname && -f $hosts_path ]]; then
         hosts_tmp=$(mktemp "$mountpoint/etc/.hosts.rootpxe.XXXXXX") || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTS_TEMP_FAILED"; }
         awk -v old="$old_hostname" -v new="$hostName" '
             function replace_tokens(prefix, out, token, ch, in_token, i) {
@@ -4159,6 +4163,11 @@ rootpxe_apply_linux_hostname_for_disk() {
         actual_hash=$(sha256sum "$hosts_path" | awk '{print $1}')
         rm -f "$hosts_tmp"
         [[ -n $expected_hash && $expected_hash == "$actual_hash" ]] || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTS_READBACK_FAILED"; }
+        fi
+    fi
+    if rootpxe_deployment_identity_linux_policy_enabled; then
+        rootpxe_deployment_identity_linux_system_in_root "$mountpoint" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_SYSTEM_IDENTITY_FAILED"; }
+        rootpxe_deployment_identity_linux_repair_references_in_root "$mountpoint" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_STORAGE_REFERENCE_REPAIR_FAILED"; }
     fi
     if mountpoint -q "$mountpoint" 2>/dev/null; then
         umount "$mountpoint" >/dev/null 2>&1 || { rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"; }
@@ -4934,8 +4943,32 @@ completeTasking() {
             killStatusReporter
             rootpxe_partition_progress_flush
             [[ $capone -eq 1 ]] && exit 0
-            [[ ${changeHostname:-false} == true ]] && rootpxe_apply_hostname_for_disk "$hd"
+            if rootpxe_deployment_identity_storage_enabled && [[ ${osid:-} == 50 ]]; then
+                rootpxe_deployment_identity_linux_storage_preflight "$hd" || handleError "PXEOS_STAGE=deployment_identity_preflight CODE=LINUX_STORAGE_REFERENCE_PRECHECK_FAILED"
+                if [[ ${imgType:-} == mpa ]]; then
+                    rootpxe_deployment_identity_apply_linux_storage_targets $disks || handleError "PXEOS_STAGE=deployment_identity_apply CODE=LINUX_STORAGE_IDENTIFIERS_FAILED"
+                else
+                    rootpxe_deployment_identity_apply_linux_storage_targets "$hd" || handleError "PXEOS_STAGE=deployment_identity_apply CODE=LINUX_STORAGE_IDENTIFIERS_FAILED"
+                fi
+            fi
+            if rootpxe_deployment_identity_storage_enabled && rootpxe_deployment_identity_windows_policy_enabled; then
+                rootpxe_deployment_identity_windows_preflight || handleError "PXEOS_STAGE=deployment_identity_preflight CODE=WINDOWS_STORAGE_REFERENCE_PRECHECK_FAILED"
+                if [[ ${imgType:-} == mpa ]]; then
+                    rootpxe_deployment_identity_apply_windows_storage_targets $disks || handleError "PXEOS_STAGE=deployment_identity_apply CODE=WINDOWS_STORAGE_IDENTIFIERS_FAILED"
+                else
+                    rootpxe_deployment_identity_apply_windows_storage_targets "$hd" || handleError "PXEOS_STAGE=deployment_identity_apply CODE=WINDOWS_STORAGE_IDENTIFIERS_FAILED"
+                fi
+                rootpxe_deployment_identity_windows_apply_repair || handleError "PXEOS_STAGE=deployment_identity_apply CODE=WINDOWS_STORAGE_REFERENCE_REPAIR_FAILED"
+                rootpxe_deployment_identity_storage_result=true
+            fi
+            if [[ ${changeHostname:-false} == true ]] || rootpxe_deployment_identity_linux_policy_enabled; then
+                rootpxe_apply_hostname_for_disk "$hd"
+                [[ ${changeHostname:-false} == true ]] && rootpxe_deployment_identity_hostname_result=true
+            fi
             rootpxe_run_post_deploy_script || handleError "PXEOS_STAGE=post_deploy_script CODE=POST_DEPLOY_SCRIPT_FAILED REASON=${rootpxe_deploy_script_error:-unknown}"
+            if rootpxe_deployment_identity_policy_enabled; then
+                rootpxe_deployment_identity_report_result "${rootpxe_deployment_identity_storage_result:-false}" "${rootpxe_deployment_identity_hostname_result:-false}" "${rootpxe_deployment_identity_machine_id_result:-false}" "${rootpxe_deployment_identity_ssh_host_keys_result:-false}" || handleError "PXEOS_STAGE=deployment_identity_result CODE=IDENTITY_RESULT_REJECTED"
+            fi
             . /bin/pxeos.imgcomplete
             ;;
     esac

@@ -77,6 +77,66 @@ rootpxe_clear_json_deploy_scripts() {
     unset preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256
 }
 
+# v1 身份策略只接受服务端冻结后的 JSON；不从内核参数或环境读取。策略
+# 文件随后由下载流程读取，权限避免执行令牌或部署计划被其他本地进程读取。
+rootpxe_apply_json_deployment_identity_policy() {
+    local document="$1" policy_file=/tmp/pxeos.deployment-identity-policy.json
+    rm -f -- "$policy_file"
+    if ! jq -e '
+      if has("deploymentIdentityPolicy") | not then true
+      else .deploymentIdentityPolicy as $p |
+        ($p | type == "object") and $p.version == 1 and
+        ($p.randomizeStorageIdentifiers | type == "boolean") and
+        ($p.systemIdentity | type == "object") and
+        ($p.systemIdentity.hostname | type == "boolean") and
+        ($p.systemIdentity.machineId | type == "boolean") and
+        ($p.systemIdentity.sshHostKeys | type == "boolean")
+      end' >/dev/null <<<"$document"; then
+        return 1
+    fi
+    if jq -e 'has("deploymentIdentityPolicy")' >/dev/null <<<"$document"; then
+        jq -c '.deploymentIdentityPolicy' <<<"$document" >"$policy_file" || { rm -f -- "$policy_file"; return 1; }
+        chmod 600 "$policy_file" || { rm -f -- "$policy_file"; return 1; }
+        deploymentIdentityPolicyFile="$policy_file"
+        export deploymentIdentityPolicyFile
+    else
+        unset deploymentIdentityPolicyFile
+    fi
+}
+
+rootpxe_apply_json_partition_inventory() {
+    local document="$1" inventory_file
+    rm -f -- "${partitionInventoryFile:-}"
+    unset partitionInventoryFile partitionInventoryHash
+    jq -e 'if has("partitionInventory") then (.partitionInventory | type == "object") and (.partitionInventory.version == 1) and ((.partitionInventory.disks|type) == "array") and (.partitionInventory.disks|length > 0) and (.partitionInventoryHash|type == "string" and test("^[a-f0-9]{64}$")) else true end' >/dev/null <<<"$document" || return 1
+    jq -e 'has("partitionInventory")' >/dev/null <<<"$document" || return 0
+    inventory_file=$(mktemp /tmp/rootpxe-inventory.XXXXXX) || return 1
+    jq -cS '.partitionInventory' <<<"$document" >"$inventory_file" || { rm -f -- "$inventory_file"; return 1; }
+    chmod 600 "$inventory_file" || { rm -f -- "$inventory_file"; return 1; }
+    partitionInventoryFile="$inventory_file"
+    partitionInventoryHash=$(jq -r '.partitionInventoryHash' <<<"$document")
+    export partitionInventoryFile partitionInventoryHash
+}
+
+rootpxe_checkin_json_payload() {
+    local capabilities='["hostname"]'
+    [[ ${taskid:-} =~ ^[1-9][0-9]*$ && -n ${task_token:-} && -n ${lmac:-} ]] || return 1
+    # Capabilities describe the executable PXEOS image, not merely source code.
+    # Windows remains withheld until its native BCD/EFI preflight, apply and
+    # verify tool is installed; the Linux paths are complete and self-contained.
+    if rootpxe_deployment_identity_linux_capabilities_installed; then
+        capabilities='["hostname","storage-linux-v1","linux-machine-id","linux-ssh-host-keys"]'
+    fi
+    jq -cn \
+        --argjson taskId "$taskid" \
+        --arg token "$task_token" \
+        --arg mac "$lmac" \
+        --arg sysuuid "${sysuuid_local:-}" \
+        --argjson versions '[1]' \
+        --argjson capabilities "$capabilities" \
+        '{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities}'
+}
+
 rootpxe_apply_json_deploy_script() {
     local document="$1" script_field="$2" hash_field="$3" file_var="$4" hash_var="$5" temp_prefix="$6"
     local has_script has_hash script_bytes script_hash script_file actual_hash
@@ -264,6 +324,8 @@ rootpxe_apply_json_checkin() {
     rootpxe_json_assign_text "$document" resumeStage '.resumeStage // .resume_stage' || return 1
     rootpxe_json_assign "$document" schemaRevision '.schemaRevision // .schema_revision' || return 1
     rootpxe_json_assign_text "$document" schemaHash '.schemaHash // .schema_hash' || return 1
+    rootpxe_apply_json_deployment_identity_policy "$document" || return 1
+    rootpxe_apply_json_partition_inventory "$document" || return 1
     rootpxe_apply_json_capture_backup_name "$document" || return 1
     rootpxe_validate_json_storage || return 1
     # Layout/schema are untrusted JSON data. Store canonical form in 0600 files;
@@ -285,7 +347,7 @@ rootpxe_apply_json_checkin() {
         rootpxe_clear_json_deploy_scripts
         jq -e 'has("preDeployScript") or has("preDeployScriptSha256") or has("postDeployScript") or has("postDeployScriptSha256")' >/dev/null 2>&1 <<<"$document" && return 1
     fi
-    export taskid execution_token taskType pxe_type img img_type img_partition_type osid img_format pigz_comp shutdown protocol storage_server storage_export hostName changeHostname resumeStage schemaRevision schemaHash captureBackupName preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 deploymentLayoutFile originalSchemaFile
+    export taskid execution_token taskType pxe_type img img_type img_partition_type osid img_format pigz_comp shutdown protocol storage_server storage_export hostName changeHostname resumeStage schemaRevision schemaHash captureBackupName preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash deploymentIdentityPolicyFile
 }
 
 checkin_rootpxe() {
@@ -322,13 +384,11 @@ checkin_rootpxe() {
         retryAfterSec=5
         # Do not use curl -f here. A 4xx means the administrator withdrew the
         # task before checkin completed; it is a safe reboot, not a PXEOS error.
+        checkin_payload=$(rootpxe_checkin_json_payload) || handleError "RootPXE checkin context is invalid ($0)"
         out=$(curl -Lks \
             --connect-timeout 10 --max-time 30 \
-            --data-urlencode "taskid=$taskid" \
-            --data-urlencode "token=$task_token" \
-            --data-urlencode "format=json" \
-            --data-urlencode "mac=$lmac" \
-            --data-urlencode "sysuuid=$sysuuid_local" \
+            -H 'Content-Type: application/json' \
+            --data-binary "$checkin_payload" \
             -w $'\n%{http_code}' "${rootpxe_api}checkin" 2>/dev/null)
         curl_status=$?
         if [[ $curl_status -ne 0 ]]; then
@@ -439,7 +499,7 @@ checkin_rootpxe() {
     imgType=${img_type:-${imgType:-}}; imgPartitionType=${img_partition_type:-${imgPartitionType:-}}
     imgFormat=${img_format:-${imgFormat:-}}; PIGZ_COMP=${pigz_comp:-${PIGZ_COMP:-}}; hostName=${hostName:-${host_name:-}}
     [[ -z ${changeHostname:-} || ${changeHostname:-} == true || ${changeHostname:-} == false ]] || handleError "Invalid changeHostname ($0)"
-    export taskType type pxeType imgType imgPartitionType imgFormat PIGZ_COMP hostName changeHostname progress_attempt rootpxe_partition_progress_enabled resumeStage schemaRevision schemaHash captureBackupName preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256
+    export taskType type pxeType imgType imgPartitionType imgFormat PIGZ_COMP hostName changeHostname progress_attempt rootpxe_partition_progress_enabled resumeStage schemaRevision schemaHash captureBackupName preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 partitionInventoryFile partitionInventoryHash deploymentIdentityPolicyFile
     protocol=${protocol,,}
     [[ $protocol == nfs || $protocol == smb ]] || handleError "Invalid storage protocol ($0)"
     storage_server=${storage_server:-$storageip}
