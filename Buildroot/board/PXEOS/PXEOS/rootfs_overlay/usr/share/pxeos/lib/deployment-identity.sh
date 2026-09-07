@@ -420,6 +420,41 @@ rootpxe_deployment_identity_apply_linux_storage_targets() {
     done
 }
 
+# Verify that a single Linux target already contains every identifier frozen
+# for this attempt.  Unlike apply_linux_storage this function is read-only:
+# it must remain safe before a post-restore resume is admitted.
+rootpxe_deployment_identity_linux_storage_plan_applied() {
+    local disk="$1" plan="$rootpxe_deployment_identity_plan_file" plan_disk binding table disk_id target guid fs uuid actual
+    [[ ${imgType:-} != mpa && $disk == /dev/* && -r $plan ]] || return 1
+    plan_disk=$(ROOTPXE_IDENTITY_PLAN_TARGET="x$disk" jq -ec '[.plan.disks[] | select(("x" + .targetDevice) == env.ROOTPXE_IDENTITY_PLAN_TARGET)] | if length == 1 then .[0] else error("missing storage plan disk") end' "$plan") || return 1
+    binding=$(ROOTPXE_IDENTITY_PLAN_TARGET="x$disk" jq -er '.plan.topology.disks[] | select(("x" + .targetDevice) == env.ROOTPXE_IDENTITY_PLAN_TARGET) | .targetBinding' "$plan") || return 1
+    [[ $(rootpxe_deployment_identity_target_binding "$disk") == "$binding" ]] || return 1
+    table=$(jq -er '.partitionTable' <<<"$plan_disk") || return 1
+    case "$table" in
+        gpt)
+            disk_id=$(jq -er '.diskGuid // empty' <<<"$plan_disk") || return 1
+            [[ -n $disk_id ]] || return 1
+            sfdisk --json "$disk" 2>/dev/null | tr -d $'\r' | jq -e --arg id "$disk_id" '.partitiontable.id | ascii_downcase == ($id | ascii_downcase)' >/dev/null || return 1
+            while IFS=$'\t' read -r target guid; do
+                target=${target//$'\r'/}; guid=${guid//$'\r'/}
+                [[ $target == /dev/* && -n $guid ]] || return 1
+                actual=$(sfdisk --json "$disk" 2>/dev/null | tr -d $'\r' | jq -er --arg target "$target" '.partitiontable.partitions[] | select(.node == $target) | .uuid' | head -n1) || return 1
+                actual=${actual//$'\r'/}
+                [[ ${actual,,} == ${guid,,} ]] || return 1
+            done < <(jq -r '.partitions[] | [.targetDevice,(.partitionGuid // "")] | @tsv' <<<"$plan_disk")
+            ;;
+        mbr) return 1 ;; # Keep MBR/Windows/MPA under the existing redeploy guard.
+        *) return 1 ;;
+    esac
+    while IFS=$'\t' read -r target fs uuid; do
+        target=${target//$'\r'/}; fs=${fs//$'\r'/}; uuid=${uuid//$'\r'/}
+        [[ $target == /dev/* && -n $uuid ]] || return 1
+        actual=$(blkid -s UUID -o value "$target" 2>/dev/null || true)
+        [[ $actual == "$uuid" ]] || return 1
+    done < <(jq -er '[.partitions[] as $partition | ($partition | select((.filesystemUuid // "") != "") | [.targetDevice,.filesystem,.filesystemUuid] | @tsv), ($partition.logicalVolumes[]? | select((.filesystemUuid // "") != "") | [.targetDevice,.filesystem,.filesystemUuid] | @tsv)] | .[]' <<<"$plan_disk")
+    rootpxe_deployment_identity_storage_result=true
+}
+
 rootpxe_deployment_identity_source_partition_geometry() {
     local source_disk="$1" number="$2"
     [[ $source_disk =~ ^[1-9][0-9]*$ && $number =~ ^[1-9][0-9]*$ ]] || return 1
@@ -555,6 +590,19 @@ rootpxe_deployment_identity_linux_efi_manifest() {
     rootpxe_deployment_identity_linux_efi_manifest_file="$manifest"
 }
 
+rootpxe_deployment_identity_linux_efi_no_runtime_repair_required() {
+    local result="$1"
+    # The offline helper has completed successfully but cannot match an
+    # efivarfs entry.  This is safe only for its exact no-op result; apply and
+    # verify then rely on the standard loader already present on the frozen
+    # ESP rather than treating absent NVRAM as a repair failure.
+    jq -e '
+        type == "object" and (keys == ["efi", "version"]) and .version == 1 and
+        (.efi | type == "object" and keys == ["available", "matched", "updated", "verified"] and
+         .available == false and .matched == 0 and .updated == 0 and .verified == false)
+    ' "$result" >/dev/null
+}
+
 rootpxe_deployment_identity_linux_efi_phase() {
     local root="$1" phase="$2" manifest result matched available
     [[ $phase == preflight || $phase == apply || $phase == verify ]] || return 1
@@ -579,6 +627,9 @@ rootpxe_deployment_identity_linux_efi_phase() {
         [[ $available == true ]] || return 1
         matched=$(jq -er '.efi.matched' "$result") || return 1
         [[ $matched -gt 0 ]] || rootpxe_deployment_identity_linux_efi_fallback_present || return 1
+    elif rootpxe_deployment_identity_linux_efi_no_runtime_repair_required "$result"; then
+        rootpxe_deployment_identity_linux_efi_fallback_present
+        return $?
     elif [[ $phase == apply ]]; then
         jq -e '.version == 1 and .efi.available == true and (.efi.updated | type) == "number"' "$result" >/dev/null || return 1
     else
@@ -788,12 +839,7 @@ rootpxe_deployment_identity_mount_linux_boot_filesystems() {
         for ((index=0; index<${#boot_targets[@]}; index++)); do
             [[ ${boot_targets[$index]} == "$expected" ]] || continue
             source=${boot_sources[$index]}; declared_fs=${boot_types[$index]}
-            case "$source" in
-                UUID=*) identifier=$(rootpxe_deployment_identity_fstab_identifier "${source#UUID=}") || { rootpxe_deployment_identity_unmount_linux_boot_filesystems || true; return 1; }; device=$(blkid -U "$identifier" 2>/dev/null) ;;
-                PARTUUID=*) identifier=$(rootpxe_deployment_identity_fstab_identifier "${source#PARTUUID=}") || { rootpxe_deployment_identity_unmount_linux_boot_filesystems || true; return 1; }; device=$(blkid -t "PARTUUID=$identifier" -o device 2>/dev/null) ;;
-                /dev/*) device="$source" ;;
-                *) rootpxe_deployment_identity_unmount_linux_boot_filesystems || true; return 1;;
-            esac
+            device=$(rootpxe_deployment_identity_linux_fstab_source_device "$source") || { rootpxe_deployment_identity_unmount_linux_boot_filesystems || true; return 1; }
             [[ -d "$root$expected" && ! -L "$root$expected" ]] && rootpxe_deployment_identity_boot_device_is_block "$device" || { rootpxe_deployment_identity_unmount_linux_boot_filesystems || true; return 1; }
             rootpxe_deployment_identity_plan_target_device "$device" || { rootpxe_deployment_identity_unmount_linux_boot_filesystems || true; return 1; }
             fs=$(blkid -s TYPE -o value "$device" 2>/dev/null | tr -d '\r\n' | tr '[:upper:]' '[:lower:]') || { rootpxe_deployment_identity_unmount_linux_boot_filesystems || true; return 1; }
@@ -819,6 +865,99 @@ rootpxe_deployment_identity_unmount_linux_boot_filesystems() {
     done
     rootpxe_deployment_identity_boot_mounts=()
     rootpxe_deployment_identity_boot_mount_records=()
+}
+
+# Resolve a filesystem named by the target's fstab.  Before storage identity
+# changes, blkid resolves the old identifier directly.  Afterwards it can only
+# be recovered through the frozen topology, which remains bound to the same
+# permitted target device.
+rootpxe_deployment_identity_linux_fstab_source_device() {
+    local source="$1" identifier device="" plan="${rootpxe_deployment_identity_plan_file:-}" identifier_kind
+    case "$source" in
+        UUID=*)
+            identifier=$(rootpxe_deployment_identity_fstab_identifier "${source#UUID=}") || return 1
+            device=$(blkid -U "$identifier" 2>/dev/null || true)
+            identifier_kind=filesystem_uuid
+            ;;
+        PARTUUID=*)
+            identifier=$(rootpxe_deployment_identity_fstab_identifier "${source#PARTUUID=}") || return 1
+            device=$(blkid -t "PARTUUID=$identifier" -o device 2>/dev/null || true)
+            identifier_kind=partition_id
+            ;;
+        /dev/*) device="$source" ;;
+        *) return 1 ;;
+    esac
+    device=${device//$'\r'/}; device=${device//$'\n'/}
+    [[ -n $device ]] || {
+        [[ -r $plan && -n ${identifier_kind:-} ]] || return 1
+        device=$(jq -er --arg identifier "$identifier" --arg kind "$identifier_kind" '
+          def same_identifier($value):
+            if ($value | type) == "string" then
+              ($value | ascii_downcase) == ($identifier | ascii_downcase)
+            else false end;
+          [
+            (.plan.topology.disks[].partitions[] |
+             select(if $kind == "filesystem_uuid" then same_identifier(.originalFilesystemUuid) else same_identifier(.oldPartitionId) end) |
+             .targetDevice),
+            (.plan.disks[].partitions[] |
+             select(if $kind == "filesystem_uuid" then same_identifier(.filesystemUuid) else same_identifier(.partitionId) end) |
+             .targetDevice)
+          ] | unique |
+          if length == 1 then .[0] else error("fstab source is not uniquely bound") end
+        ' "$plan" 2>/dev/null) || return 1
+    }
+    [[ $device == /dev/* ]] || return 1
+    printf '%s\n' "$device"
+}
+
+# /var can be a separate target filesystem.  Mount it only when its fstab
+# source resolves to a device present in the immutable deployment plan; retain
+# ownership so cleanup never unmounts a borrowed mount.
+rootpxe_deployment_identity_mount_linux_var_filesystem() {
+    local root="$1" source="" target="" declared_fs="" device fs options count=0
+    rootpxe_deployment_identity_var_mount=""
+    [[ -e $root/etc/fstab ]] || return 0
+    rootpxe_deployment_identity_safe_target_file "$root" "$root/etc/fstab" || return 1
+    while IFS=$'\t' read -r source target declared_fs; do
+        [[ $target == /var ]] || continue
+        count=$((count + 1))
+        [[ $count -eq 1 && -n $source && -n $declared_fs ]] || return 1
+        rootpxe_deployment_identity_var_source="$source"
+        rootpxe_deployment_identity_var_fs="${declared_fs,,}"
+    done < <(awk '!/^[[:space:]]*#/ && NF >= 3 {print $1 "\t" $2 "\t" $3}' "$root/etc/fstab")
+    [[ $count -eq 0 ]] && return 0
+    source=${rootpxe_deployment_identity_var_source:-}; declared_fs=${rootpxe_deployment_identity_var_fs:-}
+    unset rootpxe_deployment_identity_var_source rootpxe_deployment_identity_var_fs
+    device=$(rootpxe_deployment_identity_linux_fstab_source_device "$source") || return 1
+    [[ -d $root/var && ! -L $root/var ]] && rootpxe_deployment_identity_boot_device_is_block "$device" || return 1
+    rootpxe_deployment_identity_plan_target_device "$device" || return 1
+    fs=$(blkid -s TYPE -o value "$device" 2>/dev/null | tr -d '\r\n' | tr '[:upper:]' '[:lower:]') || return 1
+    [[ $declared_fs == "$fs" || ( $declared_fs == fat* && $fs == vfat ) ]] || return 1
+    case $fs in vfat|ext2|ext3|ext4|xfs) ;; *) return 1 ;; esac
+    if mountpoint -q "$root/var" 2>/dev/null; then
+        rootpxe_deployment_identity_boot_mount_device_numbers "$root/var" "$device"
+        return $?
+    fi
+    options=$(rootpxe_linux_mount_options rw "$fs") || return 1
+    mount -t "$fs" -o "$options" "$device" "$root/var" || return 1
+    rootpxe_deployment_identity_boot_mount_device_numbers "$root/var" "$device" || { umount "$root/var" >/dev/null 2>&1 || true; return 1; }
+    rootpxe_deployment_identity_var_mount="$root/var"
+}
+
+rootpxe_deployment_identity_unmount_linux_var_filesystem() {
+    local mountpoint="${rootpxe_deployment_identity_var_mount:-}"
+    rootpxe_deployment_identity_var_mount=""
+    [[ -n $mountpoint ]] || return 0
+    umount "$mountpoint" >/dev/null 2>&1
+}
+
+rootpxe_deployment_identity_prepare_linux_var_tmpdir() {
+    local root="$1" tmpdir="$1/var/tmp"
+    # dracut's default temporary workspace is /var/tmp.  A separately
+    # restored /var can legitimately be empty, so establish the standard
+    # sticky directory after /var is mounted for the repair window.
+    rootpxe_deployment_identity_safe_target_dir "$root" var/tmp || return 1
+    chmod 1777 "$tmpdir"
 }
 
 rootpxe_deployment_identity_rebuild_linux_initramfs() {
@@ -881,11 +1020,16 @@ rootpxe_deployment_identity_linux_repair_references_in_root() {
     chmod 600 "$map" || { rm -f -- "$map"; return 1; }
     rootpxe_deployment_identity_linux_reference_map "$rootpxe_deployment_identity_plan_file" >"$map" || { rm -f -- "$map"; return 1; }
     [[ -s $map ]] || { rm -f -- "$map"; return 1; }
+    # Reference repair can rebuild the target initramfs.  Keep a separately
+    # mounted /var available for this whole write window, but only unmount a
+    # filesystem this helper mounted itself.
+    rootpxe_deployment_identity_mount_linux_var_filesystem "$root" || { rm -f -- "$map"; return 1; }
+    rootpxe_deployment_identity_prepare_linux_var_tmpdir "$root" || { rootpxe_deployment_identity_unmount_linux_var_filesystem || true; rm -f -- "$map"; return 1; }
     # The physical UUIDs were already changed.  Rewrite the root fstab first,
     # then resolve /boot and /boot/efi through the planned new identifiers.
-    rootpxe_deployment_identity_rewrite_linux_references "$root" "$map" || { rm -f -- "$map"; return 1; }
-    rootpxe_deployment_identity_mount_linux_boot_filesystems "$root" || { rm -f -- "$map"; return 1; }
-    rootpxe_deployment_identity_update_machine_id_boot_paths "$root" "${rootpxe_deployment_identity_old_machine_id:-}" "${rootpxe_deployment_identity_new_machine_id:-}" || { rootpxe_deployment_identity_unmount_linux_boot_filesystems || true; rm -f -- "$map"; return 1; }
+    rootpxe_deployment_identity_rewrite_linux_references "$root" "$map" || { rootpxe_deployment_identity_unmount_linux_var_filesystem || true; rm -f -- "$map"; return 1; }
+    rootpxe_deployment_identity_mount_linux_boot_filesystems "$root" || { rootpxe_deployment_identity_unmount_linux_var_filesystem || true; rm -f -- "$map"; return 1; }
+    rootpxe_deployment_identity_update_machine_id_boot_paths "$root" "${rootpxe_deployment_identity_old_machine_id:-}" "${rootpxe_deployment_identity_new_machine_id:-}" || { rootpxe_deployment_identity_unmount_linux_boot_filesystems || true; rootpxe_deployment_identity_unmount_linux_var_filesystem || true; rm -f -- "$map"; return 1; }
     rootpxe_deployment_identity_rewrite_linux_references "$root" "$map"
     result=$?
     [[ $result -eq 0 ]] && rootpxe_deployment_identity_rewrite_linux_grubenv "$root" "$map"
@@ -901,6 +1045,7 @@ rootpxe_deployment_identity_linux_repair_references_in_root() {
         fi
     fi
     rootpxe_deployment_identity_unmount_linux_boot_filesystems || result=1
+    rootpxe_deployment_identity_unmount_linux_var_filesystem || result=1
     rm -f -- "$map"
     return $result
 }
@@ -1403,7 +1548,7 @@ rootpxe_deployment_identity_linux_login_preflight() {
     fi
 }
 
-rootpxe_deployment_identity_linux_system_preflight() {
+rootpxe_deployment_identity_linux_system_preflight_mounted() {
     local root="$1" plan="${rootpxe_deployment_identity_plan_file:-}" machine_id ssh_dir key private_selected=false
     [[ -d $root/etc && ! -L $root/etc && -r $plan ]] || return 1
     [[ -d $root/var/lib && ! -L $root/var && ! -L $root/var/lib && ( ( ! -e $root/var/lib/rootpxe && ! -L $root/var/lib/rootpxe ) || ( -d $root/var/lib/rootpxe && ! -L $root/var/lib/rootpxe ) ) ]] || return 1
@@ -1430,10 +1575,18 @@ rootpxe_deployment_identity_linux_system_preflight() {
     [[ $private_selected != true ]] || rootpxe_deployment_identity_selinux_relabel_preflight "$root"
 }
 
-rootpxe_deployment_identity_linux_system_in_root() {
+rootpxe_deployment_identity_linux_system_preflight() {
+    local root="$1" rc
+    rootpxe_deployment_identity_mount_linux_var_filesystem "$root" || return 1
+    rootpxe_deployment_identity_linux_system_preflight_mounted "$root"
+    rc=$?
+    rootpxe_deployment_identity_unmount_linux_var_filesystem || rc=1
+    return "$rc"
+}
+
+rootpxe_deployment_identity_linux_system_in_root_mounted() {
     local root="$1" plan="${rootpxe_deployment_identity_plan_file:-}" machine_id old_machine_id marker ssh_dir key stage private public machine_tmp dbus_path dbus_tmp marker_tmp
     rootpxe_deployment_identity_linux_policy_enabled || return 0
-    rootpxe_deployment_identity_linux_system_preflight "$root" || return 1
     if jq -e '.systemIdentity.machineId == true or .systemIdentity.sshHostKeys == true or .systemIdentity.sshLoginPublicKeys == true or .systemIdentity.rootPassword == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1; then
         rootpxe_deployment_identity_request_selinux_relabel "$root" || return 1
     fi
@@ -1499,6 +1652,16 @@ rootpxe_deployment_identity_linux_system_in_root() {
     marker_tmp=$(mktemp "$root/var/lib/rootpxe/.deployment-identity-v1.XXXXXX") || return 1
     jq -cn --arg planHash "$(jq -r '.planHash' "$plan")" --argjson machineId "${rootpxe_deployment_identity_machine_id_result:-false}" --argjson sshHostKeys "${rootpxe_deployment_identity_ssh_host_keys_result:-false}" '{version:1,planHash:$planHash,machineId:$machineId,sshHostKeys:$sshHostKeys}' >"$marker_tmp" || { rm -f -- "$marker_tmp"; return 1; }
     chmod 0600 "$marker_tmp" && mv -f -- "$marker_tmp" "$marker" || { rm -f -- "$marker_tmp"; return 1; }
+}
+
+rootpxe_deployment_identity_linux_system_in_root() {
+    local root="$1" rc
+    rootpxe_deployment_identity_linux_system_preflight "$root" || return 1
+    rootpxe_deployment_identity_mount_linux_var_filesystem "$root" || return 1
+    rootpxe_deployment_identity_linux_system_in_root_mounted "$root"
+    rc=$?
+    rootpxe_deployment_identity_unmount_linux_var_filesystem || rc=1
+    return "$rc"
 }
 
 # PXEOS cannot apply the target SELinux policy to a file from its own mount

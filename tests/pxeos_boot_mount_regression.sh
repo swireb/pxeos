@@ -27,6 +27,18 @@ run_case normal $'PARTUUID=efi /boot/efi vfat defaults 0 2\nUUID=boot /boot ext4
 [[ $(sed -n '1p' "$log") == "mount /dev/mock-boot $tmp/normal/boot" ]] || fail 'fstab reverse order mounted ESP first'
 [[ $(sed -n '2p' "$log") == "mount /dev/mock-efi $tmp/normal/boot/efi" ]] || fail normal-order
 rootpxe_deployment_identity_unmount_linux_boot_filesystems || fail normal-cleanup
+# After the storage-identifier phase, fstab carries the frozen *new* UUID.
+# PXEOS blkid may not resolve that UUID's presentation, so /boot must use the
+# same plan-bound fallback as any other target filesystem instead of failing
+# before initramfs repair.
+target="$tmp/post-uuid"; mkdir -p "$target/etc" "$target/boot/efi"
+printf 'UUID=NEW-BOOT /boot ext4 defaults 0 1\nPARTUUID=efi /boot/efi vfat defaults 0 2\n' >"$target/etc/fstab"
+rootpxe_deployment_identity_plan_file="$tmp/post-uuid-plan"
+printf '%s\n' '{"plan":{"topology":{"disks":[{"partitions":[{"targetDevice":"/dev/mock-boot","originalFilesystemUuid":"old-boot"}]}]},"disks":[{"partitions":[{"targetDevice":"/dev/mock-boot","filesystemUuid":"NEW-BOOT"}]}]}}' >"$rootpxe_deployment_identity_plan_file"
+mounted=(); : >"$log"
+rootpxe_deployment_identity_mount_linux_boot_filesystems "$target" || fail 'post-change boot UUID was rejected'
+[[ $(sed -n '1p' "$log") == "mount /dev/mock-boot $target/boot" ]] || fail 'post-change boot UUID did not use planned device'
+rootpxe_deployment_identity_unmount_linux_boot_filesystems || fail post-change-cleanup
 # A borrowed wrong mount must fail but never be unmounted.
 target="$tmp/borrow"; mkdir -p "$target/etc" "$target/boot/efi"; printf 'UUID=boot /boot ext4 defaults 0 1\n' >"$target/etc/fstab"; mounted=(["$target/boot"]=/dev/mock-other); : >"$log"
 if rootpxe_deployment_identity_mount_linux_boot_filesystems "$target"; then fail borrowed-accepted; fi

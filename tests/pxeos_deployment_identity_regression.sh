@@ -162,6 +162,10 @@ if [[ ${ROOTPXE_EFI_UNAVAILABLE:-0} == 1 ]]; then
   printf '{"version":1,"efi":{"available":false,"matched":0,"updated":0,"verified":false}}\n' >"$result"
   exit 0
 fi
+if [[ ${ROOTPXE_EFI_UNAVAILABLE_BAD_RESULT:-0} == 1 ]]; then
+  printf '{"version":1,"efi":{"available":false,"matched":1,"updated":0,"verified":false}}\n' >"$result"
+  exit 0
+fi
 if [[ ${ROOTPXE_EFI_BAD_UPDATED:-0} == 1 ]]; then updated='"invalid"'; else updated=2; fi
 if [[ ${ROOTPXE_EFI_READBACK_FAIL:-0} == 1 ]]; then verified=false; else verified=true; fi
 printf '{"version":1,"efi":{"available":true,"matched":%s,"updated":%s,"verified":%s}}\n' "${ROOTPXE_EFI_MATCHED:-1}" "$updated" "$verified" >"$result"
@@ -573,15 +577,31 @@ if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" preflight; the
 printf 'fallback\n' >"$linux_efi_state/boot/efi/EFI/BOOT/BOOTX64.EFI"; export ROOTPXE_EFI_MATCHED=1
 export ROOTPXE_EFI_UNAVAILABLE=1
 rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" preflight || fail 'available-false EFI result did not accept a real fallback'
+# In a UEFI PXEOS environment the NVRAM identity match can legitimately be
+# unavailable while the frozen ESP still contains the removable-media loader.
+# Apply and verify must preserve that bootable fallback rather than turning the
+# otherwise successful storage-reference repair into a false failure.
+rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" apply || fail 'available-false EFI apply did not accept a real fallback'
+rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" verify || fail 'available-false EFI verify did not accept a real fallback'
 rm -f "$linux_efi_state/boot/efi/EFI/BOOT/BOOTX64.EFI"
 if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" preflight; then fail 'available-false EFI result accepted a missing fallback'; fi
+if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" apply; then fail 'available-false EFI apply accepted a missing fallback'; fi
+if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" verify; then fail 'available-false EFI verify accepted a missing fallback'; fi
 printf 'fallback\n' >"$linux_efi_state/boot/efi/EFI/BOOT/BOOTX64.EFI"
 unset ROOTPXE_EFI_UNAVAILABLE
+export ROOTPXE_EFI_UNAVAILABLE_BAD_RESULT=1
+if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" apply; then fail 'nonzero unavailable EFI match was accepted during apply'; fi
+if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" verify; then fail 'nonzero unavailable EFI match was accepted during verify'; fi
+unset ROOTPXE_EFI_UNAVAILABLE_BAD_RESULT
 export ROOTPXE_EFI_MALFORMED=1
 if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" preflight; then fail 'malformed unavailable EFI result was accepted'; fi
+if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" apply; then fail 'malformed unavailable EFI result was accepted during apply'; fi
+if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" verify; then fail 'malformed unavailable EFI result was accepted during verify'; fi
 unset ROOTPXE_EFI_MALFORMED
 export ROOTPXE_EFI_TOOL_FAIL=1
 if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" preflight; then fail 'failed EFI tool was accepted'; fi
+if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" apply; then fail 'failed EFI tool was accepted during apply'; fi
+if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" verify; then fail 'failed EFI tool was accepted during verify'; fi
 unset ROOTPXE_EFI_TOOL_FAIL
 export ROOTPXE_EFI_BAD_UPDATED=1
 if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" apply; then fail 'non-numeric EFI updated count was accepted'; fi
