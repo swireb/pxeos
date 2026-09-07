@@ -43,7 +43,19 @@ if [[ $endpoint == *deployment-initialization ]]; then
   printf '\n200'
   exit 0
 fi
-topology=$(jq -c '.topology' "$ROOTPXE_CURL_BODY")
+# The API decodes the submitted topology into its typed model before returning
+# it in a plan.  Consequently empty optional arrays and strings are omitted
+# from the response even when an older PXEOS request explicitly included them.
+topology=$(jq -c '
+  .topology | walk(
+    if type == "object" then
+      with_entries(select(
+        (.key != "logicalVolumes" or (.value | length) > 0) and
+        (.key != "originalFilesystemUuid" or .value != "")
+      ))
+    else . end
+  )
+' "$ROOTPXE_CURL_BODY")
 jq -cn --argjson topology "$topology" '{plan:{version:1,planId:"plan-1",topology:$topology,disks:[{targetDevice:"/dev/mock0",partitionTable:"gpt",diskGuid:"cccccccc-cccc-cccc-cccc-cccccccccccc",partitions:[{targetDevice:"/dev/mock0p1",filesystem:"ext4",partitionGuid:"dddddddd-dddd-dddd-dddd-dddddddddddd",filesystemUuid:"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"}]}]},planHash:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",attempt:3}'
 printf '\n200'
 EOF
@@ -144,6 +156,12 @@ if [[ $mode == windows-repair ]]; then
   exit 0
 fi
 printf 'efi %s\n' "$phase" >>"$ROOTPXE_TEST_LOG"
+if [[ ${ROOTPXE_EFI_TOOL_FAIL:-0} == 1 ]]; then exit 17; fi
+if [[ ${ROOTPXE_EFI_MALFORMED:-0} == 1 ]]; then printf '{"version":1,"efi":{"available":false}}\n' >"$result"; exit 0; fi
+if [[ ${ROOTPXE_EFI_UNAVAILABLE:-0} == 1 ]]; then
+  printf '{"version":1,"efi":{"available":false,"matched":0,"updated":0,"verified":false}}\n' >"$result"
+  exit 0
+fi
 if [[ ${ROOTPXE_EFI_BAD_UPDATED:-0} == 1 ]]; then updated='"invalid"'; else updated=2; fi
 if [[ ${ROOTPXE_EFI_READBACK_FAIL:-0} == 1 ]]; then verified=false; else verified=true; fi
 printf '{"version":1,"efi":{"available":true,"matched":%s,"updated":%s,"verified":%s}}\n' "${ROOTPXE_EFI_MATCHED:-1}" "$updated" "$verified" >"$result"
@@ -159,6 +177,11 @@ deploymentIdentityPolicyFile="$tmp/policy"; printf '%s\n' '{"version":1,"randomi
 rootpxe_disk_permit_granted=yes; rootpxe_disk_permit_target_id=wwn:stable-target
 
 . "$lib"
+# This legacy broad regression records mount commands but does not create real
+# mountpoints.  Its identity check is mocked here; the dedicated boot-mount
+# regression exercises mount order, cleanup, and mocked identity outcomes.
+rootpxe_deployment_identity_boot_mount_device_numbers() { return 0; }
+rootpxe_deployment_identity_boot_device_is_block() { [[ $1 == /dev/sda1 || $1 == /dev/sda2 ]]; }
 printf '%s\n' '{"version":1,"randomizeStorageIdentifiers":false,"systemIdentity":{"sshLoginPublicKeys":true}}' >"$deploymentIdentityPolicyFile"
 rootpxe_deployment_identity_request_private || fail 'private initialization request did not use task token and attempt'
 jq -e '.taskId == 17 and .token == "token" and .attempt == 3' "$ROOTPXE_CURL_BODY" >/dev/null || fail 'private initialization request used stale context fields'
@@ -406,7 +429,7 @@ fi
 empty_include_root="$tmp/empty-include-root"; mkdir -p "$empty_include_root/etc/ssh/sshd_config.d"
 printf 'Include /etc/ssh/sshd_config.d/*.conf\n' >"$empty_include_root/etc/ssh/sshd_config"
 rootpxe_deployment_identity_collect_ssh_host_keys "$empty_include_root" || fail 'empty ssh Include glob was rejected'
-[[ ${rootpxe_deployment_identity_ssh_keys[*]} == 'ecdsa ed25519 rsa' ]] || fail 'empty ssh Include did not retain default keys'
+[[ ${rootpxe_deployment_identity_ssh_keys[*]} == 'rsa ecdsa ed25519' ]] || fail "empty ssh Include did not retain default keys: ${rootpxe_deployment_identity_ssh_keys[*]}"
 rootpxe_deployment_identity_machine_id_dbus_link_target_safe ../../../etc/machine-id || fail 'relative in-root dbus machine-id symlink was rejected'
 rootpxe_deployment_identity_machine_id_dbus_link_target_safe /etc/machine-id || fail 'absolute in-root dbus machine-id symlink was rejected'
 if rootpxe_deployment_identity_machine_id_dbus_link_target_safe ../../../../etc/machine-id; then fail 'escaping dbus machine-id symlink was accepted'; fi
@@ -548,6 +571,18 @@ rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" preflight || fail
 rm -f "$linux_efi_state/boot/efi/EFI/BOOT/BOOTX64.EFI"
 if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" preflight; then fail 'matched-zero EFI result accepted a missing fallback'; fi
 printf 'fallback\n' >"$linux_efi_state/boot/efi/EFI/BOOT/BOOTX64.EFI"; export ROOTPXE_EFI_MATCHED=1
+export ROOTPXE_EFI_UNAVAILABLE=1
+rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" preflight || fail 'available-false EFI result did not accept a real fallback'
+rm -f "$linux_efi_state/boot/efi/EFI/BOOT/BOOTX64.EFI"
+if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" preflight; then fail 'available-false EFI result accepted a missing fallback'; fi
+printf 'fallback\n' >"$linux_efi_state/boot/efi/EFI/BOOT/BOOTX64.EFI"
+unset ROOTPXE_EFI_UNAVAILABLE
+export ROOTPXE_EFI_MALFORMED=1
+if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" preflight; then fail 'malformed unavailable EFI result was accepted'; fi
+unset ROOTPXE_EFI_MALFORMED
+export ROOTPXE_EFI_TOOL_FAIL=1
+if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" preflight; then fail 'failed EFI tool was accepted'; fi
+unset ROOTPXE_EFI_TOOL_FAIL
 export ROOTPXE_EFI_BAD_UPDATED=1
 if rootpxe_deployment_identity_linux_efi_phase "$linux_efi_state" apply; then fail 'non-numeric EFI updated count was accepted'; fi
 unset ROOTPXE_EFI_BAD_UPDATED

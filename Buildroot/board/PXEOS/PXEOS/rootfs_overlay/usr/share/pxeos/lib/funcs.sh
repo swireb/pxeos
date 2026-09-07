@@ -4126,6 +4126,9 @@ rootpxe_apply_linux_hostname_for_disk() {
     options=$(rootpxe_linux_mount_options rw "$root_fs" "$root_subvolid") || handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"
     mount -t "$root_fs" -o "$options" "$root_device" "$mountpoint" >/tmp/rootpxe-linux-mount-output 2>&1 || { rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_MOUNT_FAILED"; }
     rootpxe_linux_paths_safe_for_write "$mountpoint" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_PATH_UNSAFE"; }
+    if rootpxe_deployment_identity_linux_policy_enabled; then
+        rootpxe_deployment_identity_linux_system_preflight "$mountpoint" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_SYSTEM_IDENTITY_PRECHECK_FAILED"; }
+    fi
     if [[ ${changeHostname:-false} == true ]]; then
         hostname_path="$mountpoint/etc/hostname"
         hosts_path="$mountpoint/etc/hosts"
@@ -4859,6 +4862,9 @@ completeTasking() {
             if rootpxe_deployment_identity_policy_enabled; then
                 rootpxe_deployment_identity_request_plan "$hd" || handleError "PXEOS_STAGE=deployment_identity_plan CODE=IDENTITY_PLAN_REJECTED"
             fi
+            if rootpxe_deployment_identity_private_enabled; then
+                rootpxe_deployment_identity_request_private || handleError "PXEOS_STAGE=system_initialization CODE=INITIALIZATION_PRIVATE_CONFIG_UNAVAILABLE"
+            fi
             if rootpxe_deployment_identity_storage_enabled && [[ ${osid:-} == 50 ]]; then
                 rootpxe_deployment_identity_linux_storage_preflight "$hd" || handleError "PXEOS_STAGE=deployment_identity_preflight CODE=LINUX_STORAGE_REFERENCE_PRECHECK_FAILED"
                 if [[ ${imgType:-} == mpa ]]; then
@@ -4876,9 +4882,6 @@ completeTasking() {
                 fi
                 rootpxe_deployment_identity_windows_apply_repair || handleError "PXEOS_STAGE=deployment_identity_apply CODE=WINDOWS_STORAGE_REFERENCE_REPAIR_FAILED"
                 rootpxe_deployment_identity_storage_result=true
-            fi
-            if rootpxe_deployment_identity_private_enabled; then
-                rootpxe_deployment_identity_request_private || handleError "PXEOS_STAGE=system_initialization CODE=INITIALIZATION_PRIVATE_CONFIG_UNAVAILABLE"
             fi
             if [[ ${changeHostname:-false} == true ]] || rootpxe_deployment_identity_linux_policy_enabled || ( rootpxe_deployment_identity_windows_policy_enabled && jq -e '.systemIdentity.sysprep == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1 ); then
                 rootpxe_apply_hostname_for_disk "$hd" || handleError "PXEOS_STAGE=system_initialization CODE=SYSTEM_INITIALIZATION_FAILED"
