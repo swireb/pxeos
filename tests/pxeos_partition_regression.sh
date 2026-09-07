@@ -249,6 +249,7 @@ chmod +x "$tmp/mock"/*
 sed -e "s|^\. /usr/share/pxeos/lib/partition-funcs.sh|. \"$partition_funcs\"|" \
     -e "s|^\. /usr/share/pxeos/lib/restore-preflight.sh|. \"$overlay/usr/share/pxeos/lib/restore-preflight.sh\"|" \
     -e "s|^\. /usr/share/pxeos/lib/capture-recovery.sh|. \"$overlay/usr/share/pxeos/lib/capture-recovery.sh\"|" \
+	-e "s|^\. /usr/share/pxeos/lib/deployment-identity.sh|. \"$overlay/usr/share/pxeos/lib/deployment-identity.sh\"|" \
     -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" "$funcs" >"$tmp/funcs.sh"
 cp "$progress_lib" "$tmp/partclone-progress.sh"
 export PATH="$tmp/mock:$PATH"
@@ -1358,6 +1359,9 @@ capture_child_done=$(grep -n -E 'd1:p1:lv:.*\|(completed)\|' "$progress_trace" |
 [[ $capture_parent_done =~ ^[0-9]+$ && $capture_child_done =~ ^[0-9]+$ && $capture_parent_done -gt $capture_child_done ]] || fail lvm-capture-parent-must-finish-after-children
 [[ -s "$tmp/image/d1.lvm.schema.json" && -f "$tmp/image/d1p1.lvm.pv.meta" && -f "$tmp/image/d1p1.lvm.vg.cfg" && -f "$tmp/image/d1p1.lvm.lv.root.img" && ! -e "$tmp/image/d1p1.lvm.lv.swap.img" && ! -e "$tmp/image/d1.lv.lv-root.img" ]] || fail readable-lvm-artifacts
 jq -e '.version == 1 and .captureMode == "per_lv" and .resizePolicy == "grow_only" and ([.vgs[].lvs[] | select(.fs == "swap" and .artifact != "")] | length) == 0' "$tmp/image/d1.lvm.schema.json" >/dev/null || fail lvm-v1-schema
+jq -e '[.vgs[].lvs[] | select(.fs != "swap") | has("filesystemUuid") | not] | all' "$tmp/image/d1.lvm.schema.json" >/dev/null || fail lvm-data-schema-must-not-store-filesystem-uuid
+! grep -Fq 'blkid:-s UUID -o value /dev/vg0/root' "$LVM_TRACE" || fail lvm-data-capture-must-not-read-filesystem-uuid
+grep -Fq 'blkid:-s UUID -o value /dev/vg0/swap' "$LVM_TRACE" || fail lvm-swap-capture-must-retain-swap-uuid
 ! grep -Fq -- '--nosuffix' "$LVM_TRACE" || fail capture-must-not-use-unsupported-pvdisplay-option
 grep -Fq 'partclone.extfs:' "$LVM_TRACE" || fail writer-not-run
 grep -Fq 'vgchange:-ay --select vg_uuid=vg-1 vg0' "$LVM_TRACE" || fail capture-vg-not-activated

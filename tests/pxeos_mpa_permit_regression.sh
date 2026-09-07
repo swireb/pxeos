@@ -54,6 +54,8 @@ entry="$tmp/pxeos.download"
 entry_stubs="$tmp/entry-stubs.sh"
 cat >"$entry_stubs" <<'EOF'
 rootpxe_storage_path(){ printf '%s\n' "$tmp/image"; }
+rootpxe_deployment_identity_policy_enabled(){ return 1; }
+rootpxe_deployment_identity_cleanup_private(){ :; }
 rootpxe_validate_fixed_image_lvm_inventory(){ :; }
 rootpxe_validate_restore_artifacts(){ printf 'preflight\n' >>"$events"; }
 getMACAddresses(){ printf x; }

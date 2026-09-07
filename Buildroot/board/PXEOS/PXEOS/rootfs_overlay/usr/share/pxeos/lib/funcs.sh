@@ -254,7 +254,6 @@ rootpxe_partition_progress_flush() {
     return 0
 }
 REG_LOCAL_MACHINE_XP="/ntfs/WINDOWS/system32/config/system"
-REG_LOCAL_MACHINE_7="/ntfs/Windows/System32/config/SYSTEM"
 # 1 to turn on massive debugging of partition table restoration
 [[ -z $ismajordebug ]] && ismajordebug=0
 rootpxe_kernel_key_allowed() {
@@ -798,12 +797,13 @@ rootpxe_capture_lvm_volumes() {
     vgcfgbackup -f "$stage/$vg_artifact" "$rootpxe_lvm_vg_name" >/dev/null 2>&1 || return 1
     : >"$stage/d1.lvm.capture.tsv" || return 1
     while IFS='|' read -r lv_name lv_uuid lv_path lv_size fs extra; do
-        artifact=""; swap_uuid=""; filesystem_uuid=""
+        artifact=""; swap_uuid=""
         [[ -n $lv_name && -n $lv_uuid && $lv_path == /dev/* && $lv_size =~ ^[1-9][0-9]*$ && -z $extra ]] || return 1
         case $fs in ext2|ext3|ext4|xfs|swap) ;; *) return 1;; esac
-        filesystem_uuid=$(blkid -s UUID -o value "$lv_path" 2>/dev/null | tr -d '\r\n')
-        [[ -n $filesystem_uuid ]] || return 1
-        [[ $fs == swap ]] && swap_uuid="$filesystem_uuid"
+        if [[ $fs == swap ]]; then
+            swap_uuid=$(blkid -s UUID -o value "$lv_path" 2>/dev/null | tr -d '\r\n')
+            [[ -n $swap_uuid ]] || return 1
+        fi
         # n images preserve the source layout while capturing.  The original
         # logical-volume size is therefore also its minimum deployment size.
         min_bytes="$lv_size"; producer=0; writer=0
@@ -837,11 +837,11 @@ rootpxe_capture_lvm_volumes() {
         elif [[ $fs == swap ]]; then
             rootpxe_partition_progress_item "d1:p${rootpxe_lvm_pv_number}:lv:${lv_uuid}" completed - "交换逻辑卷元数据已保存"
         fi
-        printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$lv_name" "$lv_uuid" "$lv_size" "$min_bytes" "$fs" "$artifact" "$swap_uuid" "$filesystem_uuid" >>"$stage/d1.lvm.capture.tsv" || return 1
+        printf '%s|%s|%s|%s|%s|%s|%s\n' "$lv_name" "$lv_uuid" "$lv_size" "$min_bytes" "$fs" "$artifact" "$swap_uuid" >>"$stage/d1.lvm.capture.tsv" || return 1
     done <"$rootpxe_lvm_lv_facts_file"
     pv_min_bytes="$rootpxe_lvm_pv_bytes"
     jq -n --arg pv_uuid "$rootpxe_lvm_pv_uuid" --arg vg_uuid "$rootpxe_lvm_vg_uuid" --arg vg_name "$rootpxe_lvm_vg_name" --arg pv_artifact "$pv_artifact" --arg vg_artifact "$vg_artifact" --argjson part "$rootpxe_lvm_pv_number" --argjson pv_bytes "$rootpxe_lvm_pv_bytes" --argjson pv_min "$pv_min_bytes" --argjson pe_start "$rootpxe_lvm_pe_start_bytes" --argjson extent "$rootpxe_lvm_vg_extent_bytes" --argjson free "$rootpxe_lvm_vg_free_bytes" --rawfile lvs "$stage/d1.lvm.capture.tsv" '
-      {version:1,captureMode:"per_lv",resizePolicy:"grow_only",pvs:[{partitionNumber:$part,uuid:$pv_uuid,vgUuid:$vg_uuid,originalBytes:$pv_bytes,minBytes:$pv_min,peStartBytes:$pe_start,artifact:$pv_artifact,vgConfigArtifact:$vg_artifact}],vgs:[{name:$vg_name,uuid:$vg_uuid,extentBytes:$extent,pvPartitionNumbers:[$part],originalFreeBytes:$free,lvs:($lvs|split("\n")|map(select(length>0)|split("|")|{name:.[0],uuid:.[1],layout:"linear",originalBytes:(.[2]|tonumber),minBytes:(.[3]|tonumber),fs:.[4],role:(if .[4]=="swap" then "swap" else "data" end),resizable:(.[4] != "swap"),artifact:.[5],swapUuid:(if .[4]=="swap" then .[6] else "" end)} + (if .[7] == "" then {} else {filesystemUuid:.[7]} end))}]} ' >"$stage/d1.lvm.schema.json" || return 1
+      {version:1,captureMode:"per_lv",resizePolicy:"grow_only",pvs:[{partitionNumber:$part,uuid:$pv_uuid,vgUuid:$vg_uuid,originalBytes:$pv_bytes,minBytes:$pv_min,peStartBytes:$pe_start,artifact:$pv_artifact,vgConfigArtifact:$vg_artifact}],vgs:[{name:$vg_name,uuid:$vg_uuid,extentBytes:$extent,pvPartitionNumbers:[$part],originalFreeBytes:$free,lvs:($lvs|split("\n")|map(select(length>0)|split("|")|{name:.[0],uuid:.[1],layout:"linear",originalBytes:(.[2]|tonumber),minBytes:(.[3]|tonumber),fs:.[4],role:(if .[4]=="swap" then "swap" else "data" end),resizable:(.[4] != "swap"),artifact:.[5],swapUuid:(if .[4]=="swap" then .[6] else "" end)})}]} ' >"$stage/d1.lvm.schema.json" || return 1
     jq -e '.version == 1 and .captureMode == "per_lv" and .resizePolicy == "grow_only" and (.pvs|length) == 1 and (.vgs|length) == 1' "$stage/d1.lvm.schema.json" >/dev/null || return 1
     rm -f -- "$stage/d1.lvm.capture.tsv" || return 1
     [[ ! -e "$image_path/d1.lvm.schema.json" && ! -e "$image_path/$pv_artifact" && ! -e "$image_path/$vg_artifact" && ! -e "$image_path/d1p${rootpxe_lvm_pv_number}.img" && ! -e "$image_path/d1p${rootpxe_lvm_pv_number}.img.000" ]] || return 1
@@ -4176,7 +4176,6 @@ rootpxe_apply_linux_hostname_for_disk() {
     fi
     if rootpxe_deployment_identity_linux_policy_enabled; then
         rootpxe_deployment_identity_linux_system_in_root "$mountpoint" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_SYSTEM_IDENTITY_FAILED"; }
-        rootpxe_deployment_identity_linux_repair_references_in_root "$mountpoint" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_STORAGE_REFERENCE_REPAIR_FAILED"; }
     fi
     if mountpoint -q "$mountpoint" 2>/dev/null; then
         umount "$mountpoint" >/dev/null 2>&1 || { rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"; }
@@ -4241,14 +4240,11 @@ rootpxe_validate_windows_hostname() {
 }
 
 rootpxe_apply_windows_hostname() {
-    local part="$1" sysprep=0 mode='' xml_path source_xml xml_tmp rows architecture count expected_hash actual_hash
+    local part="$1" sysprep=0 xml_path source_xml xml_tmp rows architecture count expected_hash actual_hash
     [[ ${changeHostname:-false} == true ]] && rootpxe_validate_windows_hostname "${hostName:-}" || [[ ${changeHostname:-false} != true ]] || return 1
     [[ -r ${deploymentIdentityPolicyFile:-} ]] && jq -e '.systemIdentity.sysprep == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1 && sysprep=1
     [[ ${changeHostname:-false} == true || $sysprep -eq 1 ]] || return 0
     if [[ $sysprep -eq 1 ]]; then
-        mode=$(jq -r '.systemIdentity.sysprepComputerNameMode // "xml"' "$deploymentIdentityPolicyFile") || return 1
-        [[ $mode == xml || $mode == platform ]] || return 1
-        [[ $mode != platform ]] || rootpxe_validate_windows_hostname "${hostName:-}" || return 1
         source_xml="${rootpxe_deployment_initialization_private_file:-}"
         [[ -r $source_xml && ! -L $source_xml ]] || return 1
     fi
@@ -4256,7 +4252,7 @@ rootpxe_apply_windows_hostname() {
     mkdir -p /ntfs || return 1
     umount /ntfs >/dev/null 2>&1 || true
     ntfs-3g -o remove_hiberfile,rw "$part" /ntfs >/tmp/ntfs-mount-output 2>&1 || return 1
-    if [[ ${changeHostname:-false} == true ]]; then
+    if [[ ${changeHostname:-false} == true && $sysprep -eq 0 ]]; then
         rootpxe_change_hostname_registry "$part" || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
         rootpxe_deployment_identity_hostname_result=true
     fi
@@ -4266,7 +4262,7 @@ rootpxe_apply_windows_hostname() {
         xml_tmp=$(mktemp "${xml_path%/*}/.unattend.rootpxe.XXXXXX") || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
         chmod 0600 "$xml_tmp" && jq -j '.unattendXml' "$source_xml" >"$xml_tmp" || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
         command -v xmlstarlet >/dev/null 2>&1 && xmlstarlet val -w "$xml_tmp" >/dev/null 2>&1 || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
-        if [[ $mode == platform ]]; then
+        if [[ ${changeHostname:-false} == true ]]; then
             rows=$(xmlstarlet sel -t -m "/*[local-name()='unattend' and namespace-uri()='urn:schemas-microsoft-com:unattend']/*[local-name()='settings' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@pass='specialize']/*[local-name()='component' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@name='Microsoft-Windows-Shell-Setup']" -v "concat(@processorArchitecture,'|',count(*[local-name()='ComputerName' and namespace-uri()='urn:schemas-microsoft-com:unattend']))" -n "$xml_tmp" 2>/dev/null) || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
             [[ -n $rows ]] && awk -F'|' 'NF==2 && $1!="" && ($2==0 || $2==1) && !seen[$1]++ {next} {exit 1}' <<<"$rows" || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
             while IFS='|' read -r architecture count; do
@@ -4277,6 +4273,10 @@ rootpxe_apply_windows_hostname() {
                 fi
             done <<<"$rows"
             [[ $(xmlstarlet sel -t -m "/*[local-name()='unattend' and namespace-uri()='urn:schemas-microsoft-com:unattend']/*[local-name()='settings' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@pass='specialize']/*[local-name()='component' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@name='Microsoft-Windows-Shell-Setup']/*[local-name()='ComputerName' and namespace-uri()='urn:schemas-microsoft-com:unattend']" -v . -n "$xml_tmp" 2>/dev/null | sort -u) == "$hostName" ]] || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
+			# With Sysprep enabled, the specialize Shell-Setup entry is the
+			# authoritative computer-name action.  Its verified readback fulfils
+			# the task-level change_hostname result without a second registry edit.
+			rootpxe_deployment_identity_hostname_result=true
         fi
         expected_hash=$(sha256sum "$xml_tmp" 2>/dev/null | awk '{print $1}') || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
         [[ $expected_hash =~ ^[0-9a-fA-F]{64}$ ]] || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
@@ -4353,75 +4353,6 @@ fixWin7boot() {
     echo "Done"
     debugPause
     umount /bcdstore >/dev/null 2>&1
-}
-# Clears out windows hiber and page files
-#
-# $1 is the partition
-clearMountedDevices() {
-    local part="$1"
-    [[ -z $part ]] && handleError "No partition passed (${FUNCNAME[0]})\n   Args Passed: $*"
-    if [[ ! -d /ntfs ]]; then
-        mkdir -p /ntfs >/dev/null 2>&1
-        case $? in
-            0)
-                umount /ntfs >/dev/null 2>&1
-                ;;
-            *)
-                handleError "Could not create mount point /ntfs (${FUNCNAME[0]})\n   Args Passed: $*"
-                ;;
-        esac
-    fi
-    case $osid in
-        4|[5-7]|9|10|11)
-            local fstype=""
-            fsTypeSetting "$part"
-            REG_HOSTNAME_MOUNTED_DEVICES_7="\MountedDevices"
-            if [[ ! -f /usr/share/pxeos/lib/EOFMOUNT ]]; then
-                echo "cd $REG_HOSTNAME_MOUNTED_DEVICES_7" >/usr/share/pxeos/lib/EOFMOUNT
-                echo "dellallv" >>/usr/share/pxeos/lib/EOFMOUNT
-                echo "q" >>/usr/share/pxeos/lib/EOFMOUNT
-                echo "y" >>/usr/share/pxeos/lib/EOFMOUNT
-                echo >> /usr/share/pxeos/lib/EOFMOUNT
-            fi
-            case $fstype in
-                ntfs)
-                    dots "Clearing part ($part)"
-                    ntfs-3g -o remove_hiberfile,rw $part /ntfs >/tmp/ntfs-mount-output 2>&1
-                    case $? in
-                        0)
-                            ;;
-                        *)
-                            echo "Failed"
-                            debugPause
-                            handleError "Could not mount $part (${FUNCNAME[0]})\n    Args Passed: $*\n    Reason: $(cat /tmp/ntfs-mount-output | tr -d \\0)"
-                            ;;
-                    esac
-                    if [[ ! -f $REG_LOCAL_MACHINE_7 ]]; then
-                        echo "Skipped"
-                        rootpxe_console_message WARN 'Registry file was not found.'
-                        debugPause
-                        umount /ntfs >/dev/null 2>&1
-                        return
-                    fi
-                    reged -e $REG_LOCAL_MACHINE_7 </usr/share/pxeos/lib/EOFMOUNT >/dev/null 2>&1
-                    case $? in
-                        [0-2])
-                            echo "Done"
-                            debugPause
-                            umount /ntfs >/dev/null 2>&1
-                            ;;
-                        *)
-                            echo "Failed"
-                            debugPause
-                            /umount /ntfs >/dev/null 2>&1
-                            rootpxe_console_message WARN "Could not clear partition $part."
-                            return
-                            ;;
-                    esac
-                    ;;
-            esac
-            ;;
-    esac
 }
 # Only removes the page file
 #
@@ -4865,30 +4796,12 @@ completeTasking() {
             if rootpxe_deployment_identity_private_enabled; then
                 rootpxe_deployment_identity_request_private || handleError "PXEOS_STAGE=system_initialization CODE=INITIALIZATION_PRIVATE_CONFIG_UNAVAILABLE"
             fi
-            if rootpxe_deployment_identity_storage_enabled && [[ ${osid:-} == 50 ]]; then
-                rootpxe_deployment_identity_linux_storage_preflight "$hd" || handleError "PXEOS_STAGE=deployment_identity_preflight CODE=LINUX_STORAGE_REFERENCE_PRECHECK_FAILED"
-                if [[ ${imgType:-} == mpa ]]; then
-                    rootpxe_deployment_identity_apply_linux_storage_targets $disks || handleError "PXEOS_STAGE=deployment_identity_apply CODE=LINUX_STORAGE_IDENTIFIERS_FAILED"
-                else
-                    rootpxe_deployment_identity_apply_linux_storage_targets "$hd" || handleError "PXEOS_STAGE=deployment_identity_apply CODE=LINUX_STORAGE_IDENTIFIERS_FAILED"
-                fi
-            fi
-            if rootpxe_deployment_identity_storage_enabled && rootpxe_deployment_identity_windows_policy_enabled; then
-                rootpxe_deployment_identity_windows_preflight || handleError "PXEOS_STAGE=deployment_identity_preflight CODE=WINDOWS_STORAGE_REFERENCE_PRECHECK_FAILED"
-                if [[ ${imgType:-} == mpa ]]; then
-                    rootpxe_deployment_identity_apply_windows_storage_targets $disks || handleError "PXEOS_STAGE=deployment_identity_apply CODE=WINDOWS_STORAGE_IDENTIFIERS_FAILED"
-                else
-                    rootpxe_deployment_identity_apply_windows_storage_targets "$hd" || handleError "PXEOS_STAGE=deployment_identity_apply CODE=WINDOWS_STORAGE_IDENTIFIERS_FAILED"
-                fi
-                rootpxe_deployment_identity_windows_apply_repair || handleError "PXEOS_STAGE=deployment_identity_apply CODE=WINDOWS_STORAGE_REFERENCE_REPAIR_FAILED"
-                rootpxe_deployment_identity_storage_result=true
-            fi
             if [[ ${changeHostname:-false} == true ]] || rootpxe_deployment_identity_linux_policy_enabled || ( rootpxe_deployment_identity_windows_policy_enabled && jq -e '.systemIdentity.sysprep == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1 ); then
                 rootpxe_apply_hostname_for_disk "$hd" || handleError "PXEOS_STAGE=system_initialization CODE=SYSTEM_INITIALIZATION_FAILED"
             fi
             rootpxe_run_post_deploy_script || handleError "PXEOS_STAGE=post_deploy_script CODE=POST_DEPLOY_SCRIPT_FAILED REASON=${rootpxe_deploy_script_error:-unknown}"
             if rootpxe_deployment_identity_policy_enabled; then
-                rootpxe_deployment_identity_report_result "${rootpxe_deployment_identity_storage_result:-false}" "${rootpxe_deployment_identity_hostname_result:-false}" "${rootpxe_deployment_identity_machine_id_result:-false}" "${rootpxe_deployment_identity_ssh_host_keys_result:-false}" "${rootpxe_deployment_identity_ssh_login_public_keys_result:-false}" "${rootpxe_deployment_identity_root_password_result:-false}" "${rootpxe_deployment_identity_sysprep_result:-false}" || handleError "PXEOS_STAGE=deployment_identity_result CODE=IDENTITY_RESULT_REJECTED"
+				rootpxe_deployment_identity_report_result "${rootpxe_deployment_identity_hostname_result:-false}" "${rootpxe_deployment_identity_machine_id_result:-false}" "${rootpxe_deployment_identity_ssh_host_keys_result:-false}" "${rootpxe_deployment_identity_ssh_login_public_keys_result:-false}" "${rootpxe_deployment_identity_root_password_result:-false}" "${rootpxe_deployment_identity_sysprep_result:-false}" || handleError "PXEOS_STAGE=deployment_identity_result CODE=IDENTITY_RESULT_REJECTED"
             fi
             rootpxe_deployment_identity_cleanup_private
             . /bin/pxeos.imgcomplete

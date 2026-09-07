@@ -12,7 +12,7 @@ trap 'rm -rf -- "$tmp"; [[ -n ${rootpxe_last_diagnostic_file:-} ]] && rm -f -- "
 test_funcs="$tmp/funcs.sh"
 # The production library imports an absolute Buildroot companion.  These
 # ordinary-file tests do not call that companion, so remove only this import.
-sed -e '/partition-funcs\.sh/d' -e '/restore-preflight\.sh/d' -e '/capture-recovery\.sh/d' "$funcs" >"$test_funcs"
+sed -e '/partition-funcs\.sh/d' -e '/restore-preflight\.sh/d' -e '/capture-recovery\.sh/d' -e '/deployment-identity\.sh/d' "$funcs" >"$test_funcs"
 cp "$progress_lib" "$tmp/partclone-progress.sh"
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 must_have(){ grep -Fq -- "$2" "$1" || fail "missing $2 in $1"; }

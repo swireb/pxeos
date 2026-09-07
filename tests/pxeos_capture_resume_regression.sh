@@ -48,6 +48,7 @@ resume_events="$tmp/resume-events.log"
     type=up imgType=n imagePath="$rootpxe_final_capture_path" taskid="$taskid" task_token=masked mac=mock web=http://mock/ pxeapi=http://mock/ capture_size_bytes=9
     rootpxe_stage() { echo "stage:$*"; }
     rootpxe_require_task_context() { return 0; }
+	rootpxe_deployment_identity_policy_enabled() { return 1; }
     rootpxe_build_partition_inventory() { echo 'FAIL: resumed imgcomplete rebuilt inventory'; return 91; }
     rootpxe_build_original_schema() { echo 'FAIL: resumed imgcomplete rebuilt schema'; return 92; }
     rootpxe_capture_publish_metadata() { echo 'FAIL: resumed imgcomplete republished metadata'; return 93; }
@@ -175,6 +176,7 @@ mpa_events="$tmp/mpa-events.log"
     runPartprobe() { :; }
     isBitlockedPartition() { :; }
     rootpxe_console_message() { :; }
+	rootpxe_partition_progress_plan_disks() { :; }
     debugPause() { :; }
     { printf 'case "$imgType" in\n'; cat "$mpa_case"; printf 'esac\n'; } >"$tmp/mpa-wrapper.sh"
     . "$tmp/mpa-wrapper.sh"

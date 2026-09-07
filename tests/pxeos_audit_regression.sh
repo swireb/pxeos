@@ -25,7 +25,7 @@ grep -Fq 'file -b --mime-type' "$usb" || fail 'USB asset validation missing'
 # Exercise the real selectors with regular-file paths and command mocks only.
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
-sed -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/restore-preflight.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' "$funcs" >"$tmp/funcs.sh"
+sed -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/restore-preflight.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/deployment-identity.sh$|:|' "$funcs" >"$tmp/funcs.sh"
 cp "$(dirname "$funcs")/partclone-progress.sh" "$tmp/partclone-progress.sh"
 set +u; source "$tmp/funcs.sh"; set -u
 lsblk() { printf '%s\n' '/dev/mock-b 2G' '/dev/mock-a 1G'; }
@@ -83,7 +83,7 @@ printf 'other\n' >"$tmp/patch-tree/value"
 
 # BCD stage/copy/rename failures retain the original ordinary file.
 bcdroot="$tmp/bcdstore"; mkdir -p "$bcdroot/Boot"; printf 'old-bcd' >"$bcdroot/Boot/BCD"; printf 'new-bcd' >"$tmp/template-bcd"
-sed -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/restore-preflight.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' -e "s|/bcdstore|$bcdroot|g" -e "s|/usr/share/pxeos/BCD|$tmp/template-bcd|g" "$funcs" >"$tmp/bcd-funcs.sh"
+sed -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/restore-preflight.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/deployment-identity.sh$|:|' -e "s|/bcdstore|$bcdroot|g" -e "s|/usr/share/pxeos/BCD|$tmp/template-bcd|g" "$funcs" >"$tmp/bcd-funcs.sh"
 cp "$(dirname "$funcs")/partclone-progress.sh" "$tmp/partclone-progress.sh"
 set +u; source "$tmp/bcd-funcs.sh"; set -u
 osid=7; fsTypeSetting() { fstype=ntfs; }; ntfs-3g() { :; }; umount() { :; }; dots() { :; }; debugPause() { :; }; handleError() { return 1; }

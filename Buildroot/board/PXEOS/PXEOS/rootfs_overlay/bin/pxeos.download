@@ -170,21 +170,6 @@ if [[ ${resumeStage:-} == customizing_hostname || ${resumeStage:-} == post_deplo
         if rootpxe_deployment_identity_private_enabled; then
             rootpxe_deployment_identity_request_private || handleError "PXEOS_STAGE=system_initialization CODE=INITIALIZATION_PRIVATE_CONFIG_UNAVAILABLE"
         fi
-        if rootpxe_deployment_identity_storage_enabled; then
-            # Storage randomization changes references outside the raw disk
-            # identifiers (Windows BCD/MountedDevices/EFI and Linux boot
-            # references). A safe resume cannot prove every repair completed,
-            # so require a fresh deployment instead of rewriting identifiers
-            # or manufacturing a successful result for this attempt.
-            # Only the single-disk Linux path can prove the frozen IDs are
-            # already present.  It then reuses the normal idempotent offline
-            # reference repair via hostname/system initialization below.
-            if [[ ${imgType:-} != mpa && ${osid:-} == 50 ]] && rootpxe_deployment_identity_linux_storage_plan_applied "$hd"; then
-                :
-            else
-                handleError "PXEOS_STAGE=deployment_identity_resume CODE=STORAGE_IDENTITY_RESUME_REQUIRES_REDEPLOY"
-            fi
-        fi
         if [[ ${resumeStage:-} == customizing_hostname ]] && [[ ${changeHostname:-false} != true ]] && ! rootpxe_deployment_identity_linux_policy_enabled && ! { rootpxe_deployment_identity_windows_policy_enabled && jq -e '.systemIdentity.sysprep == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1; }; then
             handleError "PXEOS_STAGE=customizing_hostname CODE=RESUME_CONTRACT_INVALID REASON=system_initialization_not_enabled"
         fi
@@ -193,7 +178,7 @@ if [[ ${resumeStage:-} == customizing_hostname || ${resumeStage:-} == post_deplo
             rootpxe_apply_hostname_for_disk "$hd" || handleError "PXEOS_STAGE=system_initialization CODE=SYSTEM_INITIALIZATION_FAILED"
         fi
 
-        rootpxe_deployment_identity_report_result "${rootpxe_deployment_identity_storage_result:-false}" "${rootpxe_deployment_identity_hostname_result:-false}" "${rootpxe_deployment_identity_machine_id_result:-false}" "${rootpxe_deployment_identity_ssh_host_keys_result:-false}" "${rootpxe_deployment_identity_ssh_login_public_keys_result:-false}" "${rootpxe_deployment_identity_root_password_result:-false}" "${rootpxe_deployment_identity_sysprep_result:-false}" || handleError "PXEOS_STAGE=deployment_identity_result CODE=IDENTITY_RESULT_REJECTED"
+        rootpxe_deployment_identity_report_result "${rootpxe_deployment_identity_hostname_result:-false}" "${rootpxe_deployment_identity_machine_id_result:-false}" "${rootpxe_deployment_identity_ssh_host_keys_result:-false}" "${rootpxe_deployment_identity_ssh_login_public_keys_result:-false}" "${rootpxe_deployment_identity_root_password_result:-false}" "${rootpxe_deployment_identity_sysprep_result:-false}" || handleError "PXEOS_STAGE=deployment_identity_result CODE=IDENTITY_RESULT_REJECTED"
         rootpxe_deployment_identity_cleanup_private
     elif [[ ${resumeStage:-} == customizing_hostname && ${changeHostname:-false} == true ]]; then
         # Hostname-only tasks do not require the extended identity plan or
@@ -247,10 +232,8 @@ if [[ ${imgType:-} == mpa && ${rootpxe_mpa_permit_is_batch:-no} == yes ]]; then
         rootpxe_verify_disk_permit_binding "$disk" deploy_write || handleError "PXEOS_STAGE=permit CODE=DISK_PERMIT_BINDING_CHANGED REASON=target_disk_identity_or_operation_mismatch"
     done
 fi
-# Freeze the identity plan only after every target has an active permit, but
-# before a deployment script, partition table, NVMe format or payload writer
-# can change the target. Storage plans use the frozen single-disk schema or
-# frozen multi-disk inventory, never a target table read at deployment time.
+# Freeze system-initialization data after every target has an active permit.
+# The plan contains no disk or filesystem identifiers.
 if rootpxe_deployment_identity_policy_enabled; then
     if [[ ${imgType:-} == mpa ]]; then
         rootpxe_deployment_identity_request_plan $disks

@@ -1,8 +1,7 @@
 config BR2_PACKAGE_ROOTPXE_OFFLINE_IDENTITIES
-	bool "RootPXE Windows offline identity repair"
-	select BR2_PACKAGE_JSON_C
-	select BR2_PACKAGE_LIBXML2
+	bool "RootPXE Windows offline hostname verification"
 	select BR2_PACKAGE_LIBHIVEX
 	help
-	  Repair BCD device records, SYSTEM MountedDevices and ReAgent.xml after
-	  PXEOS changes the identity of an offline Windows disk.
+	  Inspect and verify the offline SYSTEM hive around a PXEOS Windows
+	  computer-name update. The helper intentionally has no storage or BCD
+	  repair command.

@@ -1664,24 +1664,6 @@ for rejected_stage in customizing_hostname post_deploy_script; do
     rejected_trace="$tmp/resume-storage-${rejected_stage}.trace"
     rejected_error="$tmp/resume-storage-${rejected_stage}.error"
     : >"$rejected_trace"
-    RESUME_TRACE="$rejected_trace"; export RESUME_TRACE
-    resumeStage=$rejected_stage
-    changeHostname=true
-    set +e
-    (
-        handleError() { printf '%s\n' "$1" >"$rejected_error"; exit 93; }
-        . "$resume_script"
-    )
-    rejected_rc=$?
-    set -e
-    [[ $rejected_rc -eq 93 ]] || fail "resume-storage-${rejected_stage}-exit"
-    grep -Fqx 'PXEOS_STAGE=deployment_identity_resume CODE=STORAGE_IDENTITY_RESUME_REQUIRES_REDEPLOY' "$rejected_error" || fail "resume-storage-${rejected_stage}-reason"
-    grep -Fqx 'identity-plan:/dev/mock2' "$rejected_trace" || fail "resume-storage-${rejected_stage}-plan"
-    ! grep -Eq '^(hostname:|identity-result:|identity-cleanup|post$|complete$)' "$rejected_trace" || fail "resume-storage-${rejected_stage}-must-not-write-or-report"
-done
-rootpxe_deployment_identity_storage_enabled() { return 1; }
-
-# A legacy hostname-only retry has no deployment identity plan. It must still
 # replay the hostname step at the customization resume point, and must stop if
 # that offline update fails.
 rootpxe_deployment_identity_policy_enabled() { return 1; }

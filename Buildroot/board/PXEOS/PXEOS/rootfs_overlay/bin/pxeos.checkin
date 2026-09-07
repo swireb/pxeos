@@ -86,15 +86,12 @@ rootpxe_apply_json_deployment_identity_policy() {
       if has("deploymentIdentityPolicy") | not then true
       else .deploymentIdentityPolicy as $p |
         ($p | type == "object") and $p.version == 1 and
-        ($p.randomizeStorageIdentifiers | type == "boolean") and
         ($p.systemIdentity | type == "object") and
-        ($p.systemIdentity.hostname | type == "boolean") and
         ($p.systemIdentity.machineId | type == "boolean") and
         ($p.systemIdentity.sshHostKeys | type == "boolean") and
         (($p.systemIdentity.sshLoginPublicKeys // false) | type == "boolean") and
         (($p.systemIdentity.rootPassword // false) | type == "boolean") and
-        (($p.systemIdentity.sysprep // false) | type == "boolean") and
-        (($p.systemIdentity.sysprepComputerNameMode // "") | type == "string")
+	        (($p.systemIdentity.sysprep // false) | type == "boolean")
       end' >/dev/null <<<"$document"; then
         return 1
     fi
@@ -127,7 +124,7 @@ rootpxe_checkin_json_payload() {
     [[ ${taskid:-} =~ ^[1-9][0-9]*$ && -n ${task_token:-} && -n ${lmac:-} ]] || return 1
 	# Capabilities describe the executable PXEOS image, not merely source code.
     if rootpxe_deployment_identity_linux_capabilities_installed; then
-        capabilities='["hostname","storage-linux-v1","linux-machine-id","linux-ssh-host-keys","linux-ssh-login-public-keys","linux-root-password"]'
+        capabilities='["hostname","linux-machine-id","linux-ssh-host-keys","linux-ssh-login-public-keys","linux-root-password"]'
     fi
 	if rootpxe_deployment_identity_windows_hostname_capability_installed; then
 		capabilities=$(jq -c '. + ["windows-hostname-registry-v1"]' <<<"$capabilities") || return 1
