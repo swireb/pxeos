@@ -13,7 +13,7 @@ rootpxe_deployment_identity_private_enabled() {
 }
 
 rootpxe_deployment_identity_request_private() {
-    local api="${pxeapi:-${web:-}}" request response body code file
+    local api="${pxeapi:-${web:-}}" request response body code hash_file file password_enabled
     rootpxe_deployment_identity_private_enabled || return 0
     [[ -n $api && ${taskid:-} =~ ^[1-9][0-9]*$ && -n ${task_token:-} && -n ${mac:-} && ${progress_attempt:-} =~ ^[1-9][0-9]*$ ]] || return 1
     api="${api%/}/"
@@ -21,10 +21,23 @@ rootpxe_deployment_identity_request_private() {
     response=$(curl -Lks --connect-timeout 10 --max-time 30 -H 'Content-Type: application/json' --data-binary "$request" -w $'\n%{http_code}' "${api}deployment-initialization" 2>/dev/null) || return 1
     code=${response##*$'\n'}; body=${response%$'\n'*}
     [[ $code == 200 ]] || return 1
-    file=$(mktemp /tmp/rootpxe-deployment-initialization.XXXXXX) || return 1
-    chmod 0600 "$file" || { rm -f -- "$file"; return 1; }
-    printf '%s' "$body" >"$file" || { rm -f -- "$file"; return 1; }
-    jq -e '.version == 1 and ((.sshLoginPublicKeys|type) == "array") and ((.rootPasswordHash|type) == "string") and ((.unattendXml|type) == "string")' "$file" >/dev/null 2>&1 || { rm -f -- "$file"; return 1; }
+    printf '%s' "$body" | jq -e '.version == 1 and ((.sshLoginPublicKeys|type) == "array") and ((.rootPassword|type) == "string") and ((.unattendXml|type) == "string")' >/dev/null 2>&1 || return 1
+    password_enabled=$(jq -r '.systemIdentity.rootPassword == true' "$deploymentIdentityPolicyFile" 2>/dev/null) || return 1
+    hash_file=$(mktemp /tmp/rootpxe-deployment-initialization.hash.XXXXXX) || return 1
+    chmod 0600 "$hash_file" || { rm -f -- "$hash_file"; return 1; }
+    if [[ $password_enabled == true ]]; then
+        printf '%s' "$body" | jq -e '(.rootPassword | length) >= 8 and (.rootPassword | length) <= 128' >/dev/null 2>&1 || { rm -f -- "$hash_file"; return 1; }
+        command -v mkpasswd >/dev/null 2>&1 || { rm -f -- "$hash_file"; return 1; }
+        (set -o pipefail; printf '%s' "$body" | jq -j '.rootPassword' | mkpasswd -m sha512 -P 0 >"$hash_file") || { rm -f -- "$hash_file"; return 1; }
+        [[ $(wc -c <"$hash_file") -le 512 ]] && grep -Eq '^\$6\$[^[:space:]]+$' "$hash_file" || { rm -f -- "$hash_file"; return 1; }
+    else
+        : >"$hash_file" || { rm -f -- "$hash_file"; return 1; }
+    fi
+    file=$(mktemp /tmp/rootpxe-deployment-initialization.XXXXXX) || { rm -f -- "$hash_file"; return 1; }
+    chmod 0600 "$file" || { rm -f -- "$hash_file" "$file"; return 1; }
+    (set -o pipefail; printf '%s' "$body" | jq -c --rawfile rootPasswordHash "$hash_file" '{version:1,sshLoginPublicKeys:.sshLoginPublicKeys,rootPasswordHash:($rootPasswordHash | sub("\\n$";"")),unattendXml:.unattendXml}') >"$file" || { rm -f -- "$hash_file" "$file"; return 1; }
+    rm -f -- "$hash_file"
+    jq -e '.version == 1 and ((.sshLoginPublicKeys|type) == "array") and ((.rootPasswordHash|type) == "string") and ((.unattendXml|type) == "string") and (has("rootPassword") | not)' "$file" >/dev/null 2>&1 || { rm -f -- "$file"; return 1; }
     rootpxe_deployment_initialization_private_file="$file"; export rootpxe_deployment_initialization_private_file
 }
 
