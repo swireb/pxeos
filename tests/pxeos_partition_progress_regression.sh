@@ -293,7 +293,8 @@ lvm_prepare_trace="$tmp/lvm-prepare-trace"
 rootpxe_lvm_json_jq() { jq "$@"; }
 lvm_prepare_reset_facts() { printf 'root|lv-root|/dev/vg0/root|1073741824\nswap|lv-swap|/dev/vg0/swap|106300440576\n' >"$rootpxe_lvm_lv_facts_file"; : >"$lvm_prepare_trace"; }
 lvs() {
-    printf '{"report":[{"lv":[{"lv_uuid":"lv-root","lv_path":"/dev/vg0/root","lv_active":"%s"},{"lv_uuid":"lv-swap","lv_path":"/dev/vg0/swap","lv_active":"%s"}' "${PREP_ROOT_STATE:-inactive}" "${PREP_SWAP_STATE:-inactive}"
+    [[ ${PREP_LVS_FAIL:-no} != yes ]] || { printf 'mock lvs query failure\n' >&2; return 42; }
+    printf '{"report":[{"lv":[{"lv_uuid":"lv-root","lv_path":"/dev/vg0/root","lv_active":"%s"},{"lv_uuid":"lv-swap","lv_path":"/dev/vg0/swap","lv_active":"%s"}' "${PREP_ROOT_STATE-inactive}" "${PREP_SWAP_STATE-inactive}"
     [[ ${PREP_DUPLICATE:-no} != yes ]] || printf ',{"lv_uuid":"lv-root","lv_path":"/dev/vg0/root-copy","lv_active":"inactive"}'
     printf ']}]}\n'
 }
@@ -316,6 +317,23 @@ PREP_ROOT_STATE=inactive PREP_SWAP_STATE=active rootpxe_lvm_prepare_capture_lv_f
 assert_eq "$(grep -c -- '-ay' "$lvm_prepare_trace")" 1 'partial LV state must activate only the inactive member'
 assert_eq "$(grep -c -- '-an' "$lvm_prepare_trace")" 1 'partial LV state must deactivate only the member activated here'
 
+# Buildroot LVM 2.03 reports an inactive LV as an empty lv_active string,
+# rather than the literal "inactive".  It is still an unambiguous inactive
+# state: prepare must probe it in the same reversible activation window.
+lvm_prepare_reset_facts
+PREP_ROOT_STATE='' PREP_SWAP_STATE='' rootpxe_lvm_prepare_capture_lv_facts
+assert_eq "$(awk -F'|' '$2=="lv-root" {print $5}' "$rootpxe_lvm_lv_facts_file")" ext4 'empty lv_active must be treated as inactive for data LV probing'
+assert_eq "$(awk -F'|' '$2=="lv-swap" {print $5}' "$rootpxe_lvm_lv_facts_file")" swap 'empty lv_active must be treated as inactive for swap LV probing'
+assert_eq "$(grep -c -- '-ay' "$lvm_prepare_trace")" 2 'empty lv_active members must be activated once'
+assert_eq "$(grep -c -- '-an' "$lvm_prepare_trace")" 2 'empty lv_active members must be deactivated once'
+
+# The compatibility exception is deliberately narrow: a non-LVM state string
+# still fails before any source LV is activated.
+lvm_prepare_reset_facts
+PREP_ROOT_STATE=unknown rootpxe_lvm_prepare_capture_lv_facts && fail 'unknown lv_active state must remain fail-closed'
+assert_eq "$(wc -l <"$lvm_prepare_trace")" 0 'unknown lv_active state must not change source LV activation'
+assert_eq "$(awk -F'|' 'NR==1 {print NF}' "$rootpxe_lvm_lv_facts_file")" 4 'unknown lv_active state must not publish facts'
+
 # Any preparation failure leaves the original four-field facts untouched and
 # does not leak a partial plan input.  Cleanup failure is equally fatal.
 lvm_prepare_reset_facts
@@ -335,6 +353,18 @@ lvm_prepare_reset_facts
 PREP_LVCHANGE_FAIL=-ay rootpxe_lvm_prepare_capture_lv_facts && fail 'activation failure must reject LVM plan preparation'
 unset PREP_LVCHANGE_FAIL
 assert_eq "$(awk -F'|' 'NR==1 {print NF}' "$rootpxe_lvm_lv_facts_file")" 4 'activation failure must not publish partial facts'
+
+# A real LVM failure must retain its exact command and exit status on stderr;
+# otherwise capture only reports the outer generic prepare error.
+lvm_prepare_reset_facts
+PREP_LVCHANGE_FAIL=-ay rootpxe_lvm_prepare_capture_lv_facts >"$tmp/lvm-prepare-error" 2>&1 && fail 'reported activation failure must reject preparation'
+unset PREP_LVCHANGE_FAIL
+grep -Fq 'lvchange -ay /dev/vg0/root failed (rc=1)' "$tmp/lvm-prepare-error" || fail 'activation failure must retain command and rc'
+
+lvm_prepare_reset_facts
+PREP_LVS_FAIL=yes rootpxe_lvm_prepare_capture_lv_facts >"$tmp/lvm-prepare-error" 2>&1 && fail 'lvs query failure must reject preparation'
+unset PREP_LVS_FAIL
+grep -Fq 'lvs query for VG vg0 failed (rc=42): mock lvs query failure' "$tmp/lvm-prepare-error" || fail 'lvs query failure must retain command stderr and rc'
 
 lvm_prepare_reset_facts
 PREP_LVCHANGE_SIGNAL=yes rootpxe_lvm_prepare_capture_lv_facts && fail 'activation signal must reject LVM plan preparation'

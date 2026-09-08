@@ -160,6 +160,31 @@ rootpxe_verify_disk_permit_binding /dev/beta deploy_write || fail batch-nvme-dep
 if rootpxe_verify_disk_permit_binding /dev/swapped deploy_write; then fail batch-path-swap-accepted; fi
 if rootpxe_verify_disk_permit_binding /dev/alpha nvme_format+deploy_write; then fail batch-operation-escalation-accepted; fi
 
+# A task Retry replaces the runner with exec, so its environment survives.  A
+# completed permit-map from the failed attempt must not make the next permit
+# binding look like a duplicate or retain an old authorization.
+retry_map=$(mktemp /tmp/rootpxe-disk-permit-map.retry.XXXXXX)
+printf '%s\n' $'/dev/retry\tID_RETRY\tcapture_read_write' >"$retry_map"
+retry_bindings="$tmp/retry-bindings.json"
+printf '%s\n' '[{"targetId":"ID_RETRY","operation":"capture_read_write"}]' >"$retry_bindings"
+rootpxe_disk_permit_disk_map_file="$retry_map"
+rootpxe_disk_permit_bindings_file="$retry_bindings"
+rootpxe_disk_permit_granted=yes
+rootpxe_disk_permit_target_id=ID_RETRY
+rootpxe_disk_permit_operation=capture_read_write
+rootpxe_reset_disk_permit_retry_state || fail retry-permit-state-reset-failed
+[[ ! -e $retry_map && ! -e $retry_bindings ]] || fail retry-permit-state-files-retained
+[[ -z ${rootpxe_disk_permit_disk_map_file:-} && -z ${rootpxe_disk_permit_bindings_file:-} && -z ${rootpxe_disk_permit_granted:-} && -z ${rootpxe_disk_permit_target_id:-} && -z ${rootpxe_disk_permit_operation:-} ]] || fail retry-permit-state-vars-retained
+unsafe_retry_map="$tmp/not-a-permit-map"
+printf '%s\n' $'/dev/unsafe\tID_UNSAFE\tcapture_read_write' >"$unsafe_retry_map"
+rootpxe_disk_permit_disk_map_file="$unsafe_retry_map"
+if rootpxe_reset_disk_permit_retry_state; then fail retry-permit-state-accepted-unsafe-map; fi
+[[ -e $unsafe_retry_map ]] || fail retry-permit-state-removed-unsafe-map
+unset rootpxe_disk_permit_disk_map_file
+retry_reset_line=$(grep -n -F 'rootpxe_reset_disk_permit_retry_state || return 1' "$funcs" | cut -d: -f1)
+retry_exec_line=$(grep -n -F 'exec /bin/pxeos' "$funcs" | cut -d: -f1)
+[[ $retry_reset_line =~ ^[0-9]+$ && $retry_exec_line =~ ^[0-9]+$ && $retry_reset_line -lt $retry_exec_line ]] || fail retry-permit-state-not-cleared-before-exec
+
 # Deployment mpa selection needs complete image facts and ignores fdrive: the
 # image's ordered dN.size facts alone decide the ordered target set.
 mpa_image="$tmp/mpa-image"; mkdir "$mpa_image"

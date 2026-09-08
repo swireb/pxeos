@@ -624,12 +624,25 @@ rootpxe_lvm_prepare_capture_lv_facts() {
     lvs_json=$(mktemp /tmp/rootpxe-lvm-lv-active.XXXXXX) || { rm -f -- "$stage" "$states" "$activated"; return 1; }
     chmod 600 "$stage" "$states" "$activated" "$lvs_json" || { rm -f -- "$stage" "$states" "$activated" "$lvs_json"; return 1; }
     (
-        local name uuid path size extra query_uuid query_path active row_count source_count=0 state_count=0 fs cleanup_rc=0
+        local name uuid path size extra query_uuid query_path active row_count source_count=0 state_count=0 fs cleanup_rc=0 lvs_output lvs_rc
+        rootpxe_lvm_prepare_run() {
+            local description="$1" output rc
+            shift
+            if output=$("$@" 2>&1); then
+                return 0
+            else
+                rc=$?
+            fi
+            printf 'rootpxe LVM prepare: %s failed (rc=%s)' "$description" "$rc" >&2
+            [[ -z $output ]] || printf ': %s' "$output" >&2
+            printf '\n' >&2
+            return "$rc"
+        }
         rootpxe_lvm_prepare_cleanup() {
             local prepared_path rc=0
             while IFS= read -r prepared_path; do
                 [[ -n $prepared_path ]] || continue
-                lvchange -an "$prepared_path" >/dev/null 2>&1 || rc=1
+                rootpxe_lvm_prepare_run "lvchange -an $prepared_path" lvchange -an "$prepared_path" || rc=1
             done <"$activated"
             return "$rc"
         }
@@ -640,9 +653,19 @@ rootpxe_lvm_prepare_capture_lv_facts() {
             exit 1
         }
         trap rootpxe_lvm_prepare_signal HUP INT TERM
-        if ! lvs --reportformat json -o lv_uuid,lv_path,lv_active --select "vg_uuid=$vg_uuid" "$vg" >"$lvs_json" 2>/dev/null || ! rootpxe_lvm_json_jq -e --arg vg "$vg" '
+        if lvs_output=$(lvs --reportformat json -o lv_uuid,lv_path,lv_active --select "vg_uuid=$vg_uuid" "$vg" 2>&1); then
+            printf '%s\n' "$lvs_output" >"$lvs_json" || prepare_rc=1
+        else
+            lvs_rc=$?
+            printf 'rootpxe LVM prepare: lvs query for VG %s failed (rc=%s): %s\n' "$vg" "$lvs_rc" "$lvs_output" >&2
+            prepare_rc=1
+        fi
+        if [[ $prepare_rc -eq 0 ]] && ! rootpxe_lvm_json_jq -e --arg vg "$vg" '
           (.report|type == "array" and length == 1 and ((.[0].lv? // [])|type == "array") and
-           all((.[0].lv? // [])[]; (.lv_uuid|type == "string" and length > 0) and (.lv_path|type == "string" and startswith("/dev/")) and (.lv_active|IN("active","inactive"))) and
+           # LVM 2.03 as built by Buildroot reports an inactive LV as "".
+           # Keep accepting the documented spelling as well as that concrete,
+           # unambiguous representation; any other state remains fail-closed.
+           all((.[0].lv? // [])[]; (.lv_uuid|type == "string" and length > 0) and (.lv_path|type == "string" and startswith("/dev/")) and (.lv_active|IN("active","inactive",""))) and
            ([.[0].lv[].lv_uuid]|unique|length) == (.[0].lv|length) and
            ([.[0].lv[].lv_path]|unique|length) == (.[0].lv|length))
         ' "$lvs_json" >/dev/null; then
@@ -662,11 +685,11 @@ rootpxe_lvm_prepare_capture_lv_facts() {
             [[ $query_uuid == "$uuid" && $query_path == "$path" ]] || { prepare_rc=1; break; }
             case $active in
                 active) ;;
-                inactive)
+                inactive|'')
                     # Record cleanup intent before activation so a signal after
                     # a successful lvchange still restores the initial state.
                     printf '%s\n' "$path" >>"$activated" || { prepare_rc=1; break; }
-                    lvchange -ay "$path" >/dev/null 2>&1 || { prepare_rc=1; break; }
+                    rootpxe_lvm_prepare_run "lvchange -ay $path" lvchange -ay "$path" || { prepare_rc=1; break; }
                     ;;
                 *) prepare_rc=1; break ;;
             esac
@@ -760,7 +783,7 @@ rootpxe_xfs_restore_postcheck() {
 }
 
 rootpxe_capture_lvm_volumes() {
-    local image_path="$1" pv_artifact vg_artifact lv_name lv_uuid lv_path lv_size fs swap_uuid artifact fifo=/tmp/pigz1 producer writer progress_decoder min_bytes pv_min_bytes stage vg_active=no rootpxe_lvm_capture_status_file rootpxe_lvm_capture_status_rc
+    local image_path="$1" pv_artifact vg_artifact lv_name lv_uuid lv_path lv_size fs swap_uuid artifact fifo=/tmp/pigz1 producer writer progress_decoder min_bytes pv_min_bytes stage vg_active=no rootpxe_lvm_capture_status_file rootpxe_lvm_capture_status_rc lvm_schema_stderr lvm_schema_rc
     rootpxe_lvm_capture_error_code=LVM_CAPTURE_FAILED
     rootpxe_lvm_capture_error_reason=unknown
     [[ ${rootpxe_lvm_active:-no} == yes && ${rootpxe_lvm_captured:-no} != yes ]] || return 0
@@ -840,8 +863,15 @@ rootpxe_capture_lvm_volumes() {
         printf '%s|%s|%s|%s|%s|%s|%s\n' "$lv_name" "$lv_uuid" "$lv_size" "$min_bytes" "$fs" "$artifact" "$swap_uuid" >>"$stage/d1.lvm.capture.tsv" || return 1
     done <"$rootpxe_lvm_lv_facts_file"
     pv_min_bytes="$rootpxe_lvm_pv_bytes"
+    lvm_schema_stderr="$stage/d1.lvm.schema.stderr"
     jq -n --arg pv_uuid "$rootpxe_lvm_pv_uuid" --arg vg_uuid "$rootpxe_lvm_vg_uuid" --arg vg_name "$rootpxe_lvm_vg_name" --arg pv_artifact "$pv_artifact" --arg vg_artifact "$vg_artifact" --argjson part "$rootpxe_lvm_pv_number" --argjson pv_bytes "$rootpxe_lvm_pv_bytes" --argjson pv_min "$pv_min_bytes" --argjson pe_start "$rootpxe_lvm_pe_start_bytes" --argjson extent "$rootpxe_lvm_vg_extent_bytes" --argjson free "$rootpxe_lvm_vg_free_bytes" --rawfile lvs "$stage/d1.lvm.capture.tsv" '
-      {version:1,captureMode:"per_lv",resizePolicy:"grow_only",pvs:[{partitionNumber:$part,uuid:$pv_uuid,vgUuid:$vg_uuid,originalBytes:$pv_bytes,minBytes:$pv_min,peStartBytes:$pe_start,artifact:$pv_artifact,vgConfigArtifact:$vg_artifact}],vgs:[{name:$vg_name,uuid:$vg_uuid,extentBytes:$extent,pvPartitionNumbers:[$part],originalFreeBytes:$free,lvs:($lvs|split("\n")|map(select(length>0)|split("|")|{name:.[0],uuid:.[1],layout:"linear",originalBytes:(.[2]|tonumber),minBytes:(.[3]|tonumber),fs:.[4],role:(if .[4]=="swap" then "swap" else "data" end),resizable:(.[4] != "swap"),artifact:.[5],swapUuid:(if .[4]=="swap" then .[6] else "" end)})}]} ' >"$stage/d1.lvm.schema.json" || return 1
+      {version:1,captureMode:"per_lv",resizePolicy:"grow_only",pvs:[{partitionNumber:$part,uuid:$pv_uuid,vgUuid:$vg_uuid,originalBytes:$pv_bytes,minBytes:$pv_min,peStartBytes:$pe_start,artifact:$pv_artifact,vgConfigArtifact:$vg_artifact}],vgs:[{name:$vg_name,uuid:$vg_uuid,extentBytes:$extent,pvPartitionNumbers:[$part],originalFreeBytes:$free,lvs:($lvs|split("\n")|map(select(length>0)|split("|")|{name:.[0],uuid:.[1],layout:"linear",originalBytes:(.[2]|tonumber),minBytes:(.[3]|tonumber),fs:.[4],role:(if .[4]=="swap" then "swap" else "data" end),resizable:(.[4] != "swap"),artifact:.[5],swapUuid:(if .[4]=="swap" then .[6] else "" end)}))}]} ' >"$stage/d1.lvm.schema.json" 2>"$lvm_schema_stderr"
+    lvm_schema_rc=$?
+    if [[ $lvm_schema_rc -ne 0 ]]; then
+        cat "$lvm_schema_stderr" >&2
+        printf '%s|%s\n' LVM_SCHEMA_GENERATION_FAILED "jq_rc_${lvm_schema_rc}" >"$rootpxe_lvm_capture_status_file"
+        return 1
+    fi
     jq -e '.version == 1 and .captureMode == "per_lv" and .resizePolicy == "grow_only" and (.pvs|length) == 1 and (.vgs|length) == 1' "$stage/d1.lvm.schema.json" >/dev/null || return 1
     rm -f -- "$stage/d1.lvm.capture.tsv" || return 1
     [[ ! -e "$image_path/d1.lvm.schema.json" && ! -e "$image_path/$pv_artifact" && ! -e "$image_path/$vg_artifact" && ! -e "$image_path/d1p${rootpxe_lvm_pv_number}.img" && ! -e "$image_path/d1p${rootpxe_lvm_pv_number}.img.000" ]] || return 1
@@ -1752,6 +1782,20 @@ rootpxe_clear_disk_permit() {
     rootpxe_disk_permit_report_message=""
 }
 
+# A queued task retry reaches /bin/pxeos through exec, which deliberately
+# retains its environment.  The permit map is attempt-local and must not
+# survive that boundary: duplicate-map rejection would otherwise block the
+# same disk after the server has granted a new permit.
+rootpxe_reset_disk_permit_retry_state() {
+    local map_file="${rootpxe_disk_permit_disk_map_file:-}"
+    if [[ -n $map_file ]]; then
+        [[ $map_file == /tmp/rootpxe-disk-permit-map.* && -f $map_file && ! -L $map_file && -O $map_file ]] || return 1
+        rm -f -- "$map_file" || return 1
+    fi
+    unset rootpxe_disk_permit_disk_map_file
+    rootpxe_clear_disk_permit
+}
+
 # Only recognized server codes are rendered.  Unknown codes and response
 # bodies remain private because either can contain unsafe remote text.
 rootpxe_set_disk_permit_reason() {
@@ -2170,6 +2214,7 @@ rootpxe_error_wait_for_retry() {
             --data-urlencode "mac=$mac" "${api}task-status" 2>/dev/null)
         if [[ $status == *'"status":"queued"'* ]]; then
             rootpxe_console_message INFO 'Retry requested. Resuming task.'
+            rootpxe_reset_disk_permit_retry_state || return 1
             exec /bin/pxeos
         fi
         if [[ $status == *'"status":"deleted"'* || $status == *'"status":"cancelled"'* || $status == *'"status":"superseded"'* ]]; then

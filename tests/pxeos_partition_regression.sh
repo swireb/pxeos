@@ -991,6 +991,7 @@ case "$1" in --getsize64) case "$2" in /dev/mock1) echo 268435456;; /dev/vg0/roo
 EOF
 cat >"$tmp/bin/blkid" <<'EOF'
 #!/usr/bin/env bash
+echo "blkid:$*" >>"$LVM_TRACE"
 for last; do :; done
 case " $* " in *' TYPE '*) [[ ${LVM_MODE:-ok} == crypt ]] && { echo crypto_LUKS; exit 0; }; [[ ${LVM_MODE:-ok} == mdraid ]] && { echo linux_raid_member; exit 0; }; [[ $last == /dev/vg0/swap ]] && echo swap || echo "${LVM_FS:-ext4}";; *' UUID '*) [[ $last == /dev/vg0/swap ]] && echo swap-uuid || echo root-uuid;; esac
 EOF
