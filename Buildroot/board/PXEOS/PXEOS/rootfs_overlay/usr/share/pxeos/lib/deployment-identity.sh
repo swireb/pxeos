@@ -159,6 +159,11 @@ rootpxe_deployment_identity_linux_fstab_source_device() {
     device=${device//$'\r'/}; device=${device//$'\n'/}
     [[ -n $device ]] || return 1
     [[ $device == /dev/* ]] || return 1
+    # util-linux/BusyBox blkid may return /dev/disk/by-uuid/* (a symlink).
+    # The mounted filesystem identity is compared with the block device rdev,
+    # so use the canonical node for both the mount and that comparison.
+    device=$(readlink -f -- "$device" 2>/dev/null) || return 1
+    rootpxe_deployment_identity_target_device_is_block "$device" || return 1
     printf '%s\n' "$device"
 }
 
@@ -542,34 +547,41 @@ rootpxe_deployment_identity_linux_login_preflight() {
     fi
 }
 
+rootpxe_deployment_identity_preflight_fail() {
+    rootpxe_deployment_identity_preflight_failure_reason="$1"
+    return 1
+}
+
 rootpxe_deployment_identity_linux_system_preflight_mounted() {
     local root="$1" plan="${rootpxe_deployment_identity_plan_file:-}" ssh_dir path private_selected=false
-    [[ -d $root/etc && ! -L $root/etc && -r $plan ]] || return 1
-    [[ -d $root/var/lib && ! -L $root/var && ! -L $root/var/lib && ( ( ! -e $root/var/lib/rootpxe && ! -L $root/var/lib/rootpxe ) || ( -d $root/var/lib/rootpxe && ! -L $root/var/lib/rootpxe ) ) ]] || return 1
-    [[ ( ! -e $root/var/lib/rootpxe/deployment-identity-v1 && ! -L $root/var/lib/rootpxe/deployment-identity-v1 ) || ( -f $root/var/lib/rootpxe/deployment-identity-v1 && ! -L $root/var/lib/rootpxe/deployment-identity-v1 ) ]] || return 1
+    [[ -d $root/etc && ! -L $root/etc ]] || { rootpxe_deployment_identity_preflight_fail target_etc; return 1; }
+    [[ -r $plan && ! -L $plan ]] || { rootpxe_deployment_identity_preflight_fail plan_file; return 1; }
+    [[ -d $root/var/lib && ! -L $root/var && ! -L $root/var/lib && ( ( ! -e $root/var/lib/rootpxe && ! -L $root/var/lib/rootpxe ) || ( -d $root/var/lib/rootpxe && ! -L $root/var/lib/rootpxe ) ) ]] || { rootpxe_deployment_identity_preflight_fail target_var; return 1; }
+    [[ ( ! -e $root/var/lib/rootpxe/deployment-identity-v1 && ! -L $root/var/lib/rootpxe/deployment-identity-v1 ) || ( -f $root/var/lib/rootpxe/deployment-identity-v1 && ! -L $root/var/lib/rootpxe/deployment-identity-v1 ) ]] || { rootpxe_deployment_identity_preflight_fail identity_marker; return 1; }
     if jq -e '.systemIdentity.machineId == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1; then
-        rootpxe_deployment_identity_machine_id_etc_path "$root" >/dev/null || return 1
-        rootpxe_deployment_identity_machine_id_dbus_path "$root" || return 1
+        rootpxe_deployment_identity_machine_id_etc_path "$root" >/dev/null || { rootpxe_deployment_identity_preflight_fail machine_id_etc; return 1; }
+        rootpxe_deployment_identity_machine_id_dbus_path "$root" || { rootpxe_deployment_identity_preflight_fail machine_id_dbus; return 1; }
         private_selected=true
     fi
     if jq -e '.systemIdentity.sshHostKeys == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1; then
-        ssh_dir="$root/etc/ssh"; [[ -d $ssh_dir && ! -L $ssh_dir ]] || return 1
-        rootpxe_deployment_identity_collect_ssh_host_key_paths "$root" || return 1
+        ssh_dir="$root/etc/ssh"; [[ -d $ssh_dir && ! -L $ssh_dir ]] || { rootpxe_deployment_identity_preflight_fail ssh_directory; return 1; }
+        rootpxe_deployment_identity_collect_ssh_host_key_paths "$root" || { rootpxe_deployment_identity_preflight_fail ssh_host_keys; return 1; }
         private_selected=true
     fi
     if rootpxe_deployment_identity_private_enabled; then
-        rootpxe_deployment_identity_linux_login_preflight "$root" || return 1
+        rootpxe_deployment_identity_linux_login_preflight "$root" || { rootpxe_deployment_identity_preflight_fail login_credentials; return 1; }
         if jq -e '.systemIdentity.sshLoginPublicKeys == true or .systemIdentity.rootPassword == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1; then private_selected=true; fi
     fi
-    [[ $private_selected != true ]] || rootpxe_deployment_identity_selinux_relabel_preflight "$root"
+    [[ $private_selected != true ]] || rootpxe_deployment_identity_selinux_relabel_preflight "$root" || { rootpxe_deployment_identity_preflight_fail selinux_relabel; return 1; }
 }
 
 rootpxe_deployment_identity_linux_system_preflight() {
     local root="$1" rc
-    rootpxe_deployment_identity_mount_linux_var_filesystem "$root" || return 1
+    rootpxe_deployment_identity_preflight_failure_reason=""
+    rootpxe_deployment_identity_mount_linux_var_filesystem "$root" || { rootpxe_deployment_identity_preflight_fail var_mount; return 1; }
     rootpxe_deployment_identity_linux_system_preflight_mounted "$root"
     rc=$?
-    rootpxe_deployment_identity_unmount_linux_var_filesystem || rc=1
+    rootpxe_deployment_identity_unmount_linux_var_filesystem || { rootpxe_deployment_identity_preflight_failure_reason=var_unmount; rc=1; }
     return "$rc"
 }
 

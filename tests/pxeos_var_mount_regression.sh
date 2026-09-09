@@ -17,10 +17,24 @@ declare -A mounted=()
 rootpxe_linux_mount_options() { printf rw; }
 blkid() {
     case "$*" in
-        '-U var-id') [[ ${BLKID_MISSING:-0} != 1 ]] && printf /dev/mock-var ;;
+        '-U var-id')
+            [[ ${BLKID_MISSING:-0} != 1 ]] || return 1
+            if [[ ${BLKID_SYMLINK:-0} == 1 ]]; then
+                printf /dev/disk/by-uuid/var-id
+            else
+                printf /dev/mock-var
+            fi
+            ;;
         *'TYPE'*'/dev/mock-var') printf xfs ;;
         *) return 1 ;;
     esac
+}
+readlink() {
+    if [[ $1 == -f && ${2:-} == -- && ${3:-} == /dev/disk/by-uuid/var-id ]]; then
+        printf /dev/mock-var
+        return 0
+    fi
+    command readlink "$@"
 }
 mountpoint() { [[ $1 == -q ]] && [[ -n ${mounted[$2]:-} ]]; }
 mount() { local source="${@: -2:1}" target_path="${@: -1}"; mounted[$target_path]="$source"; }
@@ -32,6 +46,13 @@ rootpxe_deployment_identity_mount_linux_var_filesystem "$target" || fail '/var m
 [[ ${mounted[$target/var]:-} == /dev/mock-var ]] || fail '/var mount target mismatch'
 rootpxe_deployment_identity_unmount_linux_var_filesystem || fail '/var cleanup failed'
 [[ -z ${mounted[$target/var]:-} ]] || fail '/var remained mounted'
+
+# blkid -U may return the stable /dev/disk/by-uuid link instead of the
+# canonical block node.  The mount verifier compares device identities, so
+# the helper must resolve the link before both mount and verification.
+BLKID_SYMLINK=1 rootpxe_deployment_identity_mount_linux_var_filesystem "$target" || fail '/var UUID link was rejected'
+[[ ${mounted[$target/var]:-} == /dev/mock-var ]] || fail '/var UUID link was not canonicalized'
+rootpxe_deployment_identity_unmount_linux_var_filesystem || fail '/var UUID-link cleanup failed'
 
 # A missing fstab UUID is fail-closed. There is deliberately no frozen-plan
 # fallback because this feature no longer changes filesystem identifiers.

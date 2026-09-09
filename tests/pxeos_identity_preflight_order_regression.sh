@@ -13,6 +13,7 @@ hostname=$(body rootpxe_apply_linux_hostname_for_disk "$funcs")
 host_pre=$(printf '%s\n' "$hostname" | line_of 'rootpxe_deployment_identity_linux_system_preflight "$mountpoint"')
 host_write=$(printf '%s\n' "$hostname" | line_of "printf '%s\\n' \"\$hostName\" >\"\$hostname_path\"")
 [[ $host_pre =~ ^[0-9]+$ && $host_write =~ ^[0-9]+$ && $host_pre -lt $host_write ]] || fail 'Linux system preflight does not precede hostname write'
+printf '%s\n' "$hostname" | grep -Fq 'REASON=${preflight_reason} RC=${preflight_rc}' || fail 'Linux system preflight failure reason is not reported'
 
 complete=$(body completeTasking "$funcs")
 private=$(printf '%s\n' "$complete" | line_of 'rootpxe_deployment_identity_request_private')

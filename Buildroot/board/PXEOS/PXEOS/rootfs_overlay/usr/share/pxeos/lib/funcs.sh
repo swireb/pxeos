@@ -4182,7 +4182,7 @@ rootpxe_apply_linux_hostname_for_disk() {
     mount -t "$root_fs" -o "$options" "$root_device" "$mountpoint" >/tmp/rootpxe-linux-mount-output 2>&1 || { rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_MOUNT_FAILED"; }
     rootpxe_linux_paths_safe_for_write "$mountpoint" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_PATH_UNSAFE"; }
     if rootpxe_deployment_identity_linux_policy_enabled; then
-        rootpxe_deployment_identity_linux_system_preflight "$mountpoint" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_SYSTEM_IDENTITY_PRECHECK_FAILED"; }
+        rootpxe_deployment_identity_linux_system_preflight "$mountpoint" || { preflight_rc=$?; preflight_reason="${rootpxe_deployment_identity_preflight_failure_reason:-unknown}"; umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_SYSTEM_IDENTITY_PRECHECK_FAILED REASON=${preflight_reason} RC=${preflight_rc}"; }
     fi
     if [[ ${changeHostname:-false} == true ]]; then
         hostname_path="$mountpoint/etc/hostname"

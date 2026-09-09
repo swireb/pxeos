@@ -47,6 +47,14 @@ mkdir -p "$target/root/.ssh"
 printf '%s\n%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7yE5q7MdhqWNsZnKZqRppDi0n0QzQnQbE0SgP5Gux5 old-comment' 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCkeptblob kept-key' >"$target/root/.ssh/authorized_keys"
 rootpxe_deployment_identity_linux_system_preflight "$target" || fail 'complete valid selected identity set was rejected by preflight'
 [[ $(cat "$target/etc/machine-id") == old-machine-id && $(cat "$target/etc/shadow") == "$shadow_before" ]] || fail 'successful preflight modified target files'
+
+# A preflight failure must expose a bounded, non-sensitive reason so the task
+# event identifies the failed prerequisite without exposing private payloads.
+rm -f "$plan"
+if rootpxe_deployment_identity_linux_system_preflight "$target"; then fail 'missing identity plan was accepted'; fi
+[[ ${rootpxe_deployment_identity_preflight_failure_reason:-} == plan_file ]] || fail 'missing identity plan did not report plan_file'
+printf '%s\n' '{"plan":{"version":1,"planId":"plan-1"},"planHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' >"$plan"
+
 apply_output="$tmp/identity-apply.log"
 rootpxe_deployment_identity_linux_system_in_root "$target" >"$apply_output" 2>&1 || fail 'first-boot reset identity operation failed'
 ! grep -Fq '$6$salt$hash' "$apply_output" || fail 'identity apply output leaked the password hash'
