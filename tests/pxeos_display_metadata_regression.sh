@@ -58,6 +58,44 @@ case_lvm() {
     esac
 }
 
+case_lvm_mapper_aliases() {
+    local mode="$1" d="$tmp/lvm-mapper-$1" inv="$tmp/lvm-mapper-$1/i.json" mount_count=0 umount_count=0
+    load; mkdir -p "$d"
+    rootpxe_display_metadata_file="$d/m.json"; printf '%s\n' '{"mountsCollected":false,"mounts":[]}' >"$rootpxe_display_metadata_file"
+    rootpxe_display_metadata_identities='p:1:1|/dev/nvme0n1p1 p:1:2|/dev/nvme0n1p2 p:1:3|/dev/nvme0n1p3'
+    rootpxe_lvm_lv_facts_file="$d/lvs"
+    # Production capture facts contain five fields; the fifth filesystem field
+    # must not shift LV UUID or path parsing in display metadata.
+    printf '%s\n' 'root|lv-root|/dev/rlm/root|60700000000|xfs' 'home|lv-home|/dev/rlm/home|21400000000|xfs' 'var|lv-var|/dev/rlm/var|21400000000|xfs' 'swap|lv-swap|/dev/rlm/swap|2140000000|swap' >"$rootpxe_lvm_lv_facts_file"
+    rootpxe_display_metadata_lv_readable() { [[ $1 == /dev/rlm/root || $1 == /dev/rlm/home || $1 == /dev/rlm/var || $1 == /dev/rlm/swap ]]; }
+    rootpxe_linux_root_fstype_supported() { [[ $1 == xfs ]]; }
+    rootpxe_linux_mount_options() { [[ $1 == ro && $2 == xfs ]] && printf 'ro,nouuid\n'; }
+    blkid() { local device; device=$(last_arg "$@"); case " $* " in *' TYPE '*) case "$device" in /dev/nvme0n1p1) echo vfat;; /dev/nvme0n1p2|/dev/rlm/root|/dev/rlm/home|/dev/rlm/var) echo xfs;; /dev/nvme0n1p3) echo LVM2_member;; /dev/rlm/swap) echo swap;; esac;; *' UUID '*) case "$device" in /dev/nvme0n1p1) echo efi;; /dev/nvme0n1p2) echo boot;; /dev/rlm/root) echo root;; /dev/rlm/home) echo home;; /dev/rlm/var) echo var;; /dev/rlm/swap) echo swap;; esac;; esac; }
+    # This models PXEOS1: mapper nodes do not canonicalize to /dev/dm-N,
+    # whereas /dev/VG/LV aliases do.
+    readlink() { case "${2:-}" in /dev/mapper/rlm-root|/dev/mapper/rlm-home|/dev/mapper/rlm-var) printf '%s\n' "${2:-}";; /dev/rlm/root) echo /dev/dm-3;; /dev/rlm/home) echo /dev/dm-2;; /dev/rlm/var) echo /dev/dm-4;; *) command readlink "$@";; esac; }
+    lsblk() {
+        local device; device=$(last_arg "$@")
+        case "$mode:$device" in
+            good:/dev/mapper/rlm-root|good:/dev/rlm/root) printf ' 253:3   \n';; good:/dev/mapper/rlm-home|good:/dev/rlm/home) printf ' 253:2   \n';; good:/dev/mapper/rlm-var|good:/dev/rlm/var) printf ' 253:4   \n';;
+            ambiguous:/dev/mapper/rlm-root|ambiguous:/dev/rlm/root|ambiguous:/dev/rlm/home) echo 253:3;; ambiguous:/dev/mapper/rlm-home) echo 253:2;; ambiguous:/dev/mapper/rlm-var|ambiguous:/dev/rlm/var) echo 253:4;;
+            invalid:/dev/mapper/rlm-root|invalid:/dev/rlm/root) echo not-a-device;; invalid:/dev/mapper/rlm-home|invalid:/dev/rlm/home) echo 253:2;; invalid:/dev/mapper/rlm-var|invalid:/dev/rlm/var) echo 253:4;;
+            multi:/dev/mapper/rlm-root|multi:/dev/rlm/root) printf '253:3\n253:99\n';; multi:/dev/mapper/rlm-home|multi:/dev/rlm/home) echo 253:2;; multi:/dev/mapper/rlm-var|multi:/dev/rlm/var) echo 253:4;;
+            nonblock:*) return 1;; *) return 1;;
+        esac
+    }
+    mount() { local target device; target=$(last_arg "$@"); device=$(penultimate_arg "$@"); mount_count=$((mount_count + 1)); mkdir -p "$target/etc"; if [[ $device == /dev/rlm/root ]]; then printf '%s\n' 'UUID=efi /boot/efi vfat defaults 0 2' 'UUID=boot /boot xfs defaults 0 2' '/dev/mapper/rlm-root / xfs defaults 0 1' '/dev/mapper/rlm-home /home xfs defaults 0 2' '/dev/mapper/rlm-var /var xfs defaults 0 2' 'UUID=swap none swap defaults 0 0' >"$target/etc/fstab"; else : >"$target/etc/fstab"; fi; }
+    mountpoint() { return 0; }; umount() { umount_count=$((umount_count + 1)); rm -rf -- "$1/etc"; }
+    rootpxe_display_metadata_collect_lvm
+    [[ $mount_count -eq $umount_count ]] || return 1
+    printf '%s\n' '{"version":1,"disks":[{"number":1,"sourceDevice":"/dev/nvme0n1","partitionTable":"gpt","originalDiskBytes":107374182400,"logicalSectorBytes":512,"physicalSectorBytes":512,"partitions":[{"number":1,"startSectors":2048,"originalSectors":1024000,"typeGuid":"efi","fs":"vfat"},{"number":2,"startSectors":1026048,"originalSectors":2097152,"typeGuid":"linux","fs":"xfs"},{"number":3,"startSectors":3123200,"originalSectors":200000000,"typeGuid":"lvm","fs":"LVM2_member"}]}]}' >"$inv"
+    rootpxe_display_metadata_merge_inventory "$inv"
+    case "$mode" in
+        good) jq -e '.disks[0].partitions[0].mountPoints == ["/boot/efi"] and .disks[0].partitions[1].mountPoints == ["/boot"] and .disks[0].partitions[2].mountPoints == [] and .disks[0].logicalVolumes == [{"uuid":"lv-root","mountPoints":["/"]},{"uuid":"lv-home","mountPoints":["/home"]},{"uuid":"lv-var","mountPoints":["/var"]},{"uuid":"lv-swap","mountPoints":[]}]' "$inv" >/dev/null;;
+        ambiguous|invalid|multi|nonblock) jq -e '(.disks[0].partitions|all(has("mountPoints")|not)) and .disks[0].logicalVolumes == [{"uuid":"lv-root"},{"uuid":"lv-home"},{"uuid":"lv-var"},{"uuid":"lv-swap"}]' "$inv" >/dev/null;;
+    esac
+}
+
 case_windows() {
     local mode="$1" d="$tmp/windows-$1" rows="$tmp/windows-$1/rows" inv="$tmp/windows-$1/i.json"; load; mkdir -p "$d"; : >"$rows"
     rootpxe_display_metadata_disks=/dev/mockdisk; rootpxe_display_metadata_drive_rows="$rows"
@@ -104,6 +142,11 @@ run case_fstab || fail fstab
 run case_lvm physical || fail physical-root-lv-home
 run case_lvm lv || fail lv-root
 run case_lvm multi || fail multi-root
+run case_lvm_mapper_aliases good || fail lvm-mapper-aliases
+run case_lvm_mapper_aliases ambiguous || fail lvm-mapper-ambiguous
+run case_lvm_mapper_aliases invalid || fail lvm-mapper-invalid
+run case_lvm_mapper_aliases multi || fail lvm-mapper-multiline
+run case_lvm_mapper_aliases nonblock || fail lvm-mapper-nonblock
 run case_windows success || fail windows-mbr-gpt
 run case_windows mixed-device || fail windows-mbr-with-unrelated-utf16-device
 run case_windows no-hive || fail windows-no-hive

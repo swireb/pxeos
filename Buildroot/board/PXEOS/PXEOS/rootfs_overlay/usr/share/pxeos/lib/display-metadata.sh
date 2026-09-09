@@ -38,13 +38,29 @@ rootpxe_display_metadata_unescape_fstab_field() {
 
 # Resolve fstab only against the capture source devices passed by the caller.
 # It never follows a UUID/LABEL to an arbitrary PE environment disk.
+rootpxe_display_metadata_block_major_minor() {
+    local device="$1" value
+    value=$(lsblk -dn -o MAJ:MIN "$device" 2>/dev/null) || return 1
+    value="${value#"${value%%[![:blank:]]*}"}"
+    value="${value%"${value##*[![:blank:]]}"}"
+    [[ $value =~ ^[0-9]+:[0-9]+$ ]] || return 1
+    printf '%s\n' "$value"
+}
+
+rootpxe_display_metadata_same_block_device() {
+    local left="$1" right="$2" left_identity right_identity
+    left_identity=$(rootpxe_display_metadata_block_major_minor "$left") || return 1
+    right_identity=$(rootpxe_display_metadata_block_major_minor "$right") || return 1
+    [[ $left_identity == "$right_identity" ]]
+}
+
 rootpxe_display_metadata_fstab_identity() {
     local spec="$1" identities="$2" identity device value actual count=0 result="" IFS=$' \t\n'
     case "$spec" in
         UUID=*) value=${spec#UUID=}; for identity in $identities; do device=${identity#*|}; actual=$(blkid -s UUID -o value "$device" 2>/dev/null | tr -d '\r\n'); [[ $actual == "$value" ]] && { result=${identity%%|*}; count=$((count + 1)); }; done ;;
         PARTUUID=*) value=${spec#PARTUUID=}; for identity in $identities; do device=${identity#*|}; actual=$(blkid -s PARTUUID -o value "$device" 2>/dev/null | tr -d '\r\n'); [[ ${actual,,} == ${value,,} ]] && { result=${identity%%|*}; count=$((count + 1)); }; done ;;
         LABEL=*) value=${spec#LABEL=}; for identity in $identities; do device=${identity#*|}; actual=$(blkid -s LABEL -o value "$device" 2>/dev/null | tr -d '\r\n'); [[ $actual == "$value" ]] && { result=${identity%%|*}; count=$((count + 1)); }; done ;;
-        /dev/*) for identity in $identities; do device=${identity#*|}; [[ $(readlink -f "$device" 2>/dev/null) == $(readlink -f "$spec" 2>/dev/null) ]] && { result=${identity%%|*}; count=$((count + 1)); }; done ;;
+        /dev/*) for identity in $identities; do device=${identity#*|}; { [[ $(readlink -f "$device" 2>/dev/null) == $(readlink -f "$spec" 2>/dev/null) ]] || rootpxe_display_metadata_same_block_device "$device" "$spec"; } && { result=${identity%%|*}; count=$((count + 1)); }; done ;;
         *) return 1 ;;
     esac
     [[ $count -eq 1 ]] && printf '%s\n' "$result"
@@ -162,11 +178,11 @@ rootpxe_display_metadata_merge_inventory() {
 # LVM is activated only inside the existing capture window. Reuse its
 # preflight UUID/path facts; never identify an LV by its human-readable name.
 rootpxe_display_metadata_collect_lvm() {
-    local rows identities="${rootpxe_display_metadata_identities:-}" identity source_identity device lv_name lv_uuid lv_path lv_size fs status temporary source
+    local rows identities="${rootpxe_display_metadata_identities:-}" identity source_identity device lv_name lv_uuid lv_path lv_size lv_fs fs status temporary source
     [[ -r ${rootpxe_display_metadata_file:-} && -r ${rootpxe_lvm_lv_facts_file:-} ]] || return 0
     rows=$(mktemp /tmp/rootpxe-display-lvm-rows.XXXXXX) || return 1
     chmod 600 "$rows" || { rm -f -- "$rows"; return 1; }
-    while IFS='|' read -r lv_name lv_uuid lv_path lv_size; do
+    while IFS='|' read -r lv_name lv_uuid lv_path lv_size lv_fs; do
         [[ -n $lv_uuid ]] && rootpxe_display_metadata_lv_readable "$lv_path" || { rm -f -- "$rows"; return 1; }
         identities+=" l:${lv_uuid}|${lv_path}"
     done <"$rootpxe_lvm_lv_facts_file"
