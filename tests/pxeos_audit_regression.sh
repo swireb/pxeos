@@ -4,6 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
 build="$root/build.sh"
+filesystem_lvm_patch="$root/patch/filesystem/lvm2-udev-sync.patch"
 usb="$root/create-usb-image.sh"
 realtek="$root/KernelPackages/drivers/net/ethernet/realtek/Makefile"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -15,6 +16,9 @@ grep -Fq '"x$imgType" == "xmpa" && "x$type" == "xdown"' "$funcs" || fail 'mpa de
 grep -Fq 'rootpxe_prepare_capture_output_path' "$funcs" || fail 'nested capture output safety gate missing'
 grep -Fq 'BCD.rootpxe-new' "$funcs" || fail 'BCD replacement is not staged'
 grep -Fq 'rootpxe_build_apply_patch_once' "$build" || fail 'build patch idempotence helper missing'
+grep -Fq 'rootpxe_build_apply_filesystem_patches' "$build" || fail 'filesystem patch set helper missing'
+grep -Fq 'lvm2-udev-sync.patch' "$build" || fail 'LVM udev patch is not independently applied'
+grep -Fq 'LVM2_DEPENDENCIES += udev' "$filesystem_lvm_patch" || fail 'LVM udev patch lacks virtual udev dependency'
 grep -Fq '"$PROJECT_DIRECTORY/Buildroot/"' "$build" || fail 'Buildroot source input is not anchored to project directory'
 grep -Fq 'return 1' "$build" || fail 'build artifact failure cannot propagate'
 grep -Fq 'CONFIG_R8127' "$realtek" || fail 'R8127 make target missing'
@@ -81,6 +85,51 @@ printf 'other\n' >"$tmp/patch-tree/value"
 (cd "$tmp/patch-tree" && rootpxe_build_apply_patch_once "$tmp/once.patch") && fail 'conflicting patch was accepted'
 [[ $(<"$tmp/patch-tree/value") == other ]] || fail 'conflicting patch changed content'
 
+# Existing build directories may already have fs.patch applied while a newly
+# introduced filesystem patch is still pending.  Each patch must be tested and
+# applied independently, otherwise a whole-bundle forward/reverse probe cannot
+# distinguish that mixed but valid state.
+eval "$(sed -n '/^rootpxe_build_apply_filesystem_patches()/,/^}/p' "$build")"
+mkdir -p "$tmp/mixed-project/patch/filesystem" "$tmp/mixed-patch-tree"
+cat >"$tmp/mixed-project/patch/filesystem/fs.patch" <<'EOF'
+--- a/base
++++ b/base
+@@ -1 +1 @@
+-old-base
++new-base
+EOF
+cat >"$tmp/mixed-project/patch/filesystem/lvm2-udev-sync.patch" <<'EOF'
+--- a/lvm
++++ b/lvm
+@@ -1 +1 @@
+-old-lvm
++new-lvm
+EOF
+cat >"$tmp/whole-filesystem.patch" <<'EOF'
+--- a/base
++++ b/base
+@@ -1 +1 @@
+-old-base
++new-base
+--- a/lvm
++++ b/lvm
+@@ -1 +1 @@
+-old-lvm
++new-lvm
+EOF
+printf 'new-base\n' >"$tmp/mixed-patch-tree/base"
+printf 'old-lvm\n' >"$tmp/mixed-patch-tree/lvm"
+(cd "$tmp/mixed-patch-tree" && rootpxe_build_apply_patch_once "$tmp/whole-filesystem.patch") && fail 'whole filesystem patch accepted a mixed state'
+[[ $(<"$tmp/mixed-patch-tree/base") == new-base && $(<"$tmp/mixed-patch-tree/lvm") == old-lvm ]] || fail 'whole filesystem patch altered mixed state'
+(
+    cd "$tmp/mixed-patch-tree"
+    PROJECT_DIRECTORY="$tmp/mixed-project"
+    dots() { :; }
+    rootpxe_build_apply_filesystem_patches
+    rootpxe_build_apply_filesystem_patches
+) || fail 'mixed filesystem patch state was not idempotently completed'
+[[ $(<"$tmp/mixed-patch-tree/base") == new-base && $(<"$tmp/mixed-patch-tree/lvm") == new-lvm ]] || fail 'mixed filesystem patch state changed existing patch or skipped LVM patch'
+
 # BCD stage/copy/rename failures retain the original ordinary file.
 bcdroot="$tmp/bcdstore"; mkdir -p "$bcdroot/Boot"; printf 'old-bcd' >"$bcdroot/Boot/BCD"; printf 'new-bcd' >"$tmp/template-bcd"
 sed -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/restore-preflight.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/deployment-identity.sh$|:|' -e "s|/bcdstore|$bcdroot|g" -e "s|/usr/share/pxeos/BCD|$tmp/template-bcd|g" "$funcs" >"$tmp/bcd-funcs.sh"
@@ -94,7 +143,7 @@ mv() { [[ $2 == "$bcdroot/Boot/BCD" ]] && return 1; command mv "$@"; }; fixWin7b
 # collaborators mocked.  Missing output and sha256 failure must both return.
 (
     set +e
-    eval "$(sed -n '122,294p' "$build")"
+    eval "$(sed -n '/^function buildFilesystem()/,/^}/p' "$build")"
     PROJECT_DIRECTORY="$tmp/empty-project"; buildPath="$tmp/build-output"; mkdir -p "$PROJECT_DIRECTORY" "$buildPath/fssourcex64/package" "$buildPath/fssourcex64/output/images"; : >"$buildPath/fssourcex64/package/Config.in"; : >"$buildPath/fssourcex64/.config"; : >"$buildPath/fssourcex64/.packConfDone"
     dots() { :; }; rsync() { :; }; sed() { :; }; make() { :; }
     BUILDROOT_VERSION=mock; verbose=y; confirm=n; fsDownloadOnly=n; cd "$buildPath"

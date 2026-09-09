@@ -715,7 +715,7 @@ rootpxe_lvm_prepare_capture_lv_facts() {
 }
 
 rootpxe_xfs_capture_preflight() {
-    local device="$1" mount_point="" primary_error=""
+    local device="$1" mount_point="" primary_error="" repair_output repair_rc
     rootpxe_xfs_capture_error=""
     [[ -n $device ]] || { rootpxe_xfs_capture_error=invalid_device; return 1; }
     findmnt -rn -S "$device" >/dev/null 2>&1
@@ -730,8 +730,13 @@ rootpxe_xfs_capture_preflight() {
     elif ! umount "$mount_point"; then
         primary_error=log_replay_unmount_failed
         umount "$mount_point" >/dev/null 2>&1 || true
-    elif ! xfs_repair -n "$device"; then
-        primary_error=post_replay_check_failed
+    else
+        repair_output=$(xfs_repair -n "$device" 2>&1)
+        repair_rc=$?
+        if [[ $repair_rc -ne 0 ]]; then
+            [[ -z $repair_output ]] || printf '%s\n' "$repair_output" >&2
+            primary_error=post_replay_check_failed
+        fi
     fi
     if [[ -n $mount_point ]] && ! rmdir "$mount_point" >/dev/null 2>&1 && [[ -z $primary_error ]]; then
         primary_error=temp_cleanup_failed
@@ -743,17 +748,18 @@ rootpxe_xfs_capture_preflight() {
 # un-replayed journal. xfs_repair -n rejects it by design, so replay only the
 # exact diagnostic observed in production; every other failure stays closed.
 rootpxe_xfs_restore_postcheck() {
-    local device="$1" mount_point="" primary_error="" repair_output repair_rc mount_state
+    local device="$1" mount_point="" primary_error="" repair_output initial_repair_output="" repair_rc mount_state
     rootpxe_xfs_restore_error=""
     [[ -n $device ]] || { rootpxe_xfs_restore_error=invalid_device; return 1; }
     repair_output=$(xfs_repair -n "$device" 2>&1)
     repair_rc=$?
-    [[ -z $repair_output ]] || printf '%s\n' "$repair_output" >&2
     [[ $repair_rc -eq 0 ]] && return 0
     [[ $repair_output == *'valuable metadata changes in a log'* ]] || {
+        [[ -z $repair_output ]] || printf '%s\n' "$repair_output" >&2
         rootpxe_xfs_restore_error=post_restore_inconsistent
         return 1
     }
+    initial_repair_output=$repair_output
     findmnt -rn -S "$device" >/dev/null 2>&1
     mount_state=$?
     case $mount_state in
@@ -773,13 +779,17 @@ rootpxe_xfs_restore_postcheck() {
     else
         repair_output=$(xfs_repair -n "$device" 2>&1)
         repair_rc=$?
-        [[ -z $repair_output ]] || printf '%s\n' "$repair_output" >&2
         [[ $repair_rc -eq 0 ]] || primary_error=post_replay_check_failed
     fi
     if [[ -n $mount_point ]] && ! rmdir "$mount_point" >/dev/null 2>&1 && [[ -z $primary_error ]]; then
         primary_error=temp_cleanup_failed
     fi
-    [[ -z $primary_error ]] || { rootpxe_xfs_restore_error=$primary_error; return 1; }
+    [[ -z $primary_error ]] || {
+        [[ -z $initial_repair_output ]] || printf '%s\n' "$initial_repair_output" >&2
+        [[ $repair_output == "$initial_repair_output" || -z $repair_output ]] || printf '%s\n' "$repair_output" >&2
+        rootpxe_xfs_restore_error=$primary_error
+        return 1
+    }
 }
 
 rootpxe_capture_lvm_volumes() {

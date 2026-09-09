@@ -118,6 +118,25 @@ rootpxe_build_apply_patch_once() {
     fi
 }
 
+rootpxe_build_apply_filesystem_patches() {
+    local patch_file applied=no
+    for patch_file in \
+        "$PROJECT_DIRECTORY/patch/filesystem/fs.patch" \
+        "$PROJECT_DIRECTORY/patch/filesystem/lvm2-udev-sync.patch"; do
+        [[ -e $patch_file ]] || continue
+        [[ -f $patch_file ]] || return 1
+        dots " * Applying filesystem patch"
+        echo
+        if ! rootpxe_build_apply_patch_once "$patch_file"; then
+            echo "Failed"
+            return 1
+        fi
+        echo "Done"
+        applied=yes
+    done
+    [[ $applied == yes ]] || echo " * WARNING: Did not find any patch file(s), building filesystem without patches!"
+}
+
 
 function buildFilesystem() {
     local arch="$1"
@@ -138,17 +157,7 @@ function buildFilesystem() {
         echo "Done"
     fi
     cd "fssource$arch" || { echo "Couldn't change directory to fssource$arch"; exit 1; }
-    if [[ -f $PROJECT_DIRECTORY/patch/filesystem/fs.patch ]]; then
-        dots " * Applying filesystem patch"
-        echo
-        if ! rootpxe_build_apply_patch_once "$PROJECT_DIRECTORY/patch/filesystem/fs.patch"; then
-            echo "Failed"
-            exit 1
-        fi
-        echo "Done"
-    else
-        echo " * WARNING: Did not find any patch file(s), building filesystem without patches!"
-    fi
+    rootpxe_build_apply_filesystem_patches || return 1
     dots "Preparing code"
     if [[ ! -f .packConfDone ]]; then
         cat "$PROJECT_DIRECTORY/Buildroot/package/newConf.in" >> package/Config.in

@@ -1,0 +1,11 @@
+diff --git a/package/lvm2/lvm2.mk b/package/lvm2/lvm2.mk
+index 3a1dded55f..c2fd489357 100644
+--- a/package/lvm2/lvm2.mk
++++ b/package/lvm2/lvm2.mk
+@@ -39,3 +39,5 @@ ifeq ($(BR2_PACKAGE_HAS_UDEV),y)
+ ifeq ($(BR2_PACKAGE_HAS_UDEV),y)
+-LVM2_CONF_OPTS += --enable-udev_rules
++LVM2_CONF_OPTS += --enable-udev_rules --enable-udev_sync
++# udev is virtual: eudev and systemd both provide it.
++LVM2_DEPENDENCIES += udev
+ endif

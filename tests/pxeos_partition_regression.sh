@@ -13,6 +13,7 @@ funcs="$overlay/usr/share/pxeos/lib/funcs.sh"
 progress_lib="$overlay/usr/share/pxeos/lib/partclone-progress.sh"
 partition_funcs="$overlay/usr/share/pxeos/lib/partition-funcs.sh"
 processor="$overlay/usr/share/pxeos/lib/procsfdisk.awk"
+filesystem_lvm_patch="$root/patch/filesystem/lvm2-udev-sync.patch"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -30,6 +31,8 @@ must_have "$partition_funcs" 'blockdev --getss'
 must_have "$processor" 'by_partition_number'
 must_have "$processor" 'disk_end = int(diskSize) - int(firstlba)'
 must_have "$processor" 'if (rc != 0)'
+must_have "$filesystem_lvm_patch" 'LVM2_CONF_OPTS += --enable-udev_rules --enable-udev_sync'
+must_have "$filesystem_lvm_patch" 'LVM2_DEPENDENCIES += udev'
 
 cat >"$tmp/gpt-4kn.sfdisk" <<'EOF'
 label: gpt
@@ -1229,12 +1232,16 @@ xfs_repair() {
       XFS_RESTORE_REPAIR_CALLS=$(grep -c '^xfs_repair:' "$LVM_TRACE")
     fi
     case $XFS_RESTORE_MODE in
-      clean) return 0 ;;
+      clean)
+        [[ ${XFS_REPAIR_SUCCESS_OUTPUT:-0} != 1 ]] || printf '%s\n' 'xfs_repair: clean check detail' >&2
+        return 0
+        ;;
       dirty|mount_fail|umount_fail)
         if [[ $XFS_RESTORE_REPAIR_CALLS -eq 1 ]]; then
           printf '%s\n' 'ALERT: The filesystem has valuable metadata changes in a log which is being ignored because the -n option was used.' >&2
           return 1
         fi
+        [[ ${XFS_REPAIR_SUCCESS_OUTPUT:-0} != 1 ]] || printf '%s\n' 'xfs_repair: clean replay check detail' >&2
         return 0
         ;;
       corruption) printf '%s\n' 'fatal error -- metadata corruption' >&2; return 1 ;;
@@ -1248,19 +1255,28 @@ xfs_repair() {
         ;;
     esac
   fi
-  [[ ${XFS_PREFLIGHT_MODE:-ok} != repair_fail ]]
+  if [[ ${XFS_PREFLIGHT_MODE:-ok} == repair_fail ]]; then
+    printf '%s\n' 'fatal error -- capture metadata corruption' >&2
+    return 1
+  fi
+  [[ ${XFS_REPAIR_SUCCESS_OUTPUT:-0} != 1 ]] || printf '%s\n' 'xfs_repair: capture check detail' >&2
+  return 0
 }
 
 : >"$LVM_TRACE"
-rootpxe_xfs_capture_preflight /dev/mock1 || fail xfs-preflight-success
+: >"$tmp/xfs-capture-output"; export XFS_REPAIR_SUCCESS_OUTPUT=1
+rootpxe_xfs_capture_preflight /dev/mock1 2>"$tmp/xfs-capture-output" || fail xfs-preflight-success
+[[ ! -s "$tmp/xfs-capture-output" ]] || fail xfs-preflight-success-must-be-silent
+unset XFS_REPAIR_SUCCESS_OUTPUT
 grep -Fq 'mount:-t xfs -o rw,nouuid /dev/mock1' "$LVM_TRACE" || fail xfs-preflight-mount-order
 grep -Fq 'umount:' "$LVM_TRACE" || fail xfs-preflight-umount-order
 grep -Fq 'xfs_repair:-n /dev/mock1' "$LVM_TRACE" || fail xfs-preflight-repair-order
 for xfs_failure in mounted findmnt_fail mount_fail umount_fail repair_fail; do
-  : >"$LVM_TRACE"; export XFS_PREFLIGHT_MODE="$xfs_failure"
-  rootpxe_xfs_capture_preflight /dev/mock1 && fail "xfs-preflight-$xfs_failure"
+  : >"$LVM_TRACE"; : >"$tmp/xfs-capture-output"; export XFS_PREFLIGHT_MODE="$xfs_failure"
+  rootpxe_xfs_capture_preflight /dev/mock1 2>"$tmp/xfs-capture-output" && fail "xfs-preflight-$xfs_failure"
   ! grep -Fq 'partclone.xfs:' "$LVM_TRACE" || fail "xfs-preflight-$xfs_failure-partclone"
   [[ $xfs_failure != umount_fail || $(grep -c '^umount:' "$LVM_TRACE") -eq 2 ]] || fail xfs-preflight-umount-retry
+  [[ $xfs_failure != repair_fail ]] || grep -Fq 'fatal error -- capture metadata corruption' "$tmp/xfs-capture-output" || fail xfs-preflight-repair-failure-diagnostic-visible
   unset XFS_PREFLIGHT_MODE
 done
 
@@ -1268,7 +1284,7 @@ done
 # after the exact observed dirty-log diagnostic, one controlled RW replay and
 # a clean second offline check.  Other repair failures must never mount.
 for restore_mode in clean dirty corruption mount_fail umount_fail second_repair_fail; do
-  : >"$LVM_TRACE"; : >"$tmp/xfs-restore-state"; : >"$tmp/xfs-restore-output"; export XFS_RESTORE_MODE="$restore_mode" XFS_RESTORE_STATE_FILE="$tmp/xfs-restore-state"
+  : >"$LVM_TRACE"; : >"$tmp/xfs-restore-state"; : >"$tmp/xfs-restore-output"; export XFS_RESTORE_MODE="$restore_mode" XFS_RESTORE_STATE_FILE="$tmp/xfs-restore-state" XFS_REPAIR_SUCCESS_OUTPUT=1
   case $restore_mode in
     clean|dirty) rootpxe_xfs_restore_postcheck /dev/mock1 2>"$tmp/xfs-restore-output" || fail "xfs-restore-$restore_mode" ;;
     *) rootpxe_xfs_restore_postcheck /dev/mock1 2>"$tmp/xfs-restore-output" && fail "xfs-restore-$restore_mode-must-fail" ;;
@@ -1276,9 +1292,10 @@ for restore_mode in clean dirty corruption mount_fail umount_fail second_repair_
   case $restore_mode in
     clean)
       ! grep -Fq 'mount:' "$LVM_TRACE" || fail xfs-restore-clean-must-not-mount
+      [[ ! -s "$tmp/xfs-restore-output" ]] || fail xfs-restore-clean-must-be-silent
       ;;
     dirty)
-      grep -Fq 'valuable metadata changes in a log' "$tmp/xfs-restore-output" || fail xfs-restore-dirty-diagnostic-visible
+      [[ ! -s "$tmp/xfs-restore-output" ]] || fail xfs-restore-dirty-replay-must-be-silent
       repair_first=$(grep -n -F 'xfs_repair:-n /dev/mock1' "$LVM_TRACE" | sed -n '1p' | cut -d: -f1)
       mount_line=$(grep -n -F 'mount:-t xfs -o rw,nouuid /dev/mock1' "$LVM_TRACE" | cut -d: -f1)
       umount_line=$(grep -n -F 'umount:' "$LVM_TRACE" | sed -n '1p' | cut -d: -f1)
@@ -1297,7 +1314,7 @@ for restore_mode in clean dirty corruption mount_fail umount_fail second_repair_
       ;;
     second_repair_fail) [[ ${rootpxe_xfs_restore_error:-} == post_replay_check_failed ]] || fail xfs-restore-second-repair-reason ;;
   esac
-  unset XFS_RESTORE_MODE XFS_RESTORE_STATE_FILE
+  unset XFS_RESTORE_MODE XFS_RESTORE_STATE_FILE XFS_REPAIR_SUCCESS_OUTPUT
 done
 
 # Legal preflight/capture executes real helper branches; it occurs before any permit.
