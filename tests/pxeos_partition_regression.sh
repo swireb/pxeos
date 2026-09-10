@@ -831,15 +831,32 @@ cat >"$tmp/bin/blockdev" <<'EOF'
 #!/usr/bin/env bash
 case "$1:$2" in
   --getss:*) echo 512;; --getpbsz:*) echo 512;;
-  --getsize64:/dev/nvme0n1) echo 1073741824;; --getsize64:/dev/sda) echo 536870912;;
+  --getsize64:/dev/nvme0n1) echo 4294967296;; --getsize64:/dev/sda) echo 536870912;;
   *) exit 1;; esac
 EOF
 cat >"$tmp/bin/blkid" <<'EOF'
 #!/usr/bin/env bash
 for last; do :; done
-case "$last:$2" in
-  /dev/nvme0n1p1:TYPE) echo vfat;; /dev/nvme0n1p1:UUID) echo efi-uuid;; /dev/nvme0n1p1:PARTUUID) echo efi-partuuid;;
-  /dev/sda1:TYPE) echo xfs;; /dev/sda1:UUID) echo data-uuid;; /dev/sda1:PARTUUID) echo data-partuuid;;
+if [[ $last == /dev/nvme0n1p1 && $* == *'-p -s VERSION '* && ${BLKID_FAT_PROBE_FAIL:-no} == yes ]]; then
+  printf FAT32
+  exit 1
+fi
+case "$last:$*" in
+  /dev/nvme0n1p1:*-s\ TYPE\ *) echo vfat;; /dev/nvme0n1p1:*-s\ VERSION\ *) echo FAT32;; /dev/nvme0n1p1:*-s\ BLOCK_SIZE\ *) echo 512;; /dev/nvme0n1p1:*-s\ UUID\ *) echo efi-uuid;; /dev/nvme0n1p1:*-s\ PARTUUID\ *) echo efi-partuuid;;
+  /dev/nvme0n1p2:*-s\ TYPE\ *) echo vfat;; /dev/nvme0n1p2:*-s\ VERSION\ *) echo FAT16;; /dev/nvme0n1p2:*-s\ BLOCK_SIZE\ *) echo 512;; /dev/nvme0n1p2:*-s\ UUID\ *) echo fat16-uuid;; /dev/nvme0n1p2:*-s\ PARTUUID\ *) echo fat16-partuuid;;
+  /dev/nvme0n1p3:*-s\ TYPE\ *) echo mysteryfs;; /dev/nvme0n1p3:*-s\ UUID\ *) echo mystery-uuid;; /dev/nvme0n1p3:*-s\ PARTUUID\ *) echo mystery-partuuid;;
+  /dev/nvme0n1p4:*-s\ TYPE\ *) echo ext4;; /dev/nvme0n1p4:*-s\ UUID\ *) echo ext-uuid;; /dev/nvme0n1p4:*-s\ PARTUUID\ *) echo ext-partuuid;;
+  /dev/nvme0n1p5:*-s\ TYPE\ *) echo vfat;; /dev/nvme0n1p5:*-s\ VERSION\ *) echo FAT32;; /dev/nvme0n1p5:*-s\ BLOCK_SIZE\ *) echo 4096;; /dev/nvme0n1p5:*-s\ UUID\ *) echo fat32-4k-uuid;; /dev/nvme0n1p5:*-s\ PARTUUID\ *) echo fat32-4k-partuuid;;
+  /dev/sda1:*-s\ TYPE\ *) echo xfs;; /dev/sda1:*-s\ UUID\ *) echo data-uuid;; /dev/sda1:*-s\ PARTUUID\ *) echo data-partuuid;;
+esac
+EOF
+cat >"$tmp/bin/btrfs" <<'EOF'
+#!/usr/bin/env bash
+case ${BTRFS_MODE:-single} in
+  single) printf '%s\n' 'Label: none' $'\tTotal devices 1 FS bytes used 0' $'\tdevid    1 size 1024 used 0 path /dev/mockbtrfs' ;;
+  multi) printf '%s\n' 'Label: none' $'\tTotal devices 2 FS bytes used 0' $'\tdevid    1 size 1024 used 0 path /dev/mockbtrfs' $'\tdevid    2 size 1024 used 0 path /dev/other' ;;
+  incomplete) printf '%s\n' 'Label: none' $'\tTotal devices 2 FS bytes used 0' $'\tdevid    1 size 1024 used 0 path /dev/mockbtrfs' ;;
+  missing) printf '%s\n' 'Label: none' $'\tTotal devices 1 FS bytes used 0' $'\tdevid    1 size 1024 used 0 path MISSING' ;;
 esac
 EOF
 chmod +x "$tmp/bin"/*
@@ -849,22 +866,66 @@ sed -e "s|/usr/share/pxeos|$overlay/usr/share/pxeos|g" -e "s|</proc/cmdline|<\"$
 cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
 # shellcheck disable=SC1090
 ismajordebug=0; . "$tmp/funcs.sh"
-getPartitions() { case "$1" in /dev/nvme0n1) parts='/dev/nvme0n1p1';; /dev/sda) parts='/dev/sda1';; *) parts='';; esac; }
+export BTRFS_MODE=single
+[[ $(rootpxe_capture_partition_growth_facts /dev/mockbtrfs btrfs 512) == 'true|' ]] || fail btrfs-single-device-growable
+for btrfs_mode in multi incomplete missing; do
+  export BTRFS_MODE=$btrfs_mode
+  [[ $(rootpxe_capture_partition_growth_facts /dev/mockbtrfs btrfs 512) == 'false|' ]] || fail "btrfs-$btrfs_mode-must-not-grow"
+done
+export BLKID_FAT_PROBE_FAIL=yes
+[[ $(rootpxe_capture_partition_growth_facts /dev/nvme0n1p1 vfat 512) == 'false|' ]] || fail fat-probe-failure-must-not-grow
+unset BLKID_FAT_PROBE_FAIL
+getPartitions() { case "$1" in /dev/nvme0n1) parts='/dev/nvme0n1p1 /dev/nvme0n1p2 /dev/nvme0n1p3 /dev/nvme0n1p4 /dev/nvme0n1p5';; /dev/sda) parts='/dev/sda1';; *) parts='';; esac; }
 cat >"$tmp/capture/d1.partitions" <<'EOF'
 label: gpt
 device: /dev/nvme0n1
 unit: sectors
 sector-size: 512
 /dev/nvme0n1p1 : start=        2048, size=     1024000, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+/dev/nvme0n1p2 : start=     1026048, size=     1024000, type=8300
+/dev/nvme0n1p3 : start=     2050048, size=     1024000, type=8300
+/dev/nvme0n1p4 : start=     3074048, size=     1024000, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+/dev/nvme0n1p5 : start=     4098048, size=     1024000, type=8300
 EOF
 rootpxe_build_partition_inventory "$tmp/capture" mps /dev/nvme0n1 "" || fail mps
 jq -e '.version == 1 and (.disks|length)==1 and .disks[0].partitions[0].fs == "vfat" and .disks[0].partitions[0].uuid == "efi-uuid"' "$rootpxe_partition_inventory_file" >/dev/null || fail mps-facts
 # This exercises the real jq invocation in the n schema builder with no LVM
 # rawfile supplied.  The canonical d1.partitions is the sole source layout;
 # no shrunken/minimum sidecar is created for the new n contract.
-: >"$tmp/capture/d1p1.img"
+: >"$tmp/capture/d1p1.img"; : >"$tmp/capture/d1p2.img"; : >"$tmp/capture/d1p3.img"; : >"$tmp/capture/d1p4.img"; : >"$tmp/capture/d1p5.img"
 rootpxe_build_original_schema /dev/nvme0n1 "$tmp/capture" || fail n-schema-real-jq
 jq -e '.partitionTable == "gpt" and .partitions[0].fs == "vfat" and .minDeployBytes == .originalDiskBytes and (.partitions | all(.minSectors == .originalSectors))' "$rootpxe_original_schema_file" >/dev/null || fail n-schema-facts
+jq -e '
+  ([.partitions[] | select(.number == 1) | .role == "efi" and .fsVariant == "FAT32" and .resizable == true] | all) and
+  ([.partitions[] | select(.number == 2) | .fsVariant == "FAT16" and .resizable == false] | all) and
+  ([.partitions[] | select(.number == 3) | (has("fsVariant") | not) and .resizable == false] | all) and
+  ([.partitions[] | select(.number == 4) | .role == "efi" and .fs == "ext4" and .resizable == true] | all) and
+  ([.partitions[] | select(.number == 5) | .fsVariant == "FAT32" and .resizable == false] | all)
+' "$rootpxe_original_schema_file" >/dev/null || fail n-schema-grow-capabilities
+# Deployment mode is a permission to alter the captured geometry, not merely
+# a calculation hint.  A non-growable source must reject fixed/remaining even
+# when the supplied size is exactly original, and percentage is retired.
+schemaRevision=1; schemaHash=$(rootpxe_canonical_json_hash "$rootpxe_original_schema_file")
+for rejected_layout in fixed remaining percentage; do
+  case $rejected_layout in
+    fixed) changed='{"number":2,"mode":"fixed","fixedBytes":524288000}' ;;
+    remaining) changed='{"number":3,"mode":"remaining"}' ;;
+    percentage) changed='{"number":1,"mode":"percentage","percentage":1}' ;;
+  esac
+  printf '{"schemaHash":"%s","partitions":[{"number":1,"mode":"original"},{"number":2,"mode":"original"},{"number":3,"mode":"original"},{"number":4,"mode":"original"},{"number":5,"mode":"original"}]}' "$schemaHash" >"$tmp/growth-layout.json"
+  jq --argjson changed "$changed" '(.partitions[] | select(.number == $changed.number)) = $changed' "$tmp/growth-layout.json" >"$tmp/growth-layout.next" && mv "$tmp/growth-layout.next" "$tmp/growth-layout.json"
+  rootpxe_validate_deployment_layout /dev/nvme0n1 "$rootpxe_original_schema_file" "$tmp/growth-layout.json" && fail "non-growable-$rejected_layout-must-reject-before-permit"
+  rm -f "${rootpxe_resolved_layout_file:-}"; unset rootpxe_resolved_layout_file
+done
+unset schemaRevision schemaHash
+# An old broad resizable flag is not a substitute for an explicit supported
+# filesystem capability.  Keep the fixed size equal to original so this is a
+# pure pre-permit authorization check, not a growth arithmetic failure.
+jq '(.partitions[] | select(.number == 3)).resizable = true' "$rootpxe_original_schema_file" >"$tmp/legacy-broad-schema.json"
+schemaRevision=1; schemaHash=$(rootpxe_canonical_json_hash "$tmp/legacy-broad-schema.json")
+printf '{"schemaHash":"%s","partitions":[{"number":1,"mode":"original"},{"number":2,"mode":"original"},{"number":3,"mode":"fixed","fixedBytes":524288000},{"number":4,"mode":"original"},{"number":5,"mode":"original"}]}' "$schemaHash" >"$tmp/legacy-broad-layout.json"
+rootpxe_validate_deployment_layout /dev/nvme0n1 "$tmp/legacy-broad-schema.json" "$tmp/legacy-broad-layout.json" && fail legacy-broad-resizable-unknown-must-reject
+rm -f "${rootpxe_resolved_layout_file:-}"; unset rootpxe_resolved_layout_file schemaRevision schemaHash
 [[ ! -e "$tmp/capture/d1.minimum.partitions" && ! -e "$tmp/capture/d1.original.partitions" && ! -e "$tmp/capture/d1.shrunken.partitions" ]] || fail n-schema-must-not-read-legacy-layouts
 # An MBR extended container may contain unused tail sectors after its last
 # logical partition.  d1.partitions is both the captured and minimum layout,
@@ -893,7 +954,7 @@ mv "$tmp/capture/d1.gpt.partitions" "$tmp/capture/d1.partitions"
 cat >"$tmp/lvm-schema.json" <<'EOF'
 {"version":2,"logicalSectorBytes":512,"lvm":{"version":1,"captureMode":"per_lv","resizePolicy":"grow_only","pvs":[{"partitionNumber":1,"uuid":"pv-1","vgUuid":"vg-1","originalBytes":268435456,"minBytes":268435456,"peStartBytes":1048576,"artifact":"d1p1.lvm.pv.meta","vgConfigArtifact":"d1p1.lvm.vg.cfg"}],"vgs":[{"name":"vg0","uuid":"vg-1","extentBytes":4194304,"pvPartitionNumbers":[1],"originalFreeBytes":0,"lvs":[{"name":"root","uuid":"lv-root","layout":"linear","originalBytes":67108864,"minBytes":67108864,"fs":"ext4","role":"data","resizable":true,"artifact":"d1p1.lvm.lv.root.img"}]}]}}
 EOF
-printf '%s\n' '{"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"preserveOriginal","volumes":[{"uuid":"lv-root","mode":"original"}]}]}' >"$tmp/lvm-layout.json"
+printf '%s\n' '{"partitions":[{"number":1,"mode":"original"}],"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"preserveOriginal","volumes":[{"uuid":"lv-root","mode":"original"}]}]}' >"$tmp/lvm-layout.json"
 printf '%s\n' '[{"number":1,"resolvedSectors":524288}]' >"$tmp/lvm-partitions.json"
 rootpxe_validate_lvm_deployment_layout "$tmp/lvm-schema.json" "$tmp/lvm-layout.json" "$tmp/lvm-partitions.json" || fail lvm-layout-real-jq
 jq -e '.volumes|type == "array" and length == 1 and .[0].resolvedBytes == 67108864' "$rootpxe_resolved_lvm_layout_file" >/dev/null || fail lvm-layout-result-shape
@@ -934,14 +995,18 @@ for image_type in n mps mpa dd; do
     taskid=42 task_token=token mac=aa:bb:cc:dd:ee:ff web=https://rootpxe.invalid/ \
     env -u rootpxe_original_schema_file -u rootpxe_partition_inventory_file bash -s -- "$overlay/bin/pxeos.imgcomplete" "$tmp" <<'EOF'
 script=$1; test_tmp=$2
+imagePath="$test_tmp/capture"; mkdir -p "$imagePath"
 dmidecode() { printf '%s\n' test-uuid; }
 rootpxe_require_task_context() { :; }
+rootpxe_deployment_identity_policy_enabled() { return 1; }
 rootpxe_stage() { :; }
 rootpxe_finalize_capture() { rootpxe_final_capture_path="$test_tmp/capture"; capture_size_bytes=8; }
 rootpxe_build_partition_inventory() { rootpxe_partition_inventory_file="$test_tmp/inventory-${imgType}"; printf '%s\n' '{"version":1,"disks":[{"number":1,"sourceDevice":"/dev/mock","partitionTable":"none","originalDiskBytes":1,"logicalSectorBytes":1,"physicalSectorBytes":1,"partitions":[]}]}' >"$rootpxe_partition_inventory_file"; }
 rootpxe_build_original_schema() { rootpxe_original_schema_file="$test_tmp/schema-${imgType}"; printf '%s\n' '{"version":1}' >"$rootpxe_original_schema_file"; }
 rootpxe_clear_capture_marker() { :; }
 rootpxe_cleanup_task_json() { :; }
+rootpxe_capture_resume_cleanup() { :; }
+rootpxe_capture_publish_metadata() { :; }
 rootpxe_console_message() { :; }
 dots() { :; }
 debugPause() { :; }
@@ -1092,7 +1157,7 @@ chmod +x "$tmp/bin/findmnt" "$tmp/bin/mount" "$tmp/bin/umount"
 cat >"$tmp/bin/jq" <<'EOF'
 #!/usr/bin/env bash
 args="$*"
-if [[ $args == *'--slurpfile schema'* ]]; then [[ ${LAYOUT_MODE:-ok} != belowmin ]] || exit 1; echo '{"pv":{"partitionNumber":1,"uuid":"pv-1","originalBytes":268435456,"artifact":"d1p1.lvm.pv.meta","vgConfigArtifact":"d1p1.lvm.vg.cfg"},"vg":{"name":"vg0","uuid":"vg-1","extentBytes":4194304},"pvBytes":268435456,"volumes":[{"name":"root","uuid":"lv-root","fs":"ext4","artifact":"d1p1.lvm.lv.root.img","resolvedBytes":67108864},{"name":"swap","uuid":"lv-swap","fs":"swap","artifact":"","swapUuid":"swap-uuid","resolvedBytes":33554432}]}'; exit 0; fi
+if [[ $args == *'--slurpfile schema'* ]]; then [[ ${LAYOUT_MODE:-ok} != belowmin && ${LAYOUT_MODE:-ok} != percentage ]] || exit 1; echo '{"pv":{"partitionNumber":1,"uuid":"pv-1","originalBytes":268435456,"artifact":"d1p1.lvm.pv.meta","vgConfigArtifact":"d1p1.lvm.vg.cfg"},"vg":{"name":"vg0","uuid":"vg-1","extentBytes":4194304},"pvBytes":268435456,"volumes":[{"name":"root","uuid":"lv-root","fs":"ext4","artifact":"d1p1.lvm.lv.root.img","resolvedBytes":67108864},{"name":"swap","uuid":"lv-swap","fs":"swap","artifact":"","swapUuid":"swap-uuid","resolvedBytes":33554432}]}'; exit 0; fi
 if [[ $args == *'.volumes[]|.name,'* ]]; then
   [[ ${LVM_LIST_MODE:-ok} != fail ]] || exit 1
   [[ ${LVM_LIST_MODE:-ok} != empty ]] || exit 0
@@ -1412,7 +1477,7 @@ export LVM_SEGTYPE=thin; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" &&
 export LVM_MODE=crypt; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail crypt-topology; unset LVM_MODE
 export LVM_MODE=mdraid; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail mdraid-topology; unset LVM_MODE
 grep -Fq '[[ $fs == xfs ]]' "$overlay/usr/share/pxeos/lib/funcs.sh" || fail xfs-capture-branch
-grep -Fq '.[4] != "swap"' "$overlay/usr/share/pxeos/lib/funcs.sh" || fail xfs-growable-schema
+grep -Fq '["ext2","ext3","ext4","xfs"]' "$overlay/usr/share/pxeos/lib/funcs.sh" || fail xfs-growable-schema
 grep -Fq 'xfs_growfs "$xfs_mount"' "$overlay/usr/share/pxeos/lib/funcs.sh" || fail xfs-grow-branch
 grep -Fq 'lvextend -y -L' "$overlay/usr/share/pxeos/lib/funcs.sh" || fail lvm-grow-only-branch
 grep -Fq 'rootpxe_lvm_json_jq() { command jq "$@"; }' "$overlay/usr/share/pxeos/lib/funcs.sh" || fail lvm-jq-must-not-be-environment-replaced
@@ -1428,13 +1493,14 @@ jq() { rootpxe_test_real_jq "$@"; }
 printf '{"version":2,"partitions":[{"fs":"LVM2_member","role":"lvm_pv"}]}' >"$tmp/legacy-lvm-schema.json"
 rootpxe_validate_lvm_deployment_layout "$tmp/legacy-lvm-schema.json" "$tmp/layout.json" "$tmp/partitions.json" && fail raw-lvm-without-schema
 unset -f jq
-for mode in fixed percentage remaining; do export LAYOUT_MODE="$mode"; rootpxe_validate_lvm_deployment_layout "$tmp/schema.json" "$tmp/layout.json" "$tmp/partitions.json" || fail "layout-$mode"; unset LAYOUT_MODE; done
+for mode in fixed remaining; do export LAYOUT_MODE="$mode"; rootpxe_validate_lvm_deployment_layout "$tmp/schema.json" "$tmp/layout.json" "$tmp/partitions.json" || fail "layout-$mode"; unset LAYOUT_MODE; done
+export LAYOUT_MODE=percentage; rootpxe_validate_lvm_deployment_layout "$tmp/schema.json" "$tmp/layout.json" "$tmp/partitions.json" && fail layout-percentage-must-reject; unset LAYOUT_MODE
 export LAYOUT_MODE=belowmin; rootpxe_validate_lvm_deployment_layout "$tmp/schema.json" "$tmp/layout.json" "$tmp/partitions.json" && fail layout-below-min; unset LAYOUT_MODE
-node -e 'const extent=4194304,capacity=100*extent,min=9*extent,fixed=10*extent,pct=Math.floor(capacity*25/100/extent)*extent,remaining=capacity-fixed-pct;if(fixed<min||pct<=0||remaining<min)process.exit(1)' || fail layout-capacity-oracle
+node -e 'const extent=4194304,capacity=100*extent,min=9*extent,fixed=10*extent,remaining=capacity-fixed;if(fixed<min||remaining<min)process.exit(1)' || fail layout-capacity-oracle
 
 # A captured swap intentionally remains resizable=false in the immutable
 # schema because it has no payload.  The deployment resolver must nevertheless
-# accept only grow-only fixed/percentage/remaining sizes: it recreates swap
+# accept only grow-only fixed/remaining sizes with a remaining PV: it recreates swap
 # after a possible lvextend and preserves its captured UUID.
 cat >"$tmp/swap-grow-schema.json" <<'EOF'
 {"version":2,"logicalSectorBytes":512,"lvm":{"version":1,"captureMode":"per_lv","resizePolicy":"grow_only","pvs":[{"partitionNumber":1,"uuid":"pv-1","vgUuid":"vg-1","originalBytes":268435456,"minBytes":268435456,"peStartBytes":1048576,"artifact":"d1p1.lvm.pv.meta","vgConfigArtifact":"d1p1.lvm.vg.cfg"}],"vgs":[{"name":"vg0","uuid":"vg-1","extentBytes":4194304,"pvPartitionNumbers":[1],"originalFreeBytes":0,"lvs":[{"name":"root","uuid":"lv-root","layout":"linear","originalBytes":67108864,"minBytes":67108864,"fs":"ext4","role":"data","resizable":true,"artifact":"d1p1.lvm.lv.root.img"},{"name":"swap","uuid":"lv-swap","layout":"linear","originalBytes":33554432,"minBytes":33554432,"fs":"swap","role":"swap","resizable":false,"artifact":"","swapUuid":"swap-uuid"}]}]}}
@@ -1442,24 +1508,35 @@ EOF
 printf '%s\n' '[{"number":1,"resolvedSectors":524288}]' >"$tmp/swap-grow-partitions.json"
 for swap_layout in \
   '{"uuid":"lv-swap","mode":"fixed","fixedBytes":37748736}' \
-  '{"uuid":"lv-swap","mode":"percentage","percentage":25}' \
   '{"uuid":"lv-swap","mode":"remaining"}'; do
   swap_mode=$(rootpxe_test_real_jq -r '.mode' <<<"$swap_layout")
-  printf '{"version":2,"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"allocateToRemaining","volumes":[{"uuid":"lv-root","mode":"original"},%s]}]}\n' "$swap_layout" >"$tmp/swap-grow-layout.json"
+  printf '{"version":2,"partitions":[{"number":1,"mode":"remaining"}],"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"allocateToRemaining","volumes":[{"uuid":"lv-root","mode":"original"},%s]}]}\n' "$swap_layout" >"$tmp/swap-grow-layout.json"
   jq() { rootpxe_test_real_jq "$@"; }
   rootpxe_validate_lvm_deployment_layout "$tmp/swap-grow-schema.json" "$tmp/swap-grow-layout.json" "$tmp/swap-grow-partitions.json" || fail "swap-grow-layout-$swap_mode"
   rootpxe_test_real_jq -e '.volumes[] | select(.uuid == "lv-swap") | (.resolvedBytes >= 33554432 and (.resolvedBytes % 4194304) == 0)' "$rootpxe_resolved_lvm_layout_file" >/dev/null || fail swap-grow-resolved-bytes
   rm -f "$rootpxe_resolved_lvm_layout_file"; unset rootpxe_resolved_lvm_layout_file
   unset -f jq
 done
-printf '%s\n' '{"version":2,"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"allocateToRemaining","volumes":[{"uuid":"lv-root","mode":"original"},{"uuid":"lv-swap","mode":"fixed","fixedBytes":29360128}]}]}' >"$tmp/swap-grow-layout.json"
+printf '%s\n' '{"version":2,"partitions":[{"number":1,"mode":"remaining"}],"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"allocateToRemaining","volumes":[{"uuid":"lv-root","mode":"original"},{"uuid":"lv-swap","mode":"percentage","percentage":25}]}]}' >"$tmp/swap-grow-layout.json"
+jq() { rootpxe_test_real_jq "$@"; }
+rootpxe_validate_lvm_deployment_layout "$tmp/swap-grow-schema.json" "$tmp/swap-grow-layout.json" "$tmp/swap-grow-partitions.json" && fail lvm-percentage-must-reject
+unset -f jq
+printf '%s\n' '{"version":2,"partitions":[{"number":1,"mode":"original"}],"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"allocateToRemaining","volumes":[{"uuid":"lv-root","mode":"fixed","fixedBytes":71303168},{"uuid":"lv-swap","mode":"original"}]}]}' >"$tmp/swap-grow-layout.json"
+jq() { rootpxe_test_real_jq "$@"; }
+rootpxe_validate_lvm_deployment_layout "$tmp/swap-grow-schema.json" "$tmp/swap-grow-layout.json" "$tmp/swap-grow-partitions.json" && fail lvm-original-pv-must-not-allow-lv-growth
+unset -f jq
+printf '%s\n' '{"version":2,"partitions":[{"number":1,"mode":"fixed","fixedBytes":268435456}],"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"preserveOriginal","volumes":[{"uuid":"lv-root","mode":"original"},{"uuid":"lv-swap","mode":"original"}]}]}' >"$tmp/swap-grow-layout.json"
+jq() { rootpxe_test_real_jq "$@"; }
+rootpxe_validate_lvm_deployment_layout "$tmp/swap-grow-schema.json" "$tmp/swap-grow-layout.json" "$tmp/swap-grow-partitions.json" && fail lvm-pv-fixed-must-reject
+unset -f jq
+printf '%s\n' '{"version":2,"partitions":[{"number":1,"mode":"remaining"}],"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"allocateToRemaining","volumes":[{"uuid":"lv-root","mode":"original"},{"uuid":"lv-swap","mode":"fixed","fixedBytes":29360128}]}]}' >"$tmp/swap-grow-layout.json"
 jq() { rootpxe_test_real_jq "$@"; }
 rootpxe_validate_lvm_deployment_layout "$tmp/swap-grow-schema.json" "$tmp/swap-grow-layout.json" "$tmp/swap-grow-partitions.json" && fail swap-grow-must-not-shrink
-printf '%s\n' '{"version":2,"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"allocateToRemaining","volumes":[{"uuid":"lv-root","mode":"remaining"},{"uuid":"lv-swap","mode":"remaining"}]}]}' >"$tmp/swap-grow-layout.json"
+printf '%s\n' '{"version":2,"partitions":[{"number":1,"mode":"remaining"}],"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"allocateToRemaining","volumes":[{"uuid":"lv-root","mode":"remaining"},{"uuid":"lv-swap","mode":"remaining"}]}]}' >"$tmp/swap-grow-layout.json"
 rootpxe_validate_lvm_deployment_layout "$tmp/swap-grow-schema.json" "$tmp/swap-grow-layout.json" "$tmp/swap-grow-partitions.json" && fail swap-grow-multiple-remaining-must-fail
 unset -f jq
 sed 's/"fs":"ext4","role":"data","resizable":true/"fs":"ext4","role":"swap","resizable":true/' "$tmp/swap-grow-schema.json" >"$tmp/lvm-role-swap-schema.json"
-printf '%s\n' '{"version":2,"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"allocateToRemaining","volumes":[{"uuid":"lv-root","mode":"fixed","fixedBytes":71303168},{"uuid":"lv-swap","mode":"original"}]}]}' >"$tmp/lvm-role-swap-layout.json"
+printf '%s\n' '{"version":2,"partitions":[{"number":1,"mode":"remaining"}],"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"allocateToRemaining","volumes":[{"uuid":"lv-root","mode":"fixed","fixedBytes":71303168},{"uuid":"lv-swap","mode":"original"}]}]}' >"$tmp/lvm-role-swap-layout.json"
 jq() { rootpxe_test_real_jq "$@"; }
 rootpxe_validate_lvm_deployment_layout "$tmp/lvm-role-swap-schema.json" "$tmp/lvm-role-swap-layout.json" "$tmp/swap-grow-partitions.json" && fail lvm-role-swap-non-swap-must-be-protected
 unset -f jq

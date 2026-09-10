@@ -98,18 +98,20 @@ utf8_complete "$utf8_bounded" || fail callback-c-locale-invalid-utf8
 [[ $(LC_ALL=C printf '%s' "$utf8_bounded" | wc -c) -le 262144 ]] || fail callback-c-locale-too-large
 [[ $utf8_bounded == *'[TRUNCATED: full diagnostic retained locally]' ]] || fail callback-c-locale-no-marker
 
-# F: only the precise metadata-free MSR and BIOS boot GUID cases may grow.
+# F: metadata-free partitions and FAT variants without an explicit capture
+# capability must never grow.  FAT32 requires both the recorded capability
+# and 512-byte logical sectors.
 schema_msr="$tmp/schema-msr.json"; schema_efi="$tmp/schema-efi.json"; resolved="$tmp/resolved.json"
-printf '%s' '{"partitions":[{"number":1,"originalSectors":100,"fs":"","role":"msr","typeGuid":"e3c9e316-0b5c-4db8-817d-f92df00215ae"}]}' >"$schema_msr"
+printf '%s' '{"partitions":[{"number":1,"originalSectors":100,"fs":"","role":"msr","resizable":false,"typeGuid":"e3c9e316-0b5c-4db8-817d-f92df00215ae"}]}' >"$schema_msr"
 printf '%s' '{"partitions":[{"number":1,"originalSectors":100,"fs":"","role":"efi","typeGuid":"c12a7328-f81f-11d2-ba4b-00a0c93ec93b"}]}' >"$schema_efi"
 printf '%s' '[{"number":1,"resolvedSectors":200}]' >"$resolved"
 command -v jq >/dev/null 2>&1 || fail jq-required
-rootpxe_validate_growth_capability "$schema_msr" "$resolved" || fail msr-growth-rejected
+if rootpxe_validate_growth_capability "$schema_msr" "$resolved"; then fail msr-growth-accepted; fi
 if rootpxe_validate_growth_capability "$schema_efi" "$resolved"; then fail efi-empty-fs-growth-accepted; fi
 schema_fat512="$tmp/schema-fat512.json"; schema_fat4096="$tmp/schema-fat4096.json"; schema_fat_missing_logical="$tmp/schema-fat-missing-logical.json"; resolved_same="$tmp/resolved-same.json"
-printf '%s' '{"logicalSectorBytes":512,"partitions":[{"number":1,"originalSectors":100,"fs":"vfat","role":"efi","typeGuid":""}]}' >"$schema_fat512"
-printf '%s' '{"logicalSectorBytes":4096,"partitions":[{"number":1,"originalSectors":100,"fs":"vfat","role":"efi","typeGuid":""}]}' >"$schema_fat4096"
-printf '%s' '{"partitions":[{"number":1,"originalSectors":100,"fs":"vfat","role":"efi","typeGuid":""}]}' >"$schema_fat_missing_logical"
+printf '%s' '{"logicalSectorBytes":512,"partitions":[{"number":1,"originalSectors":100,"fs":"vfat","fsVariant":"FAT32","resizable":true,"role":"efi","typeGuid":""}]}' >"$schema_fat512"
+printf '%s' '{"logicalSectorBytes":4096,"partitions":[{"number":1,"originalSectors":100,"fs":"vfat","fsVariant":"FAT32","resizable":true,"role":"efi","typeGuid":""}]}' >"$schema_fat4096"
+printf '%s' '{"partitions":[{"number":1,"originalSectors":100,"fs":"vfat","fsVariant":"FAT32","resizable":true,"role":"efi","typeGuid":""}]}' >"$schema_fat_missing_logical"
 printf '%s' '[{"number":1,"resolvedSectors":100}]' >"$resolved_same"
 fsck.fat(){ :; }; pxeosfatgrow(){ :; }
 rootpxe_validate_growth_capability "$schema_fat512" "$resolved" || fail fat-512-growth-rejected

@@ -875,7 +875,7 @@ rootpxe_capture_lvm_volumes() {
     pv_min_bytes="$rootpxe_lvm_pv_bytes"
     lvm_schema_stderr="$stage/d1.lvm.schema.stderr"
     jq -n --arg pv_uuid "$rootpxe_lvm_pv_uuid" --arg vg_uuid "$rootpxe_lvm_vg_uuid" --arg vg_name "$rootpxe_lvm_vg_name" --arg pv_artifact "$pv_artifact" --arg vg_artifact "$vg_artifact" --argjson part "$rootpxe_lvm_pv_number" --argjson pv_bytes "$rootpxe_lvm_pv_bytes" --argjson pv_min "$pv_min_bytes" --argjson pe_start "$rootpxe_lvm_pe_start_bytes" --argjson extent "$rootpxe_lvm_vg_extent_bytes" --argjson free "$rootpxe_lvm_vg_free_bytes" --rawfile lvs "$stage/d1.lvm.capture.tsv" '
-      {version:1,captureMode:"per_lv",resizePolicy:"grow_only",pvs:[{partitionNumber:$part,uuid:$pv_uuid,vgUuid:$vg_uuid,originalBytes:$pv_bytes,minBytes:$pv_min,peStartBytes:$pe_start,artifact:$pv_artifact,vgConfigArtifact:$vg_artifact}],vgs:[{name:$vg_name,uuid:$vg_uuid,extentBytes:$extent,pvPartitionNumbers:[$part],originalFreeBytes:$free,lvs:($lvs|split("\n")|map(select(length>0)|split("|")|{name:.[0],uuid:.[1],layout:"linear",originalBytes:(.[2]|tonumber),minBytes:(.[3]|tonumber),fs:.[4],role:(if .[4]=="swap" then "swap" else "data" end),resizable:(.[4] != "swap"),artifact:.[5],swapUuid:(if .[4]=="swap" then .[6] else "" end)}))}]} ' >"$stage/d1.lvm.schema.json" 2>"$lvm_schema_stderr"
+      {version:1,captureMode:"per_lv",resizePolicy:"grow_only",pvs:[{partitionNumber:$part,uuid:$pv_uuid,vgUuid:$vg_uuid,originalBytes:$pv_bytes,minBytes:$pv_min,peStartBytes:$pe_start,artifact:$pv_artifact,vgConfigArtifact:$vg_artifact}],vgs:[{name:$vg_name,uuid:$vg_uuid,extentBytes:$extent,pvPartitionNumbers:[$part],originalFreeBytes:$free,lvs:($lvs|split("\n")|map(select(length>0)|split("|")|. as $row|{name:$row[0],uuid:$row[1],layout:"linear",originalBytes:($row[2]|tonumber),minBytes:($row[3]|tonumber),fs:$row[4],role:(if $row[4]=="swap" then "swap" else "data" end),resizable:(["ext2","ext3","ext4","xfs"]|index($row[4]) != null),artifact:$row[5],swapUuid:(if $row[4]=="swap" then $row[6] else "" end)}))}]} ' >"$stage/d1.lvm.schema.json" 2>"$lvm_schema_stderr"
     lvm_schema_rc=$?
     if [[ $lvm_schema_rc -ne 0 ]]; then
         cat "$lvm_schema_stderr" >&2
@@ -909,6 +909,35 @@ rootpxe_capture_lvm_volumes() {
     rootpxe_lvm_captured=yes
     export rootpxe_lvm_captured
     rootpxe_partition_progress_item "d1:p${rootpxe_lvm_pv_number}" completed - "LVM 物理卷及逻辑卷抓取完成"
+}
+
+# Capture-time growth facts are deliberately read-only.  The deployment
+# contract uses these facts to decide whether a layout mode may alter a
+# partition; a probe failure is conservative and never fails capture itself.
+rootpxe_capture_partition_growth_facts() {
+    local part="$1" fs="${2,,}" logical_sector="$3" variant="" fat_block_size="" btrfs_show="" devid_count
+    case "$fs" in
+        ext2|ext3|ext4|xfs|ntfs|f2fs|swap)
+            printf 'true|\n'
+            ;;
+        btrfs)
+            command -v btrfs >/dev/null 2>&1 || { printf 'false|\n'; return 0; }
+            btrfs_show=$(btrfs filesystem show --raw "$part" 2>/dev/null) || { printf 'false|\n'; return 0; }
+            devid_count=$(awk '/^[[:space:]]*Total devices[[:space:]]+1([[:space:]]|$)/ { single=1 } /^[[:space:]]*devid[[:space:]]+[0-9]+[[:space:]]/ { count++; if ($2 != 1) invalid=1 } tolower($0) ~ /(^|[[:space:]])missing([[:space:]]|$)/ { missing=1 } END { if (single && count == 1 && !invalid && !missing) print count }' <<<"$btrfs_show")
+            [[ $devid_count == 1 ]] && printf 'true|\n' || printf 'false|\n'
+            ;;
+        vfat|fat)
+            if ! variant=$(blkid -p -s VERSION -o value "$part" 2>/dev/null); then variant=""; fi
+            variant=${variant//$'\r'/}; variant=${variant//$'\n'/}
+            case "$variant" in FAT12|FAT16|FAT32) ;; *) variant="" ;; esac
+            if ! fat_block_size=$(blkid -p -s BLOCK_SIZE -o value "$part" 2>/dev/null); then fat_block_size=""; fi
+            fat_block_size=${fat_block_size//$'\r'/}; fat_block_size=${fat_block_size//$'\n'/}
+            [[ $variant == FAT32 && $logical_sector == 512 && $fat_block_size == 512 ]] && printf 'true|%s\n' "$variant" || printf 'false|%s\n' "$variant"
+            ;;
+        *)
+            printf 'false|\n'
+            ;;
+    esac
 }
 
 # Captured n-type images carry a compact, canonical partition fact record.
@@ -981,7 +1010,7 @@ rootpxe_build_original_schema() {
     # it as v1 would lose the LVM contract at task snapshot creation.
     [[ -n $lvm_fragment ]] && schema_version=2
     while IFS=$'\t' read -r part_number part_start part_size part_type part_label artifact flags part_kind parent_number; do
-        local part_path fs uuid partuuid
+        local part_path fs uuid partuuid resizable fs_variant growth_facts
         [[ $artifact == - ]] && artifact=""
         [[ $flags == - ]] && flags=""
         [[ $parent_number == - ]] && parent_number=""
@@ -1002,14 +1031,18 @@ rootpxe_build_original_schema() {
         # and does not create d1pN.img. It is a protected fact, not a missing
         # payload error.
         [[ $is_lvm_pv == yes || $fs == swap || -f $artifact || -f "${artifact}.000" ]] || { rm -f "$parts_file" "$facts_file"; return 1; }
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$part_number" "$fs" "$uuid" "$partuuid" "$flags" "$part_kind" "$parent_number" >>"$facts_file"
+        growth_facts=$(rootpxe_capture_partition_growth_facts "$part_path" "$fs" "$logical")
+        IFS='|' read -r resizable fs_variant <<<"$growth_facts"
+        [[ $resizable == true ]] || resizable=false
+        [[ $fs_variant != *$'\t'* ]] || { rm -f "$parts_file" "$facts_file"; return 1; }
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$part_number" "$fs" "$uuid" "$partuuid" "$flags" "$part_kind" "$parent_number" "$resizable" "$fs_variant" >>"$facts_file"
     done <"$parts_file"
     rootpxe_original_schema_file=$(mktemp /tmp/rootpxe-original-schema.XXXXXX) || { rm -f "$parts_file" "$facts_file"; return 1; }
     chmod 600 "$rootpxe_original_schema_file"
     jq -n --arg table "$schema_table" \
         --argjson version "$schema_version" --argjson disk "$disk_bytes" --argjson logical "$logical" --argjson physical "$physical" \
         --rawfile rows "$parts_file" --rawfile facts "$facts_file" "${lvm_jq_args[@]}" '
-          def factmap: ($facts | split("\n") | map(select(length>0)|split("\t")|{key:.[0],value:{fs:.[1],uuid:.[2],partuuid:.[3],flags:(.[4]|split(",")|map(select(length>0)))}}) | from_entries);
+          def factmap: ($facts | split("\n") | map(select(length>0)|split("\t")|{key:.[0],value:{fs:.[1],uuid:.[2],partuuid:.[3],flags:(.[4]|split(",")|map(select(length>0))),resizable:((.[7] // "false") == "true"),fsVariant:(.[8] // "")}}) | from_entries);
           def mbrtype($type): ($type|ascii_downcase|sub("^0x";"") | "0x" + .);
           def role($type;$flags;$fs): if $fs == "swap" then "swap"
              elif (($type|ascii_downcase) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" or ($type|ascii_downcase) == "ef" or ($type|ascii_downcase) == "0xef") then "efi"
@@ -1023,10 +1056,10 @@ rootpxe_build_original_schema() {
           (if ($ARGS.named.lvm // "")|length > 0 then ($ARGS.named.lvm|fromjson) else null end) as $lvmdata |
           (factmap) as $facts |
           ($rows|split("\n")|map(select(length>0)|split("\t")|
-            . as $row | ($facts[$row[0]] // {fs:"",uuid:"",partuuid:"",flags:[]}) as $fact |
+            . as $row | ($facts[$row[0]] // {fs:"",uuid:"",partuuid:"",flags:[],resizable:false,fsVariant:""}) as $fact |
             (($row[0]|tonumber)) as $number |
             (if $row[7] == "extended" then "extended_container" elif ($lvmdata != null and ([$lvmdata.pvs[]|select(.partitionNumber == $number)]|length) == 1) then "lvm_pv" else role($row[3];$fact.flags;$fact.fs) end) as $role |
-            {number:$number,startSectors:($row[1]|tonumber),originalSectors:($row[2]|tonumber),minSectors:($row[2]|tonumber),typeGuid:(if $version == 2 and $table == "mbr" then mbrtype($row[3]) else $row[3] end),flags:$fact.flags,role:$role,resizable:(($role == "data" and ($fact.fs|length) > 0) or $role == "lvm_pv"),fs:$fact.fs,uuid:$fact.uuid,partuuid:$fact.partuuid,artifact:(if $role == "swap" or $role == "lvm_pv" or $row[7] == "extended" then "" else ($row[5]|split("/")|last) end),_kind:(if $version == 2 and $row[7] == "" then "primary" else $row[7] end),_parent:($row[8] // "")})) as $base |
+            {number:$number,startSectors:($row[1]|tonumber),originalSectors:($row[2]|tonumber),minSectors:($row[2]|tonumber),typeGuid:(if $version == 2 and $table == "mbr" then mbrtype($row[3]) else $row[3] end),flags:$fact.flags,role:$role,resizable:(if $role == "lvm_pv" then ($lvmdata != null and ([$lvmdata.pvs[]|select(.partitionNumber == $number)]|length) == 1) else $fact.resizable end),fs:$fact.fs,uuid:$fact.uuid,partuuid:$fact.partuuid,artifact:(if $role == "swap" or $role == "lvm_pv" or $row[7] == "extended" then "" else ($row[5]|split("/")|last) end),_kind:(if $version == 2 and $row[7] == "" then "primary" else $row[7] end),_parent:($row[8] // "")} + (if (($fact.fs == "vfat" or $fact.fs == "fat") and $fact.fsVariant != "") then {fsVariant:$fact.fsVariant} else {} end))) as $base |
           (if $version == 2 then
             $base as $all | $base | map(. as $part | . + {
               kind:$part._kind
@@ -1223,10 +1256,25 @@ rootpxe_validate_deployment_layout() {
         --argjson target "$target_sectors" --argjson logical "$schema_logical" '
           def align_up($n;$a): ((($n + $a - 1) / $a)|floor) * $a;
           def align_down($n;$a): (($n / $a)|floor) * $a;
+          def verified_lvm_pv($p;$lvm):
+            $lvm != null and $p.fs == "LVM2_member" and
+            $lvm.version == 1 and $lvm.captureMode == "per_lv" and $lvm.resizePolicy == "grow_only" and
+            ($lvm.pvs|type) == "array" and ($lvm.pvs|length) == 1 and
+            ($lvm.vgs|type) == "array" and ($lvm.vgs|length) == 1 and
+            ([$lvm.pvs[] | select(.partitionNumber == $p.number)] | length) == 1;
+          def physical_growth_supported($p;$logical;$lvm):
+            ($p.fs // "") as $fs |
+            ($p.role // "") as $role |
+            if $p.resizable != true then false
+            elif $role == "lvm_pv" then verified_lvm_pv($p;$lvm)
+            elif $fs == "swap" or ($fs|IN("ext2","ext3","ext4","xfs","ntfs","f2fs","btrfs")) then true
+            elif ($fs|IN("vfat","fat")) and $p.fsVariant == "FAT32" and $logical == 512 then true
+            else false end;
           ($schema[0]) as $s | ($layout[0]) as $l |
           ($s.partitions|sort_by(.number)) as $sp |
           ($l.partitions // $l) as $lp |
           if ($lp|type) != "array" then error("layout partitions missing") else . end |
+          if ([$lp[] | select(has("percentage"))] | length) != 0 then error("percentage mode is retired") else . end |
           if ([ $lp[].number ]|unique|length) != ($lp|length) then error("duplicate layout number") else . end |
           if ([ $sp[].number ]|sort) != ([ $lp[].number ]|sort) then error("layout identity mismatch") else . end |
           ($s.version == 2 and $s.partitionTable == "mbr") as $mbrExtended |
@@ -1235,7 +1283,7 @@ rootpxe_validate_deployment_layout() {
              if ($extendeds|length) != 1 then error("invalid extended container") else . end |
              ($extendeds[0]) as $extended |
              ([$lp[] | select(.number == $extended.number)]) as $extendedLayout |
-             if ($extendedLayout|length) != 1 or $extendedLayout[0].mode != "derived" or ($extendedLayout[0]|has("fixedBytes") or has("percentage")) then error("extended container must be derived") else . end |
+             if ($extendedLayout|length) != 1 or $extendedLayout[0].mode != "derived" or ($extendedLayout[0]|has("fixedBytes")) then error("extended container must be derived") else . end |
              ([$sp[] | select(.kind == "logical")]) as $logicals |
              if ($logicals|length) == 0 or ([ $logicals[] | select(.parentNumber != $extended.number)]|length) != 0 then error("invalid logical parent") else . end |
              ([$sp[] | select(.kind == "primary") | (.startSectors + .originalSectors)]) as $primaryEnds |
@@ -1249,19 +1297,16 @@ rootpxe_validate_deployment_layout() {
           if $available <= 0 then error("target too small") else . end |
           [ $worksp[] as $p | ($lp[]|select(.number == $p.number)) as $o |
             ($o.mode // "original") as $mode |
-            if (($mode|type) != "string" or ($mode|IN("original","fixed","percentage","remaining")|not)) then error("unknown mode") else . end |
-            if $mode == "fixed" and ((($o.fixedBytes // null)|type) != "number" or ($o.fixedBytes <= 0) or ($o|has("percentage"))) then error("invalid fixed mode") else . end |
-            if $mode == "percentage" and ((($o.percentage // null)|type) != "number" or ($o|has("fixedBytes"))) then error("invalid percentage mode") else . end |
-            if ($mode == "original" or $mode == "remaining") and (($o|has("fixedBytes")) or ($o|has("percentage"))) then error("unexpected mode field") else . end |
+            if (($mode|type) != "string" or ($mode|IN("original","fixed","remaining")|not)) then error("unknown mode") else . end |
+            if $mode == "fixed" and ((($o.fixedBytes // null)|type) != "number" or ($o.fixedBytes <= 0)) then error("invalid fixed mode") else . end |
+            if ($mode == "original" or $mode == "remaining") and ($o|has("fixedBytes")) then error("unexpected mode field") else . end |
+            if $p.role == "lvm_pv" and ($mode|IN("original","remaining")|not) then error("invalid lvm pv mode") else . end |
+            if $mode != "original" and (physical_growth_supported($p;$logical;($s.lvm // null))|not) then error("partition growth unsupported") else . end |
             if $mode == "fixed" and $o.fixedBytes < ($p.originalSectors * $logical) then error("original size violated") else . end |
             {p:$p,o:$o,mode:$mode} ] as $items |
           ([ $items[]|select(.mode == "remaining") ]|length) as $remainingCount |
           if $remainingCount > 1 then error("multiple remaining") else . end |
-          ([ $items[] | select(.mode == "percentage") | (.o.percentage // -1) ] | all(. >= 0 and . <= 100)) as $validPct |
-          if $validPct|not then error("invalid percentage") else . end |
-          ([ $items[] | select(.mode == "percentage") | .o.percentage] | add // 0) as $pctSum |
-          if $pctSum > 100 then error("percentage exceeds 100") else . end |
-          ($items | map(if .mode == "original" then .p.originalSectors elif .mode == "fixed" then align_up(((.o.fixedBytes // 0) / $logical|ceil);$alignment) elif .mode == "percentage" then align_down(($available * .o.percentage / 100|floor);$alignment) else 0 end)) as $pre |
+          ($items | map(if .mode == "original" then .p.originalSectors elif .mode == "fixed" then align_up(((.o.fixedBytes // 0) / $logical|ceil);$alignment) else 0 end)) as $pre |
           ($pre|add) as $used |
           if $used > $available then error("target too small") else . end |
           (if $remainingCount == 1 then align_down(($available-$used);$alignment) else 0 end) as $remaining |
@@ -1314,12 +1359,16 @@ rootpxe_validate_lvm_deployment_layout() {
       def modebytes($v;$capacity;$extent):
         if $v.mode == "original" then $v.originalBytes
         elif $v.mode == "fixed" then $v.fixedBytes
-        elif $v.mode == "percentage" then ((($capacity * $v.percentage / 100)|floor / $extent|floor) * $extent)
         else 0 end;
       ($schema[0]) as $s | ($layout[0]) as $l | ($partitions[0]) as $resolved |
       ($s.lvm) as $ls | ($l.lvm // []) as $ll |
       if ($ls.version != 1 or $ls.captureMode != "per_lv" or $ls.resizePolicy != "grow_only" or ($ls.pvs|length)!=1 or ($ls.vgs|length)!=1 or ($ll|length)!=1) then error("invalid lvm topology") else . end |
       ($ls.pvs[0]) as $pv | ($ls.vgs[0]) as $vg | ($ll[0]) as $plan |
+      ($l.partitions // $l) as $physicalLayout |
+      ([$physicalLayout[] | select(.number == $pv.partitionNumber)] | if length == 1 then .[0] else error("lvm pv layout missing") end) as $pvPlan |
+      ($pvPlan.mode // "original") as $pvMode |
+      if ($pvMode|IN("original","remaining")|not) or ($pvMode == "original" and ([$plan.volumes[] | select((.mode // "original") != "original")] | length) != 0) then error("lvm pv and lv mode mismatch") else . end |
+      if ([$plan.volumes[] | select(has("percentage"))] | length) != 0 then error("percentage mode is retired") else . end |
       if ($pv.vgUuid != $vg.uuid or $pv.partitionNumber != $vg.pvPartitionNumbers[0] or $plan.pvPartitionNumber != $pv.partitionNumber or ($plan.freeSpacePolicy|IN("preserveOriginal","allocateToRemaining")|not) or ($plan.volumes|length) != ($vg.lvs|length)) then error("lvm identity mismatch") else . end |
       ([$resolved[] | select(.number == $pv.partitionNumber)]|if length==1 then .[0] else error("resolved pv missing") end) as $resolvedPV |
       ($resolvedPV.resolvedSectors * $s.logicalSectorBytes) as $pvBytes |
@@ -1327,17 +1376,16 @@ rootpxe_validate_lvm_deployment_layout() {
       (((($pvBytes - $pv.peStartBytes - (if $plan.freeSpacePolicy == "preserveOriginal" then $vg.originalFreeBytes else 0 end)) / $vg.extentBytes)|floor) * $vg.extentBytes) as $capacity |
       if $capacity < 0 then error("pv capacity exhausted") else . end |
       [range(0;($vg.lvs|length)) as $i | ($vg.lvs[$i]) as $lv | ($plan.volumes[$i]) as $v |
-        if ($v.uuid != $lv.uuid or ($v.mode|IN("original","fixed","percentage","remaining")|not)) then error("lvm volume identity") else . end |
+        if ($v.uuid != $lv.uuid or ($v.mode|IN("original","fixed","remaining")|not)) then error("lvm volume identity") else . end |
         # Swap has no payload and is recreated after a possible lvextend.  It
         # remains resizable=false in capture metadata, so accept non-original
         # modes only for the exact typed swap schema contract.
         if ($lv.fs == "swap" and ($lv.role != "swap" or $lv.resizable != false or (($lv.artifact // "") != "") or (($lv.swapUuid|type) != "string") or ($lv.swapUuid|length) == 0)) then error("invalid recreated swap volume") else . end |
         if ((($lv.resizable != true) or ($lv.role == "swap")) and (($lv.fs != "swap") or ($lv.role != "swap") or ($lv.resizable != false) or (($lv.artifact // "") != "") or (($lv.swapUuid|type) != "string") or (($lv.swapUuid|length) == 0)) and $v.mode != "original") then error("protected lvm volume") else . end |
-        if $v.mode == "fixed" and (($v.fixedBytes|type)!="number" or $v.fixedBytes < $lv.minBytes or ($v.fixedBytes % $vg.extentBytes)!=0 or ($v|has("percentage"))) then error("invalid fixed lvm volume") else . end |
-        if $v.mode == "percentage" and (($v.percentage|type)!="number" or $v.percentage < 1 or $v.percentage > 100 or ($v|has("fixedBytes"))) then error("invalid percentage lvm volume") else . end |
-        if ($v.mode == "original" or $v.mode == "remaining") and (($v|has("fixedBytes")) or ($v|has("percentage"))) then error("unexpected lvm fields") else . end |
+        if $v.mode == "fixed" and (($v.fixedBytes|type)!="number" or $v.fixedBytes < $lv.minBytes or ($v.fixedBytes % $vg.extentBytes)!=0) then error("invalid fixed lvm volume") else . end |
+        if ($v.mode == "original" or $v.mode == "remaining") and ($v|has("fixedBytes")) then error("unexpected lvm fields") else . end |
         {schema:$lv,layout:$v}] as $items |
-      if ([$items[].layout|select(.mode=="remaining")]|length)>1 or ([$items[].layout|select(.mode=="percentage")|.percentage]|add//0)>100 then error("lvm mode totals") else . end |
+      if ([$items[].layout|select(.mode=="remaining")]|length)>1 then error("lvm mode totals") else . end |
       ($items | map(. + {bytes:modebytes((.schema + .layout);$capacity;$vg.extentBytes)})) as $pre |
       ($pre|map(.bytes)|add) as $used |
       if $used > $capacity then error("lvm capacity exceeded") else . end |
@@ -5613,7 +5661,7 @@ savePartition() {
             rootpxe_lvm_is_pv_partition "$part" || handleError "Unsupported LVM PV topology. (${FUNCNAME[0]})"
             rootpxe_capture_lvm_volumes "$imagePath" || handleError "PXEOS_STAGE=capture CODE=${rootpxe_lvm_capture_error_code:-LVM_CAPTURE_FAILED} REASON=${rootpxe_lvm_capture_error_reason:-unknown}"
             # LVM reports the PV container and each LV itself with metadata-only
-            # percentages. Do not fall through to the generic payload 100%.
+            # progress. Do not fall through to the generic payload 100%.
             return 0
             ;;
         swap)
@@ -6009,7 +6057,7 @@ rootpxe_expansion_partition_is_listed() {
 # after imaging it.  Run this from the authenticated resolved layout before
 # requesting a destructive disk permit.
 rootpxe_validate_growth_capability() {
-    local schema_file="$1" resolved_file="$2" rows row number fs role type_guid logical_sector
+    local schema_file="$1" resolved_file="$2" rows row number fs role logical_sector resizable fs_variant verified_lvm
     [[ -r $schema_file && -r $resolved_file ]] || return 1
     command -v jq >/dev/null 2>&1 || return 1
     rows=$(jq -r --slurpfile resolved "$resolved_file" '
@@ -6018,17 +6066,21 @@ rootpxe_validate_growth_capability() {
         .partitions[] as $source |
         ($resolved[] | select(.number == $source.number)) as $actual |
         select($actual.resolvedSectors > $source.originalSectors) |
-        {number:$source.number,fs:($source.fs // ""),role:($source.role // ""),typeGuid:(($source.typeGuid // "")|ascii_downcase),logicalSectorBytes:($schema.logicalSectorBytes // null)} | @json
+        (($schema.lvm // null) as $lvm |
+         {number:$source.number,fs:($source.fs // ""),role:($source.role // ""),resizable:($source.resizable == true),fsVariant:($source.fsVariant // ""),verifiedLvm:(($source.role == "lvm_pv") and ($source.fs == "LVM2_member") and ($lvm != null) and ($lvm.version == 1) and ($lvm.captureMode == "per_lv") and ($lvm.resizePolicy == "grow_only") and (($lvm.pvs|type) == "array") and (($lvm.pvs|length) == 1) and (($lvm.vgs|type) == "array") and (($lvm.vgs|length) == 1) and ([$lvm.pvs[] | select(.partitionNumber == $source.number)] | length) == 1),logicalSectorBytes:($schema.logicalSectorBytes // null)}) | @json
     ' "$schema_file") || return 1
     while IFS= read -r row; do
         [[ -n $row ]] || continue
         number=$(jq -er '.number | if type == "number" and . >= 1 and floor == . then tostring else error("number") end' <<<"$row") || return 1
         fs=$(jq -er '.fs | strings' <<<"$row") || return 1
         role=$(jq -er '.role | strings' <<<"$row") || return 1
-        type_guid=$(jq -er '.typeGuid | strings' <<<"$row") || return 1
+        resizable=$(jq -r '.resizable == true' <<<"$row") || return 1
+        fs_variant=$(jq -r '.fsVariant | strings' <<<"$row") || return 1
+        verified_lvm=$(jq -r '.verifiedLvm == true' <<<"$row") || return 1
         logical_sector=$(jq -r '.logicalSectorBytes | if type == "number" and floor == . and . > 0 then tostring else "" end' <<<"$row") || return 1
         [[ -n $number ]] || continue
-        case "$fs:$role:$type_guid" in
+        [[ $resizable == true ]] || return 1
+        case "$fs:$role" in
             ext2:*|ext3:*|ext4:*) command -v resize2fs >/dev/null 2>&1 && command -v e2fsck >/dev/null 2>&1 || return 1 ;;
             ntfs:*) command -v ntfsresize >/dev/null 2>&1 || return 1 ;;
             btrfs:*) command -v btrfs >/dev/null 2>&1 || return 1 ;;
@@ -6037,10 +6089,10 @@ rootpxe_validate_growth_capability() {
             # sectors.  This is a source-schema capability gate before the
             # permit; the post-restore FAT diagnostic remains authoritative
             # for BPB and filesystem consistency.
-            vfat:*|fat:*) [[ $logical_sector == 512 ]] && command -v fsck.fat >/dev/null 2>&1 && command -v pxeosfatgrow >/dev/null 2>&1 || return 1 ;;
+            vfat:*|fat:*) [[ $fs_variant == FAT32 && $logical_sector == 512 ]] && command -v fsck.fat >/dev/null 2>&1 && command -v pxeosfatgrow >/dev/null 2>&1 || return 1 ;;
             xfs:*) command -v xfs_growfs >/dev/null 2>&1 || return 1 ;;
-            swap:*|*:swap:*|LVM2_member:*|*:lvm_pv:*) : ;;
-            :msr:e3c9e316-0b5c-4db8-817d-f92df00215ae|:boot:21686148-6449-6e6f-744e-656564454649) : ;;
+            swap:*) : ;;
+            LVM2_member:lvm_pv) [[ $verified_lvm == true ]] || return 1 ;;
             *) return 1 ;;
         esac
     done <<<"$rows"
