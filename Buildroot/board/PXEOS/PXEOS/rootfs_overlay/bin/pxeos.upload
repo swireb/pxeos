@@ -102,9 +102,8 @@ rootpxe_capture_single_disk() {
     [[ ${#parts} -gt 0 ]] || handleError "No partitions found ($0)\n   Args Passed: $*"
     rootpxe_partition_progress_plan_disk "$hd" 1 || handleError "PXEOS_STAGE=capture CODE=LVM_PROGRESS_PLAN_FAILED REASON=complete_lv_filesystem_facts_required"
 
-    dots "Saving original partition table"
+    rootpxe_console_message INFO 'Saving original partition table.'
     savePartitionTablesAndBootLoaders "$hd" 1 "$imagePath" "$osid" "$imgPartitionType"
-    echo "Done"
     debugPause
 
     rootpxe_console_message INFO "Processing disk device: $hd."

@@ -889,6 +889,32 @@ pass 'extfs preflight only accepts a clean recheck after journal recovery'
  ! grep -Fq 'rootpxe_capture_recovery' "$upload" || fail 'n capture must not include source recovery helpers'
 pass 'n capture preserves the source layout and only writes d1.partitions'
 
+# The outer capture phase and its GPT table-save substep both emit status.
+# `dots` deliberately leaves its result on the current line, so a nested dots
+# call must first terminate the outer phase rather than concatenating both
+# labels and then printing two independent Done results.
+capture_console=$(
+    rootpxe_verify_disk_permit_binding() { :; }
+    runPartprobe() { :; }
+    getPartitions() { parts=/dev/mockp1; }
+    rootpxe_partition_progress_plan_disk() { :; }
+    isBitlockedPartition() { :; }
+    savePartition() { :; }
+    dots() { printf '[INFO]  %s' "$*"; }
+    rootpxe_console_message() { printf '[%s]  %s\n' "$1" "$2"; }
+    savePartitionTablesAndBootLoaders() { dots 'Saving Partition Tables (GPT)'; echo 'Done'; }
+    debugPause() { :; }
+    eval "$n_capture"
+    hd=/dev/mock imagePath=/tmp/mock-image osid=50 imgPartitionType=all
+    rootpxe_capture_single_disk
+)
+mapfile -t capture_console_lines <<<"$capture_console"
+[[ ${#capture_console_lines[@]} -eq 3 ]] || fail 'partition table capture status was concatenated or completed twice'
+[[ ${capture_console_lines[0]} == '[INFO]  Saving original partition table.' ]] || fail 'outer partition table status must occupy its own line'
+[[ ${capture_console_lines[1]} == '[INFO]  Saving Partition Tables (GPT)Done' ]] || fail 'nested GPT status must own the only inline completion result'
+[[ ${capture_console_lines[2]} == '[INFO]  Processing disk device: /dev/mock.' ]] || fail 'partition table completion must not offset the next capture status'
+pass 'partition table capture status lines do not nest dots'
+
 # Type/scope/format/LVM cross-contract: fixed image types may select a
 # partition subset, while n/dd are always all-disk scopes; Partimage is never
 # a new capture writer and fixed LVM raw capture is rejected before permit.
