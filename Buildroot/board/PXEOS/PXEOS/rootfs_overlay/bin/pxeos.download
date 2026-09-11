@@ -194,7 +194,7 @@ fi
 if [[ ${imgType:-} == [Nn] ]]; then
     rootpxe_require_single_disk_layout_metadata "$sector_metadata" "${originalSchemaFile:-}" "${deploymentLayoutFile:-}" || handleError "PXEOS_STAGE=layout_validation CODE=N_LAYOUT_METADATA_MISSING REASON=${rootpxe_layout_metadata_reason:-unknown}"
 rootpxe_validate_deployment_layout "$hd" "$originalSchemaFile" "$deploymentLayoutFile" || handleError "PXEOS_STAGE=layout_validation CODE=INVALID_DEPLOYMENT_LAYOUT REASON=pre_permit_validation_failed"
-rootpxe_validate_growth_capability "$originalSchemaFile" "$rootpxe_resolved_layout_file" || handleError "PXEOS_STAGE=layout_validation CODE=UNSUPPORTED_FILESYSTEM_GROWTH REASON=validated_layout_requires_unsupported_growth"
+rootpxe_validate_growth_capability "$originalSchemaFile" "$rootpxe_resolved_layout_file" "$imagePath" || handleError "PXEOS_STAGE=layout_validation CODE=UNSUPPORTED_FILESYSTEM_GROWTH REASON=validated_layout_requires_unsupported_growth"
 fi
 rootpxe_validate_restore_artifacts "$imagePath" "$imgType" "$imgPartitionType" "${originalSchemaFile:-}" || handleError "PXEOS_STAGE=restore_preflight CODE=REQUIRED_ARTIFACT_MISSING REASON=target_write_not_started"
 if [[ ${imgType:-} == mpa ]]; then

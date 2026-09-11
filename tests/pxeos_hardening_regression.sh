@@ -120,6 +120,49 @@ if rootpxe_validate_growth_capability "$schema_fat_missing_logical" "$resolved";
 unset -f fsck.fat pxeosfatgrow
 rootpxe_validate_growth_capability "$schema_fat4096" "$resolved_same" || fail fat-same-size-rejected
 
+# Legacy physical swap did not carry resizable=true, but only the exact
+# captured swap schema may grow and it must still have a usable UUID record
+# before the disk permit is requested.
+schema_swap="$tmp/schema-swap.json"; swap_image="$tmp/swap-image"; mkdir -p "$swap_image"
+printf '%s' '{"partitions":[{"number":1,"originalSectors":100,"fs":"swap","role":"swap","resizable":false,"uuid":"legacy-swap-uuid"}]}' >"$schema_swap"
+mkswap(){ :; }
+printf '%s\n' 'a1 legacy-swap-uuid' >"$swap_image/d1.original.swapuuids"
+rootpxe_validate_growth_capability "$schema_swap" "$resolved" "$swap_image" || fail legacy-physical-swap-growth-rejected
+unset -f mkswap
+command(){
+  [[ $1 == -v && $2 == mkswap ]] && return 1
+  builtin command "$@"
+}
+if rootpxe_validate_growth_capability "$schema_swap" "$resolved" "$swap_image"; then fail legacy-physical-swap-mkswap-missing-accepted; fi
+unset -f command
+mkswap(){ :; }
+for swap_case in missing mismatch duplicate; do
+  case $swap_case in
+    missing) rm -f "$swap_image/d1.original.swapuuids" ;;
+    mismatch) printf '%s\n' '1 different-uuid' >"$swap_image/d1.original.swapuuids" ;;
+    duplicate) printf '%s\n%s\n' '1 legacy-swap-uuid' 'a1 legacy-swap-uuid' >"$swap_image/d1.original.swapuuids" ;;
+  esac
+  if rootpxe_validate_growth_capability "$schema_swap" "$resolved" "$swap_image"; then fail "legacy-physical-swap-$swap_case-accepted"; fi
+done
+for invalid_swap_schema in \
+  '{"partitions":[{"number":1,"originalSectors":100,"fs":"swap","role":"data","resizable":true,"uuid":"legacy-swap-uuid"}]}' \
+  '{"partitions":[{"number":1,"originalSectors":100,"fs":"ext4","role":"swap","resizable":true,"uuid":"legacy-swap-uuid"}]}' \
+  '{"partitions":[{"number":1,"originalSectors":100,"fs":"swap","role":"swap","resizable":true,"uuid":"","artifact":""}]}' \
+  '{"partitions":[{"number":1,"originalSectors":100,"fs":"swap","role":"swap","resizable":true,"uuid":"   ","artifact":""}]}' \
+  '{"partitions":[{"number":1,"originalSectors":100,"fs":"swap","role":"swap","resizable":true,"uuid":"legacy-swap-uuid","artifact":"swap.img"}]}' \
+  '{"partitions":[{"number":1,"kind":"extended","originalSectors":100,"fs":"swap","role":"swap","resizable":true,"uuid":"legacy-swap-uuid"}]}'
+do
+  printf '%s' "$invalid_swap_schema" >"$schema_swap"
+  printf '%s\n' '1 legacy-swap-uuid' >"$swap_image/d1.original.swapuuids"
+  if rootpxe_validate_growth_capability "$schema_swap" "$resolved" "$swap_image"; then fail legacy-physical-swap-invalid-schema-accepted; fi
+done
+unset -f mkswap
+schema_ext_without_uuid="$tmp/schema-ext-without-uuid.json"
+printf '%s' '{"partitions":[{"number":1,"originalSectors":100,"fs":"ext4","role":"data","resizable":true}]}' >"$schema_ext_without_uuid"
+resize2fs(){ :; }; e2fsck(){ :; }
+rootpxe_validate_growth_capability "$schema_ext_without_uuid" "$resolved" || fail non-swap-growth-must-not-require-uuid
+unset -f resize2fs e2fsck
+
 # Integration names: capture resume and full restore preflight are exercised
 # by their dedicated capture/partition suites; keep this test tied to them.
 must_have "$restore_preflight" 'rootpxe_validate_restore_artifacts'

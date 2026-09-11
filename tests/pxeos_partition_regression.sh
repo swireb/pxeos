@@ -1021,6 +1021,59 @@ EOF
     fail "imgcomplete-$image_type-fixed-schema"
   fi
 done
+# Resolver coverage for the same GPT v2 physical-swap contract used by the
+# management API: old resizable=false and new resizable=true records may grow
+# only with the explicit no-payload UUID shape.
+cat >"$tmp/physical-swap-schema.json" <<'EOF'
+{"version":2,"partitionTable":"gpt","originalDiskBytes":4194304,"logicalSectorBytes":512,"physicalSectorBytes":512,"minDeployBytes":4194304,"partitions":[{"number":1,"kind":"primary","startSectors":2048,"originalSectors":2048,"minSectors":2048,"fs":"swap","role":"swap","resizable":false,"uuid":"legacy-swap-uuid"},{"number":2,"kind":"primary","startSectors":4096,"originalSectors":2048,"minSectors":2048,"fs":"ext4","role":"data","resizable":true,"artifact":"d1p2.img"}]}
+EOF
+for swap_case in legacy_fixed new_remaining; do
+  case $swap_case in
+    legacy_fixed)
+      cp "$tmp/physical-swap-schema.json" "$tmp/physical-swap-case.json"
+      printf '{"schemaHash":"%s","partitions":[{"number":1,"mode":"fixed","fixedBytes":2097152},{"number":2,"mode":"original"}]}' "$(rootpxe_canonical_json_hash "$tmp/physical-swap-case.json")" >"$tmp/physical-swap-layout.json"
+      ;;
+    new_remaining)
+      jq '(.partitions[] | select(.number == 1)) |= . + {resizable:true,artifact:""}' "$tmp/physical-swap-schema.json" >"$tmp/physical-swap-case.json"
+      printf '{"schemaHash":"%s","partitions":[{"number":1,"mode":"remaining"},{"number":2,"mode":"original"}]}' "$(rootpxe_canonical_json_hash "$tmp/physical-swap-case.json")" >"$tmp/physical-swap-layout.json"
+      ;;
+  esac
+  schemaRevision=1; schemaHash=$(rootpxe_canonical_json_hash "$tmp/physical-swap-case.json")
+  rootpxe_validate_deployment_layout /dev/nvme0n1 "$tmp/physical-swap-case.json" "$tmp/physical-swap-layout.json" || fail "physical-swap-$swap_case-resolver-rejected"
+  jq -e '.[] | select(.number == 1) | .resolvedSectors > 2048' "$rootpxe_resolved_layout_file" >/dev/null || fail "physical-swap-$swap_case-resolver-did-not-grow"
+  rm -f "$rootpxe_resolved_layout_file"; unset rootpxe_resolved_layout_file schemaRevision schemaHash
+done
+for invalid_swap_case in wrong_role wrong_fs missing_uuid whitespace_uuid artifact extended; do
+  case $invalid_swap_case in
+    wrong_role) jq '(.partitions[] | select(.number == 1)) |= . + {resizable:true,role:"data"}' "$tmp/physical-swap-schema.json" >"$tmp/physical-swap-case.json" ;;
+    wrong_fs) jq '(.partitions[] | select(.number == 1)) |= . + {resizable:true,fs:"ext4"}' "$tmp/physical-swap-schema.json" >"$tmp/physical-swap-case.json" ;;
+    missing_uuid) jq 'del(.partitions[] | select(.number == 1).uuid)' "$tmp/physical-swap-schema.json" >"$tmp/physical-swap-case.json" ;;
+    whitespace_uuid) jq '(.partitions[] | select(.number == 1)).uuid = "   "' "$tmp/physical-swap-schema.json" >"$tmp/physical-swap-case.json" ;;
+    artifact) jq '(.partitions[] | select(.number == 1)).artifact = "swap.img"' "$tmp/physical-swap-schema.json" >"$tmp/physical-swap-case.json" ;;
+    extended) jq '(.partitions[] | select(.number == 1)).kind = "extended"' "$tmp/physical-swap-schema.json" >"$tmp/physical-swap-case.json" ;;
+  esac
+  schemaRevision=1; schemaHash=$(rootpxe_canonical_json_hash "$tmp/physical-swap-case.json")
+  printf '{"schemaHash":"%s","partitions":[{"number":1,"mode":"fixed","fixedBytes":2097152},{"number":2,"mode":"original"}]}' "$schemaHash" >"$tmp/physical-swap-layout.json"
+  rootpxe_validate_deployment_layout /dev/nvme0n1 "$tmp/physical-swap-case.json" "$tmp/physical-swap-layout.json" && fail "physical-swap-$invalid_swap_case-resolver-accepted"
+  rm -f "${rootpxe_resolved_layout_file:-}"; unset rootpxe_resolved_layout_file schemaRevision schemaHash
+done
+
+# Exercise the existing physical-swap recreation path with command mocks only:
+# an a-prefixed capture record must reach mkswap with its original UUID.
+swap_recreate_image="$tmp/physical-swap-recreate"; mkdir -p "$swap_recreate_image"
+printf '%s\n' 'a1 legacy-swap-uuid' >"$swap_recreate_image/d1.original.swapuuids"
+swap_recreate_trace="$tmp/physical-swap-recreate.trace"
+getPartitions(){ parts='/dev/mockdiskp1'; }
+getPartitionNumber(){ part_number=1; }
+getDiskFromPartition(){ disk=/dev/mockdisk; }
+hasGPT(){ hasgpt=1; }
+dots(){ :; }
+debugPause(){ :; }
+runPartprobe(){ :; }
+rootpxe_partition_progress_item(){ :; }
+mkswap(){ printf '%s\n' "$*" >"$swap_recreate_trace"; }
+makeAllSwapSystems /dev/mockdisk 1 "$swap_recreate_image" all || fail physical-swap-recreate
+grep -Fqx -- '-U legacy-swap-uuid /dev/mockdiskp1' "$swap_recreate_trace" || fail physical-swap-recreate-must-preserve-uuid
 echo 'PASS: PXEOS partition inventory regression'
 )
 # ===== 原脚本结束：tests/pxeos_partition_inventory_regression.sh =====

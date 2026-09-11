@@ -1265,9 +1265,13 @@ rootpxe_validate_deployment_layout() {
           def physical_growth_supported($p;$logical;$lvm):
             ($p.fs // "") as $fs |
             ($p.role // "") as $role |
-            if $p.resizable != true then false
+            if (($p.kind // "") != "extended" and $p.fs == "swap" and $p.role == "swap"
+                and (($p | has("artifact") | not) or $p.artifact == "")
+                and (($p.uuid|type) == "string") and (($p.uuid | gsub("[[:space:]]"; "") | length) > 0)) then true
+            elif $p.fs == "swap" or $p.role == "swap" then false
+            elif $p.resizable != true then false
             elif $role == "lvm_pv" then verified_lvm_pv($p;$lvm)
-            elif $fs == "swap" or ($fs|IN("ext2","ext3","ext4","xfs","ntfs","f2fs","btrfs")) then true
+            elif ($fs|IN("ext2","ext3","ext4","xfs","ntfs","f2fs","btrfs")) then true
             elif ($fs|IN("vfat","fat")) and $p.fsVariant == "FAT32" and $logical == 512 then true
             else false end;
           ($schema[0]) as $s | ($layout[0]) as $l |
@@ -6057,7 +6061,7 @@ rootpxe_expansion_partition_is_listed() {
 # after imaging it.  Run this from the authenticated resolved layout before
 # requesting a destructive disk permit.
 rootpxe_validate_growth_capability() {
-    local schema_file="$1" resolved_file="$2" rows row number fs role logical_sector resizable fs_variant verified_lvm
+    local schema_file="$1" resolved_file="$2" image_path="${3:-}" rows row number fs role uuid recreated_swap logical_sector resizable fs_variant verified_lvm swap_uuid_file recorded_swap_uuid record_count
     [[ -r $schema_file && -r $resolved_file ]] || return 1
     command -v jq >/dev/null 2>&1 || return 1
     rows=$(jq -r --slurpfile resolved "$resolved_file" '
@@ -6067,7 +6071,7 @@ rootpxe_validate_growth_capability() {
         ($resolved[] | select(.number == $source.number)) as $actual |
         select($actual.resolvedSectors > $source.originalSectors) |
         (($schema.lvm // null) as $lvm |
-         {number:$source.number,fs:($source.fs // ""),role:($source.role // ""),resizable:($source.resizable == true),fsVariant:($source.fsVariant // ""),verifiedLvm:(($source.role == "lvm_pv") and ($source.fs == "LVM2_member") and ($lvm != null) and ($lvm.version == 1) and ($lvm.captureMode == "per_lv") and ($lvm.resizePolicy == "grow_only") and (($lvm.pvs|type) == "array") and (($lvm.pvs|length) == 1) and (($lvm.vgs|type) == "array") and (($lvm.vgs|length) == 1) and ([$lvm.pvs[] | select(.partitionNumber == $source.number)] | length) == 1),logicalSectorBytes:($schema.logicalSectorBytes // null)}) | @json
+         {number:$source.number,fs:($source.fs // ""),role:($source.role // ""),uuid:($source.uuid // null),recreatedSwap:((($source.kind // "") != "extended") and ($source.fs == "swap") and ($source.role == "swap") and ((($source | has("artifact")) | not) or $source.artifact == "") and (($source.uuid|type) == "string") and (($source.uuid | gsub("[[:space:]]"; "") | length) > 0)),resizable:($source.resizable == true),fsVariant:($source.fsVariant // ""),verifiedLvm:(($source.role == "lvm_pv") and ($source.fs == "LVM2_member") and ($lvm != null) and ($lvm.version == 1) and ($lvm.captureMode == "per_lv") and ($lvm.resizePolicy == "grow_only") and (($lvm.pvs|type) == "array") and (($lvm.pvs|length) == 1) and (($lvm.vgs|type) == "array") and (($lvm.vgs|length) == 1) and ([$lvm.pvs[] | select(.partitionNumber == $source.number)] | length) == 1),logicalSectorBytes:($schema.logicalSectorBytes // null)}) | @json
     ' "$schema_file") || return 1
     while IFS= read -r row; do
         [[ -n $row ]] || continue
@@ -6079,6 +6083,20 @@ rootpxe_validate_growth_capability() {
         verified_lvm=$(jq -r '.verifiedLvm == true' <<<"$row") || return 1
         logical_sector=$(jq -r '.logicalSectorBytes | if type == "number" and floor == . and . > 0 then tostring else "" end' <<<"$row") || return 1
         [[ -n $number ]] || continue
+        if [[ $fs == swap || $role == swap ]]; then
+            recreated_swap=$(jq -r '.recreatedSwap == true' <<<"$row") || return 1
+            [[ $recreated_swap == true ]] || return 1
+            uuid=$(jq -er '.uuid | strings' <<<"$row") || return 1
+            command -v mkswap >/dev/null 2>&1 || return 1
+            [[ -n $image_path ]] || return 1
+            swap_uuid_file="$image_path/d1.original.swapuuids"
+            [[ -r $swap_uuid_file ]] || return 1
+            record_count=$(awk -v number="$number" '$1 == number || $1 == "a" number { count++ } END { print count + 0 }' "$swap_uuid_file") || return 1
+            [[ $record_count == 1 ]] || return 1
+            recorded_swap_uuid=$(awk -v number="$number" '$1 == number || $1 == "a" number { print $2; exit }' "$swap_uuid_file") || return 1
+            [[ $recorded_swap_uuid == "$uuid" ]] || return 1
+            continue
+        fi
         [[ $resizable == true ]] || return 1
         case "$fs:$role" in
             ext2:*|ext3:*|ext4:*) command -v resize2fs >/dev/null 2>&1 && command -v e2fsck >/dev/null 2>&1 || return 1 ;;
@@ -6091,7 +6109,6 @@ rootpxe_validate_growth_capability() {
             # for BPB and filesystem consistency.
             vfat:*|fat:*) [[ $fs_variant == FAT32 && $logical_sector == 512 ]] && command -v fsck.fat >/dev/null 2>&1 && command -v pxeosfatgrow >/dev/null 2>&1 || return 1 ;;
             xfs:*) command -v xfs_growfs >/dev/null 2>&1 || return 1 ;;
-            swap:*) : ;;
             LVM2_member:lvm_pv) [[ $verified_lvm == true ]] || return 1 ;;
             *) return 1 ;;
         esac
