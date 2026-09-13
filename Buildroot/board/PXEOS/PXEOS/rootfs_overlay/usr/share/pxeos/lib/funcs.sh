@@ -15,9 +15,7 @@ rootpxe_progress_lib=/usr/share/pxeos/lib/partclone-progress.sh
 . "$rootpxe_progress_lib"
 # 分区进度是旁路遥测；业务流程仅追加状态事件，statusreporter 是快照唯一写者。
 # 这样采样不会并发覆盖完成状态，缺少 jq、队列写入或上报失败也不影响成像。
-rootpxe_data_imaging_wait_marker=/tmp/pxeos.data-imaging-wait
 rootpxe_partition_progress_initialize_runtime() {
-    rmdir -- "$rootpxe_data_imaging_wait_marker" >/dev/null 2>&1 || true
     [[ ${rootpxe_partition_progress_enabled:-no} == yes ]] || return 0
     rm -f -- /tmp/pxeos.partition-progress.json /tmp/pxeos.partition-progress.json.tmp
     rm -rf -- /tmp/pxeos.partition-progress.events
@@ -794,21 +792,6 @@ rootpxe_xfs_restore_postcheck() {
     }
 }
 
-# Pause once per capture/deploy task immediately before the first data imaging
-# engine starts.  The marker is a shared filesystem guard because LVM capture
-# runs in a subshell and ordinary variables do not cross that boundary.
-rootpxe_wait_before_data_imaging() {
-    local marker="${rootpxe_data_imaging_wait_marker:-/tmp/pxeos.data-imaging-wait}"
-    if mkdir -- "$marker" >/dev/null 2>&1; then
-        if sleep 3; then
-            return 0
-        fi
-        rmdir -- "$marker" >/dev/null 2>&1 || true
-        return 1
-    fi
-    [[ -d $marker && ! -L $marker ]]
-}
-
 # Activate one captured VG without leaking vgchange/udev diagnostics on the
 # success path.  Failed activation remains visible through the wrapped console
 # formatter, is deactivated defensively, and preserves the original status.
@@ -892,7 +875,6 @@ rootpxe_capture_lvm_volumes() {
             rootpxe_partition_progress_item "d1:p${rootpxe_lvm_pv_number}:lv:${lv_uuid}" running 0 "开始复制逻辑卷"
             rootpxe_partition_progress_current_item "d1:p${rootpxe_lvm_pv_number}:lv:${lv_uuid}"
             rootpxe_partclone_progress_start_collector
-            rootpxe_wait_before_data_imaging || return 1
             if [[ $fs == xfs ]]; then LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.xfs "${rootpxe_partclone_progress_args[@]}" -cs "$lv_path" -O "$fifo" -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"; else LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.extfs "${rootpxe_partclone_progress_args[@]}" -cs "$lv_path" -O "$fifo" -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"; fi
             producer=$?; rootpxe_partclone_progress_wait; progress_decoder=$?; rootpxe_wait_for_writer "$rootpxe_last_writer_pid"; writer=$?
             [[ $producer -eq 0 ]] || { printf '%s|%s\n' LVM_LV_PARTCLONE_FAILED "lv_${lv_name}_${fs}" >"$rootpxe_lvm_capture_status_file"; rm -f "$fifo"; return 1; }
@@ -3713,7 +3695,6 @@ writeImage()  {
         5|6)
             # ZSTD Compressed image.
             rootpxe_console_message INFO 'Imaging with Partclone (zstd).'
-            rootpxe_wait_before_data_imaging || handleError "PXEOS_STAGE=restore CODE=RESTORE_WAIT_FAILED REASON=unable_to_wait_before_data_imaging"
             if ( set -o pipefail; zstdmt -dc </tmp/pigz1 | LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.restore "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -O "${target}" -f 1 2>"$rootpxe_partclone_progress_stderr_target" ); then
                 exitcode=0
             else
@@ -3723,7 +3704,6 @@ writeImage()  {
         3|4)
             # Uncompressed partclone
             rootpxe_console_message INFO 'Imaging with Partclone (uncompressed).'
-            rootpxe_wait_before_data_imaging || handleError "PXEOS_STAGE=restore CODE=RESTORE_WAIT_FAILED REASON=unable_to_wait_before_data_imaging"
             if ( set -o pipefail; cat </tmp/pigz1 | LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.restore "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -O "${target}" -f 1 2>"$rootpxe_partclone_progress_stderr_target" ); then
                 exitcode=0
             else
@@ -3733,7 +3713,6 @@ writeImage()  {
         1)
             # Partimage
             rootpxe_console_message INFO 'Imaging with Partimage (gzip).'
-            rootpxe_wait_before_data_imaging || handleError "PXEOS_STAGE=restore CODE=RESTORE_WAIT_FAILED REASON=unable_to_wait_before_data_imaging"
             #zstdmt -dc </tmp/pigz1 | partimage restore ${target} stdin -f3 -b 2>/tmp/status.pxeos
             if ( set -o pipefail; pigz -dc </tmp/pigz1 | partimage restore "${target}" stdin -f3 -b 2>/tmp/status.pxeos ); then
                 exitcode=0
@@ -3744,7 +3723,6 @@ writeImage()  {
         0|2)
             # GZIP Compressed partclone
             rootpxe_console_message INFO 'Imaging with Partclone (gzip).'
-            rootpxe_wait_before_data_imaging || handleError "PXEOS_STAGE=restore CODE=RESTORE_WAIT_FAILED REASON=unable_to_wait_before_data_imaging"
             if ( set -o pipefail; pigz -dc </tmp/pigz1 | LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.restore "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -O "${target}" -f 1 2>"$rootpxe_partclone_progress_stderr_target" ); then
                 exitcode=0
             else
@@ -5736,7 +5714,6 @@ savePartition() {
             rootpxe_partition_progress_item "d${disk_number}:p${part_number}" running 0 "开始复制"
             rootpxe_partition_progress_current_item "d${disk_number}:p${part_number}"
             rootpxe_partclone_progress_start_collector
-            rootpxe_wait_before_data_imaging || handleError "PXEOS_STAGE=capture CODE=CAPTURE_WAIT_FAILED REASON=unable_to_wait_before_data_imaging"
             if LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.$fstype "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -f 1 2>"$rootpxe_partclone_progress_stderr_target"; then
                 exitcode=0
             else
@@ -5792,7 +5769,6 @@ savePartition() {
                     rootpxe_partition_progress_item "d${disk_number}:p${part_number}" running 0 "开始复制"
                     rootpxe_partition_progress_current_item "d${disk_number}:p${part_number}"
                     rootpxe_partclone_progress_start_collector
-                    rootpxe_wait_before_data_imaging || handleError "PXEOS_STAGE=capture CODE=CAPTURE_WAIT_FAILED REASON=unable_to_wait_before_data_imaging"
                     if LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.$fstype "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"; then
                         exitcode=0
                     else

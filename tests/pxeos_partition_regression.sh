@@ -1304,13 +1304,6 @@ getPartitionNumber() { part_number=${1##*mock}; part_number=${part_number##*p}; 
 uploadFormat() { [[ ${UPLOAD_FAIL:-0} != 1 ]] || return 1; : >"$2.000"; rootpxe_last_writer_pid=1; }
 rootpxe_wait_for_writer() { [[ ${WRITER_FAIL:-0} != 1 ]]; }
 
-# Keep the LVM capture tests deterministic while making the task-level
-# Partclone wait observable.  The production helper must invoke this exactly
-# once before the first Partclone process in a task.
-sleep() {
-  printf 'sleep:%s\n' "$*" >>"$LVM_TRACE"
-  [[ ${WAIT_SLEEP_FAIL:-0} != 1 ]]
-}
 vgchange() {
   printf 'vgchange:%s\n' "$*" >>"$LVM_TRACE"
   if [[ $1 == -ay && ${VGCHANGE_OUTPUT:-} != '' ]]; then
@@ -1505,7 +1498,7 @@ rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" || fail preflight-after-com
 progress_trace="$tmp/lvm-progress-trace"
 rootpxe_partition_progress_item() { printf '%s|%s|%s\n' "$1" "$2" "${3:--}" >>"$progress_trace"; }
 : >"$progress_trace"
-: >"$LVM_TRACE"; rootpxe_data_imaging_wait_marker="$tmp/imaging-wait.marker"; rootpxe_partition_progress_enabled=no; rootpxe_partition_progress_initialize_runtime
+: >"$LVM_TRACE"
 export E2FSCK_RC=1; rootpxe_capture_lvm_volumes "$tmp/image" || fail legal-capture-e2fsck-fixed; unset E2FSCK_RC
 grep -Fq 'd1:p1|preparing|-' "$progress_trace" || fail lvm-capture-parent-preparing
 grep -Fq 'd1:p1|running|-' "$progress_trace" || fail lvm-capture-parent-running
@@ -1523,12 +1516,6 @@ grep -Fq 'partclone.extfs:' "$LVM_TRACE" || fail writer-not-run
 grep -Fq 'vgchange:-ay --select vg_uuid=vg-1 vg0' "$LVM_TRACE" || fail capture-vg-not-activated
 grep -Fq 'vgchange:-an --select vg_uuid=vg-1 vg0' "$LVM_TRACE" || fail capture-vg-not-deactivated
 ! grep -Fq 'lvextend:' "$LVM_TRACE" || fail n-capture-must-not-expand-source-lv
-sleep_count=$(grep -c '^sleep:3$' "$LVM_TRACE" || true)
-[[ $sleep_count -eq 1 ]] || fail "lvm-capture-must-wait-once-$sleep_count"
-sleep_line=$(grep -n '^sleep:3$' "$LVM_TRACE" | cut -d: -f1)
-partclone_line=$(grep -n '^partclone\.extfs:' "$LVM_TRACE" | head -n 1 | cut -d: -f1)
-[[ $sleep_line =~ ^[0-9]+$ && $partclone_line =~ ^[0-9]+$ && $sleep_line -lt $partclone_line ]] || fail lvm-capture-wait-before-partclone
-
 # The surrounding LVM suite uses a jq stub for its command-flow matrix.  Run
 # this production capture branch once with the host jq binary so syntax errors
 # in the real schema program cannot be hidden by the stub.

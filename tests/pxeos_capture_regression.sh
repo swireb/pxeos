@@ -785,15 +785,6 @@ upload_script="$(<"$overlay/bin/pxeos.upload")"
 [[ $upload_script != *'mkfifo /tmp/pigz1'* ]] || fail '原始磁盘 capture 不得忽略独立 FIFO 建立失败'
 pass 'raw capture delegates FIFO creation to checked uploadFormat'
 
-# Whole-disk Partclone capture must use the same task-level one-shot wait as
-# partition/LVM capture.  Keep this contract static here because executing the
-# full PXEOS upload script requires a booted target and disk fixtures.
-upload_wait_line=$(grep -n -F 'rootpxe_wait_before_data_imaging || handleError' "$overlay/bin/pxeos.upload" | cut -d: -f1)
-upload_partclone_line=$(grep -n -F 'partclone.imager' "$overlay/bin/pxeos.upload" | cut -d: -f1)
-[[ $upload_wait_line =~ ^[1-9][0-9]*$ && $upload_partclone_line =~ ^[1-9][0-9]*$ && $upload_wait_line -lt $upload_partclone_line ]] || fail '整盘Partclone必须在首次引擎启动前等待3秒'
-[[ $(grep -Fc 'rootpxe_wait_before_data_imaging || handleError' "$overlay/bin/pxeos.upload") -eq 1 ]] || fail '整盘Partclone任务只能有一个等待入口'
-pass 'whole-disk Partclone capture waits once before imaging'
-
 # 镜像文件读取进程在后台失败也必须被 wait；不能因为下游刚好返回 0 而成功。
 cat > "$tmp/bin/cat" <<'EOF'
 #!/bin/sh
