@@ -2,10 +2,22 @@ diff --git a/package/lvm2/lvm2.mk b/package/lvm2/lvm2.mk
 index 3a1dded55f..c2fd489357 100644
 --- a/package/lvm2/lvm2.mk
 +++ b/package/lvm2/lvm2.mk
-@@ -39,3 +39,5 @@ ifeq ($(BR2_PACKAGE_HAS_UDEV),y)
+@@ -39,3 +39,17 @@ ifeq ($(BR2_PACKAGE_HAS_UDEV),y)
  ifeq ($(BR2_PACKAGE_HAS_UDEV),y)
 -LVM2_CONF_OPTS += --enable-udev_rules
 +LVM2_CONF_OPTS += --enable-udev_rules --enable-udev_sync
 +# udev is virtual: eudev and systemd both provide it.
 +LVM2_DEPENDENCIES += udev
++
++# LVM2's 69-dm-lvm.rules performs event autoactivation through a system
++# service manager unavailable in this runtime.
++# PXEOS uses eudev with SysV init, so keep device-mapper/LVM udev synchrony
++# but remove only this systemd-specific background activation rule. Explicit
++# rootpxe_activate_lvm_vg calls continue to own LVM activation for tasks.
++ifneq ($(BR2_INIT_SYSTEMD),y)
++define LVM2_REMOVE_SYSTEMD_UDEV_AUTOACTIVATION
++\trm -f $(TARGET_DIR)/usr/lib/udev/rules.d/69-dm-lvm.rules
++endef
++LVM2_POST_INSTALL_TARGET_HOOKS += LVM2_REMOVE_SYSTEMD_UDEV_AUTOACTIVATION
++endif
  endif
