@@ -120,9 +120,15 @@ rootpxe_build_apply_patch_once() {
 
 rootpxe_build_apply_filesystem_patches() {
     local patch_file applied=no
+    # 91b1dd3 wrote a literal backslash-t into this one known LVM2 recipe.
+    # Repair only that exact source state before normal idempotent patches.
+    if grep -Fq '\trm -f $(TARGET_DIR)/usr/lib/udev/rules.d/69-dm-lvm.rules' package/lvm2/lvm2.mk; then
+        rootpxe_build_apply_patch_once "$PROJECT_DIRECTORY/patch/filesystem/lvm2-repair-literal-tab-hook.patch" || return 1
+    fi
     for patch_file in \
         "$PROJECT_DIRECTORY/patch/filesystem/fs.patch" \
-        "$PROJECT_DIRECTORY/patch/filesystem/lvm2-udev-sync.patch"; do
+        "$PROJECT_DIRECTORY/patch/filesystem/lvm2-udev-sync.patch" \
+        "$PROJECT_DIRECTORY/patch/filesystem/lvm2-no-systemd-autoactivation.patch"; do
         [[ -e $patch_file ]] || continue
         [[ -f $patch_file ]] || return 1
         dots " * Applying filesystem patch"

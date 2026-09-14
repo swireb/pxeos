@@ -3,6 +3,7 @@
 . /bin/pxeos.checkin
 rootpxe_download_cleanup_initialization_private() {
     rootpxe_deployment_identity_cleanup_private
+    rootpxe_multicast_cleanup
 }
 # The private initialization payload remains needed through finish reporting,
 # then must be removed on both normal completion and every task exit/signal.
@@ -80,7 +81,7 @@ putDataBack() {
     [[ $imgFormat -eq 1 || $imgLegacy -eq 1 ]] \
         && rootpxe_console_message INFO 'Image format: Partimage.' \
         || rootpxe_console_message INFO 'Image format: Partclone.'
-    [[ $mc == yes ]] && usleep 10000000 || usleep 3000000
+    [[ $mc == yes ]] || usleep 3000000
     case $imgType in
         dd)
             restorePartition "$hd" 1 "$imagePath/${img}*" "$mc"
@@ -197,6 +198,10 @@ rootpxe_validate_deployment_layout "$hd" "$originalSchemaFile" "$deploymentLayou
 rootpxe_validate_growth_capability "$originalSchemaFile" "$rootpxe_resolved_layout_file" "$imagePath" || handleError "PXEOS_STAGE=layout_validation CODE=UNSUPPORTED_FILESYSTEM_GROWTH REASON=validated_layout_requires_unsupported_growth"
 fi
 rootpxe_validate_restore_artifacts "$imagePath" "$imgType" "$imgPartitionType" "${originalSchemaFile:-}" || handleError "PXEOS_STAGE=restore_preflight CODE=REQUIRED_ARTIFACT_MISSING REASON=target_write_not_started"
+if [[ ${mc:-no} == yes ]]; then
+    rootpxe_multicast_build_manifest "$imagePath" || handleError "PXEOS_STAGE=restore_preflight CODE=MULTICAST_MANIFEST_INVALID REASON=artifact_set_is_not_safe_or_complete"
+    rootpxe_multicast_join || handleError "PXEOS_STAGE=restore_preflight CODE=MULTICAST_JOIN_FAILED REASON=controller_join_rejected"
+fi
 if [[ ${imgType:-} == mpa ]]; then
     rootpxe_plan_mpa_disk_permits "$imagePath" || handleError "PXEOS_STAGE=permit CODE=MPA_TARGET_MAPPING_INVALID REASON=unable_to_bind_complete_target_disk_set"
 else
@@ -272,5 +277,8 @@ if [[ $imgPartitionType != mbr ]]; then
     fi
 else
     rootpxe_console_message INFO 'Skipping partition restore: MBR only.'
+fi
+if [[ ${mc:-no} == yes ]]; then
+    rootpxe_multicast_end || handleError "PXEOS_STAGE=restore CODE=MULTICAST_END_FAILED REASON=controller_completion_barrier_not_reached"
 fi
 completeTasking

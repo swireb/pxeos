@@ -120,7 +120,7 @@ rootpxe_apply_json_partition_inventory() {
 }
 
 rootpxe_checkin_json_payload() {
-    local capabilities='["hostname"]'
+    local capabilities='["hostname"]' identity_versions='[1]' multicast_versions
     [[ ${taskid:-} =~ ^[1-9][0-9]*$ && -n ${task_token:-} && -n ${lmac:-} ]] || return 1
 	# Capabilities describe the executable PXEOS image, not merely source code.
     if rootpxe_deployment_identity_linux_capabilities_installed; then
@@ -132,14 +132,20 @@ rootpxe_checkin_json_payload() {
 	if rootpxe_deployment_identity_windows_sysprep_capability_installed; then
 		capabilities=$(jq -c '. + ["windows-sysprep-v1"]' <<<"$capabilities") || return 1
 	fi
+    if rootpxe_multicast_runtime_ready; then
+        multicast_versions='[1]'
+    else
+        multicast_versions='[]'
+    fi
     jq -cn \
         --argjson taskId "$taskid" \
         --arg token "$task_token" \
         --arg mac "$lmac" \
         --arg sysuuid "${sysuuid_local:-}" \
-        --argjson versions '[1]' \
+        --argjson versions "$identity_versions" \
         --argjson capabilities "$capabilities" \
-        '{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities}'
+        --argjson multicastVersions "$multicast_versions" \
+        '{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities,multicastProtocolVersions:$multicastVersions}'
 }
 
 rootpxe_apply_json_deploy_script() {
@@ -277,6 +283,7 @@ rootpxe_apply_json_checkin() {
         # protocol, path, or SMB credentials.
         protocol="" storage_server="" storage_export=""
         smb_username="" smb_password="" smb_domain=""
+        rootpxe_multicast_reset
         rootpxe_clear_json_deploy_scripts
         export protocol storage_server storage_export
         return 0
@@ -332,6 +339,7 @@ rootpxe_apply_json_checkin() {
     rootpxe_apply_json_deployment_identity_policy "$document" || return 1
     rootpxe_apply_json_partition_inventory "$document" || return 1
     rootpxe_apply_json_capture_backup_name "$document" || return 1
+    rootpxe_multicast_apply_transport_mode "$document" || return 1
     rootpxe_validate_json_storage || return 1
     # Layout/schema are untrusted JSON data. Store canonical form in 0600 files;
     # they are never printed or made kernel arguments.
@@ -352,7 +360,7 @@ rootpxe_apply_json_checkin() {
         rootpxe_clear_json_deploy_scripts
         jq -e 'has("preDeployScript") or has("preDeployScriptSha256") or has("postDeployScript") or has("postDeployScriptSha256")' >/dev/null 2>&1 <<<"$document" && return 1
     fi
-    export taskid execution_token taskType pxe_type img img_type img_partition_type osid img_format pigz_comp shutdown protocol storage_server storage_export hostName changeHostname resumeStage schemaRevision schemaHash captureBackupName preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash deploymentIdentityPolicyFile
+    export taskid execution_token taskType pxe_type img img_type img_partition_type osid img_format pigz_comp shutdown protocol storage_server storage_export hostName changeHostname resumeStage schemaRevision schemaHash captureBackupName preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash deploymentIdentityPolicyFile multicastTransportMode multicastProtocolVersion mc
 }
 
 checkin_rootpxe() {
@@ -362,11 +370,7 @@ checkin_rootpxe() {
     captureBackupName=""
     rootpxe_console_message INFO 'Checking in with RootPXE.'
     rootpxe_require_identity || handleError "RootPXE: invalid task identity ($0)"
-    case $mc in
-        [Yy][Ee][Ss]|[Bb][Tt])
-            handleError "RootPXE: multicast/torrent imaging (mc) is not supported ($0)\n   Args Passed: $*"
-            ;;
-    esac
+    rootpxe_multicast_reset
     local sysuuid_local
     sysuuid_local=$(dmidecode -s system-uuid)
     sysuuid_local=${sysuuid_local,,}
@@ -425,6 +429,7 @@ checkin_rootpxe() {
             rootpxe_apply_json_checkin "$out" || handleError "RootPXE checkin returned invalid JSON ($0)"
         else
             checkin_response_format=legacy
+            rootpxe_multicast_reset
             # Only a non-JSON response enters the legacy compatibility parser.
             while IFS= read -r line || [[ -n $line ]]; do
             [[ -z $line ]] && continue
