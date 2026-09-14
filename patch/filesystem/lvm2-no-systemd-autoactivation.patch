@@ -2,9 +2,7 @@ diff --git a/package/lvm2/lvm2.mk b/package/lvm2/lvm2.mk
 index c2fd489357..d760ed1f34 100644
 --- a/package/lvm2/lvm2.mk
 +++ b/package/lvm2/lvm2.mk
-@@ -39,6 +39,14 @@ ifeq ($(BR2_PACKAGE_HAS_UDEV),y)
- ifeq ($(BR2_PACKAGE_HAS_UDEV),y)
- LVM2_CONF_OPTS += --enable-udev_rules --enable-udev_sync
+@@ -42,6 +42,14 @@
  # udev is virtual: eudev and systemd both provide it.
  LVM2_DEPENDENCIES += udev
  
@@ -17,3 +15,5 @@ index c2fd489357..d760ed1f34 100644
 +LVM2_POST_INSTALL_TARGET_HOOKS += LVM2_REMOVE_SYSTEMD_UDEV_AUTOACTIVATION
 +endif
  endif
+
+ ifeq ($(BR2_PACKAGE_LIBSELINUX),y)

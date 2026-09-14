@@ -108,12 +108,18 @@ buildPath="$(pwd -P)"
 
 rootpxe_build_apply_patch_once() {
     local patch_file="$1"
+    local forward_output reverse_output
     [[ -r $patch_file ]] || return 1
-    if patch --batch --forward --dry-run -p1 < "$patch_file" >/dev/null; then
-        patch --batch --forward -p1 < "$patch_file"
-    elif patch --batch --force --reverse --dry-run -p1 < "$patch_file" >/dev/null; then
+    if forward_output=$(patch --batch --forward --dry-run -p1 < "$patch_file" 2>&1); then
+        if ! patch --batch --forward -p1 < "$patch_file"; then
+            printf 'Failed to apply patch %s after its forward dry-run succeeded.\n' "$patch_file" >&2
+            return 1
+        fi
+    elif reverse_output=$(patch --batch --force --reverse --dry-run -p1 < "$patch_file" 2>&1); then
         echo 'Patch already applied.'
     else
+        printf 'Failed to apply patch %s. Forward dry-run output:\n%s\nReverse dry-run output:\n%s\n' \
+            "$patch_file" "$forward_output" "$reverse_output" >&2
         return 1
     fi
 }
@@ -122,7 +128,7 @@ rootpxe_build_apply_filesystem_patches() {
     local patch_file applied=no
     # 91b1dd3 wrote a literal backslash-t into this one known LVM2 recipe.
     # Repair only that exact source state before normal idempotent patches.
-    if grep -Fq '\trm -f $(TARGET_DIR)/usr/lib/udev/rules.d/69-dm-lvm.rules' package/lvm2/lvm2.mk; then
+    if [[ -f package/lvm2/lvm2.mk ]] && grep -Fq '\trm -f $(TARGET_DIR)/usr/lib/udev/rules.d/69-dm-lvm.rules' package/lvm2/lvm2.mk; then
         rootpxe_build_apply_patch_once "$PROJECT_DIRECTORY/patch/filesystem/lvm2-repair-literal-tab-hook.patch" || return 1
     fi
     for patch_file in \
@@ -134,7 +140,7 @@ rootpxe_build_apply_filesystem_patches() {
         dots " * Applying filesystem patch"
         echo
         if ! rootpxe_build_apply_patch_once "$patch_file"; then
-            echo "Failed"
+            printf 'Failed to apply filesystem patch: %s\n' "$patch_file" >&2
             return 1
         fi
         echo "Done"
