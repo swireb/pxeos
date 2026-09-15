@@ -1966,7 +1966,13 @@ rootpxe_request_disk_permit_for_target() {
     rootpxe_require_task_context || return 11
     api="${pxeapi:-${web:-}}"
     [[ -n $api ]] || return 11
-    [[ ${mc:-no} == yes ]] && rootpxe_permit_attempt_args=(--data-urlencode "progressAttempt=${progress_attempt:-1}")
+    if [[ ${mc:-no} == yes ]]; then
+        rootpxe_multicast_valid_session_id "${multicastSessionId:-}" || return 12
+        rootpxe_permit_attempt_args=(
+            --data-urlencode "progressAttempt=${progress_attempt:-1}"
+            --data-urlencode "sessionId=$multicastSessionId"
+        )
+    fi
     response=$(curl -Lks --connect-timeout 10 --max-time 30 \
         --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
         --data-urlencode "mac=$mac" --data-urlencode "targetId=$target_id" \
@@ -2087,7 +2093,13 @@ rootpxe_request_disk_permit_batch() {
     [[ $(printf '%s\n' "${ids[@]}" | sort -u | wc -l) -eq ${#ids[@]} ]] || return 12
     request=$(printf '%s\n' "${items[@]}" | jq -cs .) || return 12
     local -a rootpxe_permit_batch_attempt_args=()
-    [[ ${mc:-no} == yes ]] && rootpxe_permit_batch_attempt_args=(--data-urlencode "progressAttempt=${progress_attempt:-1}")
+    if [[ ${mc:-no} == yes ]]; then
+        rootpxe_multicast_valid_session_id "${multicastSessionId:-}" || return 12
+        rootpxe_permit_batch_attempt_args=(
+            --data-urlencode "progressAttempt=${progress_attempt:-1}"
+            --data-urlencode "sessionId=$multicastSessionId"
+        )
+    fi
     response=$(curl -Lks --connect-timeout 10 --max-time 30 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "targets=$request" "${rootpxe_permit_batch_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
     http_code=${response##*$'\n'}; body=${response%$'\n'*}
     [[ $http_code =~ ^[0-9]{3}$ ]] || { rootpxe_set_disk_permit_protocol_error unknown; return 12; }
@@ -2251,7 +2263,13 @@ rootpxe_error_wait_for_retry() {
         --data-urlencode "mac=$mac" --data-urlencode "errorCode=$code"
         --data-urlencode "message=$message"
     )
-    [[ ${mc:-no} == yes ]] && error_args+=(--data-urlencode "progressAttempt=${progress_attempt:-1}")
+    if [[ ${mc:-no} == yes ]]; then
+        rootpxe_multicast_valid_session_id "${multicastSessionId:-}" || return 1
+        error_args+=(
+            --data-urlencode "progressAttempt=${progress_attempt:-1}"
+            --data-urlencode "sessionId=$multicastSessionId"
+        )
+    fi
     [[ $stage_count -eq 1 && $stage_invalid -eq 0 ]] && error_args+=(--data-urlencode "stage=$stage")
     # Do not arm the local timeout until the service confirms persistence.
     while :; do
@@ -2287,7 +2305,11 @@ rootpxe_error_wait_for_retry() {
     deadline=$(( $(date +%s) + wait ))
     rootpxe_console_message ERROR 'Task paused. Error reported to RootPXE.'
     rootpxe_console_message INFO 'SSH is available for troubleshooting.'
-    rootpxe_console_message INFO 'Select Retry in the web UI to resume.'
+    if [[ ${mc:-no} == yes ]]; then
+        rootpxe_console_message INFO 'Manual multicast session failed on this client; wait for administrator action.'
+    else
+        rootpxe_console_message INFO 'Select Retry in the web UI to resume.'
+    fi
     rootpxe_console_message INFO "Timeout: ${wait}s. Timeout action: $action."
     while :; do
         now=$(date +%s)
@@ -2298,7 +2320,7 @@ rootpxe_error_wait_for_retry() {
         status=$(curl -Lks --connect-timeout 10 --max-time 20 \
             --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
             --data-urlencode "mac=$mac" "${api}task-status" 2>/dev/null)
-        if [[ $status == *'"status":"queued"'* ]]; then
+        if [[ ${mc:-no} != yes && $status == *'"status":"queued"'* ]]; then
             rootpxe_console_message INFO 'Retry requested. Resuming task.'
             rootpxe_reset_disk_permit_retry_state || return 1
             exec /bin/pxeos
@@ -3679,6 +3701,7 @@ writeImage()  {
         [[ -n $report ]] || report=no
         rootpxe_write_image_stop_local
         if [[ $mc == yes ]]; then
+            rootpxe_multicast_local_failure=yes
             [[ $report == yes ]] && rootpxe_multicast_report false >/dev/null 2>&1 || true
             rootpxe_multicast_cleanup
         fi
@@ -3725,17 +3748,18 @@ writeImage()  {
         yes)
             multicast_key=$(rootpxe_multicast_key_from_restore_source "$file" "$imagePath") || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=MULTICAST_ARTIFACT_INVALID REASON=restore_source_not_in_manifest_root"
             rootpxe_multicast_prepare_stream "$multicast_key" || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=MULTICAST_PREPARE_FAILED REASON=controller_stream_rejected"
-            udp-receiver --nokbd --portbase "$rootpxe_multicast_port_base" --mcast-rdv-address "$rootpxe_multicast_address" --ttl "$rootpxe_multicast_ttl" --start-timeout "$rootpxe_multicast_ready_timeout_sec" --receive-timeout "$rootpxe_multicast_ready_timeout_sec" >/tmp/pigz1 2>/dev/null &
+            [[ ${rootpxe_multicast_receiver_timeout_sec:-} =~ ^[0-9]+$ ]] && (( rootpxe_multicast_receiver_timeout_sec >= 2 )) || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=MULTICAST_PREPARE_FAILED REASON=controller_receiver_timeout_invalid"
+            udp-receiver --nokbd --portbase "$rootpxe_multicast_port_base" --mcast-rdv-address "$rootpxe_multicast_address" --ttl "$rootpxe_multicast_ttl" --start-timeout "$rootpxe_multicast_receiver_timeout_sec" --receive-timeout "$rootpxe_multicast_receiver_timeout_sec" >/tmp/pigz1 2>/dev/null &
             source_pid="$!"
             rootpxe_multicast_receiver_pid=$source_pid
+            if [[ -n ${rootpxe_multicast_receiver_pid_file:-} ]]; then
+                printf '%s\n' "$source_pid" >"$rootpxe_multicast_receiver_pid_file"
+            fi
             rootpxe_multicast_ready || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=MULTICAST_READY_FAILED REASON=controller_ready_rejected"
-            umask 077
-            rootpxe_multicast_monitor_dir=$(mktemp -d /tmp/rootpxe-multicast-monitor.XXXXXX) || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=MULTICAST_MONITOR_SETUP_FAILED REASON=unable_to_create_controller_status_directory"
-            chmod 700 "$rootpxe_multicast_monitor_dir" || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=MULTICAST_MONITOR_SETUP_FAILED REASON=unable_to_protect_controller_status_directory"
-            rootpxe_multicast_monitor_failure_file="$rootpxe_multicast_monitor_dir/failure"
-            rootpxe_multicast_status_monitor "$source_pid" &
-            multicast_monitor_pid="$!"
-            rootpxe_multicast_monitor_pid=$multicast_monitor_pid
+            # The session watchdog begins before the disk permit and remains
+            # live through layout, initialization and every artifact.  It is
+            # not coupled to an individual receiver process.
+            rootpxe_multicast_session_guard || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=MULTICAST_STATUS_FAILED REASON=session_watchdog_rejected" yes
             ;;
         *)
             cat -- "${source_files[@]}" >/tmp/pigz1 &
@@ -3811,7 +3835,7 @@ writeImage()  {
         fi
     fi
     [[ -s ${rootpxe_multicast_monitor_failure_file:-} ]] && multicast_monitor_failed=yes
-    [[ $mc != yes ]] || rootpxe_multicast_stop_runtime
+    [[ $mc != yes ]] || rootpxe_multicast_stop_stream
     if [[ $exitcode -ne 0 ]]; then
         rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_FAILED REASON=image_decoder_or_writer_failed" yes
     fi
@@ -5113,6 +5137,7 @@ handleError() {
     printf '[INFO]  Init version: %s\n' "$initversion"
     printf '\n[INFO]  Error details:\n'
     safe_str=$(rootpxe_redact_diagnostic "$str")
+    [[ ${mc:-no} == yes ]] && rootpxe_multicast_local_failure=yes
     printf '%b\n' "$safe_str" | sed 's/^/        /'
     printf '\n[INFO]  Kernel variables and settings:\n'
     rootpxe_redact_diagnostic "$*" | sed 's/^/        /'

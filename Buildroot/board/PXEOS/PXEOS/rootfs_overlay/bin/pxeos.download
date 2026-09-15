@@ -201,6 +201,11 @@ rootpxe_validate_restore_artifacts "$imagePath" "$imgType" "$imgPartitionType" "
 if [[ ${mc:-no} == yes ]]; then
     rootpxe_multicast_build_manifest "$imagePath" || handleError "PXEOS_STAGE=restore_preflight CODE=MULTICAST_MANIFEST_INVALID REASON=artifact_set_is_not_safe_or_complete"
     rootpxe_multicast_join || handleError "PXEOS_STAGE=restore_preflight CODE=MULTICAST_JOIN_FAILED REASON=controller_join_rejected"
+    # A WAITING response is deliberately non-destructive: no disk permit or
+    # partition write is requested until the server freezes this member into
+    # the RUNNING roster.  A reconnect reuses this same session and READY join.
+    rootpxe_multicast_wait_for_selection || handleError "PXEOS_STAGE=restore_preflight CODE=MULTICAST_MEMBER_NOT_SELECTED REASON=session_did_not_freeze_this_client"
+    rootpxe_multicast_watchdog_start || handleError "PXEOS_STAGE=restore_preflight CODE=MULTICAST_STATUS_MONITOR_FAILED REASON=unable_to_start_session_heartbeat"
 fi
 if [[ ${imgType:-} == mpa ]]; then
     rootpxe_plan_mpa_disk_permits "$imagePath" || handleError "PXEOS_STAGE=permit CODE=MPA_TARGET_MAPPING_INVALID REASON=unable_to_bind_complete_target_disk_set"
@@ -232,6 +237,7 @@ while :; do
             ;;
     esac
 done
+[[ ${mc:-no} != yes ]] || rootpxe_multicast_session_guard || handleError "PXEOS_STAGE=permit CODE=MULTICAST_SESSION_CANCELLED REASON=session_watchdog_stopped_before_disk_write"
 if [[ ${imgType:-} == mpa && ${rootpxe_mpa_permit_is_batch:-no} == yes ]]; then
     for disk in $disks; do
         rootpxe_verify_disk_permit_binding "$disk" deploy_write || handleError "PXEOS_STAGE=permit CODE=DISK_PERMIT_BINDING_CHANGED REASON=target_disk_identity_or_operation_mismatch"
@@ -247,6 +253,7 @@ if rootpxe_deployment_identity_policy_enabled; then
     fi || handleError "PXEOS_STAGE=deployment_identity_plan CODE=IDENTITY_PLAN_FAILED REASON=source_metadata_or_permit_binding_invalid"
 fi
 rootpxe_run_pre_deploy_script || handleError "PXEOS_STAGE=pre_deploy_script CODE=PRE_DEPLOY_SCRIPT_FAILED REASON=${rootpxe_deploy_script_error:-unknown}"
+[[ ${mc:-no} != yes ]] || rootpxe_multicast_session_guard || handleError "PXEOS_STAGE=init CODE=MULTICAST_SESSION_CANCELLED REASON=session_watchdog_stopped_before_layout"
 rootpxe_stage init "pxeos download started, storage mounted"
 [[ $nombr -eq 1 ]] && rootpxe_console_message INFO 'Skipping partition layout: single-partition restore.' || preparePartitions
 if [[ ${imgType:-} == [Nn] ]]; then
@@ -259,6 +266,7 @@ if [[ ${imgType:-} == [Nn] ]]; then
     rootpxe_restore_deployment_boot_code "$hd" 1 "$imagePath" "$originalSchemaFile" || handleError "PXEOS_STAGE=layout_apply CODE=BOOT_CODE_RESTORE_FAILED REASON=boot_code_metadata_invalid"
 fi
 [[ $nombr -ne 1 ]] && rootpxe_stage prepare_partitions "partition layout prepared"
+[[ ${mc:-no} != yes ]] || rootpxe_multicast_session_guard || handleError "PXEOS_STAGE=prepare_partitions CODE=MULTICAST_SESSION_CANCELLED REASON=session_watchdog_stopped_during_layout"
 # Build one immutable, full plan only after the permitted target layout exists.
 # Raw dd remains a single disk item because it has no safe internal boundaries.
 case ${imgType:-} in
@@ -279,6 +287,9 @@ else
     rootpxe_console_message INFO 'Skipping partition restore: MBR only.'
 fi
 if [[ ${mc:-no} == yes ]]; then
-    rootpxe_multicast_end || handleError "PXEOS_STAGE=restore CODE=MULTICAST_END_FAILED REASON=controller_completion_barrier_not_reached"
+    rootpxe_multicast_session_guard || handleError "PXEOS_STAGE=restore CODE=MULTICAST_SESSION_CANCELLED REASON=session_watchdog_stopped_during_data_phase"
+    # completed here is this member's data barrier only; final task completion
+    # remains governed by the normal imgcomplete task-finish protocol.
+    rootpxe_multicast_end || handleError "PXEOS_STAGE=restore CODE=MULTICAST_END_FAILED REASON=controller_data_barrier_not_reached"
 fi
 completeTasking

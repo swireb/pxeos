@@ -120,7 +120,7 @@ rootpxe_apply_json_partition_inventory() {
 }
 
 rootpxe_checkin_json_payload() {
-    local capabilities='["hostname"]' identity_versions='[1]' multicast_versions
+    local capabilities='["hostname"]' identity_versions='[1]'
     [[ ${taskid:-} =~ ^[1-9][0-9]*$ && -n ${task_token:-} && -n ${lmac:-} ]] || return 1
 	# Capabilities describe the executable PXEOS image, not merely source code.
     if rootpxe_deployment_identity_linux_capabilities_installed; then
@@ -133,9 +133,7 @@ rootpxe_checkin_json_payload() {
 		capabilities=$(jq -c '. + ["windows-sysprep-v1"]' <<<"$capabilities") || return 1
 	fi
     if rootpxe_multicast_runtime_ready; then
-        multicast_versions='[1]'
-    else
-        multicast_versions='[]'
+        capabilities=$(jq -c '. + ["manual-multicast-session"]' <<<"$capabilities") || return 1
     fi
     jq -cn \
         --argjson taskId "$taskid" \
@@ -144,8 +142,7 @@ rootpxe_checkin_json_payload() {
         --arg sysuuid "${sysuuid_local:-}" \
         --argjson versions "$identity_versions" \
         --argjson capabilities "$capabilities" \
-        --argjson multicastVersions "$multicast_versions" \
-        '{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities,multicastProtocolVersions:$multicastVersions}'
+        '{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities}'
 }
 
 rootpxe_apply_json_deploy_script() {
@@ -360,7 +357,7 @@ rootpxe_apply_json_checkin() {
         rootpxe_clear_json_deploy_scripts
         jq -e 'has("preDeployScript") or has("preDeployScriptSha256") or has("postDeployScript") or has("postDeployScriptSha256")' >/dev/null 2>&1 <<<"$document" && return 1
     fi
-    export taskid execution_token taskType pxe_type img img_type img_partition_type osid img_format pigz_comp shutdown protocol storage_server storage_export hostName changeHostname resumeStage schemaRevision schemaHash captureBackupName preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash deploymentIdentityPolicyFile multicastTransportMode multicastProtocolVersion mc
+    export taskid execution_token taskType pxe_type img img_type img_partition_type osid img_format pigz_comp shutdown protocol storage_server storage_export hostName changeHostname resumeStage schemaRevision schemaHash captureBackupName preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash deploymentIdentityPolicyFile multicastTransportMode multicastSessionId multicastWaitTimeoutSec mc
 }
 
 checkin_rootpxe() {

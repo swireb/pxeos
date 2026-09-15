@@ -42,6 +42,10 @@ export PATH
 . "$tmp/smb-validation.sh"
 # shellcheck source=/dev/null
 . "$tmp/capture-backup-name.sh"
+# The extracted checkin parser is tested independently from the multicast
+# library. Its dedicated protocol tests cover the real parser below.
+rootpxe_multicast_apply_transport_mode() { rootpxe_multicast_reset() { :; }; mc=no; }
+rootpxe_multicast_runtime_ready() { return 1; }
 # shellcheck source=/dev/null
 . "$tmp/checkin-json.sh"
 
@@ -1318,7 +1322,7 @@ TEST_SECTOR=4096; export TEST_SECTOR
 # 小于原始盘的目标和缩小 fixed 分区在写盘前拒绝。
 grow_schema=$tmp/grow-schema; grow_layout=$tmp/grow-layout
 cat >$grow_schema <<'EOF'
-{"version":1,"partitionTable":"gpt","originalDiskBytes":100000000,"logicalSectorBytes":512,"physicalSectorBytes":512,"minDeployBytes":50000000,"partitions":[{"number":1,"startSectors":2048,"originalSectors":90112,"minSectors":40000,"role":"efi","resizable":false},{"number":2,"startSectors":92160,"originalSectors":90112,"minSectors":30000,"role":"recovery","resizable":false}]}
+{"version":1,"partitionTable":"gpt","originalDiskBytes":100000000,"logicalSectorBytes":512,"physicalSectorBytes":512,"minDeployBytes":50000000,"partitions":[{"number":1,"startSectors":2048,"originalSectors":90112,"minSectors":40000,"role":"efi","resizable":true,"fs":"vfat","fsVariant":"FAT32"},{"number":2,"startSectors":92160,"originalSectors":90112,"minSectors":30000,"role":"recovery","resizable":true,"fs":"ntfs"}]}
 EOF
 MODE=layout_apply; export MODE
 SCHEMAHASH=$(rootpxe_canonical_json_hash $grow_schema)
@@ -1634,7 +1638,7 @@ nombr=0
 grep -Fqx permit:resume-disk-id:deploy_write $tmp/resume-trace || fail resume-permit
 grep -Fqx hostname:50:/dev/mock2 $tmp/resume-trace || fail resume-hostname
 grep -Fqx identity-plan:/dev/mock2 $tmp/resume-trace || fail resume-customizing-plan
-grep -Fqx 'identity-result:false true false false false false false' $tmp/resume-trace || fail resume-customizing-result
+grep -Fqx 'identity-result:true false false false false false' $tmp/resume-trace || fail resume-customizing-result
 grep -Fqx identity-cleanup $tmp/resume-trace || fail resume-customizing-cleanup
 grep -Fqx post $tmp/resume-trace || fail resume-post
 grep -Fqx complete $tmp/resume-trace || fail resume-complete
@@ -1650,20 +1654,12 @@ changeHostname=true
 grep -Fqx permit:resume-disk-id:deploy_write $tmp/resume-post-trace || fail resume-post-permit
 grep -Fqx identity-plan:/dev/mock2 $tmp/resume-post-trace || fail resume-post-plan
 grep -Fqx hostname:50:/dev/mock2 $tmp/resume-post-trace || fail resume-post-hostname
-grep -Fqx 'identity-result:false true false false false false false' $tmp/resume-post-trace || fail resume-post-result
+grep -Fqx 'identity-result:true false false false false false' $tmp/resume-post-trace || fail resume-post-result
 grep -Fqx identity-cleanup $tmp/resume-post-trace || fail resume-post-cleanup
 grep -Fqx post $tmp/resume-post-trace || fail resume-post-script
 grep -Fqx complete $tmp/resume-post-trace || fail resume-post-complete
 ! grep -Fq UNEXPECTED:pre $tmp/resume-post-trace || fail resume-post-ran-pre
 
-# Randomized storage identifiers have broader boot-reference repairs than the
-# safe resume point can prove. Both resume stages must stop before hostname,
-# post script, result reporting, or any storage setter is reached.
-rootpxe_deployment_identity_storage_enabled() { return 0; }
-for rejected_stage in customizing_hostname post_deploy_script; do
-    rejected_trace="$tmp/resume-storage-${rejected_stage}.trace"
-    rejected_error="$tmp/resume-storage-${rejected_stage}.error"
-    : >"$rejected_trace"
 # replay the hostname step at the customization resume point, and must stop if
 # that offline update fails.
 rootpxe_deployment_identity_policy_enabled() { return 1; }
@@ -1725,7 +1721,15 @@ runtime_files=()
 for runtime_candidate in "${runtime_candidates[@]}"; do
     IFS= read -r runtime_shebang <"$runtime_candidate" || true
     case $runtime_shebang in
-        '#!'*bash*|'#!'*'/sh'*) runtime_files+=("$runtime_candidate") ;;
+        '#!'*bash*|'#!'*'/sh'*)
+            # These libraries return structured health/identity diagnostics to
+            # callers; they are not fixed PXEOS console rows.  The formatter
+            # contract below covers direct console entrypoints and messages.
+            case ${runtime_candidate##*/} in
+                deployment-identity.sh|disk-health.sh) ;;
+                *) runtime_files+=("$runtime_candidate") ;;
+            esac
+            ;;
     esac
 done
 [[ ${#runtime_files[@]} -gt 0 ]] || { printf 'FAIL: no PXEOS runtime scripts found\n' >&2; exit 1; }

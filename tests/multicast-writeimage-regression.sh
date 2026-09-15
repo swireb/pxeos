@@ -12,6 +12,7 @@ case_run() (
   fifo="$tmp/$name.fifo"
   trace="$tmp/$name.trace"
   export trace
+  rootpxe_multicast_shutdown_grace_sec=0
   eval "$(sed "s|/tmp/pigz1|$fifo|g" "$multicast")"
   eval "$(printf '%s\n' "$write" | sed "s|/tmp/pigz1|$fifo|g")"
   rootpxe_validate_runtime_img_format(){ :; }
@@ -25,6 +26,7 @@ case_run() (
   rootpxe_multicast_key_from_restore_source(){ echo d1p1.img; }
   rootpxe_multicast_prepare_stream(){ [[ $name != prepare_fail ]]; }
   rootpxe_multicast_ready(){ [[ $name != ready_fail ]]; }
+  rootpxe_multicast_session_guard(){ [[ $name != monitor_fail ]]; }
   rootpxe_multicast_report(){
     echo "report:$1" >>"$trace"
     [[ $name != report_fail || $1 != true ]]
@@ -50,6 +52,7 @@ case_run() (
     trap 'echo receiver_exit >>"$trace"' EXIT
     [[ $name != signal ]] || trap '' TERM
     echo "$BASHPID" >"$tmp/$name.receiver.pid"
+    printf '%s\n' "$*" >"$tmp/$name.receiver.args"
     echo receiver_start >>"$trace"
     printf x
     [[ $name != receiver_fail ]] || return 7
@@ -68,7 +71,7 @@ case_run() (
   rootpxe_multicast_port_base=9000
   rootpxe_multicast_address=239.1.2.3
   rootpxe_multicast_ttl=32
-  rootpxe_multicast_ready_timeout_sec=1
+  rootpxe_multicast_receiver_timeout_sec=2
   rootpxe_multicast_join_window_sec=1
   if [[ $name == signal ]]; then
     echo "$BASHPID" >"$tmp/signal.case.pid"
@@ -118,6 +121,7 @@ check_signal() {
 set +e
 check unicast 0
 check success 0
+grep -Fqx -- '--nokbd --portbase 9000 --mcast-rdv-address 239.1.2.3 --ttl 32 --start-timeout 2 --receive-timeout 2' "$tmp/success.receiver.args"
 check receiver_fail 90
 check decoder_early 90
 check decoder_early_compressed 90
@@ -129,10 +133,10 @@ check sequence_fail 90
 check_signal
 set -e
 grep -Fq 'report:false' "$tmp/decoder_early.trace"
-grep -Fq cancel "$tmp/decoder_early.trace"
+! grep -Fq cancel "$tmp/decoder_early.trace"
 grep -Fq 'report:true' "$tmp/report_fail.trace"
-grep -Fq cancel "$tmp/report_fail.trace"
+! grep -Fq cancel "$tmp/report_fail.trace"
 grep -Fq 'report:false' "$tmp/monitor_fail.trace"
-grep -Fq cancel "$tmp/monitor_fail.trace"
+! grep -Fq cancel "$tmp/monitor_fail.trace"
 grep -Fq progress_abort "$tmp/ready_fail.trace"
 echo 'PASS: multicast writeImage mock regression'

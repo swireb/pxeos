@@ -44,7 +44,13 @@ finish_args=(
     --data-urlencode "message=pxeos imgcomplete type=$type"
 )
 finish_args+=("${rootpxe_finish_identity_args[@]}")
-[[ ${mc:-no} == yes ]] && finish_args+=(--data-urlencode "progressAttempt=${progress_attempt:-1}")
+if [[ ${mc:-no} == yes ]]; then
+    rootpxe_multicast_valid_session_id "${multicastSessionId:-}" || handleError "PXEOS_STAGE=finish_notify CODE=MULTICAST_SESSION_INVALID"
+    finish_args+=(
+        --data-urlencode "progressAttempt=${progress_attempt:-1}"
+        --data-urlencode "sessionId=$multicastSessionId"
+    )
+fi
 [[ -n ${capture_size_bytes:-} ]] && finish_args+=(--data-urlencode "sizeBytes=$capture_size_bytes")
 [[ -n ${rootpxe_partition_inventory_file:-} ]] && finish_args+=(--data-urlencode "partitionInventory=$(cat "$rootpxe_partition_inventory_file")")
 [[ -n ${rootpxe_original_schema_file:-} ]] && finish_args+=(--data-urlencode "originalSchema=$(cat "$rootpxe_original_schema_file")")
