@@ -1248,9 +1248,8 @@ rootpxe_validate_deployment_layout() {
     local disk="$1" schema_file="$2" layout_file="$3" schema_logical original_disk_bytes target_bytes target_sectors source_hash layout_hash
     [[ -r $schema_file && -r $layout_file ]] || return 1
     command -v jq >/dev/null 2>&1 || return 1
-    # MBR extended containers require EBR-chain reconstruction.  Do not turn
-    # them into ordinary resizable partitions until a dedicated layout engine
-    # exists; legacy no-snapshot deployment remains available.
+    # MBR extended containers use derived geometry and EBR reconstruction;
+    # they are not independently resizable filesystems.
     jq -e '([.partitions[] | select(.role == "other")] | length) == 0' "$schema_file" >/dev/null 2>&1 || return 1
     # Schema sectors are expressed in the source image's logical sector unit.
     # Target 4Kn/512e geometry must therefore be converted through bytes, not
@@ -1300,7 +1299,7 @@ rootpxe_validate_deployment_layout() {
           if ([$lp[] | select(has("percentage"))] | length) != 0 then error("percentage mode is retired") else . end |
           if ([ $lp[].number ]|unique|length) != ($lp|length) then error("duplicate layout number") else . end |
           if ([ $sp[].number ]|sort) != ([ $lp[].number ]|sort) then error("layout identity mismatch") else . end |
-          ($s.version == 2 and $s.partitionTable == "mbr") as $mbrExtended |
+          ($s.version == 2 and $s.partitionTable == "mbr" and any($sp[]; .kind == "extended")) as $mbrExtended |
           (if $mbrExtended then
              ([$sp[] | select(.kind == "extended")]) as $extendeds |
              if ($extendeds|length) != 1 then error("invalid extended container") else . end |
@@ -1317,7 +1316,7 @@ rootpxe_validate_deployment_layout() {
              ([$sp[] | select(.kind == "extended")][0]) as $extended |
              ([$sp[] | select(.kind == "logical" and .parentNumber == $extended.number)] | length) * $extended.ebrReservedSectors
            else 0 end) as $ebrReservedTotal |
-          ($worksp|map(.startSectors)|min) as $front |
+          ($sp|map(.startSectors)|min) as $front |
           (if $s.partitionTable == "gpt" then $front else 0 end) as $back |
           ($target - $front - $back - $ebrReservedTotal) as $available |
           (262144 / $logical | floor | if . < 1 then 1 else . end) as $alignment |
@@ -1333,6 +1332,12 @@ rootpxe_validate_deployment_layout() {
             {p:$p,o:$o,mode:$mode} ] as $items |
           ([ $items[]|select(.mode == "remaining") ]|length) as $remainingCount |
           if $remainingCount > 1 then error("multiple remaining") else . end |
+          # The unadjusted disk writer restores the original table verbatim.
+          # Its runtime plan must use the same geometry, without re-alignment.
+          if all($items[]; .mode == "original") then
+            if any($sp[]; .startSectors < 0 or .originalSectors <= 0 or (.startSectors + .originalSectors) > $target) then error("source geometry exceeds target")
+            else $sp | map(. + {resolvedSectors:.originalSectors}) end
+          else
           ($items | map(if .mode == "original" then .p.originalSectors elif .mode == "fixed" then align_up(((.o.fixedBytes // 0) / $logical|ceil);$alignment) else 0 end)) as $pre |
           ($pre|add) as $used |
           if $used > $available then error("target too small") else . end |
@@ -1364,14 +1369,14 @@ rootpxe_validate_deployment_layout() {
            def remaining_that_fits($low; $high):
              if $low >= $high then $low
              else (($low + $high + 1) / 2 | floor) as $middle |
-               if (resolve_leaves($middle).cursor <= ($target - $back))
+               if (resolve_leaves($middle * $alignment).cursor <= ($target - $back))
                then remaining_that_fits($middle; $high)
                else remaining_that_fits($low; $middle - 1)
                end
              end;
            (if $remainingCount == 1 then
               ([ $items[] | select(.mode == "remaining") | .p.originalSectors ] | first | align_up(.;$alignment)) as $minimumRemaining |
-              if $remaining < $minimumRemaining then $remaining else remaining_that_fits($minimumRemaining; $remaining) end
+              if $remaining < $minimumRemaining then $remaining else (remaining_that_fits($minimumRemaining / $alignment; $remaining / $alignment) * $alignment) end
             else 0 end) as $resolvedRemaining |
            (resolve_leaves($resolvedRemaining)) as $leafResolved |
            if $leafResolved.cursor > ($target-$back) then error("layout exceeds target") else . end |
@@ -1384,7 +1389,7 @@ rootpxe_validate_deployment_layout() {
               if $extendedEnd > ($target-$back) then error("layout exceeds target")
               else ($leaves + [$extended + {startSectors:$extendedStart,resolvedSectors:($extendedEnd-$extendedStart)}] | sort_by(.number)) end
             else $leaves end) as $resolved |
-           $resolved' >"$rootpxe_resolved_layout_file" || { rm -f "$rootpxe_resolved_layout_file"; return 1; }
+           $resolved end' >"$rootpxe_resolved_layout_file" || { rm -f "$rootpxe_resolved_layout_file"; return 1; }
     export rootpxe_resolved_layout_file
     rootpxe_validate_lvm_deployment_layout "$schema_file" "$layout_file" "$rootpxe_resolved_layout_file" || return 1
     # A layout that preserves every captured partition is not an adjusted
@@ -4470,18 +4475,22 @@ rootpxe_apply_windows_hostname_for_disk() {
 # v2 Windows hostname path.  `reged` remains the sole writer; the native
 # helper only selects real ControlSet values and verifies all written values.
 rootpxe_change_hostname_registry() {
-    local part="$1" hive hostname controls control script rc
+    local part="$1" hive hostname controls control script rc inspected key
+    rootpxe_initialization_failure_reason=windows_hostname_hive_inspection_failed
     [[ ${changeHostname:-false} == true && -n ${hostName:-} && -d /ntfs && ! -L /ntfs ]] || return 1
     hive=/ntfs/Windows/System32/config/SYSTEM
     [[ -f $hive && ! -L $hive ]] || return 1
     hostname="$hostName"
-    mapfile -t controls < <(rootpxe-offline-identities windows-hostname-inspect "$hive") || return 1
+    # Do not lose the inspector exit status through process substitution.
+    inspected=$(rootpxe-offline-identities windows-hostname-inspect "$hive") || return 1
+    mapfile -t controls <<<"$inspected"
     [[ ${#controls[@]} -gt 0 ]] || return 1
     script=$(mktemp /tmp/rootpxe-reged-hostname.XXXXXX) || return 1
     chmod 0600 "$script" || { rm -f -- "$script"; return 1; }
     for control in "${controls[@]}"; do
         [[ $control =~ ^ControlSet[0-9]{3}$ ]] || { rm -f -- "$script"; return 1; }
-        for key in "\\${control}\\Services\\Tcpip\\Parameters\\NV Hostname" "\\${control}\\Services\\Tcpip\\Parameters\\Hostname" "\\${control}\\Control\\ComputerName\\ActiveComputerName\\ComputerName" "\\${control}\\Control\\ComputerName\\ComputerName\\ComputerName"; do
+        # ActiveComputerName is volatile runtime state, not an offline hive contract.
+        for key in "\\${control}\\Services\\Tcpip\\Parameters\\NV Hostname" "\\${control}\\Services\\Tcpip\\Parameters\\Hostname" "\\${control}\\Control\\ComputerName\\ComputerName\\ComputerName"; do
             printf 'ed %s\n%s\n' "$key" "$hostname" >>"$script" || { rm -f -- "$script"; return 1; }
         done
     done
@@ -4491,8 +4500,11 @@ rootpxe_change_hostname_registry() {
     # reged returns 0, 1, or 2 after an interactive hive edit depending on
     # whether data was changed.  The native read-only verifier is the actual
     # success condition and rejects every incomplete write.
+    rootpxe_initialization_failure_reason=windows_hostname_registry_write_failed
     [[ $rc -ge 0 && $rc -le 2 ]] || return 1
-    rootpxe-offline-identities windows-hostname-verify "$hive" "$hostname"
+    rootpxe_initialization_failure_reason=windows_hostname_readback_failed
+    rootpxe-offline-identities windows-hostname-verify "$hive" "$hostname" || return 1
+    unset rootpxe_initialization_failure_reason
 }
 
 rootpxe_validate_windows_hostname() {
@@ -4502,14 +4514,17 @@ rootpxe_validate_windows_hostname() {
 
 rootpxe_apply_windows_hostname() {
     local part="$1" sysprep=0 xml_path source_xml xml_tmp rows architecture count expected_hash actual_hash
+    rootpxe_initialization_failure_reason=windows_hostname_invalid
     [[ ${changeHostname:-false} == true ]] && rootpxe_validate_windows_hostname "${hostName:-}" || [[ ${changeHostname:-false} != true ]] || return 1
     [[ -r ${deploymentIdentityPolicyFile:-} ]] && jq -e '.systemIdentity.sysprep == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1 && sysprep=1
     [[ ${changeHostname:-false} == true || $sysprep -eq 1 ]] || return 0
     if [[ $sysprep -eq 1 ]]; then
+        rootpxe_initialization_failure_reason=windows_sysprep_private_config_unavailable
         source_xml="${rootpxe_deployment_initialization_private_file:-}"
         [[ -r $source_xml && ! -L $source_xml ]] || return 1
     fi
     rootpxe_stage customizing_hostname "code=WINDOWS_INITIALIZATION_STARTED"
+    rootpxe_initialization_failure_reason=windows_system_mount_failed
     mkdir -p /ntfs || return 1
     umount /ntfs >/dev/null 2>&1 || true
     ntfs-3g -o remove_hiberfile,rw "$part" /ntfs >/tmp/ntfs-mount-output 2>&1 || return 1
@@ -4518,6 +4533,7 @@ rootpxe_apply_windows_hostname() {
         rootpxe_deployment_identity_hostname_result=true
     fi
     if [[ $sysprep -eq 1 ]]; then
+        rootpxe_initialization_failure_reason=windows_sysprep_xml_write_or_verify_failed
         xml_path=/ntfs/Windows/System32/Sysprep/unattend.xml
         [[ -d ${xml_path%/*} && ! -L ${xml_path%/*} && ( ! -e $xml_path || ( -f $xml_path && ! -L $xml_path ) ) ]] || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
         xml_tmp=$(mktemp "${xml_path%/*}/.unattend.rootpxe.XXXXXX") || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
@@ -4546,7 +4562,9 @@ rootpxe_apply_windows_hostname() {
         [[ $actual_hash == "$expected_hash" ]] || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
         rootpxe_deployment_identity_sysprep_result=true
     fi
+    rootpxe_initialization_failure_reason=windows_system_unmount_failed
     umount /ntfs >/dev/null 2>&1 || return 1
+    unset rootpxe_initialization_failure_reason
     rootpxe_stage customizing_hostname "code=WINDOWS_INITIALIZATION_COMPLETE"
 }
 
@@ -5058,7 +5076,8 @@ completeTasking() {
                 rootpxe_deployment_identity_request_private || handleError "PXEOS_STAGE=system_initialization CODE=INITIALIZATION_PRIVATE_CONFIG_UNAVAILABLE"
             fi
             if [[ ${changeHostname:-false} == true ]] || rootpxe_deployment_identity_linux_policy_enabled || ( rootpxe_deployment_identity_windows_policy_enabled && jq -e '.systemIdentity.sysprep == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1 ); then
-                rootpxe_apply_hostname_for_disk "$hd" || handleError "PXEOS_STAGE=system_initialization CODE=SYSTEM_INITIALIZATION_FAILED"
+                unset rootpxe_initialization_failure_reason
+                rootpxe_apply_hostname_for_disk "$hd" || handleError "PXEOS_STAGE=system_initialization CODE=SYSTEM_INITIALIZATION_FAILED REASON=${rootpxe_initialization_failure_reason:-unknown}"
             fi
             rootpxe_run_post_deploy_script || handleError "PXEOS_STAGE=post_deploy_script CODE=POST_DEPLOY_SCRIPT_FAILED REASON=${rootpxe_deploy_script_error:-unknown}"
             if rootpxe_deployment_identity_policy_enabled; then
@@ -6225,6 +6244,9 @@ rootpxe_validate_growth_capability() {
         .partitions[] as $source |
         ($resolved[] | select(.number == $source.number)) as $actual |
         select($actual.resolvedSectors > $source.originalSectors) |
+        # Geometry validation already checked this derived container. It has
+        # no filesystem; only its logical members require a grow tool.
+        select(($schema.version == 2 and $schema.partitionTable == "mbr" and $source.kind == "extended" and $source.role == "extended_container" and (($source.fs // "") == "") and (($source.artifact // "") == "")) | not) |
         (($schema.lvm // null) as $lvm |
          {number:$source.number,fs:($source.fs // ""),role:($source.role // ""),uuid:($source.uuid // null),recreatedSwap:((($source.kind // "") != "extended") and ($source.fs == "swap") and ($source.role == "swap") and ((($source | has("artifact")) | not) or $source.artifact == "") and (($source.uuid|type) == "string") and (($source.uuid | gsub("[[:space:]]"; "") | length) > 0)),resizable:($source.resizable == true),fsVariant:($source.fsVariant // ""),verifiedLvm:(($source.role == "lvm_pv") and ($source.fs == "LVM2_member") and ($lvm != null) and ($lvm.version == 1) and ($lvm.captureMode == "per_lv") and ($lvm.resizePolicy == "grow_only") and (($lvm.pvs|type) == "array") and (($lvm.pvs|length) == 1) and (($lvm.vgs|type) == "array") and (($lvm.vgs|length) == 1) and ([$lvm.pvs[] | select(.partitionNumber == $source.number)] | length) == 1),logicalSectorBytes:($schema.logicalSectorBytes // null)}) | @json
     ' "$schema_file") || return 1

@@ -153,7 +153,6 @@ static int windows_hostname_inspect_or_verify(const char *system,
         char control[16];
         hive_node_h current_set;
         hive_node_h tcp;
-        hive_node_h active;
         hive_node_h computer;
 
         if (snprintf(control, sizeof(control), "ControlSet%03u", selected[i])
@@ -168,20 +167,20 @@ static int windows_hostname_inspect_or_verify(const char *system,
         }
         tcp = hostname_path(hive, current_set, "Services", "Tcpip",
                             "Parameters", NULL);
-        active = hostname_path(hive, current_set, "Control", "ComputerName",
-                               "ActiveComputerName", NULL);
         computer = hostname_path(hive, current_set, "Control", "ComputerName",
                                  "ComputerName", NULL);
-        if (!tcp || !active || !computer ||
+        /* ActiveComputerName is volatile and is rebuilt on Windows boot.
+         * It may be absent or stale in an offline SYSTEM hive. */
+        if (!tcp || !computer ||
             hostname_value_matches(hive, tcp, "Hostname", hostname) ||
             hostname_value_matches(hive, tcp, "NV Hostname", hostname) ||
-            hostname_value_matches(hive, active, "ComputerName", hostname) ||
             hostname_value_matches(hive, computer, "ComputerName", hostname))
             goto bad;
     }
     hivex_close(hive);
     return 0;
 bad:
+    fprintf(stderr, "offline SYSTEM hive control-set or persistent hostname verification failed\n");
     hivex_close(hive);
     return -1;
 }

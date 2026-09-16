@@ -176,7 +176,8 @@ if [[ ${resumeStage:-} == customizing_hostname || ${resumeStage:-} == post_deplo
         fi
         rootpxe_stage customizing_hostname "resume permit confirmed"
         if [[ ${changeHostname:-false} == true ]] || rootpxe_deployment_identity_linux_policy_enabled || { rootpxe_deployment_identity_windows_policy_enabled && jq -e '.systemIdentity.sysprep == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1; }; then
-            rootpxe_apply_hostname_for_disk "$hd" || handleError "PXEOS_STAGE=system_initialization CODE=SYSTEM_INITIALIZATION_FAILED"
+            unset rootpxe_initialization_failure_reason
+            rootpxe_apply_hostname_for_disk "$hd" || handleError "PXEOS_STAGE=system_initialization CODE=SYSTEM_INITIALIZATION_FAILED REASON=${rootpxe_initialization_failure_reason:-unknown}"
         fi
 
         rootpxe_deployment_identity_report_result "${rootpxe_deployment_identity_hostname_result:-false}" "${rootpxe_deployment_identity_machine_id_result:-false}" "${rootpxe_deployment_identity_ssh_host_keys_result:-false}" "${rootpxe_deployment_identity_ssh_login_public_keys_result:-false}" "${rootpxe_deployment_identity_root_password_result:-false}" "${rootpxe_deployment_identity_sysprep_result:-false}" || handleError "PXEOS_STAGE=deployment_identity_result CODE=IDENTITY_RESULT_REJECTED"

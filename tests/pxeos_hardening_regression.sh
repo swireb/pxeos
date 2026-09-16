@@ -163,6 +163,13 @@ resize2fs(){ :; }; e2fsck(){ :; }
 rootpxe_validate_growth_capability "$schema_ext_without_uuid" "$resolved" || fail non-swap-growth-must-not-require-uuid
 unset -f resize2fs e2fsck
 
+# A derived extended container grows structurally, not as a filesystem.
+schema_extended="$tmp/schema-extended.json"
+printf '%s' '{"version":2,"partitionTable":"mbr","partitions":[{"number":1,"kind":"extended","role":"extended_container","fs":"","originalSectors":100,"resizable":false}]}' >"$schema_extended"
+rootpxe_validate_growth_capability "$schema_extended" "$resolved" || fail derived-container-growth-rejected
+jq '.partitions[0].kind="primary"' "$schema_extended" >"$tmp/fake-container.json"
+if rootpxe_validate_growth_capability "$tmp/fake-container.json" "$resolved"; then fail fake-container-growth-accepted; fi
+
 # Integration names: capture resume and full restore preflight are exercised
 # by their dedicated capture/partition suites; keep this test tied to them.
 must_have "$restore_preflight" 'rootpxe_validate_restore_artifacts'

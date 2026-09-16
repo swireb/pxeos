@@ -961,6 +961,7 @@ EOF
 schemaRevision=1; schemaHash=$(rootpxe_canonical_json_hash "$tmp/mbr-primary-after-extended-schema.json")
 printf '{"schemaHash":"%s","partitions":[{"number":1,"mode":"original"},{"number":2,"mode":"derived"},{"number":3,"mode":"original"},{"number":5,"mode":"original"}]}' "$schemaHash" >"$tmp/mbr-primary-after-extended-layout.json"
 rootpxe_validate_deployment_layout /dev/sda "$tmp/mbr-primary-after-extended-schema.json" "$tmp/mbr-primary-after-extended-layout.json" || fail mbr-primary-after-extended-must-resolve
+jq -e --slurpfile source "$tmp/mbr-primary-after-extended-schema.json" 'all(.[]; . as $p | any($source[0].partitions[]; .number == $p.number and .startSectors == $p.startSectors and .originalSectors == $p.resolvedSectors))' "$rootpxe_resolved_layout_file" >/dev/null || fail original-layout-must-preserve-source-geometry
 jq -e '([.[] | select(.kind != "extended")] | sort_by(.startSectors, .number) | map(.number)) == [1,5,3] and ([.[] | select(.number == 2)][0] | .resolvedSectors >= 10000) and ([.[] | select(.number == 5)][0].startSectors < ([.[] | select(.number == 3)][0].startSectors))' "$rootpxe_resolved_layout_file" >/dev/null || fail mbr-primary-after-extended-physical-order-or-container-range
 # A growable NTFS logical member may use a fixed deployment size while the
 # extended container retains its captured minimum tail before the later
@@ -969,12 +970,16 @@ jq -e '([.[] | select(.kind != "extended")] | sort_by(.startSectors, .number) | 
 rm -f "$rootpxe_resolved_layout_file"
 printf '{"schemaHash":"%s","partitions":[{"number":1,"mode":"original"},{"number":2,"mode":"derived"},{"number":3,"mode":"original"},{"number":5,"mode":"fixed","fixedBytes":1024000}]}' "$schemaHash" >"$tmp/mbr-primary-after-extended-fixed-logical-layout.json"
 rootpxe_validate_deployment_layout /dev/sda "$tmp/mbr-primary-after-extended-schema.json" "$tmp/mbr-primary-after-extended-fixed-logical-layout.json" || fail mbr-primary-after-extended-fixed-logical-must-resolve
+ntfsresize(){ :; }
+rootpxe_validate_growth_capability "$tmp/mbr-primary-after-extended-schema.json" "$rootpxe_resolved_layout_file" || fail logical-fixed-growth-preflight
 jq -e '([.[] | select(.number == 5)][0].resolvedSectors == 2048) and ([.[] | select(.number == 2)][0].resolvedSectors >= 10000) and ([.[] | select(.number == 5)][0].startSectors < ([.[] | select(.number == 3)][0].startSectors))' "$rootpxe_resolved_layout_file" >/dev/null || fail mbr-primary-after-extended-fixed-logical-geometry
 # The remaining-space logical mode must also reserve the later primary and
 # MBR/EBR alignment gaps instead of overcommitting the target disk.
 rm -f "$rootpxe_resolved_layout_file"
 printf '{"schemaHash":"%s","partitions":[{"number":1,"mode":"original"},{"number":2,"mode":"derived"},{"number":3,"mode":"original"},{"number":5,"mode":"remaining"}]}' "$schemaHash" >"$tmp/mbr-primary-after-extended-remaining-logical-layout.json"
 rootpxe_validate_deployment_layout /dev/sda "$tmp/mbr-primary-after-extended-schema.json" "$tmp/mbr-primary-after-extended-remaining-logical-layout.json" || fail mbr-primary-after-extended-remaining-logical-must-resolve
+rootpxe_validate_growth_capability "$tmp/mbr-primary-after-extended-schema.json" "$rootpxe_resolved_layout_file" || fail logical-remaining-growth-preflight
+unset -f ntfsresize
 jq -e '([.[] | select(.number == 5)][0]) as $logical | ([.[] | select(.number == 3)][0]) as $primary | ($logical.resolvedSectors > 1000) and ($logical.startSectors + $logical.resolvedSectors <= $primary.startSectors) and ($primary.startSectors + $primary.resolvedSectors <= 1048576)' "$rootpxe_resolved_layout_file" >/dev/null || fail mbr-primary-after-extended-remaining-logical-geometry
 rm -f "$rootpxe_resolved_layout_file"; unset rootpxe_resolved_layout_file schemaRevision schemaHash
 # Primary partitions remain forbidden only when their original range actually
@@ -994,6 +999,13 @@ printf '%s\n' '{"partitions":[{"number":1,"mode":"original"}],"lvm":[{"pvPartiti
 printf '%s\n' '[{"number":1,"resolvedSectors":524288}]' >"$tmp/lvm-partitions.json"
 rootpxe_validate_lvm_deployment_layout "$tmp/lvm-schema.json" "$tmp/lvm-layout.json" "$tmp/lvm-partitions.json" || fail lvm-layout-real-jq
 jq -e '.volumes|type == "array" and length == 1 and .[0].resolvedBytes == 67108864' "$rootpxe_resolved_lvm_layout_file" >/dev/null || fail lvm-layout-result-shape
+# Schema v2 also represents a primary-only MBR LVM disk; it must not require
+# an extended container merely because it uses version 2.
+jq '. + {partitionTable:"mbr",originalDiskBytes:536870912,minDeployBytes:536870912,physicalSectorBytes:512,partitions:[{number:1,kind:"primary",startSectors:2048,originalSectors:524288,minSectors:524288,fs:"LVM2_member",role:"lvm_pv",resizable:true}]}' "$tmp/lvm-schema.json" >"$tmp/lvm-mbr-schema.json"
+schemaRevision=1; schemaHash=$(rootpxe_canonical_json_hash "$tmp/lvm-mbr-schema.json")
+jq --arg hash "$schemaHash" '. + {schemaHash:$hash}' "$tmp/lvm-layout.json" >"$tmp/lvm-mbr-layout.json"
+rootpxe_validate_deployment_layout /dev/sda "$tmp/lvm-mbr-schema.json" "$tmp/lvm-mbr-layout.json" || fail mbr-lvm-without-extended-rejected
+rm -f "$rootpxe_resolved_layout_file"; unset rootpxe_resolved_layout_file schemaRevision schemaHash
 cat >"$tmp/capture/d2.partitions" <<'EOF'
 label: dos
 device: /dev/sda

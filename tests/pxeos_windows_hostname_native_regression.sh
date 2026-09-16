@@ -70,16 +70,15 @@ static void copy(const char *source, const char *destination) {
     if (count < 0 || close(in) || close(out)) fail("close fixture hive");
 }
 static void control_set(hive_h *hive, hive_node_h root, unsigned set) {
-    char name[16]; hive_node_h node, tcp, computer, active;
+    char name[16]; hive_node_h node, tcp, computer;
     if (snprintf(name, sizeof(name), "ControlSet%03u", set) >= (int)sizeof(name)) fail("control set name");
     node = add(hive, root, name);
     tcp = add(hive, add(hive, add(hive, node, "Services"), "Tcpip"), "Parameters");
     computer = add(hive, add(hive, node, "Control"), "ComputerName");
-    active = add(hive, computer, "ActiveComputerName");
+    /* Deliberately omit volatile ActiveComputerName, as in an offline hive. */
     computer = add(hive, computer, "ComputerName");
     string(hive, tcp, "Hostname", "BEFORE");
     string(hive, tcp, "NV Hostname", "BEFORE");
-    string(hive, active, "ComputerName", "BEFORE");
     string(hive, computer, "ComputerName", "BEFORE");
 }
 int main(int argc, char **argv) {
@@ -118,7 +117,6 @@ set +e
         printf 'ed \\%s\\Services\\Tcpip\\Parameters\\Hostname\nAFTER\n' "$set"
         printf 'ed \\%s\\Services\\Tcpip\\Parameters\\NV Hostname\nAFTER\n' "$set"
         printf 'ed \\%s\\Control\\ComputerName\\ComputerName\\ComputerName\nAFTER\n' "$set"
-        printf 'ed \\%s\\Control\\ComputerName\\ActiveComputerName\\ComputerName\nAFTER\n' "$set"
     done
     printf 'q\ny\n\n'
 } | "$reged" -e "$system" >/dev/null
