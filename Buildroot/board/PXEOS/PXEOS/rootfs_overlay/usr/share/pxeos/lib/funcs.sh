@@ -1309,13 +1309,17 @@ rootpxe_validate_deployment_layout() {
              if ($extendedLayout|length) != 1 or $extendedLayout[0].mode != "derived" or ($extendedLayout[0]|has("fixedBytes")) then error("extended container must be derived") else . end |
              ([$sp[] | select(.kind == "logical")]) as $logicals |
              if ($logicals|length) == 0 or ([ $logicals[] | select(.parentNumber != $extended.number)]|length) != 0 then error("invalid logical parent") else . end |
-             ([$sp[] | select(.kind == "primary") | (.startSectors + .originalSectors)]) as $primaryEnds |
-             if (($primaryEnds | max // 0) > $extended.startSectors) then error("primary after extended is not supported safely") else . end |
-             $sp | map(select(.kind != "extended"))
+             ([$sp[] | select(.kind == "primary" and .startSectors < ($extended.startSectors + $extended.originalSectors) and $extended.startSectors < (.startSectors + .originalSectors))] | length) as $primaryOverlaps |
+             if $primaryOverlaps != 0 then error("primary overlaps extended container") else . end |
+             $sp | map(select(.kind != "extended")) | sort_by([.startSectors, .number])
            else $sp end) as $worksp |
+          (if $mbrExtended then
+             ([$sp[] | select(.kind == "extended")][0]) as $extended |
+             ([$sp[] | select(.kind == "logical" and .parentNumber == $extended.number)] | length) * $extended.ebrReservedSectors
+           else 0 end) as $ebrReservedTotal |
           ($worksp|map(.startSectors)|min) as $front |
           (if $s.partitionTable == "gpt" then $front else 0 end) as $back |
-          ($target - $front - $back) as $available |
+          ($target - $front - $back - $ebrReservedTotal) as $available |
           (262144 / $logical | floor | if . < 1 then 1 else . end) as $alignment |
           if $available <= 0 then error("target too small") else . end |
           [ $worksp[] as $p | ($lp[]|select(.number == $p.number)) as $o |
@@ -1333,22 +1337,54 @@ rootpxe_validate_deployment_layout() {
           ($pre|add) as $used |
           if $used > $available then error("target too small") else . end |
           (if $remainingCount == 1 then align_down(($available-$used);$alignment) else 0 end) as $remaining |
-          (reduce range(0;($items|length)) as $i ({cursor:$front,out:[]};
-            ($items[$i]) as $item | ($pre[$i]) as $base |
-            (if $item.mode == "remaining" then $remaining else $base end) as $size |
-            if $size < $item.p.originalSectors then error("original size violated") else . end |
-            .cursor = align_up(.cursor;$alignment) |
-            .out += [$item.p + {startSectors:.cursor,resolvedSectors:$size}] |
-            .cursor += $size) |
-          if .cursor > ($target-$back) then error("layout exceeds target") else .out end) as $resolved |
-          if $mbrExtended then
-            ([$sp[] | select(.kind == "extended")][0]) as $extended |
-            ($resolved | map(select(.kind == "logical"))) as $logicals |
-            ($logicals | map(.startSectors) | min - $extended.ebrReservedSectors) as $extendedStart |
-            ($logicals | map(.startSectors + .resolvedSectors) | max) as $extendedEnd |
-            if $extendedStart < 0 or $extendedEnd <= $extendedStart then error("derived extended geometry invalid") else . end |
-            ([$resolved[], $extended + {startSectors:$extendedStart,resolvedSectors:($extendedEnd-$extendedStart)}] | sort_by(.number))
-          else $resolved end' >"$rootpxe_resolved_layout_file" || { rm -f "$rootpxe_resolved_layout_file"; return 1; }
+           # A numbered MBR table is not necessarily in physical order:
+           # Windows may place a primary recovery partition after an extended
+           # container while its logical members are p5+.  Allocate all leaves
+           # by source geometry.  EBRs and the mandatory container tail are
+           # inserted before the later primary leaf is allocated.
+           (if $mbrExtended then ([$sp[] | select(.kind == "extended")][0]) else null end) as $extended |
+           (if $mbrExtended then ([$items[] | select(.p.kind == "logical")] | sort_by([.p.startSectors, .p.number])) else [] end) as $logicalItems |
+           (if $mbrExtended then $logicalItems[-1].p.number else null end) as $lastLogicalNumber |
+           def resolve_leaves($remainingSectors):
+             ([range(0;($items|length)) as $i |
+               if $items[$i].p.kind == "logical" then
+                 (if $items[$i].mode == "remaining" then $remainingSectors else $pre[$i] end)
+               else empty end] | add // 0) as $logicalPayloadSectors |
+             (if $mbrExtended then (($logicalItems|length) * $extended.ebrReservedSectors + $logicalPayloadSectors) else 0 end) as $logicalFootprint |
+             (if $mbrExtended and $extended.minSectors > $logicalFootprint then $extended.minSectors - $logicalFootprint else 0 end) as $extendedTailSectors |
+             reduce range(0;($items|length)) as $i ({cursor:$front,out:[]};
+               ($items[$i]) as $item | ($pre[$i]) as $base |
+               (if $item.mode == "remaining" then $remainingSectors else $base end) as $size |
+               if $size < $item.p.originalSectors then error("original size violated") else . end |
+               .cursor = align_up(.cursor;$alignment) |
+               if $mbrExtended and $item.p.kind == "logical" then .cursor = align_up(.cursor + $extended.ebrReservedSectors;$alignment) else . end |
+               .out += [$item.p + {startSectors:.cursor,resolvedSectors:$size}] |
+               .cursor += $size |
+               if $mbrExtended and $item.p.kind == "logical" and $item.p.number == $lastLogicalNumber then .cursor += $extendedTailSectors else . end);
+           def remaining_that_fits($low; $high):
+             if $low >= $high then $low
+             else (($low + $high + 1) / 2 | floor) as $middle |
+               if (resolve_leaves($middle).cursor <= ($target - $back))
+               then remaining_that_fits($middle; $high)
+               else remaining_that_fits($low; $middle - 1)
+               end
+             end;
+           (if $remainingCount == 1 then
+              ([ $items[] | select(.mode == "remaining") | .p.originalSectors ] | first | align_up(.;$alignment)) as $minimumRemaining |
+              if $remaining < $minimumRemaining then $remaining else remaining_that_fits($minimumRemaining; $remaining) end
+            else 0 end) as $resolvedRemaining |
+           (resolve_leaves($resolvedRemaining)) as $leafResolved |
+           if $leafResolved.cursor > ($target-$back) then error("layout exceeds target") else . end |
+           ($leafResolved.out) as $leaves |
+           (if $mbrExtended then
+              ([$leaves[] | select(.kind == "logical")]) as $logicals |
+              (($logicals | map(.startSectors) | min) - $extended.ebrReservedSectors) as $extendedStart |
+              ($logicals | map(.startSectors + .resolvedSectors) | max) as $logicalEnd |
+              (if $logicalEnd > ($extendedStart + $extended.minSectors) then $logicalEnd else ($extendedStart + $extended.minSectors) end) as $extendedEnd |
+              if $extendedEnd > ($target-$back) then error("layout exceeds target")
+              else ($leaves + [$extended + {startSectors:$extendedStart,resolvedSectors:($extendedEnd-$extendedStart)}] | sort_by(.number)) end
+            else $leaves end) as $resolved |
+           $resolved' >"$rootpxe_resolved_layout_file" || { rm -f "$rootpxe_resolved_layout_file"; return 1; }
     export rootpxe_resolved_layout_file
     rootpxe_validate_lvm_deployment_layout "$schema_file" "$layout_file" "$rootpxe_resolved_layout_file" || return 1
     # A layout that preserves every captured partition is not an adjusted

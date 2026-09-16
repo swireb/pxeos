@@ -948,6 +948,42 @@ EOF
 rootpxe_build_original_schema /dev/sda "$tmp/capture" || fail mbr-extended-tail-schema
 jq -e '.version == 2 and .partitionTable == "mbr" and .minDeployBytes == .originalDiskBytes and ([.partitions[] | select(.kind == "extended") | .originalSectors == 10000 and .minSectors == .originalSectors] | length) == 1 and (.partitions | all(.minSectors == .originalSectors))' "$rootpxe_original_schema_file" >/dev/null || fail mbr-extended-tail-must-keep-captured-minimum
 mv "$tmp/capture/d1.gpt.partitions" "$tmp/capture/d1.partitions"
+# A Windows MBR layout may place recovery primary p3 after the p2 extended
+# container.  Resolve leaves by physical geometry, retain the container's
+# captured tail, and never treat this legal order as a topology failure.
+cat >"$tmp/mbr-primary-after-extended-schema.json" <<'EOF'
+{"version":2,"partitionTable":"mbr","originalDiskBytes":204800,"logicalSectorBytes":512,"physicalSectorBytes":512,"minDeployBytes":204800,"partitions":[
+ {"number":1,"kind":"primary","startSectors":2048,"originalSectors":1000,"minSectors":1000,"typeGuid":"0x07","role":"data","resizable":true,"fs":"ntfs","artifact":"d1p1.img"},
+ {"number":2,"kind":"extended","startSectors":4096,"originalSectors":10000,"minSectors":10000,"typeGuid":"0x0f","role":"extended_container","resizable":true,"logicalNumbers":[5],"ebrReservedSectors":2,"ebrArtifact":"d1p2.ebr","artifact":""},
+ {"number":3,"kind":"primary","startSectors":14096,"originalSectors":1000,"minSectors":1000,"typeGuid":"0x27","role":"recovery","resizable":false,"fs":"ntfs","artifact":"d1p3.img"},
+ {"number":5,"kind":"logical","parentNumber":2,"startSectors":4098,"originalSectors":1000,"minSectors":1000,"typeGuid":"0x07","role":"data","resizable":true,"fs":"ntfs","artifact":"d1p5.img"}]}
+EOF
+schemaRevision=1; schemaHash=$(rootpxe_canonical_json_hash "$tmp/mbr-primary-after-extended-schema.json")
+printf '{"schemaHash":"%s","partitions":[{"number":1,"mode":"original"},{"number":2,"mode":"derived"},{"number":3,"mode":"original"},{"number":5,"mode":"original"}]}' "$schemaHash" >"$tmp/mbr-primary-after-extended-layout.json"
+rootpxe_validate_deployment_layout /dev/sda "$tmp/mbr-primary-after-extended-schema.json" "$tmp/mbr-primary-after-extended-layout.json" || fail mbr-primary-after-extended-must-resolve
+jq -e '([.[] | select(.kind != "extended")] | sort_by(.startSectors, .number) | map(.number)) == [1,5,3] and ([.[] | select(.number == 2)][0] | .resolvedSectors >= 10000) and ([.[] | select(.number == 5)][0].startSectors < ([.[] | select(.number == 3)][0].startSectors))' "$rootpxe_resolved_layout_file" >/dev/null || fail mbr-primary-after-extended-physical-order-or-container-range
+# A growable NTFS logical member may use a fixed deployment size while the
+# extended container retains its captured minimum tail before the later
+# recovery primary.  This exercises the same per-member mode consumed by the
+# RootPXE editor, rather than accepting only the all-original layout.
+rm -f "$rootpxe_resolved_layout_file"
+printf '{"schemaHash":"%s","partitions":[{"number":1,"mode":"original"},{"number":2,"mode":"derived"},{"number":3,"mode":"original"},{"number":5,"mode":"fixed","fixedBytes":1024000}]}' "$schemaHash" >"$tmp/mbr-primary-after-extended-fixed-logical-layout.json"
+rootpxe_validate_deployment_layout /dev/sda "$tmp/mbr-primary-after-extended-schema.json" "$tmp/mbr-primary-after-extended-fixed-logical-layout.json" || fail mbr-primary-after-extended-fixed-logical-must-resolve
+jq -e '([.[] | select(.number == 5)][0].resolvedSectors == 2048) and ([.[] | select(.number == 2)][0].resolvedSectors >= 10000) and ([.[] | select(.number == 5)][0].startSectors < ([.[] | select(.number == 3)][0].startSectors))' "$rootpxe_resolved_layout_file" >/dev/null || fail mbr-primary-after-extended-fixed-logical-geometry
+# The remaining-space logical mode must also reserve the later primary and
+# MBR/EBR alignment gaps instead of overcommitting the target disk.
+rm -f "$rootpxe_resolved_layout_file"
+printf '{"schemaHash":"%s","partitions":[{"number":1,"mode":"original"},{"number":2,"mode":"derived"},{"number":3,"mode":"original"},{"number":5,"mode":"remaining"}]}' "$schemaHash" >"$tmp/mbr-primary-after-extended-remaining-logical-layout.json"
+rootpxe_validate_deployment_layout /dev/sda "$tmp/mbr-primary-after-extended-schema.json" "$tmp/mbr-primary-after-extended-remaining-logical-layout.json" || fail mbr-primary-after-extended-remaining-logical-must-resolve
+jq -e '([.[] | select(.number == 5)][0]) as $logical | ([.[] | select(.number == 3)][0]) as $primary | ($logical.resolvedSectors > 1000) and ($logical.startSectors + $logical.resolvedSectors <= $primary.startSectors) and ($primary.startSectors + $primary.resolvedSectors <= 1048576)' "$rootpxe_resolved_layout_file" >/dev/null || fail mbr-primary-after-extended-remaining-logical-geometry
+rm -f "$rootpxe_resolved_layout_file"; unset rootpxe_resolved_layout_file schemaRevision schemaHash
+# Primary partitions remain forbidden only when their original range actually
+# intersects the extended container.
+jq '(.partitions[] | select(.number == 3)).startSectors = 13000' "$tmp/mbr-primary-after-extended-schema.json" >"$tmp/mbr-primary-overlap-extended-schema.json"
+schemaRevision=1; schemaHash=$(rootpxe_canonical_json_hash "$tmp/mbr-primary-overlap-extended-schema.json")
+printf '{"schemaHash":"%s","partitions":[{"number":1,"mode":"original"},{"number":2,"mode":"derived"},{"number":3,"mode":"original"},{"number":5,"mode":"original"}]}' "$schemaHash" >"$tmp/mbr-primary-overlap-extended-layout.json"
+rootpxe_validate_deployment_layout /dev/sda "$tmp/mbr-primary-overlap-extended-schema.json" "$tmp/mbr-primary-overlap-extended-layout.json" && fail mbr-primary-overlap-extended-must-reject
+rm -f "${rootpxe_resolved_layout_file:-}"; unset rootpxe_resolved_layout_file schemaRevision schemaHash
 # Exercise the production LVM layout resolver with the real jq binary too.
 # The separate LVM suite intentionally replaces jq to focus on command-flow
 # failures, so it cannot detect jq syntax or result-shape regressions here.
