@@ -82,6 +82,34 @@ cat >"$n/canonical-omitted-extended-fields-schema.json" <<'JSON'
 JSON
 expect_ok rootpxe_validate_restore_artifacts "$n" n all "$n/canonical-omitted-extended-fields-schema.json"
 
+# Historical Windows GPT captures used a schema v1 MSR record with no
+# filesystem but retained its tiny Partclone artifact.  MSR is a valid
+# non-filesystem partition, so preflight must validate that artifact rather
+# than reject the whole schema merely because .fs is null.
+win_msr="$tmp/win-msr"
+mkdir "$win_msr"
+cat >"$win_msr/schema.json" <<'JSON'
+{"version":1,"partitionTable":"gpt","logicalSectorBytes":512,"partitions":[
+ {"number":1,"startSectors":2048,"role":"efi","fs":"vfat","artifact":"d1p1.img"},
+ {"number":2,"startSectors":206848,"role":"msr","fs":null,"artifact":"d1p2.img"},
+ {"number":3,"startSectors":239616,"role":"data","fs":"ntfs","artifact":"d1p3.img"},
+ {"number":4,"startSectors":123947008,"role":"recovery","fs":"ntfs","artifact":"d1p4.img"}]}
+JSON
+for part in 1 2 3 4; do file "$win_msr/d1p${part}.img"; done
+cat >"$win_msr/d1.partitions" <<'EOF'
+label: gpt
+/dev/mock1 : start=2048, size=204800, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+/dev/mock2 : start=206848, size=32768, type=E3C9E316-0B5C-4DB8-817D-F92DF00215AE
+/dev/mock3 : start=239616, size=123707392, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7
+/dev/mock4 : start=123947008, size=83886080, type=DE94BBA4-06D1-4D40-A16A-BFD50179D6AC
+EOF
+expect_ok rootpxe_validate_restore_artifacts "$win_msr" n all "$win_msr/schema.json"
+rm "$win_msr/d1p2.img"
+expect_fail rootpxe_validate_restore_artifacts "$win_msr" n all "$win_msr/schema.json"
+file "$win_msr/d1p2.img"
+jq '(.partitions[] | select(.number == 2) | .fs) = "ntfs"' "$win_msr/schema.json" >"$win_msr/invalid-msr-filesystem-schema.json"
+expect_fail rootpxe_validate_restore_artifacts "$win_msr" n all "$win_msr/invalid-msr-filesystem-schema.json"
+
 cat >"$n/data-omitted-artifact-schema.json" <<'JSON'
 {"version":2,"partitionTable":"mbr","logicalSectorBytes":512,"originalDiskBytes":16777216,"partitions":[
  {"number":1,"kind":"primary","startSectors":8,"role":"data","fs":"ext4"},

@@ -319,19 +319,30 @@ rootpxe_preflight_n_artifacts() {
         (has("artifact") | not) or ((.artifact|type) == "string" and .artifact == "");
       def omitted_or_empty_extended_fs:
         (has("fs") | not) or ((.fs|type) == "string" and .fs == "");
+      # MSR has no filesystem.  Historical schema v1 captures preserved its
+      # tiny raw artifact, while newer captures may omit it; neither form may
+      # be mistaken for a malformed ordinary filesystem partition.
+      def omitted_or_empty_msr_fs:
+        (has("fs") | not) or .fs == null or ((.fs|type) == "string" and .fs == "");
       def exact_swap_no_payload:
         .role == "swap" and .fs == "swap" and omitted_or_empty_artifact;
       def exact_extended_no_payload:
         .kind == "extended" and .role == "extended_container" and
         omitted_or_empty_extended_fs and omitted_or_empty_artifact;
+      def exact_msr_no_payload:
+        .role == "msr" and omitted_or_empty_msr_fs and omitted_or_empty_artifact;
+      def exact_msr_payload:
+        .role == "msr" and omitted_or_empty_msr_fs and
+        ((.artifact|type) == "string" and (.artifact|length) > 0);
       def exact_lvm_pv_no_payload:
         (.role == "lvm_pv" or .fs == "LVM2_member") and omitted_or_empty_artifact;
       def valid_partition_shape:
         (.number|type) == "number" and .number >= 1 and .number == (.number|floor) and
         (.role|type) == "string" and
-        (if (.kind == "extended" and .role == "extended_container" and (has("fs") | not))
-         then true else (.fs|type) == "string" end) and
-        (if ((exact_swap_no_payload or exact_extended_no_payload or exact_lvm_pv_no_payload) and (has("artifact") | not))
+        (if .role == "msr" then omitted_or_empty_msr_fs
+         elif (.kind == "extended" and .role == "extended_container" and (has("fs") | not)) then true
+         else (.fs|type) == "string" end) and
+        (if ((exact_swap_no_payload or exact_extended_no_payload or exact_msr_no_payload or exact_lvm_pv_no_payload) and (has("artifact") | not))
          then true else (.artifact|type) == "string" end);
       if (($schema.version == 1 or $schema.version == 2) and
           ($schema.partitionTable == "mbr" or $schema.partitionTable == "gpt") and
@@ -342,8 +353,9 @@ rootpxe_preflight_n_artifacts() {
       then $schema.partitions[] else error("invalid schema") end |
       if exact_swap_no_payload then ["skip",.number,""]
       elif exact_extended_no_payload then ["skip",.number,""]
+      elif exact_msr_no_payload then ["skip",.number,""]
       elif exact_lvm_pv_no_payload then ["pv",.number,""]
-      elif (.artifact|length) > 0 then ["payload",.number,.artifact]
+      elif exact_msr_payload or (.artifact|length) > 0 then ["payload",.number,.artifact]
       else error("missing required partition artifact") end | @tsv
     ' "$schema_file") || return 1
     rows=${rows//$'\r'/}
