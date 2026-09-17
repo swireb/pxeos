@@ -4475,7 +4475,8 @@ rootpxe_apply_windows_hostname_for_disk() {
 # v2 Windows hostname path.  `reged` remains the sole writer; the native
 # helper only selects real ControlSet values and verifies all written values.
 rootpxe_change_hostname_registry() {
-    local part="$1" hive hostname controls control script rc inspected key
+    local part="$1" hive hostname controls control script rc inspected paths key expected_paths=0
+    local -a path_components
     rootpxe_initialization_failure_reason=windows_hostname_hive_inspection_failed
     [[ ${changeHostname:-false} == true && -n ${hostName:-} && -d /ntfs && ! -L /ntfs ]] || return 1
     hive=/ntfs/Windows/System32/config/SYSTEM
@@ -4485,17 +4486,29 @@ rootpxe_change_hostname_registry() {
     inspected=$(rootpxe-offline-identities windows-hostname-inspect "$hive") || return 1
     mapfile -t controls <<<"$inspected"
     [[ ${#controls[@]} -gt 0 ]] || return 1
+    paths=$(rootpxe-offline-identities windows-hostname-write-paths "$hive") || return 1
+    mapfile -t paths <<<"$paths"
+    expected_paths=$((${#controls[@]} * 3))
+    [[ ${#paths[@]} -eq $expected_paths ]] || return 1
     script=$(mktemp /tmp/rootpxe-reged-hostname.XXXXXX) || return 1
     chmod 0600 "$script" || { rm -f -- "$script"; return 1; }
-    for control in "${controls[@]}"; do
-        [[ $control =~ ^ControlSet[0-9]{3}$ ]] || { rm -f -- "$script"; return 1; }
-        # ActiveComputerName is volatile runtime state, not an offline hive contract.
-        for key in "\\${control}\\Services\\Tcpip\\Parameters\\NV Hostname" "\\${control}\\Services\\Tcpip\\Parameters\\Hostname" "\\${control}\\Control\\ComputerName\\ComputerName\\ComputerName"; do
-            printf 'ed %s\n%s\n' "$key" "$hostname" >>"$script" || { rm -f -- "$script"; return 1; }
-        done
+    for key in "${paths[@]}"; do
+        # The native helper only emits existing hive names.  Keep a second
+        # shell-side structural check before interpolating any path in reged.
+        IFS='\\' read -r -a path_components <<<"${key#\\}"
+        [[ ${key:0:1} == $'\\' && ${key:1:1} != $'\\' && ${#path_components[@]} -eq 5 && ${path_components[0],,} =~ ^controlset[0-9]{3}$ ]] || { rm -f -- "$script"; return 1; }
+        if [[ ${path_components[1],,} == services && ${path_components[2],,} == tcpip && ${path_components[3],,} == parameters ]]; then
+            [[ ${path_components[4],,} == hostname || ${path_components[4],,} == 'nv hostname' ]] || { rm -f -- "$script"; return 1; }
+        elif [[ ${path_components[1],,} == control && ${path_components[2],,} == computername && ${path_components[3],,} == computername && ${path_components[4],,} == computername ]]; then
+            :
+        else
+            rm -f -- "$script"; return 1
+        fi
+        printf 'ed %s\n%s\n' "$key" "$hostname" >>"$script" || { rm -f -- "$script"; return 1; }
     done
     printf 'q\ny\n' >>"$script" || { rm -f -- "$script"; return 1; }
-    reged -e "$hive" <"$script" >/dev/null 2>&1; rc=$?
+    rc=0
+    reged -e "$hive" <"$script" >/dev/null 2>&1 || rc=$?
     rm -f -- "$script"
     # reged returns 0, 1, or 2 after an interactive hive edit depending on
     # whether data was changed.  The native read-only verifier is the actual

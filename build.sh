@@ -149,9 +149,53 @@ rootpxe_build_apply_filesystem_patches() {
     [[ $applied == yes ]] || echo " * WARNING: Did not find any patch file(s), building filesystem without patches!"
 }
 
+# A new filesystem default does not replace an existing fssource<arch>/.config.
+# Keep this narrow migration explicit: libhivex needs the selected glibc gconv
+# modules to traverse Windows Registry key names, without overwriting any other
+# local Buildroot choices in an incremental build directory.  An empty gconv
+# list means copy every module and must retain that broader user choice.
+rootpxe_build_sync_glibc_gconv_config() {
+    local desired_config="$1" current_config="$2"
+    local copy_setting='BR2_TOOLCHAIN_GLIBC_GCONV_LIBS_COPY=y'
+    local list_setting='BR2_TOOLCHAIN_GLIBC_GCONV_LIBS_LIST="UTF-16 ISO8859-1"'
+    local current_list module
+
+    [[ -r $desired_config && -f $current_config ]] || return 1
+    grep -Fqx "$copy_setting" "$desired_config" || return 0
+    grep -Fqx "$list_setting" "$desired_config" || return 1
+
+    if grep -Fqx '# BR2_TOOLCHAIN_GLIBC_GCONV_LIBS_COPY is not set' "$current_config"; then
+        sed -i 's|^# BR2_TOOLCHAIN_GLIBC_GCONV_LIBS_COPY is not set$|BR2_TOOLCHAIN_GLIBC_GCONV_LIBS_COPY=y|' "$current_config" || return 1
+    elif grep -Eq '^BR2_TOOLCHAIN_GLIBC_GCONV_LIBS_COPY=' "$current_config"; then
+        sed -i "s|^BR2_TOOLCHAIN_GLIBC_GCONV_LIBS_COPY=.*$|$copy_setting|" "$current_config" || return 1
+    else
+        printf '%s\n' "$copy_setting" >> "$current_config" || return 1
+    fi
+
+    current_list=$(sed -n 's/^BR2_TOOLCHAIN_GLIBC_GCONV_LIBS_LIST="\(.*\)"$/\1/p' "$current_config") || return 1
+    if [[ -z $current_list ]] && ! grep -Eq '^BR2_TOOLCHAIN_GLIBC_GCONV_LIBS_LIST=' "$current_config"; then
+        printf '%s\n' "$list_setting" >> "$current_config" || return 1
+        return 0
+    fi
+    [[ -z $current_list ]] && return 0
+    for module in UTF-16 ISO8859-1; do
+        [[ " $current_list " == *" $module "* ]] || current_list+=" $module"
+    done
+    sed -i "s|^BR2_TOOLCHAIN_GLIBC_GCONV_LIBS_LIST=.*$|BR2_TOOLCHAIN_GLIBC_GCONV_LIBS_LIST=\"$current_list\"|" "$current_config" || return 1
+}
+
+rootpxe_build_olddefconfig() {
+    case "$1" in
+        x64) make olddefconfig ;;
+        x86) make ARCH=i486 olddefconfig ;;
+        arm64) make ARCH=aarch64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig ;;
+        *) make olddefconfig ;;
+    esac
+}
+
 
 function buildFilesystem() {
-    local arch="$1"
+    local arch="$1" filesystem_config="$PROJECT_DIRECTORY/configs/fs$1.config"
     local brURL="https://buildroot.org/downloads/buildroot-$BUILDROOT_VERSION.tar.xz"
     local archive="buildroot-$BUILDROOT_VERSION.tar.xz"
     echo "Preparing buildroot $BUILDROOT_VERSION on $arch build:"
@@ -178,22 +222,10 @@ function buildFilesystem() {
     rsync -avPrI "$PROJECT_DIRECTORY/Buildroot/" . > /dev/null
     sed -i "s/^export initversion=[0-9][0-9]*$/export initversion=$(date +%Y%m%d)/" board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh
     if [[ ! -f .config ]]; then
-        cp "$PROJECT_DIRECTORY/configs/fs$arch.config" .config
-        case "${arch}" in
-            x64)
-                make oldconfig
-                ;;
-            x86)
-                make ARCH=i486 oldconfig
-                ;;
-            arm64)
-                make ARCH=aarch64 CROSS_COMPILE=aarch64-linux-gnu- oldconfig
-                ;;
-            *)
-                make oldconfig
-                ;;
-        esac
+        cp "$filesystem_config" .config
     fi
+    rootpxe_build_sync_glibc_gconv_config "$filesystem_config" .config || return 1
+    rootpxe_build_olddefconfig "$arch" || return 1
     echo "Done"
 
     if [[ $fsDownloadOnly == "y" ]]; then
@@ -209,34 +241,22 @@ function buildFilesystem() {
         if [[ $config == y ]]; then
             case "${arch}" in
                 x64)
-                    make menuconfig
+                    make menuconfig || return 1
                     ;;
                 x86)
-                    make ARCH=i486 menuconfig
+                    make ARCH=i486 menuconfig || return 1
                     ;;
                 arm64)
-                    make ARCH=aarch64 CROSS_COMPILE=aarch64-linux-gnu- menuconfig
+                    make ARCH=aarch64 CROSS_COMPILE=aarch64-linux-gnu- menuconfig || return 1
                     ;;
                 *)
-                    make menuconfig
+                    make menuconfig || return 1
                     ;;
             esac
+            rootpxe_build_sync_glibc_gconv_config "$filesystem_config" .config || return 1
+            rootpxe_build_olddefconfig "$arch" || return 1
         else
-            echo "Ok, running make oldconfig instead to ensure the config is clean."
-            case "${arch}" in
-                x64)
-                    make oldconfig
-                    ;;
-                x86)
-                    make ARCH=i486 oldconfig
-                    ;;
-                arm64)
-                    make ARCH=aarch64 CROSS_COMPILE=aarch64-linux-gnu- oldconfig
-                    ;;
-                *)
-                    make oldconfig
-                    ;;
-            esac
+            echo "Ok, configuration was normalized with make olddefconfig."
         fi
         read -rp "We are ready to build are you [y|n]?" ready
         if [[ $ready == n ]]; then

@@ -69,26 +69,35 @@ static void copy(const char *source, const char *destination) {
         if (write(out, buffer, (size_t)count) != count) fail("write fixture hive");
     if (count < 0 || close(in) || close(out)) fail("close fixture hive");
 }
-static void control_set(hive_h *hive, hive_node_h root, unsigned set) {
+static void control_set(hive_h *hive, hive_node_h root, unsigned set, int omit_nv) {
     char name[16]; hive_node_h node, tcp, computer;
     if (snprintf(name, sizeof(name), "ControlSet%03u", set) >= (int)sizeof(name)) fail("control set name");
     node = add(hive, root, name);
-    tcp = add(hive, add(hive, add(hive, node, "Services"), "Tcpip"), "Parameters");
-    computer = add(hive, add(hive, node, "Control"), "ComputerName");
-    /* Deliberately omit volatile ActiveComputerName, as in an offline hive. */
-    computer = add(hive, computer, "ComputerName");
-    string(hive, tcp, "Hostname", "BEFORE");
-    string(hive, tcp, "NV Hostname", "BEFORE");
-    string(hive, computer, "ComputerName", "BEFORE");
+    if (set == 1) {
+        tcp = add(hive, add(hive, add(hive, node, "services"), "Tcpip"), "Parameters");
+        computer = add(hive, add(hive, node, "Control"), "ComputerName");
+        computer = add(hive, computer, "ComputerName");
+        string(hive, tcp, "hostname", "BEFORE");
+        if (!omit_nv) string(hive, tcp, "NV Hostname", "BEFORE");
+        string(hive, computer, "computername", "BEFORE");
+    } else {
+        tcp = add(hive, add(hive, add(hive, node, "SERVICES"), "TCPIP"), "PARAMETERS");
+        computer = add(hive, add(hive, node, "CONTROL"), "COMPUTERNAME");
+        computer = add(hive, computer, "computername");
+        string(hive, tcp, "HOSTNAME", "BEFORE");
+        if (!omit_nv) string(hive, tcp, "nv hostname", "BEFORE");
+        string(hive, computer, "ComputerName", "BEFORE");
+    }
 }
 int main(int argc, char **argv) {
     hive_h *hive; hive_node_h root, select;
-    if (argc != 3) return 2;
+    int omit_nv = argc == 4 && !strcmp(argv[3], "omit-nv");
+    if (argc != 3 && !omit_nv) return 2;
     copy(argv[1], argv[2]);
     hive = hivex_open(argv[2], HIVEX_OPEN_WRITE); if (!hive) fail("open fixture hive");
     root = hivex_root(hive); select = add(hive, root, "Select");
     dword(hive, select, "Current", 1); dword(hive, select, "Default", 2);
-    control_set(hive, root, 1); control_set(hive, root, 2);
+    control_set(hive, root, 1, omit_nv); control_set(hive, root, 2, 0);
     if (hivex_commit(hive, NULL, 0)) fail("commit fixture hive");
     hivex_close(hive); return 0;
 }
@@ -103,6 +112,11 @@ system=$tmp/SYSTEM
 
 [[ $("$tool" windows-hostname-inspect "$system") == $'ControlSet001\nControlSet002' ]] ||
     fail 'inspect did not report Current and distinct Default control sets'
+[[ $("$tool" windows-hostname-write-paths "$system") == $'\\ControlSet001\\services\\Tcpip\\Parameters\\NV Hostname\n\\ControlSet001\\services\\Tcpip\\Parameters\\hostname\n\\ControlSet001\\Control\\ComputerName\\ComputerName\\computername\n\\ControlSet002\\SERVICES\\TCPIP\\PARAMETERS\\nv hostname\n\\ControlSet002\\SERVICES\\TCPIP\\PARAMETERS\\HOSTNAME\n\\ControlSet002\\CONTROL\\COMPUTERNAME\\computername\\ComputerName' ]] ||
+    fail 'write paths did not preserve case variants from selected control sets'
+missing=$tmp/missing-SYSTEM
+"$fixture_tool" "$minimal" "$missing" omit-nv
+expect_fail "$tool" windows-hostname-write-paths "$missing"
 "$tool" windows-hostname-verify "$system" BEFORE
 expect_fail "$tool" windows-hostname-verify "$system" AFTER
 expect_fail "$tool" windows-hostname-verify "$system" 12345
@@ -113,10 +127,8 @@ expect_fail "$tool" windows-hostname-inspect "$tmp/malformed-SYSTEM"
 
 set +e
 {
-    for set in ControlSet001 ControlSet002; do
-        printf 'ed \\%s\\Services\\Tcpip\\Parameters\\Hostname\nAFTER\n' "$set"
-        printf 'ed \\%s\\Services\\Tcpip\\Parameters\\NV Hostname\nAFTER\n' "$set"
-        printf 'ed \\%s\\Control\\ComputerName\\ComputerName\\ComputerName\nAFTER\n' "$set"
+    "$tool" windows-hostname-write-paths "$system" | while IFS= read -r path; do
+        printf 'ed %s\nAFTER\n' "$path"
     done
     printf 'q\ny\n\n'
 } | "$reged" -e "$system" >/dev/null
@@ -126,7 +138,7 @@ set -e
 
 "$tool" windows-hostname-verify "$system" AFTER
 set +e
-printf 'ed \\ControlSet002\\Services\\Tcpip\\Parameters\\Hostname\nDRIFT\nq\ny\n\n' |
+printf 'ed \\ControlSet002\\SERVICES\\TCPIP\\PARAMETERS\\HOSTNAME\nDRIFT\nq\ny\n\n' |
     "$reged" -e "$system" >/dev/null
 reged_status=${PIPESTATUS[1]}
 set -e

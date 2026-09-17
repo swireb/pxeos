@@ -12,12 +12,22 @@ touch "$tmp/ntfs/Windows/System32/config/SYSTEM"
 awk '/^rootpxe_change_hostname_registry\(\)/ { found=1 } found { print } found && /^}/ { exit }' "$funcs" |
     sed "s|/ntfs|$tmp/ntfs|g" >"$tmp/wrapper.sh"
 source "$tmp/wrapper.sh"
-changeHostname=true hostName=AFTER inspect_failure=false verify_failure=false
+changeHostname=true hostName=AFTER inspect_failure=false write_paths_failure=false verify_failure=false
 rootpxe-offline-identities(){
     if [[ $1 == windows-hostname-inspect ]]; then
         printf 'ControlSet001\nControlSet002\n'
         [[ $inspect_failure == false ]]
+    elif [[ $1 == windows-hostname-write-paths ]]; then
+        [[ $write_paths_failure == false ]] || return 1
+        printf '%s\n' \
+            '\ControlSet001\services\Tcpip\Parameters\NV Hostname' \
+            '\ControlSet001\services\Tcpip\Parameters\Hostname' \
+            '\ControlSet001\Control\ComputerName\ComputerName\ComputerName' \
+            '\ControlSet002\SERVICES\TCPIP\PARAMETERS\nv hostname' \
+            '\ControlSet002\SERVICES\TCPIP\PARAMETERS\HOSTNAME' \
+            '\ControlSet002\CONTROL\COMPUTERNAME\COMPUTERNAME\computername'
     else
+        printf 'verify\n' >>"$tmp/verify-calls"
         [[ $verify_failure == false ]]
     fi
 }
@@ -30,7 +40,17 @@ reged(){
     return 2
 }
 rootpxe_change_hostname_registry /dev/fake || fail offline-hive-without-volatile-key
+grep -Fq '\ControlSet001\services\Tcpip\Parameters\NV Hostname' "$tmp/reged-calls" || fail preserved-services-case
+grep -Fq '\ControlSet002\SERVICES\TCPIP\PARAMETERS\HOSTNAME' "$tmp/reged-calls" || fail preserved-value-case
 rm "$tmp/reged-calls"
+rm -f "$tmp/verify-calls"
+set +e
+( set -e; rootpxe_change_hostname_registry /dev/fake )
+errexit_rc=$?
+set -e
+[[ $errexit_rc -eq 0 ]] || fail reged-status-two-under-errexit
+[[ -s $tmp/verify-calls ]] || fail reged-status-two-skipped-readback
+rm -f "$tmp/reged-calls" "$tmp/verify-calls"
 inspect_failure=true
 if rootpxe_change_hostname_registry /dev/fake; then fail partial-inspection-accepted; fi
 [[ $rootpxe_initialization_failure_reason == windows_hostname_hive_inspection_failed ]] || fail inspection-reason
@@ -39,6 +59,12 @@ inspect_failure=false verify_failure=true
 if rootpxe_change_hostname_registry /dev/fake; then fail failed-readback-accepted; fi
 [[ $rootpxe_initialization_failure_reason == windows_hostname_readback_failed ]] || fail readback-reason
 verify_failure=false
+rm -f "$tmp/reged-calls"
+write_paths_failure=true
+if rootpxe_change_hostname_registry /dev/fake; then fail incomplete-write-paths-accepted; fi
+[[ $rootpxe_initialization_failure_reason == windows_hostname_hive_inspection_failed ]] || fail write-paths-reason
+[[ ! -e $tmp/reged-calls ]] || fail write-paths-failure-started-write
+write_paths_failure=false
 reged(){ cat >/dev/null; return 3; }
 if rootpxe_change_hostname_registry /dev/fake; then fail failed-write-accepted; fi
 [[ $rootpxe_initialization_failure_reason == windows_hostname_registry_write_failed ]] || fail write-reason

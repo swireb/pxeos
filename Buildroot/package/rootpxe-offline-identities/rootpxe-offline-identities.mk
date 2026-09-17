@@ -2,7 +2,7 @@
 # rootpxe-offline-identities
 ################################################################################
 
-ROOTPXE_OFFLINE_IDENTITIES_VERSION = 1
+ROOTPXE_OFFLINE_IDENTITIES_VERSION = 2
 ROOTPXE_OFFLINE_IDENTITIES_SITE_METHOD = local
 ROOTPXE_OFFLINE_IDENTITIES_SITE = $(TOPDIR)/package/rootpxe-offline-identities/src
 ROOTPXE_OFFLINE_IDENTITIES_DEPENDENCIES = libhivex
