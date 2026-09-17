@@ -92,32 +92,36 @@ set timeout=-1
 insmod all_video
 
 menuentry "1. PXEOS Image Deploy/Capture" {
+ set gfxpayload=1024x768,auto
  echo loading the kernel
- linux  $myimage loglevel=$myloglevel initrd=init.xz root=/dev/ram0 rw ramdisk_size=275000 keymap= web=$mypxeosip/service/pxeos/ boottype=usb consoleblank=0 rootfstype=ext4
+ linux  $myimage loglevel=$myloglevel initrd=init.xz root=/dev/ram0 rw ramdisk_size=275000 keymap= web=$mypxeosip/service/pxeos/ boottype=usb consoleblank=0 rootfstype=ext4 fbcon=font:VGA8x16
  echo loading the virtual hard drive
  initrd $myinits
  echo booting kernel...
 }
 
 menuentry "2. Perform Full Host Registration and Inventory" {
+ set gfxpayload=1024x768,auto
  echo loading the kernel
- linux  $myimage loglevel=$myloglevel initrd=init.xz root=/dev/ram0 rw ramdisk_size=275000 keymap= web=$mypxeosip/service/pxeos/ boottype=usb consoleblank=0 rootfstype=ext4 mode=manreg
+ linux  $myimage loglevel=$myloglevel initrd=init.xz root=/dev/ram0 rw ramdisk_size=275000 keymap= web=$mypxeosip/service/pxeos/ boottype=usb consoleblank=0 rootfstype=ext4 mode=manreg fbcon=font:VGA8x16
  echo loading the virtual hard drive
  initrd $myinits
  echo booting kernel...
 }
 
 menuentry "3. Quick Registration and Inventory" {
+ set gfxpayload=1024x768,auto
  echo loading the kernel
- linux  $myimage loglevel=$myloglevel initrd=init.xz root=/dev/ram0 rw ramdisk_size=275000 keymap= web=$mypxeosip/service/pxeos/ boottype=usb consoleblank=0 rootfstype=ext4 mode=autoreg
+ linux  $myimage loglevel=$myloglevel initrd=init.xz root=/dev/ram0 rw ramdisk_size=275000 keymap= web=$mypxeosip/service/pxeos/ boottype=usb consoleblank=0 rootfstype=ext4 mode=autoreg fbcon=font:VGA8x16
  echo loading the virtual hard drive
  initrd $myinits
  echo booting kernel...
 }
 
 menuentry "4. Client System Information (Compatibility)" {
+ set gfxpayload=1024x768,auto
  echo loading the kernel
- linux  $myimage loglevel=$myloglevel initrd=init.xz root=/dev/ram0 rw ramdisk_size=275000 keymap= web=$mypxeosip/service/pxeos/ boottype=usb consoleblank=0 rootfstype=ext4 mode=sysinfo
+ linux  $myimage loglevel=$myloglevel initrd=init.xz root=/dev/ram0 rw ramdisk_size=275000 keymap= web=$mypxeosip/service/pxeos/ boottype=usb consoleblank=0 rootfstype=ext4 mode=sysinfo fbcon=font:VGA8x16
  echo loading the virtual hard drive
  initrd $myinits
  echo booting kernel...
@@ -129,8 +133,9 @@ menuentry "5. Run Memtest86+" {
 }
 
 menuentry "6. PXEOS Debug Kernel" {
+ set gfxpayload=1024x768,auto
  echo loading the kernel
- linux  $myimage loglevel=7 init=/sbin/init root=/dev/ram0 rw ramdisk_size=275000 keymap= boottype=usb consoleblank=0 rootfstype=ext4 isdebug=yes
+ linux  $myimage loglevel=7 init=/sbin/init root=/dev/ram0 rw ramdisk_size=275000 keymap= boottype=usb consoleblank=0 rootfstype=ext4 isdebug=yes fbcon=font:VGA8x16
  echo loading the virtual hard drive
  initrd $myinits
  echo booting kernel...
