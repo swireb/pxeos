@@ -14,6 +14,19 @@ rootpxe_multicast_runtime_ready() {
     command -v jq >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 && rootpxe_multicast_receiver_capable
 }
 
+# Build arguments for RootPXE's control-plane endpoint only.  PXEOS receives
+# the complete URL from the boot context; HTTPS uses TLS with certificate
+# verification disabled for IP/private-CA controller deployments, while HTTP
+# remains the caller-selected legacy transport without a client-side fallback.
+rootpxe_multicast_control_curl_args() {
+    local argument url=''
+    for argument in "$@"; do url=$argument; done
+    rootpxe_multicast_curl_args=("$@")
+    if [[ $url == https://* ]]; then
+        rootpxe_multicast_curl_args=(-k "$@")
+    fi
+}
+
 rootpxe_multicast_reset() {
     unset multicastTransportMode multicastSessionId multicastWaitTimeoutSec
     mc=no
@@ -204,18 +217,19 @@ rootpxe_multicast_http_post() {
     umask 077
     if [[ ${rootpxe_multicast_http_dir:-} == /tmp/rootpxe-multicast-monitor.* ]]; then
         response=$(mktemp "$rootpxe_multicast_http_dir/response.XXXXXX") || return 1
-        pid_file=$rootpxe_multicast_http_dir/curl.pid
+        pid_file="${rootpxe_multicast_http_dir}/curl.pid"
     else
         response=$(mktemp /tmp/rootpxe-multicast-response.XXXXXX) || return 1
     fi
     chmod 600 "$response" || { rm -f -- "$response"; return 1; }
+    rootpxe_multicast_control_curl_args -sS --connect-timeout "$connect_timeout" --max-time "$limit" -H 'Content-Type: application/json' --data-binary @"$request" -o "$response" -w '%{http_code}' "${rootpxe_api}multicast/$op"
     if [[ -n ${pid_file:-} ]]; then
-        curl -sS --connect-timeout "$connect_timeout" --max-time "$limit" -H 'Content-Type: application/json' --data-binary @"$request" -o "$response" -w '%{http_code}' "${rootpxe_api}multicast/$op" >"$response.status" 2>/dev/null &
+        curl "${rootpxe_multicast_curl_args[@]}" >"$response.status" 2>/dev/null &
         rootpxe_multicast_http_pid=$!; printf '%s\n' "$rootpxe_multicast_http_pid" >"$pid_file"
         wait "$rootpxe_multicast_http_pid" || curl_rc=$?
         status=$(cat "$response.status" 2>/dev/null); rm -f -- "$pid_file" "$response.status"
     else
-        status=$(curl -sS --connect-timeout "$connect_timeout" --max-time "$limit" -H 'Content-Type: application/json' --data-binary @"$request" -o "$response" -w '%{http_code}' "${rootpxe_api}multicast/$op" 2>/dev/null) || curl_rc=$?
+        status=$(curl "${rootpxe_multicast_curl_args[@]}" 2>/dev/null) || curl_rc=$?
     fi
     if [[ $curl_rc != 0 || ! $status =~ ^2[0-9][0-9]$ ]] || ! jq -e 'type == "object"' "$response" >/dev/null 2>&1; then
         local kind=rejected
