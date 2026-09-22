@@ -13,11 +13,11 @@ LIBHIVEX_INSTALL_STAGING = YES
 LIBHIVEX_DEPENDENCIES = host-pkgconf host-perl
 LIBHIVEX_CONF_OPTS = --disable-ocaml --disable-perl --disable-python --disable-ruby --disable-static
 
-# images/ only creates test hives, but its large target runs the target-built
-# mklarge helper.  Use the remaining top-level directories for every build
-# and install invocation.  MAKEOVERRIDES= keeps this top-level SUBDIRS value
-# from leaking into individual subdirectory make calls.
-LIBHIVEX_SUBDIRS = gnulib/lib generator lib include xml po sh
+# Only recurse through the C library and development-file prerequisites.
+# images/ runs the target-built mklarge helper; xml and sh build CLI tools.
+# MAKEOVERRIDES= keeps this top-level SUBDIRS value from leaking into the
+# lib subdirectory's own recursive make calls.
+LIBHIVEX_SUBDIRS = gnulib/lib generator lib include
 LIBHIVEX_MAKE_OPTS = \
 	MAKEOVERRIDES= \
 	SUBDIRS="$(LIBHIVEX_SUBDIRS)"
