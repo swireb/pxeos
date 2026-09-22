@@ -1,364 +1,259 @@
 #!/bin/bash
-. /usr/share/pxeos/lib/funcs.sh
-clearScreen
-displayBanner
-display_registration_response() {
-    local level="$1" response="$2" response_line=""
-    while IFS= read -r response_line || [[ -n $response_line ]]; do
-        [[ -n $response_line ]] || continue
-        rootpxe_console_message "$level" "Server response: $response_line"
-    done <<< "$response"
+# RootPXE manual registration is a pinned-HTTPS control-plane session. It does
+# not probe, mount, assemble, format, or write local disks.
+set -u
+umask 077
+
+title='RootPXE Manual Registration'
+tmpdir=$(mktemp -d /tmp/rootpxe-manreg.XXXXXX) || exit 1
+cleanup() {
+    unset login_fields ticket hostname task last_code 2>/dev/null || true
+    rm -rf -- "$tmpdir"
 }
-disks=""
-disk=""
-hd=""
-getHardDisk
-sysman=""
-sysproduct=""
-sysversion=""
-sysserial=""
-sysuuid=""
-systype=""
-biosversion=""
-biosvendor=""
-biosdate=""
-mbman=""
-mbproductname=""
-mbversion=""
-mbserial=""
-mbasset=""
-cpuman=""
-cpuversion=""
-cpucurrent=""
-cpumax=""
-mem=""
-hdinfo=""
-caseman=""
-casever=""
-caseserial=""
-caseasset=""
-sysman64=""
-sysproduct64=""
-sysversion64=""
-sysserial64=""
-sysuuid64=""
-systype64=""
-biosversion64=""
-biosvendor64=""
-biosdate64=""
-mbman64=""
-mbproductname64=""
-mbversion64=""
-mbserial64=""
-mbasset64=""
-cpuman64=""
-cpuversion64=""
-cpucurrent64=""
-cpumax64=""
-mem64=""
-hdinfo64=""
-caseman64=""
-casever64=""
-caseserial64=""
-caseasset64=""
-dots "Using disk device"
-echo 'Done'
-rootpxe_console_message INFO "Using disk device: $hd."
-rootpxe_console_message INFO 'Starting host registration.'
-mac=$(getMACAddresses | base64)
-sysuuid=$(dmidecode -s system-uuid)
-sysuuid=${sysuuid,,}
-sysuuid=$(echo $sysuuid | base64)
-exists=$(curl -Lks --data "sysuuid=${sysuuid}&mac=$mac" ${web}service/man.hostexists.php 2>/dev/null)
-checkAndSet() {
-    local testvar="$1"
-    local onlynum="$2"
-    [[ -z $testvar ]] && return
-    if [[ $onlynum =~ [Tt][Rr][Uu][Ee] && $testvar =~ ^[0-9]+$ ]]; then
-        echo $testvar | base64
-    elif [[ $testvar =~ ^[0-9,]+$ ]]; then
-        echo $testvar | base64
-    else
-        return
-    fi
-}
-setIDs() {
-    local varVar="$1"
-    local str="$2"
-    local csvstyle="$3"
-    local dummy="$4"
-    local max="$5"
-    local res=""
-    local url=""
-    local oIFS=$IFS
-    local line=""
-    while [[ -z ${!varVar} ]]; do
-        [[ $csvstyle =~ [Tt][Rr][Uu][Ee] ]] \
-            && rootpxe_console_prompt INFO "Enter $str IDs separated by commas (? for listing): " \
-            || rootpxe_console_prompt INFO "Enter a $str ID (? for listing): "
-        read dummy
-        dummy=$(echo $dummy | sed -e 's/^,//' -e 's/,$//')
-        case $dummy in
-            [?])
-                url="${web}service/${str}listing.php"
-                clearScreen
-                res=$(echo -e $(curl -ks $url 2>/dev/null))
-                i=0
-                IFS=$'\n'
-                for line in $res; do
-                    let i+=1
-                    rootpxe_console_message INFO "$line"
-                    if [[ $i -eq $max ]]; then
-                        [[ $csvstyle =~ [Tt][Rr][Uu][Ee] ]] \
-                            && rootpxe_console_prompt INFO "Press Enter or enter $str IDs separated by commas: " \
-                            || rootpxe_console_prompt INFO "Press Enter or enter a $str ID: "
-                        read dummy
-                        case $dummy in
-                            [?]|"")
-                                i=0
-                                clearScreen
-                                continue
-                                ;;
-                        esac
-                        case $csvstyle in
-                            [Tt][Rr][Uu][Ee])
-                                [[ $dummy =~ ^[0-9,]+$ ]] && printf -v "$varVar" $(checkAndSet $dummy) || setIDs "$varVar" "$str" "$csvstyle" "$dummy" "$max"
-                                break
-                                ;;
-                            *)
-                                [[ $dummy =~ ^[0-9]+$ ]] && printf -v "$varVar" $(checkAndSet $dummy "true") || setIDs "$varVar" "$str" "$csvstyle" "$dummy" "$max"
-                                break
-                                ;;
-                        esac
-                        i=0
-                        dummy=$(echo $dummy | sed -e 's/^,//' -e 's/,$//')
-                        clearScreen
-                    fi
-                done
-                ;;
-            ""|0)
-                printf -v "$varVar" 0
-                ;;
-            *)
-                dummy=$(echo $dummy | sed -e 's/^,//' -e 's/,$//')
-                [[ -z $dummy ]] && setIDs "$varVar" "$str" "$csvstyle" "$dummy" "$max"
-                case $csvstyle in
-                    [Tt][Rr][Uu][Ee])
-                        [[ $dummy =~ ^[0-9,]+$ ]] && printf -v "$varVar" $(checkAndSet $dummy) || setIDs "$varVar" "$str" "$csvstyle" "$dummy" "$max"
-                        ;;
-                    *)
-                        [[ $dummy =~ ^[0-9]+$ ]] && printf -v "$varVar" $(checkAndSet $dummy "true") || setIDs "$varVar" "$str" "$csvstyle" "$dummy" "$max"
-                        ;;
-                esac
-                ;;
-        esac
+on_signal() { cleanup; exit 1; }
+trap cleanup EXIT
+trap on_signal HUP INT TERM
+response="$tmpdir/response.json"
+dialog_out="$tmpdir/dialog.out"
+last_code='' request_state='retry' ticket='' authenticated=0
+
+die_console() { printf '[ERROR] %s\n' "$1" >/dev/console 2>/dev/null || printf '[ERROR] %s\n' "$1" >&2; exit 1; }
+
+# S99 starts this script before normal PXEOS sources funcs.sh, so import only
+# the small, fixed manual-mode kernel allowlist here instead of assuming init
+# exported command-line values. No dynamic key names are accepted.
+import_manual_kernel_args() {
+    local item key value
+    local -a items
+    [[ -r /proc/cmdline ]] || return 0
+    IFS=' ' read -r -a items </proc/cmdline || true
+    for item in "${items[@]}"; do
+        [[ $item == *=* ]] || continue
+        key=${item%%=*}; value=${item#*=}
+        case $key in pxeapi|manual_token|manual_spki_pin|manual_arch|manual_platform|keymap) ;; *) continue;; esac
+        value=${value//+_+/ }; value=${value//+__+/ }
+        [[ $value != *$'\n'* && $value != *$'\r'* ]] || continue
+        printf -v "$key" '%s' "$value"
+        export "$key"
     done
-    IFS=$oIFS
 }
-[[ $exists != "#!ok" ]] && handleError "Unable to register host: $exists ($0)\n   Args Passed: $*"
-host=""
-ip=""
-productKey=""
-imageid=""
-primaryuser=""
-other1=""
-other2=""
-blImage=""
-blDoAddGroup=""
-blDoAddSnapin=""
-keyEnter=""
-blDoAD=""
-res=""
-while [[ $res != "#!ok" ]]; do
-    rootpxe_console_prompt INFO 'Enter hostname for this computer: '
-    read host
-    if [[ ${#host} -gt 15 ]]; then
-        host=${host:0:15}
-        rootpxe_console_message WARN "Hostname was truncated to 15 characters: $host"
-        usleep 2000000
-    fi
-    host=$(echo $host | base64)
-    res=$(curl -Lks --data "host=$host" ${web}service/hostnameloop.php 2>/dev/null)
-    if [[ $res != "#!ok" ]]; then
-        rootpxe_console_message WARN 'Hostname is unavailable. Please choose another name.'
-        display_registration_response WARN "$res"
-    fi
-done
-imageid=""
-setIDs "imageid" "image" "" "" 20
-if [[ $(curl -Lks ${web}service/locationcheck.php 2>/dev/null) == "##" ]]; then
-    while [[ -z $askme ]]; do
-        rootpxe_console_prompt INFO 'Assign a location for this host? (y/N) '
-        read askme
-        case $askme in
-            [Nn]|[Nn][Oo]|"")
-                askme="N"
-                ;;
-            [Yy]|[Yy][Ee][Ss])
-                setIDs "locationid" "location" "" "" 20
-                location64=$locationid
-                ;;
-            *)
-                askme=""
-                rootpxe_console_message WARN 'Invalid input. Please try again.'
-                ;;
-        esac
-    done
+import_manual_kernel_args
+
+# /dev/tty must be usable, not merely present. The override is test-only.
+tty=${PXEOS_MANREG_TTY:-/dev/tty}
+if ! exec 3<>"$tty"; then
+    tty=/dev/console
+    exec 3<>"$tty" || die_console 'No interactive console is available.'
 fi
-askme=""
-if [[ $(curl -Lks ${web}service/oucheck.php 2>/dev/null) == "##" ]]; then
-    while [[ -z $askme ]]; do
-        rootpxe_console_prompt INFO 'Assign an OU for this host? (y/N) '
-        read askme
-        case $askme in
-            [Nn]|[Nn][Oo]|"")
-                askme="N"
-                ;;
-            [Yy]|[Yy][Ee][Ss])
-                setIDs "ouid" "ou" "" "" 20
-                ou64=$ouid
-                ;;
-            *)
-                askme=""
-                rootpxe_console_message WARN 'Invalid input. Please try again.'
-                ;;
-        esac
+case "${pxeapi:-}" in https://?*) ;; *) die_console 'Pinned HTTPS service address is unavailable.';; esac
+case "${manual_token:-}" in ?*) ;; *) die_console 'Manual registration bootstrap token is unavailable.';; esac
+[[ ${manual_spki_pin:-} =~ ^sha256//[A-Za-z0-9+/]{43}=$ ]] || die_console 'Pinned HTTPS certificate is unavailable.'
+for tool in dialog jq curl; do command -v "$tool" >/dev/null 2>&1 || die_console "$tool is unavailable."; done
+if [[ -n ${keymap:-} ]] && command -v loadkeys >/dev/null 2>&1; then loadkeys "$keymap" >/dev/null 2>&1 || die_console 'Requested keyboard map is unavailable.'; fi
+
+export DIALOG_ESC=10 DIALOG_ERROR=255
+cat >"$tmpdir/dialogrc" <<'EOF'
+bindkey formfield TAB form_NEXT
+bindkey formbox TAB form_NEXT
+bindkey formfield BTAB form_prev
+bindkey formbox BTAB form_prev
+EOF
+export DIALOGRC="$tmpdir/dialogrc"
+
+say() { dialog --clear --title "$title" --msgbox "$1" 8 72 <&3 >&3 2>/dev/null; }
+run_dialog() { : >"$dialog_out"; dialog --clear --title "$title" "$@" 2>"$dialog_out" <&3 >&3; ui_rc=$?; return 0; }
+write_secret() { printf '%s' "$2" >"$1"; }
+wipe_secret() { [[ -e $1 ]] && { : >"$1"; rm -f -- "$1"; }; }
+ui_form_cancelled() { [[ $ui_rc -eq $DIALOG_ESC || $ui_rc -eq 1 ]]; }
+ui_esc() { [[ $ui_rc -eq $DIALOG_ESC ]]; }
+ui_error() { [[ $ui_rc -eq $DIALOG_ERROR ]]; }
+
+json_login() { jq -n --rawfile bootToken "$tmpdir/boot" --rawfile username "$tmpdir/user" --rawfile password "$tmpdir/pass" '{bootToken:$bootToken,username:$username,password:$password}' >"$tmpdir/login.json"; }
+json_options() { jq -n --rawfile ticket "$tmpdir/ticket" --rawfile taskType "$tmpdir/task" --rawfile image "$tmpdir/image" --argjson page "$1" '{ticket:$ticket,taskType:$taskType,imageId:($image|tonumber),page:$page}' >"$tmpdir/options.json"; }
+json_confirm() { jq -n --rawfile ticket "$tmpdir/ticket" --rawfile hostName "$tmpdir/hostname" --rawfile taskType "$tmpdir/task" --rawfile image "$tmpdir/image" --rawfile group "$tmpdir/group" '{ticket:$ticket,hostName:$hostName,taskType:$taskType,imageId:($image|tonumber),groupId:($group|tonumber)}' >"$tmpdir/confirm.json"; }
+json_commit() { jq -n --rawfile ticket "$tmpdir/ticket" '{ticket:$ticket,confirm:true}' >"$tmpdir/commit.json"; }
+# The bootstrap token is the cancellation authority even after login. The
+# server binds it to the ticket and returns either cancelled or completed.
+json_cancel() { jq -n --rawfile bootToken "$tmpdir/boot" '{bootToken:$bootToken}' >"$tmpdir/cancel.json"; }
+
+# Curl reads JSON from a mode-0600 file, ignores curlrc, and has no redirect
+# or HTTP downgrade path. No secret is ever part of argv or the URL.
+post_json() {
+    local action=$1 request=$2 http curl_rc
+    : >"$response"; : >"$tmpdir/curl.err"
+    http=$(curl -q --silent --show-error --connect-timeout 5 --max-time 20 --max-redirs 0 --proto '=https' --proto-redir '=https' --pinnedpubkey "$manual_spki_pin" -k -H 'Content-Type: application/json' --data-binary "@$request" --output "$response" --write-out '%{http_code}' "${pxeapi%/}/manual/$action" 2>"$tmpdir/curl.err")
+    curl_rc=$?; last_code=''
+    if [[ $curl_rc -ne 0 || ! $http =~ ^2[0-9][0-9]$ ]]; then
+        jq -e 'type == "object" and (.code|type == "string")' "$response" >/dev/null 2>&1 && last_code=$(jq -r '.code' "$response")
+        return 1
+    fi
+    jq -e 'type == "object"' "$response" >/dev/null 2>&1
+}
+set_request_state() {
+    case $last_code in
+        SESSION_EXPIRED|AUTH_REVOKED) request_state='relogin' ;;
+        BOOTSTRAP_EXPIRED) request_state='bootstrap' ;;
+        INVALID_SELECTION|INVALID_STATE|REGISTRATION_CONFLICT|CONFIRMATION_REQUIRED|RECONFIRM_REQUIRED) request_state='edit' ;;
+        *) request_state='retry' ;;
+    esac
+}
+expect() { jq -e "$1" "$response" >/dev/null 2>&1 && return 0; request_state='retry'; return 1; }
+expect_login() { expect '(.ticket|type == "string") and (.ticket|length > 0) and ((.expiresInSeconds|type) == "number") and (.expiresInSeconds > 0)'; }
+expect_options() { jq -e --arg expected "$task" '.taskType == $expected and ((.images|type) == "array") and ((.groups|type) == "array")' "$response" >/dev/null 2>&1 && return 0; request_state='retry'; return 1; }
+expect_confirm() { jq -e --arg host "$hostname" --arg expected_task "$task" --argjson image "$(<"$tmpdir/image")" --argjson group "$(<"$tmpdir/group")" '.confirmed == true and .hostName == $host and .taskType == $expected_task and .imageId == $image and .groupId == $group and ((.imageName|type) == "string") and ((.groupName|type) == "string") and ((.dangerous|type) == "boolean")' "$response" >/dev/null 2>&1 && return 0; request_state='retry'; return 1; }
+expect_completed() { jq -e '(.completed == true) and ((.hostId|type) == "number") and (.hostId > 0) and ((.taskId|type) == "number") and ((.taskId % 1) == 0) and ((.taskType|type) == "string") and (.taskType == "none" or .taskType == "deploy" or .taskType == "capture") and (if .taskType == "none" then .taskId == 0 else .taskId > 0 end) and ((.message|type) == "string")' "$response" >/dev/null 2>&1 && return 0; request_state='retry'; return 1; }
+expect_commit() { jq -e --arg expected_task "$task" '(.completed == true) and ((.hostId|type) == "number") and (.hostId > 0) and ((.taskId|type) == "number") and ((.taskId % 1) == 0) and (.taskType == $expected_task) and (if $expected_task == "none" then .taskId == 0 else .taskId > 0 end) and ((.message|type) == "string")' "$response" >/dev/null 2>&1 && return 0; request_state='retry'; return 1; }
+safe_options() { jq -r '.images[]? | select((.id|type) == "number") | select((.id % 1) == 0) | [.id, ((.name // "")|tostring|gsub("[^ -~]"; "?"))] | @tsv' "$response"; }
+safe_groups() { jq -r '.groups[]? | select((.id|type) == "number") | select((.id % 1) == 0 and .id != 0) | [.id, ((.name // "")|tostring|gsub("[^ -~]"; "?"))] | @tsv' "$response"; }
+reboot_normal() { say 'Registration completed. Rebooting to continue through the normal boot path.'; reboot -f; exit 0; }
+
+cancel_or_resume() {
+    while :; do
+        json_cancel
+        if post_json cancel "$tmpdir/cancel.json"; then
+            if expect '.cancelled == true'; then say 'Cancellation was recorded. Rebooting for one local boot.'; reboot -f; exit 0; fi
+            if expect_completed; then reboot_normal; fi
+        fi
+        set_request_state
+        if [[ $request_state == bootstrap ]]; then say 'Bootstrap expired. Re-enter manual registration from the boot menu.'; return 1; fi
+        run_dialog --yesno 'Cancellation failed. Retry cancellation?' 8 72
+        ui_error && die_console 'Interactive console error.'
+        [[ $ui_rc -eq 0 ]] || return 1
     done
-fi
-askme=""
-while [[ -z $askme ]]; do
-    rootpxe_console_prompt INFO 'Associate this host with groups? (y/N) '
-    read askme
-    case $askme in
-        [Nn]|[Nn][Oo]|"")
-            askme="N"
-            ;;
-        [Yy]|[Yy][Ee][Ss])
-            setIDs "groupid" "group" "true" "" 20
-            group64=$groupid
-            ;;
-        *)
-            askme=""
-            rootpxe_console_message WARN 'Invalid input. Please try again.'
-            ;;
-    esac
+}
+
+login() {
+    while :; do
+        : >"$dialog_out"
+        dialog --clear --title "$title" --mixedform 'Administrator login' 12 72 2 'Username:' 1 1 '' 1 18 40 0 0 'Password:' 2 1 '' 2 18 40 0 1 2>"$dialog_out" <&3 >&3
+        ui_rc=$?
+        if ui_form_cancelled; then cancel_or_resume || continue; fi
+        ui_error && die_console 'Interactive console error.'
+        [[ $ui_rc -eq 0 ]] || { say 'Login form cancelled. Retry or press Esc to cancel.'; continue; }
+        mapfile -t login_fields <"$dialog_out"
+        write_secret "$tmpdir/user" "${login_fields[0]:-}"; write_secret "$tmpdir/pass" "${login_fields[1]:-}"
+        json_login
+        login_post_ok=0
+        post_json login "$tmpdir/login.json" && login_post_ok=1
+        wipe_secret "$tmpdir/pass"; wipe_secret "$tmpdir/user"; wipe_secret "$tmpdir/login.json"; wipe_secret "$dialog_out"
+        unset login_fields
+        if [[ $login_post_ok -eq 1 ]] && expect_login; then
+            ticket=$(jq -r '.ticket' "$response"); write_secret "$tmpdir/ticket" "$ticket"; authenticated=1; return 0
+        fi
+        set_request_state
+        [[ $request_state == bootstrap ]] && { say 'Bootstrap expired. Re-enter manual registration from the boot menu.'; return 1; }
+        say 'Login was not accepted. Retry or press Esc to cancel.'
+    done
+}
+choose_hostname() {
+    while :; do
+        run_dialog --inputbox 'Host name' 10 72
+        if ui_form_cancelled; then cancel_or_resume || continue; fi
+        ui_error && die_console 'Interactive console error.'
+        [[ $ui_rc -eq 0 ]] || continue
+        hostname=$(<"$dialog_out"); [[ -n $hostname ]] || { say 'Host name is required.'; continue; }
+        write_secret "$tmpdir/hostname" "$hostname"; return 0
+    done
+}
+choose_task() {
+    while :; do
+        run_dialog --menu 'Select task' 12 72 3 none 'Register only' deploy 'Deploy image (overwrites disk)' capture 'Capture image'
+        if ui_form_cancelled; then cancel_or_resume || continue; fi
+        ui_error && die_console 'Interactive console error.'
+        [[ $ui_rc -eq 0 ]] || continue
+        task=$(<"$dialog_out"); case $task in none|deploy|capture) write_secret "$tmpdir/task" "$task"; return 0;; *) say 'Invalid task selection.';; esac
+    done
+}
+choose_image() {
+    local page=1 selected id name; local -a item
+    while :; do
+        write_secret "$tmpdir/image" 0; json_options "$page"
+        if ! post_json options "$tmpdir/options.json" || ! expect_options; then
+            set_request_state; [[ $request_state == relogin ]] && return 10; [[ $request_state == bootstrap ]] && return 11
+            run_dialog --yesno 'Image list is unavailable. Retry? Press Esc to cancel.' 8 72
+            ui_esc && { cancel_or_resume || continue; }
+            ui_error && die_console 'Interactive console error.'
+            [[ $ui_rc -eq 0 ]] || return 12
+            continue
+        fi
+        item=(); while IFS=$'\t' read -r id name; do item+=("$id" "$name ($id)"); done < <(safe_options)
+        (( page > 1 )) && item+=(__previous 'Previous page'); jq -e '.hasNext == true' "$response" >/dev/null 2>&1 && item+=(__next 'Next page')
+        (( ${#item[@]} > 0 )) || { say 'No selectable images are available.'; return 12; }
+        run_dialog --menu "Select image (page $page)" 18 72 10 "${item[@]}"
+        if ui_form_cancelled; then cancel_or_resume || continue; fi
+        ui_error && die_console 'Interactive console error.'
+        [[ $ui_rc -eq 0 ]] || continue
+        selected=$(<"$dialog_out"); case $selected in __previous) ((page--));; __next) ((page++));; *) write_secret "$tmpdir/image" "$selected"; return 0;; esac
+    done
+}
+choose_group() {
+    local page=1 selected id name; local -a item
+    while :; do
+        json_options "$page"
+        if ! post_json options "$tmpdir/options.json" || ! expect_options; then
+            set_request_state; [[ $request_state == relogin ]] && return 10; [[ $request_state == bootstrap ]] && return 11
+            run_dialog --yesno 'Group list is unavailable. Retry? Press Esc to cancel.' 8 72
+            ui_esc && { cancel_or_resume || continue; }
+            ui_error && die_console 'Interactive console error.'
+            [[ $ui_rc -eq 0 ]] || return 12
+            continue
+        fi
+        item=(0 'No group'); while IFS=$'\t' read -r id name; do item+=("$id" "$name ($id)"); done < <(safe_groups)
+        (( page > 1 )) && item+=(__previous 'Previous page'); jq -e '.hasNext == true' "$response" >/dev/null 2>&1 && item+=(__next 'Next page')
+        run_dialog --menu "Select group (page $page)" 18 72 10 "${item[@]}"
+        if ui_form_cancelled; then cancel_or_resume || continue; fi
+        ui_error && die_console 'Interactive console error.'
+        [[ $ui_rc -eq 0 ]] || continue
+        selected=$(<"$dialog_out"); case $selected in __previous) ((page--));; __next) ((page++));; *) write_secret "$tmpdir/group" "$selected"; return 0;; esac
+    done
+}
+confirm_and_commit() {
+    local confirmed_host confirmed_image confirmed_group confirmed_task dangerous summary
+    while :; do
+        json_confirm
+        if ! post_json confirm "$tmpdir/confirm.json" || ! expect_confirm; then
+            set_request_state; [[ $request_state == relogin ]] && return 10; [[ $request_state == bootstrap ]] && return 11
+            say 'Registration details were rejected. Return to edit selections.'; return 12
+        fi
+        confirmed_host=$(jq -r '(.hostName // "")|tostring|gsub("[^ -~]"; "?")' "$response")
+        confirmed_image=$(jq -r '(.imageName // "No image")|tostring|gsub("[^ -~]"; "?")' "$response")
+        confirmed_group=$(jq -r '(.groupName // "No group")|tostring|gsub("[^ -~]"; "?")' "$response")
+        confirmed_task=$(jq -r '.taskType // "unknown"' "$response"); dangerous=$(jq -r '.dangerous == true' "$response")
+        summary="Host: $confirmed_host\nTask: $confirmed_task\nImage: $confirmed_image\nGroup: $confirmed_group\n\nConfirm registration?"; [[ $dangerous == true ]] && summary="WARNING: this task can overwrite data.\n\n$summary"
+        run_dialog --yesno "$summary" 16 72
+        if ui_esc; then cancel_or_resume || continue; fi
+        ui_error && die_console 'Interactive console error.'
+        [[ $ui_rc -eq 0 ]] || return 12
+        json_commit
+        while :; do
+            if post_json commit "$tmpdir/commit.json" && expect_commit; then reboot_normal; fi
+            set_request_state
+            case $request_state in
+                relogin) return 10;; bootstrap) return 11;; edit) say 'Commit was rejected. Return to edit selections.'; return 12;;
+                *) run_dialog --yesno 'Network interrupted. Retrying commit. Press Yes to retry or Esc to cancel.' 9 72
+                   ui_esc && { cancel_or_resume || continue; }
+                   ui_error && die_console 'Interactive console error.'
+                   [[ $ui_rc -eq 0 ]] || return 12
+                   # Never return to options here: reuse this ticket for idempotent commit.
+                   say 'Commit response is incomplete. Retrying commit.';;
+            esac
+        done
+    done
+}
+
+write_secret "$tmpdir/boot" "$manual_token"
+login || exit 1
+while :; do
+    choose_hostname || continue; choose_task || continue
+    choose_image; rc=$?
+    [[ $rc -eq 10 ]] && { login || exit 1; continue; }
+    [[ $rc -eq 11 ]] && { say 'Bootstrap expired. Re-enter manual registration from the boot menu.'; exit 1; }
+    [[ $rc -eq 0 ]] || continue
+    choose_group; rc=$?
+    [[ $rc -eq 10 ]] && { login || exit 1; continue; }
+    [[ $rc -eq 11 ]] && { say 'Bootstrap expired. Re-enter manual registration from the boot menu.'; exit 1; }
+    [[ $rc -eq 0 ]] || continue
+    confirm_and_commit; rc=$?
+    [[ $rc -eq 10 ]] && { login || exit 1; continue; }
+    [[ $rc -eq 11 ]] && { say 'Bootstrap expired. Re-enter manual registration from the boot menu.'; exit 1; }
 done
-askme=""
-while [[ -z $askme ]]; do
-    rootpxe_console_prompt INFO 'Associate this host with snapins? (y/N) '
-    read askme
-    case $askme in
-        [Nn]|[Nn][Oo]|"")
-            askme="N"
-            ;;
-        [Yy]|[Yy][Ee][Ss])
-            setIDs "snapinid" "snapin" "true" "" 20
-            snapin64=$snapinid
-            ;;
-        *)
-            askme=""
-            rootpxe_console_message WARN 'Invalid input. Please try again.'
-            ;;
-    esac
-done
-askme=""
-while [[ -z $askme ]]; do
-    rootpxe_console_prompt INFO 'Associate a product key with this host? (y/N) '
-    read askme
-    case $askme in
-        [Nn]|[Nn][Oo]|"")
-            askme="N"
-            ;;
-        [Yy]|[Yy][Ee][Ss])
-            rootpxe_console_prompt INFO 'Enter the product key for this computer: '
-            read productKey
-            productKey=$(echo $productKey | base64)
-            ;;
-        *)
-            askme=""
-            rootpxe_console_message WARN 'Invalid input. Please try again.'
-            ;;
-    esac
-done
-askme=""
-while [[ -z $askme ]]; do
-    rootpxe_console_prompt INFO 'Join this host to a domain using default settings? (y/N) '
-    read askme
-    case $askme in
-        [Nn]|[Nn][Oo]|"")
-            askme="N"
-            ;;
-        [Yy]|[Yy][Ee][Ss])
-            blDoAD=$(echo -n 1 | base64)
-            askme="Y"
-            ;;
-        *)
-            askme=""
-            rootpxe_console_message WARN 'Invalid input. Please try again.'
-            ;;
-    esac
-done
-rootpxe_console_prompt INFO 'Enter the primary user for this computer: '
-read primaryuser
-primaryuser=$(echo $primaryuser | base64)
-rootpxe_console_prompt INFO 'Enter other tag #1 for this computer: '
-read other1
-other1=$(echo $other1 | base64)
-rootpxe_console_prompt INFO 'Enter other tag #2 for this computer: '
-read other2
-other2=$(echo $other2 | base64)
-rootpxe_console_message INFO 'All required information was entered.'
-askme=""
-while [[ -z $askme ]]; do
-    rootpxe_console_prompt INFO 'Deploy an image to this computer now? (y/N) '
-    read askme
-    case $askme in
-        [Nn]|[Nn][Oo]|"")
-            askme="N"
-            ;;
-        [Yy]|[Yy][Ee][Ss])
-            tmp=""
-            ret=""
-            retry=3
-            while [[ $ret != "#!ok" && ! $retry -eq 0 ]]; do
-                rootpxe_console_message INFO 'Enter RootPXE GUI credentials.'
-                rootpxe_console_prompt INFO 'Username: '
-                read username
-                rootpxe_console_prompt INFO 'Password: '
-                read -s password
-                user64=$(echo $username | tr -d '\012' | base64)
-                pass64=$(echo $password | tr -d '\012' | base64)
-                ret=$(curl -Lks --data "sysuuid=${sysuuid}&mac=$mac&username=$user64&password=$pass64" ${web}service/checkcredentials.php 2>/dev/null)
-                case $ret in
-                    '#!ok')
-                        echo
-                        rootpxe_console_message INFO 'This host will reboot and deployment will start.'
-                        ret=$tmp
-                        realdoimage=$(echo -n 1 | base64)
-                        break
-                        ;;
-                    '#!il')
-                        echo
-                        rootpxe_console_message WARN "Invalid login. Attempts remaining: $retry."
-                        let retry-=1
-                        ;;
-                esac
-            done
-            askme="Y"
-            ;;
-        *)
-            askme=""
-            rootpxe_console_message WARN 'Invalid input. Please try again.'
-            ;;
-    esac
-done
-dots "Attempting to register host"
-res=""
-while [[ -z $res ]]; do
-    res=$(curl -Lks --data "sysuuid=${sysuuid}&mac=$mac&advanced=$(echo -n 1 | base64)&host=$host&imageid=$imageid&primaryuser=$primaryuser&other1=$other1&other2=$other2&doimage=$realdoimage&doad=$blDoAD&location=$location64&username=$user64&password=$pass64&groupid=$group64&snapinid=$snapin64&productKey=$productKey" ${web}service/auto.register.php 2>/dev/null)
-    usleep 2000000
-done
-echo 'Done'
-display_registration_response INFO "$res"
-. /bin/pxeos.inventory
-usleep 2000000

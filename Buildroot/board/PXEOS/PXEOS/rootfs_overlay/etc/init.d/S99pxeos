@@ -32,6 +32,19 @@ case $isdebug in
         ;;
 esac
 
+# Manual registration is an interactive control-plane session, not a task.
+# It must run before RAID discovery and must never fall through to the normal
+# task failure/reboot policy when networking, authentication, or the console
+# interaction fails.
+if [[ $mode == manreg ]]; then
+    pxeos.man.reg
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+        pxeos_init_message WARN 'Manual registration ended without reboot. Use firmware local boot if the service is unavailable.'
+    fi
+    exit "$rc"
+fi
+
 if [[ $mdraid == true ]]; then
     mdadm --auto-detect
     mdadm --assemble --scan

@@ -115,6 +115,14 @@ F2FS 内核支持变更需要重新构建对应架构的内核。FAT16/32 扩容
 
 PXEOS 自身固定控制台提示统一采用 ASCII 英文：横幅为 80 列 ASCII 边框，普通消息使用 `[INFO]`、`[WARN]` 或 `[ERROR]` 级别列；交互输入提示使用同一列格式且不自行换行；进度操作保持 `[INFO]  Operation ... Done` 的单行形式。SSH 调试入口会显示 `Mode: SSH debug.`、`Interface: <name> (<cidr>).` 和 `SSH command: ssh root@<ip>`。`pxeos.inventory` 与 `pxeos.sysinfo` 的数据表、菜单和诊断原始内容为结构化视图，保留其必要布局；其中固定说明、警告和输入提示仍使用上述级别列。内核、DHCP、SSH 服务及 Partclone 等第三方程序的原始输出不由 PXEOS 重排。
 
+## 手动注册 PXEOS
+
+内核参数 `mode=manreg` 会在 RAID 发现和普通任务前启动 `pxeos.man.reg`。此入口只执行带 SPKI pin 的 HTTPS 控制面请求，不会探测、组装、挂载、格式化或写入本地磁盘。必须同时传入 `pxeapi=https://.../service/pxeos/`、`manual_token` 和格式严格为 `sha256//<base64-sha256>` 的 `manual_spki_pin`；`manual_arch`、`manual_platform` 也会按内核参数安全白名单导入。
+
+交互使用 Buildroot `dialog` 的标准 mixedform：Tab/Shift-Tab 切换用户名和遮蔽密码字段，Enter 提交，Esc 请求服务端取消。登录后所有 `none`、`deploy`、`capture` 任务均依次选择镜像和可选分组（`0` 为 `No group`），列表可分页。确认页显示服务器确认的主机、任务、镜像、分组和覆盖风险；提交只建立服务端后续正常 iPXE/check-in 链，不在客户端执行部署。提交网络中断会使用原 ticket 保持确认状态后重试；取消失败会留在交互界面供重试，绝不自动重启。
+
+三套 initramfs 配置均启用 `dialog`，并已通过既有 `BR2_PACKAGE_LIBCURL_CURL` 提供 `curl`。更新这些脚本、依赖或配置后，按目标架构重建内核和 initramfs；本仓库 mock 回归仅覆盖客户端控制流，不等同于真实 TTY、Buildroot 构建或设备启动验证。
+
 ## 文档索引
 
 - [安全配置](docs/安全配置.md)：默认 Root 凭据与敏感信息边界。
