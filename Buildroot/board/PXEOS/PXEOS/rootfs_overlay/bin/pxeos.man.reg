@@ -7,7 +7,7 @@ umask 077
 title='RootPXE Manual Registration'
 tmpdir=$(mktemp -d /tmp/rootpxe-manreg.XXXXXX) || exit 1
 cleanup() {
-    unset login_fields ticket hostname task last_code 2>/dev/null || true
+    unset login_fields ticket hostname task last_code last_reason 2>/dev/null || true
     rm -rf -- "$tmpdir"
 }
 on_signal() { cleanup; exit 1; }
@@ -15,7 +15,7 @@ trap cleanup EXIT
 trap on_signal HUP INT TERM
 response="$tmpdir/response.json"
 dialog_out="$tmpdir/dialog.out"
-last_code='' request_state='retry' ticket='' authenticated=0
+last_code='' last_reason='' request_state='retry' ticket='' authenticated=0
 
 die_console() { printf '[ERROR] %s\n' "$1" >/dev/console 2>/dev/null || printf '[ERROR] %s\n' "$1" >&2; exit 1; }
 
@@ -30,7 +30,7 @@ import_manual_kernel_args() {
     for item in "${items[@]}"; do
         [[ $item == *=* ]] || continue
         key=${item%%=*}; value=${item#*=}
-        case $key in pxeapi|manual_token|manual_spki_pin|manual_arch|manual_platform|keymap) ;; *) continue;; esac
+        case $key in pxeapi|manual_token|manual_spki_pin|manual_arch|manual_platform|mac|mdraid|keymap) ;; *) continue;; esac
         value=${value//+_+/ }; value=${value//+__+/ }
         [[ $value != *$'\n'* && $value != *$'\r'* ]] || continue
         printf -v "$key" '%s' "$value"
@@ -38,6 +38,15 @@ import_manual_kernel_args() {
     done
 }
 import_manual_kernel_args
+
+manual_normalize_mac() {
+    local compact
+    compact=$(printf '%s' "$1" | tr -cd '[:xdigit:]')
+    compact=${compact,,}
+    [[ $compact =~ ^[0-9a-f]{12}$ ]] || return 1
+    printf '%s:%s:%s:%s:%s:%s' "${compact:0:2}" "${compact:2:2}" "${compact:4:2}" "${compact:6:2}" "${compact:8:2}" "${compact:10:2}"
+}
+manual_mac=$(manual_normalize_mac "${mac:-}") || die_console 'Manual registration device identity is unavailable.'
 
 # /dev/tty must be usable, not merely present. The override is test-only.
 tty=${PXEOS_MANREG_TTY:-/dev/tty}
@@ -81,19 +90,48 @@ json_cancel() { jq -n --rawfile bootToken "$tmpdir/boot" '{bootToken:$bootToken}
 post_json() {
     local action=$1 request=$2 http curl_rc
     : >"$response"; : >"$tmpdir/curl.err"
+	request_state=''
     http=$(curl -q --silent --show-error --connect-timeout 5 --max-time 20 --max-redirs 0 --proto '=https' --proto-redir '=https' --pinnedpubkey "$manual_spki_pin" -k -H 'Content-Type: application/json' --data-binary "@$request" --output "$response" --write-out '%{http_code}' "${pxeapi%/}/manual/$action" 2>"$tmpdir/curl.err")
-    curl_rc=$?; last_code=''
+    curl_rc=$?; last_code=''; last_reason=''
     if [[ $curl_rc -ne 0 || ! $http =~ ^2[0-9][0-9]$ ]]; then
         jq -e 'type == "object" and (.code|type == "string")' "$response" >/dev/null 2>&1 && last_code=$(jq -r '.code' "$response")
+        jq -e 'type == "object" and (.reason|type == "string")' "$response" >/dev/null 2>&1 && last_reason=$(jq -r '.reason' "$response")
         return 1
     fi
     jq -e 'type == "object"' "$response" >/dev/null 2>&1
 }
+reason_message() {
+    case $last_reason in
+        REGISTRATION_NOT_FOUND) printf '%s' 'Registration was not found.' ;;
+        REGISTRATION_NOT_PENDING) printf '%s' 'Registration is no longer pending.' ;;
+        REGISTRATION_EXPIRED) printf '%s' 'Registration has expired.' ;;
+        MAC_ALREADY_REGISTERED) printf '%s' 'This device is already registered.' ;;
+        REGISTRATION_EXISTS) printf '%s' 'A registration already exists for this device.' ;;
+        IMAGE_NOT_FOUND) printf '%s' 'Selected image is unavailable.' ;;
+        IMAGE_NOT_READY) printf '%s' 'Selected image is not ready.' ;;
+        IMAGE_FORMAT_INVALID) printf '%s' 'Selected image format is not supported.' ;;
+        IMAGE_LAYOUT_INVALID) printf '%s' 'Selected deployment layout is invalid.' ;;
+        GROUP_NOT_FOUND) printf '%s' 'Selected group is unavailable.' ;;
+        GROUP_NOT_ALLOWED) printf '%s' 'Selected image is not allowed for this group.' ;;
+        HOSTNAME_INVALID) printf '%s' 'Host name is invalid.' ;;
+        CONFIRMATION_REQUIRED) printf '%s' 'Review and confirm the registration first.' ;;
+        *) printf '%s' '' ;;
+    esac
+}
 set_request_state() {
+	# A syntactically valid 2xx commit response that fails our local handoff
+	# contract is not a transport failure. Do not overwrite that terminal-safe
+	# state with the empty HTTP code's generic retry classification.
+	[[ ${request_state:-} == handoff_invalid ]] && return
     case $last_code in
         SESSION_EXPIRED|AUTH_REVOKED) request_state='relogin' ;;
         BOOTSTRAP_EXPIRED) request_state='bootstrap' ;;
-        INVALID_SELECTION|INVALID_STATE|REGISTRATION_CONFLICT|CONFIRMATION_REQUIRED|RECONFIRM_REQUIRED) request_state='edit' ;;
+        REGISTRATION_CONFLICT)
+            case $last_reason in
+                REGISTRATION_NOT_FOUND|REGISTRATION_NOT_PENDING|REGISTRATION_EXPIRED|MAC_ALREADY_REGISTERED|REGISTRATION_EXISTS) request_state='restart' ;;
+                *) request_state='edit' ;;
+            esac ;;
+        INVALID_SELECTION|INVALID_STATE|CONFIRMATION_REQUIRED|RECONFIRM_REQUIRED) request_state='edit' ;;
         *) request_state='retry' ;;
     esac
 }
@@ -102,17 +140,52 @@ expect_login() { expect '(.ticket|type == "string") and (.ticket|length > 0) and
 expect_options() { jq -e --arg expected "$task" '.taskType == $expected and ((.images|type) == "array") and ((.groups|type) == "array")' "$response" >/dev/null 2>&1 && return 0; request_state='retry'; return 1; }
 expect_confirm() { jq -e --arg host "$hostname" --arg expected_task "$task" --argjson image "$(<"$tmpdir/image")" --argjson group "$(<"$tmpdir/group")" '.confirmed == true and .hostName == $host and .taskType == $expected_task and .imageId == $image and .groupId == $group and ((.imageName|type) == "string") and ((.groupName|type) == "string") and ((.dangerous|type) == "boolean")' "$response" >/dev/null 2>&1 && return 0; request_state='retry'; return 1; }
 expect_completed() { jq -e '(.completed == true) and ((.hostId|type) == "number") and (.hostId > 0) and ((.taskId|type) == "number") and ((.taskId % 1) == 0) and ((.taskType|type) == "string") and (.taskType == "none" or .taskType == "deploy" or .taskType == "capture") and (if .taskType == "none" then .taskId == 0 else .taskId > 0 end) and ((.message|type) == "string")' "$response" >/dev/null 2>&1 && return 0; request_state='retry'; return 1; }
-expect_commit() { jq -e --arg expected_task "$task" '(.completed == true) and ((.hostId|type) == "number") and (.hostId > 0) and ((.taskId|type) == "number") and ((.taskId % 1) == 0) and (.taskType == $expected_task) and (if $expected_task == "none" then .taskId == 0 else .taskId > 0 end) and ((.message|type) == "string")' "$response" >/dev/null 2>&1 && return 0; request_state='retry'; return 1; }
+expect_commit() {
+    local filter
+    case $task in
+        none) filter='(.completed == true) and ((.hostId|type) == "number") and (.hostId > 0) and (.taskId == 0) and (.taskType == "none") and (.mac == $expected_mac) and ((.executionToken? == null) or (.executionToken == "")) and ((.message|type) == "string")' ;;
+        deploy|capture) filter='(.completed == true) and ((.hostId|type) == "number") and (.hostId > 0) and ((.taskId|type) == "number") and ((.taskId % 1) == 0) and (.taskId > 0) and (.taskType == $expected_task) and (.mac == $expected_mac) and ((.executionToken|type) == "string") and (.executionToken | test("^[A-Za-z0-9._~+/=-]{16,512}$")) and ((.message|type) == "string")' ;;
+        *) request_state='handoff_invalid'; return 1 ;;
+    esac
+    jq -e --arg expected_task "$task" --arg expected_mac "$manual_mac" "$filter" "$response" >/dev/null 2>&1 && return 0
+    request_state='handoff_invalid'; return 1
+}
 safe_options() { jq -r '.images[]? | select((.id|type) == "number") | select((.id % 1) == 0) | [.id, ((.name // "")|tostring|gsub("[^ -~]"; "?"))] | @tsv' "$response"; }
 safe_groups() { jq -r '.groups[]? | select((.id|type) == "number") | select((.id % 1) == 0 and .id != 0) | [.id, ((.name // "")|tostring|gsub("[^ -~]"; "?"))] | @tsv' "$response"; }
 reboot_normal() { say 'Registration completed. Rebooting to continue through the normal boot path.'; reboot -f; exit 0; }
+
+write_task_handoff() {
+	local handoff_dir=${PXEOS_MANREG_HANDOFF_DIR:-/tmp/pxeos-manual-task} handoff_file task_id execution_token reply_mac reply_type raid
+    [[ $task == deploy || $task == capture ]] || return 1
+    task_id=$(jq -r '.taskId' "$response") || return 1
+    execution_token=$(jq -r '.executionToken' "$response") || return 1
+    reply_mac=$(jq -r '.mac' "$response") || return 1
+    reply_type=$(jq -r '.taskType' "$response") || return 1
+    [[ $task_id =~ ^[1-9][0-9]*$ && $execution_token =~ ^[A-Za-z0-9._~+/=-]+$ && ${#execution_token} -ge 16 && ${#execution_token} -le 512 && $reply_mac == "$manual_mac" && $reply_type == "$task" ]] || return 1
+    umask 077
+    mkdir "$handoff_dir" 2>/dev/null || return 1
+    chmod 700 "$handoff_dir" || { rmdir "$handoff_dir" 2>/dev/null || true; return 1; }
+    handoff_file="$handoff_dir/context"
+    [[ ! -e $handoff_file && ! -L $handoff_file ]] || { rmdir "$handoff_dir" 2>/dev/null || true; return 1; }
+    case ${mdraid:-} in true|'') raid=${mdraid:-} ;; *) rmdir "$handoff_dir" 2>/dev/null || true; return 1;; esac
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$task_id" "$execution_token" "$reply_mac" "$reply_type" "$raid" "$manual_spki_pin" >"$handoff_file" || { rm -f -- "$handoff_file"; rmdir "$handoff_dir" 2>/dev/null || true; return 1; }
+    chmod 600 "$handoff_file" || { rm -f -- "$handoff_file"; rmdir "$handoff_dir" 2>/dev/null || true; return 1; }
+    return 0
+}
 
 cancel_or_resume() {
     while :; do
         json_cancel
         if post_json cancel "$tmpdir/cancel.json"; then
             if expect '.cancelled == true'; then say 'Cancellation was recorded. Rebooting for one local boot.'; reboot -f; exit 0; fi
-            if expect_completed; then reboot_normal; fi
+			if expect_completed; then
+				case $(jq -r '.taskType' "$response") in
+					none) say 'Registration completed.'; exit 0 ;;
+					# Completion of a deploy/capture ticket is deliberately tokenless
+					# on the cancel endpoint, so it cannot start a task from here.
+					deploy|capture) reboot_normal ;;
+				esac
+			fi
         fi
         set_request_state
         if [[ $request_state == bootstrap ]]; then say 'Bootstrap expired. Re-enter manual registration from the boot menu.'; return 1; fi
@@ -125,7 +198,7 @@ cancel_or_resume() {
 login() {
     while :; do
         : >"$dialog_out"
-        dialog --clear --title "$title" --mixedform 'Administrator login' 12 72 2 'Username:' 1 1 '' 1 18 40 0 0 'Password:' 2 1 '' 2 18 40 0 1 2>"$dialog_out" <&3 >&3
+        dialog --clear --title "$title" --insecure --mixedform 'Administrator login' 12 72 2 'Username:' 1 1 '' 1 18 40 0 0 'Password:' 2 1 '' 2 18 40 0 1 2>"$dialog_out" <&3 >&3
         ui_rc=$?
         if ui_form_cancelled; then cancel_or_resume || continue; fi
         ui_error && die_console 'Interactive console error.'
@@ -157,7 +230,7 @@ choose_hostname() {
 }
 choose_task() {
     while :; do
-        run_dialog --menu 'Select task' 12 72 3 none 'Register only' deploy 'Deploy image (overwrites disk)' capture 'Capture image'
+        run_dialog --menu 'Select task' 12 72 3 none 'Register only' deploy 'Deploy image' capture 'Capture image'
         if ui_form_cancelled; then cancel_or_resume || continue; fi
         ui_error && die_console 'Interactive console error.'
         [[ $ui_rc -eq 0 ]] || continue
@@ -213,7 +286,9 @@ confirm_and_commit() {
         json_confirm
         if ! post_json confirm "$tmpdir/confirm.json" || ! expect_confirm; then
             set_request_state; [[ $request_state == relogin ]] && return 10; [[ $request_state == bootstrap ]] && return 11
-            say 'Registration details were rejected. Return to edit selections.'; return 12
+            reason=$(reason_message)
+            [[ -n $reason ]] || reason='Registration details were rejected.'
+            say "$reason Return to edit selections."; return 12
         fi
         confirmed_host=$(jq -r '(.hostName // "")|tostring|gsub("[^ -~]"; "?")' "$response")
         confirmed_image=$(jq -r '(.imageName // "No image")|tostring|gsub("[^ -~]"; "?")' "$response")
@@ -226,10 +301,29 @@ confirm_and_commit() {
         [[ $ui_rc -eq 0 ]] || return 12
         json_commit
         while :; do
-            if post_json commit "$tmpdir/commit.json" && expect_commit; then reboot_normal; fi
+            if post_json commit "$tmpdir/commit.json" && expect_commit; then
+                if [[ $task == none ]]; then
+                    say 'Registration completed.'
+                    exit 0
+                fi
+                write_task_handoff || { say 'Task handoff is invalid. No disk operation was started.'; return 14; }
+                say 'Registration completed. Starting the selected task.'
+                return 20
+            fi
             set_request_state
             case $request_state in
-                relogin) return 10;; bootstrap) return 11;; edit) say 'Commit was rejected. Return to edit selections.'; return 12;;
+                relogin) return 10;; bootstrap) return 11;;
+                handoff_invalid) say 'Task handoff is invalid. No disk operation was started.'; return 14;;
+                restart)
+                    reason=$(reason_message)
+                    [[ -n $reason ]] || reason='Registration cannot continue.'
+                    say "$reason Reboot and follow the normal boot path."
+                    return 13;;
+                edit)
+                    reason=$(reason_message)
+                    [[ -n $reason ]] || reason='Commit was rejected.'
+                    say "$reason Return to edit selections."
+                    return 12;;
                 *) run_dialog --yesno 'Network interrupted. Retrying commit. Press Yes to retry or Esc to cancel.' 9 72
                    ui_esc && { cancel_or_resume || continue; }
                    ui_error && die_console 'Interactive console error.'
@@ -256,4 +350,7 @@ while :; do
     confirm_and_commit; rc=$?
     [[ $rc -eq 10 ]] && { login || exit 1; continue; }
     [[ $rc -eq 11 ]] && { say 'Bootstrap expired. Re-enter manual registration from the boot menu.'; exit 1; }
+    [[ $rc -eq 13 ]] && exit 1
+    [[ $rc -eq 14 ]] && exit 1
+    [[ $rc -eq 20 ]] && exit 20
 done

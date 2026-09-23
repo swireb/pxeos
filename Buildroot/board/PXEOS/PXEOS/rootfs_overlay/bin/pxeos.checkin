@@ -4,47 +4,48 @@
 RUN_CHKDSK=""
 OS_ID_WIN7=5
 OS_ID_WIN8=6
-for arg in $(cat /proc/cmdline | tr -d \\0); do
-    case $arg in
-        initsh)
-            ash -i
-            ;;
-        nombr)
-            nombr=1
-            ;;
-        *)
-            [[ $imgPartitionType != all && $imgPartitionType != mbr ]] && nombr=1
-            ;;
+# The direct manual-registration handoff has only task identity before checkin.
+# Do not derive OS, partition, multicast, or disk state from absent old kernel
+# arguments; authenticated checkin supplies those values first.
+pxeos_checkin_runtime_setup() {
+    local arg
+    for arg in $(cat /proc/cmdline | tr -d \\0); do
+        case $arg in
+            initsh)
+                ash -i
+                ;;
+            nombr)
+                nombr=1
+                ;;
+            *)
+                [[ ${imgPartitionType:-} != all && ${imgPartitionType:-} != mbr ]] && nombr=1
+                ;;
+        esac
+    done
+    clearScreen
+    displayBanner
+    osname=""
+    mbrfile=""
+    macWinSafe="$(echo -n "$mac" | tr '[:upper:]' '[:lower:]' | tr -cd '0-9a-f')"
+    sockets=$(grep "physical id" /proc/cpuinfo|sort -u|wc -l)
+    arch=$(uname -m)
+    [[ ${chkdsk:-0} -eq 1 ]] && RUN_CHKDSK="-x"
+    case ${mc:-} in
+        yes) method="UDPCAST" ;;
+        bt) method="Torrent-CAST" ;;
+        *) method="" ;;
     esac
-done
-clearScreen
-displayBanner
-osname=""
-mbrfile=""
-# 捕获临时目录名约定：使用服务端下发（内核参数）的任务主机 MAC，并压缩为 12 位小写 hex
-macWinSafe="$(echo -n "$mac" | tr '[:upper:]' '[:lower:]' | tr -cd '0-9a-f')"
-sockets=$(grep "physical id" /proc/cpuinfo|sort -u|wc -l)
-arch=$(uname -m)
-[[ $chkdsk -eq 1 ]] && RUN_CHKDSK="-x"
-case $mc in
-    yes)
-        method="UDPCAST"
-        ;;
-    bt)
-        method="Torrent-CAST"
-        ;;
-    *) method="" ;;
-esac
-debugPause
-verifyNetworkConnection
-dots "Checking Operating System"
-[[ -z $deployed ]] && determineOS "$osid"
-echo "$osname"
-dots "Checking CPU Cores"
-cores=$(nproc)
-echo "$cores"
-blGo=0
-nfsServerName=""
+    debugPause
+    verifyNetworkConnection
+    dots "Checking Operating System"
+    [[ -z ${deployed:-} ]] && determineOS "$osid"
+    echo "$osname"
+    dots "Checking CPU Cores"
+    cores=$(nproc)
+    echo "$cores"
+    blGo=0
+    nfsServerName=""
+}
 rootpxe_api="${pxeapi:-$web}"
 
 rootpxe_json_get_string() {
@@ -119,30 +120,43 @@ rootpxe_apply_json_partition_inventory() {
     export partitionInventoryFile partitionInventoryHash
 }
 
-rootpxe_checkin_json_payload() {
-    local capabilities='["hostname"]' identity_versions='[1]'
+rootpxe_write_checkin_json_payload() {
+    local output_file="$1" token_file capabilities='["hostname"]' identity_versions='[1]' old_umask result
     [[ ${taskid:-} =~ ^[1-9][0-9]*$ && -n ${task_token:-} && -n ${lmac:-} ]] || return 1
+    [[ -n $output_file && ! -L $output_file ]] || return 1
+    # Never put the execution token in jq's argv. Keep it in a short-lived,
+    # owner-only file while jq constructs the owner-only curl request body.
+    old_umask=$(umask)
+    umask 077
+    token_file=$(mktemp /tmp/rootpxe-checkin-token.XXXXXX) || { umask "$old_umask"; return 1; }
+    chmod 600 "$token_file" || { rm -f -- "$token_file"; umask "$old_umask"; return 1; }
+    printf '%s' "$task_token" >"$token_file" || { rm -f -- "$token_file"; umask "$old_umask"; return 1; }
 	# Capabilities describe the executable PXEOS image, not merely source code.
     if rootpxe_deployment_identity_linux_capabilities_installed; then
         capabilities='["hostname","linux-machine-id","linux-ssh-host-keys","linux-ssh-login-public-keys","linux-root-password"]'
     fi
 	if rootpxe_deployment_identity_windows_hostname_capability_installed; then
-		capabilities=$(jq -c '. + ["windows-hostname-registry-v1"]' <<<"$capabilities") || return 1
+		capabilities=$(jq -c '. + ["windows-hostname-registry-v1"]' <<<"$capabilities") || { rm -f -- "$token_file"; umask "$old_umask"; return 1; }
 	fi
 	if rootpxe_deployment_identity_windows_sysprep_capability_installed; then
-		capabilities=$(jq -c '. + ["windows-sysprep-v1"]' <<<"$capabilities") || return 1
+		capabilities=$(jq -c '. + ["windows-sysprep-v1"]' <<<"$capabilities") || { rm -f -- "$token_file"; umask "$old_umask"; return 1; }
 	fi
     if rootpxe_multicast_runtime_ready; then
-        capabilities=$(jq -c '. + ["manual-multicast-session"]' <<<"$capabilities") || return 1
+		capabilities=$(jq -c '. + ["manual-multicast-session"]' <<<"$capabilities") || { rm -f -- "$token_file"; umask "$old_umask"; return 1; }
     fi
-    jq -cn \
+	jq -cn \
         --argjson taskId "$taskid" \
-        --arg token "$task_token" \
+		--rawfile token "$token_file" \
         --arg mac "$lmac" \
         --arg sysuuid "${sysuuid_local:-}" \
         --argjson versions "$identity_versions" \
         --argjson capabilities "$capabilities" \
-        '{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities}'
+		'{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities}' >"$output_file"
+	result=$?
+	: >"$token_file"
+	rm -f -- "$token_file"
+	umask "$old_umask"
+	return "$result"
 }
 
 rootpxe_apply_json_deploy_script() {
@@ -374,7 +388,7 @@ checkin_rootpxe() {
     local lmac
     # 按约定：使用服务端下发的任务主机 MAC（kernel cmdline 的 mac），不要在此处探测真实网卡
     lmac="$mac"
-    local out
+    local out checkin_payload_file
     local body
     local http_code
     local line
@@ -384,19 +398,34 @@ checkin_rootpxe() {
     local waitMsg=""
     local retryAfterSec=5
     local checkin_response_format=""
+    local -a checkin_tls_args=(-Lks)
+    if [[ ${manual_direct_task:-} == yes ]]; then
+        [[ ${manual_spki_pin:-} =~ ^sha256//[A-Za-z0-9+/]{43}=$ ]] || return 1
+        # The direct handoff token was received over the manual flow's pinned
+        # HTTPS connection. Do not send it to an HTTP endpoint or a redirect.
+        [[ ${rootpxe_api:-} == https://* ]] || return 1
+        checkin_tls_args=(-ks --proto '=https' --proto-redir '=https' --max-redirs 0 --pinnedpubkey "$manual_spki_pin")
+    fi
     while true; do
         waitFlag=""
         waitMsg=""
         retryAfterSec=5
         # Do not use curl -f here. A 4xx means the administrator withdrew the
         # task before checkin completed; it is a safe reboot, not a PXEOS error.
-        checkin_payload=$(rootpxe_checkin_json_payload) || handleError "RootPXE checkin context is invalid ($0)"
-        out=$(curl -Lks \
+		umask 077
+		checkin_payload_file=$(mktemp /tmp/rootpxe-checkin-request.XXXXXX) || handleError "RootPXE checkin context is invalid ($0)"
+		chmod 600 "$checkin_payload_file" || { rm -f -- "$checkin_payload_file"; handleError "RootPXE checkin context is invalid ($0)"; }
+		if ! rootpxe_write_checkin_json_payload "$checkin_payload_file"; then
+			rm -f -- "$checkin_payload_file"
+			handleError "RootPXE checkin context is invalid ($0)"
+		fi
+        out=$(curl "${checkin_tls_args[@]}" \
             --connect-timeout 10 --max-time 30 \
             -H 'Content-Type: application/json' \
-            --data-binary "$checkin_payload" \
+			--data-binary "@$checkin_payload_file" \
             -w $'\n%{http_code}' "${rootpxe_api}checkin" 2>/dev/null)
         curl_status=$?
+		rm -f -- "$checkin_payload_file"
         if [[ $curl_status -ne 0 ]]; then
             rootpxe_console_message WARN 'Check-in not confirmed. Retrying in 5s.'
             rootpxe_console_message INFO 'SSH is available for troubleshooting.'
@@ -536,3 +565,4 @@ if [[ ! $capone -eq 1 ]]; then
     [[ $checkin_rc -eq 0 ]] || exit "$checkin_rc"
     rootpxe_stage checkin "PXEOS checkin completed"
 fi
+pxeos_checkin_runtime_setup
