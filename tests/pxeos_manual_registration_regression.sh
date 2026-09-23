@@ -46,6 +46,10 @@ must_have "$client" 'manual_mac=$(manual_normalize_mac'
 must_have "$client" 'Task handoff is invalid. No disk operation was started.'
 must_have "$client" 'return 20'
 must_have "$client" "deploy 'Deploy image'"
+must_have "$client" "reboot 'Reboot'"
+must_have "$client" "poweroff 'Shut down'"
+must_have "$client" 'Restart failed. Select an action.'
+must_have "$client" 'Shut down failed. Select an action.'
 must_not_have "$client" "deploy 'Deploy image (overwrites disk)'"
 must_not_have "$client" 'jq -n --arg'
 must_have "$funcs" 'manual_spki_pin'
@@ -98,6 +102,16 @@ case $args in
   *'Select image (page 1)'*) printf '__next' >&2 ;;
   *'Select image (page 2)'*) printf '42' >&2 ;;
   *'Select group'*) printf '0' >&2 ;;
+  *'Registration completed. Select an action.'*)
+    count=0; [[ -f $PXEOS_TEST_STATE/power-menu ]] && count=$(<"$PXEOS_TEST_STATE/power-menu"); count=$((count+1)); printf '%s' "$count" >"$PXEOS_TEST_STATE/power-menu"
+    case ${PXEOS_TEST_POWER_SCENARIO:-${PXEOS_TEST_POWER_ACTION:-}} in
+      reboot) printf 'reboot' >&2 ;;
+      poweroff) printf 'poweroff' >&2 ;;
+      cancel-reboot) [[ $count -eq 1 ]] && exit 10; printf 'reboot' >&2 ;;
+      fail-reboot-poweroff) [[ $count -eq 1 ]] && printf 'reboot' >&2 || printf 'poweroff' >&2 ;;
+      fail-poweroff-reboot) [[ $count -eq 1 ]] && printf 'poweroff' >&2 || printf 'reboot' >&2 ;;
+      *) exit 255 ;;
+    esac ;;
   *) : ;;
 esac
 exit 0
@@ -130,12 +144,12 @@ if [[ $task == none ]]; then
   esac
 else case "$action.$count" in
   login.1) body='{"ticket":"ticket-1","expiresInSeconds":600}' ;;
-  options.1) body='{"taskType":"deploy","images":[{"id":1,"name":"First\u001bName"}],"groups":[],"page":1,"hasNext":true}' ;;
-  options.2) body='{"taskType":"deploy","images":[{"id":42,"name":"Second"}],"groups":[],"page":2,"hasNext":false}' ;;
-  options.3) body='{"taskType":"deploy","images":[],"groups":[{"id":7,"name":"Ops"}],"page":1,"hasNext":false}' ;;
-  confirm.1) body='{"confirmed":true,"hostName":"node-01","imageId":42,"imageName":"Second","groupId":0,"groupName":"No group","taskType":"deploy","dangerous":true}' ;;
+  options.1) body="{\"taskType\":\"$task\",\"images\":[{\"id\":1,\"name\":\"First\\u001bName\"}],\"groups\":[],\"page\":1,\"hasNext\":true}" ;;
+  options.2) body="{\"taskType\":\"$task\",\"images\":[{\"id\":42,\"name\":\"Second\"}],\"groups\":[],\"page\":2,\"hasNext\":false}" ;;
+  options.3) body="{\"taskType\":\"$task\",\"images\":[],\"groups\":[{\"id\":7,\"name\":\"Ops\"}],\"page\":1,\"hasNext\":false}" ;;
+  confirm.1) body="{\"confirmed\":true,\"hostName\":\"node-01\",\"imageId\":42,\"imageName\":\"Second\",\"groupId\":0,\"groupName\":\"No group\",\"taskType\":\"$task\",\"dangerous\":true}" ;;
   commit.1) exit 7 ;;
-  commit.2) body='{"completed":true,"hostId":9,"taskId":10,"taskType":"deploy","mac":"00:11:22:33:44:55","executionToken":"ABCDEFGHIJKLMNOP","message":"done"}' ;;
+  commit.2) body="{\"completed\":true,\"hostId\":9,\"taskId\":10,\"taskType\":\"$task\",\"mac\":\"00:11:22:33:44:55\",\"executionToken\":\"ABCDEFGHIJKLMNOP\",\"message\":\"done\"}" ;;
   *) body='{"code":"SERVICE_UNAVAILABLE","message":"unavailable"}' ;;
 esac
 fi
@@ -145,8 +159,16 @@ EOF
 cat >"$tmp/bin/reboot" <<'EOF'
 #!/usr/bin/env bash
 printf 'reboot\n' >>"$PXEOS_TEST_REBOOT_LOG"
+[[ ${PXEOS_TEST_POWER_SCENARIO:-} == fail-reboot-poweroff ]] && exit 1
+exit 0
 EOF
-chmod +x "$tmp/bin/dialog" "$tmp/bin/curl" "$tmp/bin/reboot"
+cat >"$tmp/bin/poweroff" <<'EOF'
+#!/usr/bin/env bash
+printf 'poweroff\n' >>"$PXEOS_TEST_POWEROFF_LOG"
+[[ ${PXEOS_TEST_POWER_SCENARIO:-} == fail-poweroff-reboot ]] && exit 1
+exit 0
+EOF
+chmod +x "$tmp/bin/dialog" "$tmp/bin/curl" "$tmp/bin/reboot" "$tmp/bin/poweroff"
 
 set +e
 PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" \
@@ -182,12 +204,51 @@ mapfile -t handoff_fields <"$tmp/handoff/context"
 runtime_dir=$(<"$tmp/runtime-dir")
 [[ ! -d $runtime_dir ]] || fail 'manual-registration credentials directory was not cleaned'
 
-# Registration-only remains a complete image/group/confirm flow and accepts
-# the contract's taskId=0 terminal result exactly once without rebooting.
-rm -rf "$tmp/state" "$tmp/requests" "$tmp/handoff"; mkdir "$tmp/state" "$tmp/requests"; rm -f "$tmp/reboot.log"
-PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" PXEOS_TEST_TASK=none PXEOS_MANREG_TTY="$tmp/tty" PXEOS_TEST_DIALOG_LOG="$tmp/dialog.log" PXEOS_TEST_CURL_ARGS="$tmp/curl-args.log" PXEOS_TEST_STATE="$tmp/state" PXEOS_TEST_REQUESTS="$tmp/requests" PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" PXEOS_TEST_RUNTIME_DIR="$tmp/runtime-dir" PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/service/pxeos/' mac='00:11:22:33:44:55' manual_token='boot-token' manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" bash "$client"
-[[ $(jq -r '.taskType' "$tmp/requests/confirm.1.json") == none ]] || fail 'none did not reach confirmation'
-[[ ! -s $tmp/reboot.log ]] || fail 'none taskId 0 rebooted unexpectedly'
+# Deploy and capture keep their direct task handoff: neither may enter the
+# registration-only power menu or issue a power action before S99 check-in.
+rm -rf "$tmp/state" "$tmp/requests" "$tmp/handoff"; mkdir "$tmp/state" "$tmp/requests"
+: >"$tmp/reboot.log"; : >"$tmp/poweroff.log"; : >"$tmp/dialog.log"
+set +e
+PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" PXEOS_TEST_TASK=capture PXEOS_MANREG_TTY="$tmp/tty" PXEOS_TEST_DIALOG_LOG="$tmp/dialog.log" PXEOS_TEST_CURL_ARGS="$tmp/curl-args.log" PXEOS_TEST_STATE="$tmp/state" PXEOS_TEST_REQUESTS="$tmp/requests" PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" PXEOS_TEST_POWEROFF_LOG="$tmp/poweroff.log" PXEOS_TEST_RUNTIME_DIR="$tmp/runtime-dir" PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/service/pxeos/' mac='00:11:22:33:44:55' manual_token='boot-token' manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" bash "$client"
+rc=$?
+set -e
+[[ $rc -eq 20 ]] || fail "capture handoff exited $rc, want 20"
+mapfile -t handoff_fields <"$tmp/handoff/context"
+[[ ${handoff_fields[0]} == 10 && ${handoff_fields[3]} == capture ]] || fail 'capture handoff context is invalid'
+[[ ! -s $tmp/reboot.log && ! -s $tmp/poweroff.log ]] || fail 'capture changed to a completed power action'
+! grep -Fq 'Registration completed. Select an action.' "$tmp/dialog.log" || fail 'capture entered the registration-only power menu'
+
+# Registration-only remains a complete image/group/confirm flow.  Its
+# taskId=0 completion asks for an explicit power action; it neither starts a
+# task nor attempts a local-disk boot.
+run_none_completion_case() {
+  local power_scenario=$1
+  rm -rf "$tmp/state" "$tmp/requests" "$tmp/handoff"; mkdir "$tmp/state" "$tmp/requests"
+  : >"$tmp/reboot.log"; : >"$tmp/poweroff.log"; : >"$tmp/dialog.log"
+  PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" PXEOS_TEST_TASK=none PXEOS_TEST_POWER_SCENARIO="$power_scenario" PXEOS_MANREG_TTY="$tmp/tty" PXEOS_TEST_DIALOG_LOG="$tmp/dialog.log" PXEOS_TEST_CURL_ARGS="$tmp/curl-args.log" PXEOS_TEST_STATE="$tmp/state" PXEOS_TEST_REQUESTS="$tmp/requests" PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" PXEOS_TEST_POWEROFF_LOG="$tmp/poweroff.log" PXEOS_TEST_RUNTIME_DIR="$tmp/runtime-dir" PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/service/pxeos/' mac='00:11:22:33:44:55' manual_token='boot-token' manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" bash "$client"
+  [[ $(jq -r '.taskType' "$tmp/requests/confirm.1.json") == none ]] || fail "$power_scenario did not reach confirmation"
+  [[ $(<"$tmp/state/commit") == 1 ]] || fail "$power_scenario repeated the completed commit"
+  [[ ! -e $tmp/state/cancel ]] || fail "$power_scenario submitted an unexpected cancellation"
+  [[ ! -e $tmp/handoff/context ]] || fail "$power_scenario created a task handoff"
+}
+
+run_none_completion_case reboot
+[[ $(wc -l <"$tmp/reboot.log") -eq 1 && ! -s $tmp/poweroff.log ]] || fail 'registration-only reboot action was not explicit'
+[[ $(<"$tmp/state/power-menu") == 1 ]] || fail 'registration-only reboot did not show the power menu'
+
+run_none_completion_case poweroff
+[[ ! -s $tmp/reboot.log && $(wc -l <"$tmp/poweroff.log") -eq 1 ]] || fail 'registration-only shut down action was not explicit'
+
+run_none_completion_case cancel-reboot
+[[ $(<"$tmp/state/power-menu") == 2 && $(wc -l <"$tmp/reboot.log") -eq 1 ]] || fail 'Esc/Cancel did not return to the completed power menu'
+
+run_none_completion_case fail-reboot-poweroff
+[[ $(<"$tmp/state/power-menu") == 2 && $(wc -l <"$tmp/reboot.log") -eq 1 && $(wc -l <"$tmp/poweroff.log") -eq 1 ]] || fail 'failed reboot did not return to the power menu'
+grep -Fq 'Restart failed. Select an action.' "$tmp/dialog.log" || fail 'failed reboot did not explain the retry'
+
+run_none_completion_case fail-poweroff-reboot
+[[ $(<"$tmp/state/power-menu") == 2 && $(wc -l <"$tmp/poweroff.log") -eq 1 && $(wc -l <"$tmp/reboot.log") -eq 1 ]] || fail 'failed shut down did not return to the power menu'
+grep -Fq 'Shut down failed. Select an action.' "$tmp/dialog.log" || fail 'failed shut down did not explain the retry'
 
 # Esc at login exercises cancellation retry: a failed cancel leaves dialog in
 # control, then a successful retry is the only path that invokes reboot.
@@ -217,6 +278,7 @@ set -u
 out=''
 for ((i=1; i <= $#; i++)); do arg=${!i}; [[ $arg == --output ]] && { j=$((i+1)); out=${!j}; }; done
 action=${!#}; action=${action##*/}
+count_file="$PXEOS_TEST_STATE/$action"; count=0; [[ -f $count_file ]] && count=$(<"$count_file"); count=$((count+1)); printf '%s' "$count" >"$count_file"
 if [[ $action == login ]]; then
   printf '{"ticket":"ticket-terminal","expiresInSeconds":600}' >"$out"
 else
@@ -225,10 +287,11 @@ fi
 printf '200'
 EOF
 chmod +x "$tmp/bin/curl"
-rm -f "$tmp/reboot.log" "$tmp/state/cancel"
-PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" PXEOS_MANREG_TTY="$tmp/tty" PXEOS_TEST_DIALOG_LOG="$tmp/dialog.log" PXEOS_TEST_CURL_ARGS="$tmp/curl-args.log" PXEOS_TEST_STATE="$tmp/state" PXEOS_TEST_REQUESTS="$tmp/requests" PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/service/pxeos/' mac='00:11:22:33:44:55' manual_token='boot-token' manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" bash "$client"
-[[ ! -s $tmp/reboot.log ]] || fail 'completed registration-only cancellation rebooted unexpectedly'
-grep -Fq 'Registration completed.' "$tmp/dialog.log" || fail 'completed registration-only cancellation did not show completion'
+rm -f "$tmp/reboot.log" "$tmp/poweroff.log" "$tmp/state/cancel" "$tmp/state/power-menu"
+PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" PXEOS_TEST_POWER_ACTION=poweroff PXEOS_MANREG_TTY="$tmp/tty" PXEOS_TEST_DIALOG_LOG="$tmp/dialog.log" PXEOS_TEST_CURL_ARGS="$tmp/curl-args.log" PXEOS_TEST_STATE="$tmp/state" PXEOS_TEST_REQUESTS="$tmp/requests" PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" PXEOS_TEST_POWEROFF_LOG="$tmp/poweroff.log" PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/service/pxeos/' mac='00:11:22:33:44:55' manual_token='boot-token' manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" bash "$client"
+[[ ! -s $tmp/reboot.log && $(wc -l <"$tmp/poweroff.log") -eq 1 ]] || fail 'completed registration-only cancellation did not require an explicit power action'
+[[ $(<"$tmp/state/cancel") == 1 && $(<"$tmp/state/power-menu") == 1 ]] || fail 'completed cancellation was retried instead of opening the power menu'
+grep -Fq 'Registration completed. Select an action.' "$tmp/dialog.log" || fail 'completed registration-only cancellation did not show the power menu'
 
 # Additional bounded scripted cases use the same fixed PATH command mocks.  A
 # shared scenario name makes every response and dialog decision explicit.
@@ -257,6 +320,7 @@ case $args in
   *'Confirm registration?'*)
     count=0; [[ -f $state/confirm-dialog ]] && count=$(<"$state/confirm-dialog"); count=$((count+1)); printf '%s' "$count" >"$state/confirm-dialog"
     [[ ${PXEOS_TEST_SCENARIO:-} == confirm-no && $count -eq 1 ]] && exit 1 ;;
+  *'Registration completed. Select an action.'*) printf 'poweroff' >&2 ;;
   *'Network interrupted.'*)
     [[ ${PXEOS_TEST_SCENARIO:-} == commit-no-cancel ]] && exit 1
     [[ ${PXEOS_TEST_SCENARIO:-} == malformed-commit ]] && exit 10 ;;
@@ -324,9 +388,9 @@ chmod +x "$tmp/bin/dialog" "$tmp/bin/curl"
 count_of() { local value=0; [[ -f $tmp/state/$1 ]] && value=$(<"$tmp/state/$1"); printf '%s' "$value"; }
 run_case() {
   local scenario=$1 expected_rc=$2 rc runtime
-  rm -rf -- "$tmp/state" "$tmp/requests"; mkdir "$tmp/state" "$tmp/requests"; : >"$tmp/reboot.log"; : >"$tmp/dialog.log"; : >"$tmp/curl-args.log"; : >"$tmp/runtime-dir"
+  rm -rf -- "$tmp/state" "$tmp/requests"; mkdir "$tmp/state" "$tmp/requests"; : >"$tmp/reboot.log"; : >"$tmp/poweroff.log"; : >"$tmp/dialog.log"; : >"$tmp/curl-args.log"; : >"$tmp/runtime-dir"
   set +e
-  PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" PXEOS_TEST_SCENARIO="$scenario" PXEOS_MANREG_TTY="$tmp/tty" PXEOS_TEST_DIALOG_LOG="$tmp/dialog.log" PXEOS_TEST_CURL_ARGS="$tmp/curl-args.log" PXEOS_TEST_STATE="$tmp/state" PXEOS_TEST_REQUESTS="$tmp/requests" PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" PXEOS_TEST_RUNTIME_DIR="$tmp/runtime-dir" PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/service/pxeos/' mac='00:11:22:33:44:55' manual_token='boot-token' manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" bash "$client"
+  PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" PXEOS_TEST_SCENARIO="$scenario" PXEOS_MANREG_TTY="$tmp/tty" PXEOS_TEST_DIALOG_LOG="$tmp/dialog.log" PXEOS_TEST_CURL_ARGS="$tmp/curl-args.log" PXEOS_TEST_STATE="$tmp/state" PXEOS_TEST_REQUESTS="$tmp/requests" PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" PXEOS_TEST_POWEROFF_LOG="$tmp/poweroff.log" PXEOS_TEST_RUNTIME_DIR="$tmp/runtime-dir" PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/service/pxeos/' mac='00:11:22:33:44:55' manual_token='boot-token' manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" bash "$client"
   rc=$?
   set -e
   [[ $rc -eq $expected_rc ]] || fail "$scenario exited $rc, want $expected_rc"

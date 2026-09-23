@@ -154,6 +154,35 @@ safe_options() { jq -r '.images[]? | select((.id|type) == "number") | select((.i
 safe_groups() { jq -r '.groups[]? | select((.id|type) == "number") | select((.id % 1) == 0 and .id != 0) | [.id, ((.name // "")|tostring|gsub("[^ -~]"; "?"))] | @tsv' "$response"; }
 reboot_normal() { say 'Registration completed. Rebooting to continue through the normal boot path.'; reboot -f; exit 0; }
 
+# PXEOS has no safe, generic way to chain into an arbitrary installed local
+# system. Registration-only completion must therefore wait for an explicit
+# power action instead of booting a local disk or restarting on its own.
+choose_completed_power_action() {
+    local action
+    while :; do
+        run_dialog --menu 'Registration completed. Select an action.' 12 72 2 reboot 'Reboot' poweroff 'Shut down'
+        if ui_form_cancelled; then
+            # Esc/Cancel intentionally stays on this terminal menu.  The
+            # registration has completed, so do not submit or cancel again.
+            continue
+        fi
+        ui_error && die_console 'Interactive console error.'
+        [[ $ui_rc -eq 0 ]] || continue
+        action=$(<"$dialog_out")
+        case $action in
+            reboot)
+                reboot -f && exit 0
+                say 'Restart failed. Select an action.'
+                ;;
+            poweroff)
+                poweroff && exit 0
+                say 'Shut down failed. Select an action.'
+                ;;
+            *) say 'Select Reboot or Shut down.' ;;
+        esac
+    done
+}
+
 write_task_handoff() {
 	local handoff_dir=${PXEOS_MANREG_HANDOFF_DIR:-/tmp/pxeos-manual-task} handoff_file task_id execution_token reply_mac reply_type raid
     [[ $task == deploy || $task == capture ]] || return 1
@@ -180,7 +209,7 @@ cancel_or_resume() {
             if expect '.cancelled == true'; then say 'Cancellation was recorded. Rebooting for one local boot.'; reboot -f; exit 0; fi
 			if expect_completed; then
 				case $(jq -r '.taskType' "$response") in
-					none) say 'Registration completed.'; exit 0 ;;
+					none) choose_completed_power_action ;;
 					# Completion of a deploy/capture ticket is deliberately tokenless
 					# on the cancel endpoint, so it cannot start a task from here.
 					deploy|capture) reboot_normal ;;
@@ -303,8 +332,7 @@ confirm_and_commit() {
         while :; do
             if post_json commit "$tmpdir/commit.json" && expect_commit; then
                 if [[ $task == none ]]; then
-                    say 'Registration completed.'
-                    exit 0
+                    choose_completed_power_action
                 fi
                 write_task_handoff || { say 'Task handoff is invalid. No disk operation was started.'; return 14; }
                 say 'Registration completed. Starting the selected task.'
