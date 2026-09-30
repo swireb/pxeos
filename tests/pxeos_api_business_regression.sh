@@ -835,7 +835,7 @@ cat >$tmp/mock/chown <<'EOF'
 #!/usr/bin/env bash
 printf 'chown:%s\n' "$*" >>$HOSTMODE_TRACE
 EOF
-cat >$tmp/mock/xmlstarlet <<'EOF'
+cat >$tmp/mock/xml <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
   *' count('* )

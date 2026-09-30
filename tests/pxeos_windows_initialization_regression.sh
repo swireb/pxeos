@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Real hivex/reged/xmlstarlet regression for the Windows hostname/Sysprep
+# Real hivex/reged/XMLStarlet regression for the Windows hostname/Sysprep
 # matrix.  changeHostname and Sysprep are the only two controls.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -9,7 +9,7 @@ tool=${ROOTPXE_WINDOWS_HOSTNAME_TOOL:-}; minimal=${ROOTPXE_HIVEX_MINIMAL:-}; reg
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 expect_fail(){ if "$@" >/dev/null 2>&1; then fail "expected failure: $*"; fi; }
 [[ -x $tool && -x $reged && -f $minimal ]] || fail 'set ROOTPXE_WINDOWS_HOSTNAME_TOOL, ROOTPXE_REGED and ROOTPXE_HIVEX_MINIMAL'
-command -v xmlstarlet >/dev/null || fail 'xmlstarlet is required'
+command -v xml >/dev/null || fail 'Buildroot XMLStarlet command xml is required'
 jq_real=$(command -v jq) || fail 'jq is required'
 [[ ! -e /ntfs ]] || fail '/ntfs exists; refuse to touch a non-test mount'
 tmp=$(mktemp -d); trap 'rm -rf "$tmp" /ntfs' EXIT
@@ -44,7 +44,7 @@ output_xml=/ntfs/Windows/System32/Sysprep/unattend.xml
 write_private(){ printf '{"unattendXml":%s}' "$(printf '%s' "$1" | jq -Rs .)" >"$private"; }
 write_policy(){ printf '{"systemIdentity":{"sysprep":%s}}' "$1" >"$policy"; }
 assert_registry(){ rootpxe-offline-identities windows-hostname-verify /ntfs/Windows/System32/config/SYSTEM "$1" || fail "registry did not contain $1"; }
-assert_xml_names(){ local expected="$1" count="$2" got actual; got=$(xmlstarlet sel -t -m "/*[local-name()='unattend']/*[local-name()='settings'][@pass='specialize']/*[local-name()='component'][@name='Microsoft-Windows-Shell-Setup']/*[local-name()='ComputerName']" -v . -n "$output_xml" | sort -u); actual=$(xmlstarlet sel -t -m "/*[local-name()='unattend']/*[local-name()='settings'][@pass='specialize']/*[local-name()='component'][@name='Microsoft-Windows-Shell-Setup']/*[local-name()='ComputerName']" -v . -n "$output_xml" | wc -l | tr -d ' '); [[ $got == "$expected" && $actual == "$count" ]] || fail "XML expected $count copies of $expected, got $actual: $got"; }
+assert_xml_names(){ local expected="$1" count="$2" got actual; got=$(xml sel -t -m "/*[local-name()='unattend']/*[local-name()='settings'][@pass='specialize']/*[local-name()='component'][@name='Microsoft-Windows-Shell-Setup']/*[local-name()='ComputerName']" -v . -n "$output_xml" | sort -u); actual=$(xml sel -t -m "/*[local-name()='unattend']/*[local-name()='settings'][@pass='specialize']/*[local-name()='component'][@name='Microsoft-Windows-Shell-Setup']/*[local-name()='ComputerName']" -v . -n "$output_xml" | wc -l | tr -d ' '); [[ $got == "$expected" && $actual == "$count" ]] || fail "XML expected $count copies of $expected, got $actual: $got"; }
 
 # OFF/OFF does not mount or modify either registry or unattend XML.
 printf 'sentinel' >"$tmp/source/Windows/System32/Sysprep/unattend.xml"; write_policy false; changeHostname=false; hostName=''

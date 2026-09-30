@@ -81,7 +81,7 @@ rootpxe_deployment_identity_windows_hostname_capability_installed() {
 
 rootpxe_deployment_identity_windows_sysprep_capability_installed() {
     local tool
-    for tool in jq ntfs-3g xmlstarlet; do
+    for tool in jq ntfs-3g xml; do
         command -v "$tool" >/dev/null 2>&1 || return 1
     done
 }

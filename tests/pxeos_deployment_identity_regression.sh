@@ -8,6 +8,34 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 source "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/deployment-identity.sh"
 
+# Buildroot's XMLStarlet package installs the CLI as `xml`.  The capability
+# gate must test that exact runtime contract, rather than accepting another
+# host-provided command name.
+xml_capability_bin="$tmp/xml-capability-bin"
+mkdir -p "$xml_capability_bin"
+cat >"$xml_capability_bin/jq" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$xml_capability_bin/ntfs-3g" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$xml_capability_bin/jq" "$xml_capability_bin/ntfs-3g"
+if (PATH="$xml_capability_bin"; rootpxe_deployment_identity_windows_sysprep_capability_installed); then
+    fail 'Sysprep capability accepted without the Buildroot xml command'
+fi
+cat >"$xml_capability_bin/xml" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$xml_capability_bin/xml"
+(PATH="$xml_capability_bin"; rootpxe_deployment_identity_windows_sysprep_capability_installed) || fail 'Sysprep capability rejected the Buildroot xml command'
+
+for config in "$root/configs/fsx64.config" "$root/configs/fsx86.config" "$root/configs/fsarm64.config"; do
+    grep -Fxq 'BR2_PACKAGE_XMLSTARLET=y' "$config" || fail "XMLStarlet package disabled in $config"
+done
+
 policy="$tmp/policy"
 deploymentIdentityPolicyFile="$policy"
 osid=50
