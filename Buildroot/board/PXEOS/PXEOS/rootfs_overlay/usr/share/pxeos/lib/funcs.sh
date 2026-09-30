@@ -4525,6 +4525,43 @@ rootpxe_validate_windows_hostname() {
     [[ $value =~ ^[A-Za-z0-9-]{1,15}$ && ! $value =~ ^[0-9]+$ ]]
 }
 
+rootpxe_resolve_casefold_directory() {
+    local parent="$1" expected="$2" candidate name
+    local -a matches=()
+    [[ $parent == /* && -d $parent && ! -L $parent && -n $expected ]] || return 1
+    for candidate in "$parent"/*; do
+        [[ -e $candidate || -L $candidate ]] || continue
+        name=${candidate##*/}
+        [[ ${name,,} == ${expected,,} ]] || continue
+        [[ -d $candidate && ! -L $candidate ]] || return 1
+        matches+=("$candidate")
+    done
+    [[ ${#matches[@]} -eq 1 ]] || return 1
+    printf '%s\n' "${matches[0]}"
+}
+
+rootpxe_resolve_windows_sysprep_unattend_path() {
+    local root="$1" parent component candidate name
+    local -a matches=()
+    [[ $root == /* && -d $root && ! -L $root ]] || return 1
+    parent=$root
+    for component in Windows System32 Sysprep; do
+        parent=$(rootpxe_resolve_casefold_directory "$parent" "$component") || return 1
+    done
+    for candidate in "$parent"/*; do
+        [[ -e $candidate || -L $candidate ]] || continue
+        name=${candidate##*/}
+        [[ ${name,,} == unattend.xml ]] || continue
+        [[ -f $candidate && ! -L $candidate ]] || return 1
+        matches+=("$candidate")
+    done
+    case ${#matches[@]} in
+        0) printf '%s/unattend.xml\n' "$parent" ;;
+        1) printf '%s\n' "${matches[0]}" ;;
+        *) return 1 ;;
+    esac
+}
+
 rootpxe_apply_windows_hostname() {
     local part="$1" sysprep=0 xml_path source_xml xml_tmp rows architecture count expected_hash actual_hash
     rootpxe_initialization_failure_reason=windows_hostname_invalid
@@ -4538,7 +4575,9 @@ rootpxe_apply_windows_hostname() {
     fi
     rootpxe_stage customizing_hostname "code=WINDOWS_INITIALIZATION_STARTED"
     rootpxe_initialization_failure_reason=windows_system_mount_failed
+    [[ ! -L /ntfs ]] || return 1
     mkdir -p /ntfs || return 1
+    [[ -d /ntfs && ! -L /ntfs ]] || return 1
     umount /ntfs >/dev/null 2>&1 || true
     ntfs-3g -o remove_hiberfile,rw "$part" /ntfs >/tmp/ntfs-mount-output 2>&1 || return 1
     if [[ ${changeHostname:-false} == true && $sysprep -eq 0 ]]; then
@@ -4546,8 +4585,9 @@ rootpxe_apply_windows_hostname() {
         rootpxe_deployment_identity_hostname_result=true
     fi
     if [[ $sysprep -eq 1 ]]; then
+        rootpxe_initialization_failure_reason=windows_sysprep_path_unsafe_or_ambiguous
+        xml_path=$(rootpxe_resolve_windows_sysprep_unattend_path /ntfs) || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
         rootpxe_initialization_failure_reason=windows_sysprep_xml_write_or_verify_failed
-        xml_path=/ntfs/Windows/System32/Sysprep/unattend.xml
         [[ -d ${xml_path%/*} && ! -L ${xml_path%/*} && ( ! -e $xml_path || ( -f $xml_path && ! -L $xml_path ) ) ]] || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
         xml_tmp=$(mktemp "${xml_path%/*}/.unattend.rootpxe.XXXXXX") || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
         chmod 0600 "$xml_tmp" && jq -j '.unattendXml' "$source_xml" >"$xml_tmp" || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }

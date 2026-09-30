@@ -4,13 +4,14 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
+funcs=${PXEOS_FUNCS:-"$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"}
+config_root=${PXEOS_CONFIG_ROOT:-"$root"}
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 expect_fail() { if "$@" >/dev/null 2>&1; then fail "expected failure: $*"; fi; }
 
-for config in "$root/configs/fsx64.config" "$root/configs/fsx86.config" "$root/configs/fsarm64.config"; do
+for config in "$config_root/configs/fsx64.config" "$config_root/configs/fsx86.config" "$config_root/configs/fsarm64.config"; do
     grep -Fxq 'BR2_PACKAGE_XMLSTARLET=y' "$config" || fail "XMLStarlet package disabled in $config"
 done
 ! grep -Fq 'xmlstarlet ' "$funcs" || fail 'production Sysprep path still invokes xmlstarlet'
@@ -18,7 +19,7 @@ grep -Fq 'xml val -w "$xml_tmp"' "$funcs" || fail 'production XML validation doe
 grep -Fq 'rows=$(xml sel ' "$funcs" || fail 'production XML selection does not invoke xml'
 grep -Fq 'xml ed -L ' "$funcs" || fail 'production XML editing does not invoke xml'
 
-mkdir -p "$tmp/bin" "$tmp/source/Windows/System32/Sysprep"
+mkdir -p "$tmp/bin" "$tmp/source/Windows/System32/sysprep"
 cat >"$tmp/bin/jq" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
@@ -30,6 +31,7 @@ EOF
 cat >"$tmp/bin/ntfs-3g" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >>"$NTFS_MOUNT_TRACE"
 source=${@: -2:1}
 target=${@: -1}
 mkdir -p "$target"
@@ -62,6 +64,8 @@ EOF
 chmod +x "$tmp/bin/jq" "$tmp/bin/ntfs-3g" "$tmp/bin/umount" "$tmp/bin/xml"
 
 awk '/^rootpxe_validate_windows_hostname\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" >"$tmp/functions.sh"
+awk '/^rootpxe_resolve_casefold_directory\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" >>"$tmp/functions.sh"
+awk '/^rootpxe_resolve_windows_sysprep_unattend_path\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" >>"$tmp/functions.sh"
 awk '/^rootpxe_apply_windows_hostname\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" | sed -e "s|/tmp/ntfs-mount-output|$tmp/mount-output|g" -e "s|/ntfs|$tmp/ntfs|g" >>"$tmp/functions.sh"
 source "$tmp/functions.sh"
 rootpxe_stage() { :; }
@@ -76,7 +80,8 @@ changeHostname=true
 hostName=PXEHOST
 export PATH="$tmp/bin:$PATH"
 XML_TRACE="$tmp/xml.trace"
-export XML_TRACE
+NTFS_MOUNT_TRACE="$tmp/ntfs-mount.trace"
+export XML_TRACE NTFS_MOUNT_TRACE
 
 rootpxe_apply_windows_hostname "$tmp/source" || fail 'Sysprep XML path rejected fixed xml command'
 grep -Eq '^val -w .+' "$XML_TRACE" || fail 'xml val arguments were not forwarded'
@@ -89,5 +94,17 @@ XML_FAIL=val
 export XML_FAIL
 expect_fail rootpxe_apply_windows_hostname "$tmp/source"
 grep -Eq '^val -w .+' "$XML_TRACE" || fail 'xml val failure was not exercised'
+
+rm -rf -- "$tmp/ntfs"
+mkdir "$tmp/mount-target"
+ln -s "$tmp/mount-target" "$tmp/ntfs"
+: >"$NTFS_MOUNT_TRACE"
+unset XML_FAIL
+if [[ -L $tmp/ntfs ]]; then
+    expect_fail rootpxe_apply_windows_hostname "$tmp/source"
+    [[ ! -s $NTFS_MOUNT_TRACE ]] || fail 'Sysprep mount root symlink invoked ntfs-3g'
+else
+    printf 'SKIP: mount-root symlink test requires symlink semantics\n' >&2
+fi
 
 printf 'PASS: PXEOS XML command runtime regression\n'

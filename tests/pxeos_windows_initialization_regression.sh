@@ -37,6 +37,8 @@ EOF
 chmod +x "$tmp/bin/jq" "$tmp/bin/ntfs-3g" "$tmp/bin/umount"; export PATH="$tmp/bin:$PATH" ROOTPXE_TEST_REAL_JQ="$jq_real"
 awk '/^rootpxe_change_hostname_registry\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" >"$tmp/functions.sh"
 awk '/^rootpxe_validate_windows_hostname\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" >>"$tmp/functions.sh"
+awk '/^rootpxe_resolve_casefold_directory\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" >>"$tmp/functions.sh"
+awk '/^rootpxe_resolve_windows_sysprep_unattend_path\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" >>"$tmp/functions.sh"
 awk '/^rootpxe_apply_windows_hostname\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" >>"$tmp/functions.sh"
 source "$tmp/functions.sh"; rootpxe_stage(){ :; }
 policy="$tmp/policy.json"; private="$tmp/private.json"; deploymentIdentityPolicyFile=$policy; rootpxe_deployment_initialization_private_file=$private
