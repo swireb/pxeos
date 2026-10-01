@@ -133,16 +133,19 @@ rootpxe_display_metadata_begin() {
         jq -n '{mountsCollected:false,mounts:[]}' >"$rootpxe_display_metadata_file" || { rm -f -- "$rows" "$rootpxe_display_metadata_file"; unset rootpxe_display_metadata_file; return 1; }
     fi
     rm -f -- "$rows"; unset rootpxe_display_metadata_mount_rows
-    local drives merged drives_status
+    local drives systems merged drives_status
     drives=$(mktemp /tmp/rootpxe-display-drive-rows.XXXXXX) || return 1
     chmod 600 "$drives" || { rm -f -- "$drives"; return 1; }
-    rootpxe_display_metadata_drive_rows="$drives"; export rootpxe_display_metadata_drive_rows
+    systems=$(mktemp /tmp/rootpxe-display-windows-system-rows.XXXXXX) || { rm -f -- "$drives"; return 1; }
+    chmod 600 "$systems" || { rm -f -- "$drives" "$systems"; return 1; }
+    rootpxe_display_metadata_drive_rows="$drives"; rootpxe_display_metadata_windows_system_rows="$systems"
+    export rootpxe_display_metadata_drive_rows rootpxe_display_metadata_windows_system_rows
     if rootpxe_display_metadata_collect_windows "$identities"; then drives_status=0; else drives_status=$?; fi
-    [[ $drives_status -eq 0 || $drives_status -eq 1 ]] || { rm -f -- "$drives"; unset rootpxe_display_metadata_drive_rows; return 2; }
-    merged=$(mktemp /tmp/rootpxe-display-metadata-drives.XXXXXX) || { rm -f -- "$drives"; unset rootpxe_display_metadata_drive_rows; return 1; }
-    jq --argjson collected "$([[ $drives_status -eq 0 ]] && printf true || printf false)" --rawfile rows "$drives" '.drivesCollected=$collected | .drives=($rows|split("\n")|map(select(length>0)|split("\t")|{id:.[0],driveLetter:.[1]}))' "$rootpxe_display_metadata_file" >"$merged" || { rm -f -- "$drives" "$merged"; unset rootpxe_display_metadata_drive_rows; return 1; }
-    mv -- "$merged" "$rootpxe_display_metadata_file" || { rm -f -- "$drives" "$merged"; unset rootpxe_display_metadata_drive_rows; return 1; }
-    rm -f -- "$drives"; unset rootpxe_display_metadata_drive_rows
+    [[ $drives_status -eq 0 || $drives_status -eq 1 ]] || { rm -f -- "$drives" "$systems"; unset rootpxe_display_metadata_drive_rows rootpxe_display_metadata_windows_system_rows; return 2; }
+    merged=$(mktemp /tmp/rootpxe-display-metadata-drives.XXXXXX) || { rm -f -- "$drives" "$systems"; unset rootpxe_display_metadata_drive_rows rootpxe_display_metadata_windows_system_rows; return 1; }
+    jq --argjson collected "$([[ $drives_status -eq 0 ]] && printf true || printf false)" --rawfile rows "$drives" --rawfile systems "$systems" '.drivesCollected=$collected | .drives=($rows|split("\n")|map(select(length>0)|split("\t")|{id:.[0],driveLetter:.[1]})) | .windowsSystems=($systems|split("\n")|map(select(length>0)))' "$rootpxe_display_metadata_file" >"$merged" || { rm -f -- "$drives" "$systems" "$merged"; unset rootpxe_display_metadata_drive_rows rootpxe_display_metadata_windows_system_rows; return 1; }
+    mv -- "$merged" "$rootpxe_display_metadata_file" || { rm -f -- "$drives" "$systems" "$merged"; unset rootpxe_display_metadata_drive_rows rootpxe_display_metadata_windows_system_rows; return 1; }
+    rm -f -- "$drives" "$systems"; unset rootpxe_display_metadata_drive_rows rootpxe_display_metadata_windows_system_rows
     export rootpxe_display_metadata_file
 }
 
@@ -157,6 +160,7 @@ rootpxe_display_metadata_merge_inventory() {
       ($metadata[0].mountsCollected // false) as $mountsCollected |
       ($metadata[0].drives // []) as $drives |
       ($metadata[0].drivesCollected // false) as $drivesCollected |
+      ($metadata[0].windowsSystems // []) as $windowsSystems |
       def windowsRole: ((.typeGuid // "") | ascii_downcase) as $type |
         if ($type == "e3c9e316-0b5c-4db8-817d-f92df00215ae") then "msr"
         elif ($type == "de94bba4-06d1-4d40-a16a-bfd50179d6ac" or $type == "0x27" or $type == "27") then "recovery"
@@ -167,8 +171,9 @@ rootpxe_display_metadata_merge_inventory() {
         ("p:" + ($disk.number|tostring) + ":" + ($part.number|tostring)) as $id |
         [$mounts[] | select(.id == $id) | .mountPoint] | unique as $points |
         [$drives[] | select(.id == $id) | .driveLetter] | unique as $letters |
+        ($windowsSystems | index($id) != null) as $isWindowsSystem |
         ($part | windowsRole) as $role |
-        $part + (if $mountsCollected then {mountPoints:$points} else {} end) + (if $drivesCollected then {driveLetters:$letters} else {} end) + (if $role != "" then {windowsRole:$role} else {} end))) |
+        $part + (if $mountsCollected then {mountPoints:$points} else {} end) + (if $drivesCollected then {driveLetters:$letters} else {} end) + (if $role != "" then {windowsRole:$role} elif $isWindowsSystem then {windowsRole:"system"} else {} end))) |
         if $disk.number == 1 and (($metadata[0].lvs // [])|length) > 0 then
           . + {logicalVolumes:[($metadata[0].lvs // [])[] as $lv | ($lv.uuid) as $uuid | [$mounts[] | select(.id == ("l:" + $uuid)) | .mountPoint] | unique as $points | {uuid:$uuid} + (if $mountsCollected then {mountPoints:$points} else {} end)]}
         else . end)' "$inventory" >"$temporary" || { rm -f -- "$temporary"; return 1; }
@@ -263,7 +268,7 @@ rootpxe_display_metadata_windows_hive() {
 
 rootpxe_display_metadata_collect_windows() {
     local identities="$1" identity device fs mountpoint candidate="" candidates=0 hive export_file parsed drive volume id matches=0 matched="" disk_number part_number disk part candidate_id temporary IFS=$' \t\n'
-    command -v ntfs-3g >/dev/null 2>&1 && command -v reged >/dev/null 2>&1 && declare -F rootpxe_display_windows_parse_reg >/dev/null 2>&1 || return 1
+    command -v ntfs-3g >/dev/null 2>&1 || return 1
     for identity in $identities; do
         device=${identity#*|}; fs=$(blkid -s TYPE -o value "$device" 2>/dev/null | tr -d '\r\n')
         [[ $fs == ntfs ]] || continue
@@ -279,6 +284,11 @@ rootpxe_display_metadata_collect_windows() {
         fi
     done
     [[ $candidates -eq 1 ]] || return 1
+    # The SYSTEM hive alone is sufficient to identify the display-only
+    # Windows system partition.  MountedDevices is optional metadata and may
+    # be absent after Sysprep, so never make this classification depend on it.
+    printf '%s\n' "${candidate%%|*}" >>"${rootpxe_display_metadata_windows_system_rows:-/dev/null}" || return 2
+    command -v reged >/dev/null 2>&1 && declare -F rootpxe_display_windows_parse_reg >/dev/null 2>&1 || return 1
     device=${candidate#*|}
     mountpoint=$(mktemp -d /tmp/rootpxe-display-windows.XXXXXX) || return 1
     ntfs-3g -o ro "$device" "$mountpoint" >/tmp/rootpxe-display-ntfs-output 2>&1 || { rmdir -- "$mountpoint" || return 2; return 1; }

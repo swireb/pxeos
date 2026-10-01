@@ -97,12 +97,24 @@ case_lvm_mapper_aliases() {
 }
 
 case_windows() {
-    local mode="$1" d="$tmp/windows-$1" rows="$tmp/windows-$1/rows" inv="$tmp/windows-$1/i.json"; load; mkdir -p "$d"; : >"$rows"
-    rootpxe_display_metadata_disks=/dev/mockdisk; rootpxe_display_metadata_drive_rows="$rows"
+    local mode="$1" d="$tmp/windows-$1" rows="$tmp/windows-$1/rows" systems="$tmp/windows-$1/systems" inv="$tmp/windows-$1/i.json"; load; mkdir -p "$d"; : >"$rows"; : >"$systems"
+    rootpxe_display_metadata_disks=/dev/mockdisk; rootpxe_display_metadata_drive_rows="$rows"; rootpxe_display_metadata_windows_system_rows="$systems"
     blkid() { local device; device=$(last_arg "$@"); case " $* " in *' TYPE '*) case "$device" in /dev/mockdisk1|/dev/mockdisk2) echo ntfs;; esac;; *' PARTUUID '*) [[ $device == /dev/mockdisk2 ]] && echo 00112233-4455-6677-8899-aabbccddeeff;; esac; }
-    ntfs-3g() { local target device; target=$(last_arg "$@"); device=$(penultimate_arg "$@"); [[ $mode == no-hive ]] && return 0; [[ $mode != double-hive && $device == /dev/mockdisk2 ]] && return 0; mkdir -p "$target/WiNdOwS/System32/config"; : >"$target/WiNdOwS/System32/config/SyStEm"; }
+    ntfs-3g() { local target device; target=$(last_arg "$@"); device=$(penultimate_arg "$@"); [[ $mode == no-hive ]] && return 0; if [[ $mode == system-no-drives ]]; then [[ $device == /dev/mockdisk1 ]] && return 0; elif [[ $mode != double-hive && $device == /dev/mockdisk2 ]]; then return 0; fi; mkdir -p "$target/WiNdOwS/System32/config"; : >"$target/WiNdOwS/System32/config/SyStEm"; }
     mountpoint() { return 0; }; umount() { [[ $mode == cleanup-fail ]] && return 1; rm -rf -- "$1/WiNdOwS"; }
-    reged() { local output; output=$(last_arg "$@"); [[ $mode != reged-fail && $mode != cleanup-fail ]] || return 1; command cat >"$output" <<'REG'
+    reged() {
+      local output; output=$(last_arg "$@")
+      [[ $mode != reged-fail && $mode != cleanup-fail && $mode != system-no-drives ]] || return 1
+      if [[ $mode == no-mounted-devices ]]; then
+        command cat >"$output" <<'REG'
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SYSTEM\ControlSet001\Control]
+"CurrentUser"="RootPXE"
+REG
+        return 0
+      fi
+      command cat >"$output" <<'REG'
 Windows Registry Editor Version 5.00
 
 [HKEY_LOCAL_MACHINE\SYSTEM\MountedDevices]
@@ -124,16 +136,44 @@ REG
       }
       rootpxe_display_metadata_collect_windows 'p:1:1|/dev/mockdisk1 p:1:2|/dev/mockdisk2'
       diff -u <(printf '%s\n' $'p:1:1\tC:') "$rows"
+      diff -u <(printf '%s\n' 'p:1:1') "$systems"
     elif [[ $mode == success ]]; then
       rootpxe_display_metadata_collect_windows 'p:1:1|/dev/mockdisk1 p:1:2|/dev/mockdisk2'
       diff -u <(printf '%s\n' $'p:1:1\tC:' $'p:1:2\tD:') "$rows"
+      diff -u <(printf '%s\n' 'p:1:1') "$systems"
       inventory >"$inv"; rootpxe_display_metadata_file="$d/m.json"
       jq -Rn '[inputs|split("\t")|{id:.[0],driveLetter:.[1]}] as $d|{mountsCollected:false,mounts:[],drivesCollected:true,drives:$d}' <"$rows" >"$rootpxe_display_metadata_file"
       rootpxe_display_metadata_merge_inventory "$inv"; jq -e '.disks[0].partitions[0].driveLetters==["C:"] and .disks[0].partitions[1].driveLetters==["D:"]' "$inv" >/dev/null
+    elif [[ $mode == system-no-drives ]]; then
+      # Sysprep may leave MountedDevices unavailable.  A uniquely identified
+      # SYSTEM hive must still identify the display-only Windows system
+      # partition, without assigning a guessed drive letter.
+      if rootpxe_display_metadata_collect_windows 'p:1:1|/dev/mockdisk1 p:1:2|/dev/mockdisk2'; then return 1; else [[ $? -eq 1 ]]; fi
+      diff -u <(printf '%s\n' 'p:1:2') "$systems"
+      rootpxe_display_metadata_file="$d/m.json"
+      printf '%s\n' '{"mountsCollected":false,"mounts":[],"drivesCollected":false,"drives":[],"windowsSystems":["p:1:2"]}' >"$rootpxe_display_metadata_file"
+      printf '%s\n' '{"version":1,"disks":[{"number":1,"sourceDevice":"/dev/mockdisk","partitionTable":"gpt","originalDiskBytes":1048576,"logicalSectorBytes":512,"physicalSectorBytes":4096,"partitions":[{"number":1,"startSectors":2048,"originalSectors":4096,"typeGuid":"C12A7328-F81F-11D2-BA4B-00A0C93EC93B","fs":"vfat"},{"number":2,"startSectors":8192,"originalSectors":4096,"typeGuid":"EBD0A0A2-B9E5-4433-87C0-68B6B72699C7","fs":"ntfs"}]}]}' >"$inv"
+      rootpxe_display_metadata_merge_inventory "$inv"
+      jq -e '.disks[0].partitions[0].windowsRole == "boot" and .disks[0].partitions[1].windowsRole == "system" and (has("driveLetters") | not)' "$inv" >/dev/null
+    elif [[ $mode == no-mounted-devices ]]; then
+      # PXEOS1 may export a valid registry document without MountedDevices.
+      # That is not a failed SYSTEM hive probe: retain the system role, but
+      # keep drive-letter collection unavailable instead of inventing C/D.
+      if rootpxe_display_metadata_collect_windows 'p:1:1|/dev/mockdisk1 p:1:2|/dev/mockdisk2'; then return 1; else [[ $? -eq 1 ]]; fi
+      [[ ! -s $rows ]]; diff -u <(printf '%s\n' 'p:1:1') "$systems"
+      rootpxe_display_metadata_file="$d/m.json"
+      printf '%s\n' '{"mountsCollected":false,"mounts":[],"drivesCollected":false,"drives":[],"windowsSystems":["p:1:1"]}' >"$rootpxe_display_metadata_file"
+      printf '%s\n' '{"version":1,"disks":[{"number":1,"sourceDevice":"/dev/mockdisk","partitionTable":"gpt","originalDiskBytes":1048576,"logicalSectorBytes":512,"physicalSectorBytes":4096,"partitions":[{"number":1,"startSectors":2048,"originalSectors":4096,"typeGuid":"EBD0A0A2-B9E5-4433-87C0-68B6B72699C7","fs":"ntfs"},{"number":2,"startSectors":8192,"originalSectors":4096,"typeGuid":"EBD0A0A2-B9E5-4433-87C0-68B6B72699C7","fs":"ntfs"}]}]}' >"$inv"
+      rootpxe_display_metadata_merge_inventory "$inv"
+      jq -e '.disks[0].partitions[0].windowsRole == "system" and (.disks[0].partitions[0] | has("driveLetters") | not) and (.disks[0].partitions[1] | has("windowsRole") | not)' "$inv" >/dev/null
     elif [[ $mode == cleanup-fail ]]; then
       if rootpxe_display_metadata_collect_windows 'p:1:1|/dev/mockdisk1'; then return 1; else [[ $? -eq 2 ]]; fi
+      [[ ! -s $systems ]]
+    elif [[ $mode == reged-fail || $mode == ambiguous-map ]]; then
+      if rootpxe_display_metadata_collect_windows 'p:1:1|/dev/mockdisk1 p:1:2|/dev/mockdisk2'; then return 1; else [[ $? -eq 1 ]]; fi
+      [[ ! -s $rows ]]; diff -u <(printf '%s\n' 'p:1:1') "$systems"
     else
-      if rootpxe_display_metadata_collect_windows 'p:1:1|/dev/mockdisk1 p:1:2|/dev/mockdisk2'; then return 1; else [[ $? -eq 1 ]]; fi; [[ ! -s $rows ]]
+      if rootpxe_display_metadata_collect_windows 'p:1:1|/dev/mockdisk1 p:1:2|/dev/mockdisk2'; then return 1; else [[ $? -eq 1 ]]; fi; [[ ! -s $rows && ! -s $systems ]]
     fi
 }
 
@@ -149,6 +189,8 @@ run case_lvm_mapper_aliases multi || fail lvm-mapper-multiline
 run case_lvm_mapper_aliases nonblock || fail lvm-mapper-nonblock
 run case_windows success || fail windows-mbr-gpt
 run case_windows mixed-device || fail windows-mbr-with-unrelated-utf16-device
+run case_windows system-no-drives || fail windows-system-hive-without-drive-letters
+run case_windows no-mounted-devices || fail windows-system-hive-without-mounted-devices
 run case_windows no-hive || fail windows-no-hive
 run case_windows double-hive || fail windows-double-hive
 run case_windows ambiguous-map || fail windows-ambiguous-map
