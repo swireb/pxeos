@@ -1996,8 +1996,8 @@ must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message WARN 
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message INFO "Using disk devices: $disks."'
 must_have "$overlay/bin/pxeos.download" "rootpxe_console_message INFO 'Task aborted or deleted. Stopping PXEOS.'"
 must_have "$overlay/bin/pxeos.download" "rootpxe_console_message WARN 'Disk permit wait was interrupted. Retrying in 5s.'"
-must_have "$overlay/etc/init.d/S99pxeos" 'pxeos_init_message INFO '\''Task completed. Powering off.'\'''
-must_have "$overlay/etc/init.d/S99pxeos" 'pxeos_init_message INFO '\''Task completed. Rebooting.'\'''
+must_have "$overlay/etc/init.d/S99pxeos" 'pxeos_init_message INFO '\''Task completed. Powering off; following shutdown messages are normal.'\'''
+must_have "$overlay/etc/init.d/S99pxeos" 'pxeos_init_message INFO '\''Task completed. Rebooting now.'\'''
 must_have "$overlay/etc/init.d/S99pxeos" 'pxeos_init_message WARN "Task exited with code: $rc."'
 must_have "$overlay/etc/init.d/S99pxeos" 'pxeos_init_message INFO "Running configured failure action: $failure_action."'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  Disk permission not confirmed. Retrying in 5s.'
@@ -2079,8 +2079,8 @@ for line in \
     '[INFO]  SSH is available for troubleshooting.' \
     '[INFO]  Task aborted or withdrawn. Stopping PXEOS.' \
     '[INFO]  Task aborted or deleted. Stopping PXEOS.' \
-    '[INFO]  Task completed. Powering off.' \
-    '[INFO]  Task completed. Rebooting.' \
+    '[INFO]  Task completed. Powering off; following shutdown messages are normal.' \
+    '[INFO]  Task completed. Rebooting now.' \
     '[WARN]  Task exited with code: 255.' \
     '[INFO]  Running configured failure action: shutdown.' \
     '[WARN]  Disk permission not confirmed. Retrying in 5s.' \

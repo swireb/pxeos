@@ -89,10 +89,10 @@ if [[ $rc -eq 0 ]]; then
         shutdown_local="$(tr -d '\r\n\0' </tmp/pxeos.shutdown)"
     fi
     if [[ "$shutdown_local" == "1" ]]; then
-        pxeos_init_message INFO 'Task completed. Powering off.'
+        pxeos_init_message INFO 'Task completed. Powering off; following shutdown messages are normal.'
         poweroff >/dev/null 2>&1
     else
-        pxeos_init_message INFO 'Task completed. Rebooting.'
+        pxeos_init_message INFO 'Task completed. Rebooting now.'
         reboot -f >/dev/null 2>&1
     fi
 else
