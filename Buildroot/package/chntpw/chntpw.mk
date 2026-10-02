@@ -5,7 +5,7 @@
 #############################################################
 CHNTPW_VERSION = 140201
 CHNTPW_SOURCE = chntpw-source-$(CHNTPW_VERSION).zip
-CHNTPW_SITE = http://pogostick.net/~pnh/ntpasswd
+CHNTPW_SITE = https://pogostick.net/~pnh/ntpasswd
 
 define CHNTPW_EXTRACT_CMDS
 	unzip $(DL_DIR)/chntpw/$(CHNTPW_SOURCE) -d $(BUILD_DIR)

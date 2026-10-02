@@ -117,6 +117,25 @@ PXEOS 的协议、安全、硬件与故障处理说明已按主题拆分；本�
 
 F2FS 内核支持变更需要重新构建对应架构的内核。FAT16/32 扩容工具属于 initramfs 包：已有 `fssource<arch>` 构建缓存时，先在对应目录执行 `make pxeos-rebuild`，再重新生成 initramfs；全新构建会自动包含该包。该工具只面向 512-byte logical-sector FAT16/32 分区，不能替代分区表布局步骤。其 Linux 常规文件镜像验证尚待具备 Linux 工具链的环境完成，因此在该验证完成前不得将其标记为已发布或已通过实机验证。
 
+三份 initramfs 配置把旧的 HTTP、尾斜杠 `BR2_BACKUP_SITE` 规范为无尾斜杠的 `https://sources.buildroot.net`；该斜杠拼接问题与镜像缺少特定自定义归档是两个独立问题。构建会迁移已有 `.config` 中这三种已知旧值，不会改写自定义镜像、空值或 `BR2_PRIMARY_SITE_ONLY=y`。
+
+构建前会把下列六个本仓库自定义包预置到 Buildroot 实际打印出的 package `DL_DIR`，缓存和下载都必须与各自唯一的 SHA-256 一致；标准 Buildroot 依赖仍由 Buildroot 的正常下载逻辑处理。所有预置 URL 均为 HTTPS，冷缓存下载、元数据/哈希校验或 `make source` 失败都会终止构建。
+
+| 包 | 主入口 | 已核验备用入口 |
+| --- | --- | --- |
+| cabextract 1.11 | cabextract.org.uk | Debian 原始源码包 |
+| chntpw 140201 | pogostick.net | MacPorts distfiles |
+| hivex 1.3.24 | download.libguestfs.org | Debian 原始源码包 |
+| partclone 0.3.48 | GitHub archive | codeload（同一上游的另一入口，不是独立镜像） |
+| testdisk 7.2 | cgsecurity.org | MacPorts distfiles |
+| partimage 0.6.9 | SourceForge | Debian 原始源码包 |
+
+若用户显式启用 `BR2_PRIMARY_SITE_ONLY=y`，预置步骤不访问上述入口，交由 Buildroot 按该受限策略下载。该机制不关闭 TLS 或 Buildroot 的哈希校验；本仓库的 mock 回归只证明控制流和拒绝行为，不等同于完整 Buildroot、镜像站、设备或发布构建成功。
+
+不能只替换备用站域名来补救缺包：例如 Void 等镜像的归档路径可能按包名和版本分目录，是否可用必须逐包、逐版本核验。
+
+Release 与 Beta 共用源码下载和三种架构的编译缓存配置，并在共同的预下载、内核和 initrd 构建阶段采用一致步骤；Beta 仍受所选架构门控，Release 保持全架构发布。
+
 ## SSH 调试模式
 
 内核参数传入 `isdebug=yes` 时，PXEOS 只完成网络初始化并显示非回环全局 IPv4 地址和 `ssh root@IP` 连接提示，随后保持 SSH 与本地控制台可用。该模式不读取 RootPXE 任务、不挂载存储、不扫描或写入磁盘，也不会自动重启或关机；调试人员登录后自行执行需要排查的脚本。未取得全局 IPv4 时，控制台会提示检查网络配置、DHCP 状态和网线连接。

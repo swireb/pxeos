@@ -11,10 +11,26 @@ defaults:
     shell: bash
 
 jobs:
+  download_filesystem_packages:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Restore Buildroot DL cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.buildroot-dl
+          key: buildroot-dl-${{ hashFiles('build.sh', 'download_helpers.sh', 'configs/**', 'Buildroot/package/**') }}
+          restore-keys: |
+            buildroot-dl-
+      - name: Download all FS packages
+        run: ./build.sh -i --fs-download-only
+
   build_kernel_arm64:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout code
+        uses: actions/checkout@v6
       - name: Build arm64 kernel
         run: ./build.sh --install-dep -nka arm64
       - name: Run sha256 checksum
@@ -31,7 +47,8 @@ jobs:
   build_kernel_x86:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout code
+        uses: actions/checkout@v6
       - name: Build x86 kernel
         run: ./build.sh --install-dep -nka x86
       - name: Run sha256 checksum
@@ -48,7 +65,8 @@ jobs:
   build_kernel_x64:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout code
+        uses: actions/checkout@v6
       - name: Build x64 kernel
         run: ./build.sh --install-dep -nka x64
       - name: Run sha256 checksum
@@ -63,9 +81,25 @@ jobs:
           retention-days: 1
 
   build_initrd_arm64:
+    needs: download_filesystem_packages
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Restore Buildroot DL cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.buildroot-dl
+          key: buildroot-dl-${{ hashFiles('build.sh', 'download_helpers.sh', 'configs/**', 'Buildroot/package/**') }}
+          restore-keys: |
+            buildroot-dl-
+      - name: Restore Buildroot CCache
+        uses: actions/cache@v5
+        with:
+          path: ~/.buildroot-ccache-arm64
+          key: ccache-arm64
+          restore-keys: |
+            ccache-arm64
       - name: Build arm64 initrd
         run: ./build.sh --install-dep -nfa arm64
       - name: Run sha256 checksum
@@ -87,9 +121,25 @@ jobs:
           retention-days: 30
 
   build_initrd_x86:
+    needs: download_filesystem_packages
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Restore Buildroot DL cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.buildroot-dl
+          key: buildroot-dl-${{ hashFiles('build.sh', 'download_helpers.sh', 'configs/**', 'Buildroot/package/**') }}
+          restore-keys: |
+            buildroot-dl-
+      - name: Restore Buildroot CCache
+        uses: actions/cache@v5
+        with:
+          path: ~/.buildroot-ccache-x86
+          key: ccache-x86
+          restore-keys: |
+            ccache-x86
       - name: Build x86 initrd
         run: ./build.sh --install-dep -nfa x86
       - name: Run sha256 checksum
@@ -111,9 +161,25 @@ jobs:
           retention-days: 30
 
   build_initrd_x64:
+    needs: download_filesystem_packages
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Restore Buildroot DL cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.buildroot-dl
+          key: buildroot-dl-${{ hashFiles('build.sh', 'download_helpers.sh', 'configs/**', 'Buildroot/package/**') }}
+          restore-keys: |
+            buildroot-dl-
+      - name: Restore Buildroot CCache
+        uses: actions/cache@v5
+        with:
+          path: ~/.buildroot-ccache-x64
+          key: ccache-x64
+          restore-keys: |
+            ccache-x64
       - name: Build x64 initrd
         run: ./build.sh --install-dep -nfa x64
       - name: Run sha256 checksum
@@ -151,8 +217,9 @@ jobs:
       group: pxeos-latest-release
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v6
-      - name: Download all artifacts
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Download distribution files
         uses: actions/download-artifact@v8
         with:
           pattern: distribution-files-*

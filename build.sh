@@ -194,6 +194,145 @@ rootpxe_build_olddefconfig() {
 }
 
 
+rootpxe_build_normalize_backup_site_config() {
+    local config_file="$1" temporary_file line line_ending changed=0
+
+    [[ -f $config_file && ! -L $config_file ]] || return 1
+    temporary_file=$(mktemp "${config_file}.tmp.XXXXXX") || return 1
+    while IFS= read -r line || [[ -n $line ]]; do
+        line_ending=''
+        if [[ $line == *$'\r' ]]; then
+            line=${line%$'\r'}
+            line_ending=$'\r'
+        fi
+        case "$line" in
+            'BR2_BACKUP_SITE="http://sources.buildroot.net/"'|\
+            'BR2_BACKUP_SITE="http://sources.buildroot.net"'|\
+            'BR2_BACKUP_SITE="https://sources.buildroot.net/"')
+                line='BR2_BACKUP_SITE="https://sources.buildroot.net"'
+                changed=1
+                ;;
+        esac
+        printf '%s%s\n' "$line" "$line_ending" >> "$temporary_file" || {
+            rm -f -- "$temporary_file"
+            return 1
+        }
+    done < "$config_file"
+    if [[ $changed == 1 ]]; then
+        mv -fT -- "$temporary_file" "$config_file" || {
+            rm -f -- "$temporary_file"
+            return 1
+        }
+    else
+        rm -f -- "$temporary_file"
+    fi
+}
+
+
+rootpxe_build_verified_source_spec() {
+    case "$1" in
+        cabextract) printf '%s\n' 'CABEXTRACT|1.11|cabextract-1.11.tar.gz|https://www.cabextract.org.uk|b5546db1155e4c718ff3d4b278573604f30dd64c3c5bfd4657cd089b823a3ac6|https://www.cabextract.org.uk/cabextract-1.11.tar.gz|https://deb.debian.org/debian/pool/main/c/cabextract/cabextract_1.11.orig.tar.gz' ;;
+        chntpw) printf '%s\n' 'CHNTPW|140201|chntpw-source-140201.zip|https://pogostick.net/~pnh/ntpasswd|96e20905443e24cba2f21e51162df71dd993a1c02bfa12b1be2d0801a4ee2ccc|https://pogostick.net/~pnh/ntpasswd/chntpw-source-140201.zip|https://distfiles.macports.org/chntpw/chntpw-source-140201.zip' ;;
+        libhivex) printf '%s\n' 'LIBHIVEX|1.3.24|hivex-1.3.24.tar.gz|https://download.libguestfs.org/hivex|a52fa45cecc9a78adb2d28605d68261e4f1fd4514a778a5473013d2ccc8a193c|https://download.libguestfs.org/hivex/hivex-1.3.24.tar.gz|https://deb.debian.org/debian/pool/main/h/hivex/hivex_1.3.24.orig.tar.gz' ;;
+        partclone) printf '%s\n' 'PARTCLONE|0.3.48|partclone-0.3.48.tar.gz|https://github.com/Thomas-Tsai/partclone/archive/0.3.48|af4f1c93fb2401eb617f1eafc13f115d7f583f6851a8195728d17b520fec7685|https://github.com/Thomas-Tsai/partclone/archive/0.3.48/partclone-0.3.48.tar.gz|https://codeload.github.com/Thomas-Tsai/partclone/tar.gz/refs/tags/0.3.48' ;;
+        testdisk) printf '%s\n' 'TESTDISK|7.2|testdisk-7.2.tar.bz2|https://www.cgsecurity.org|f8343be20cb4001c5d91a2e3bcd918398f00ae6d8310894a5a9f2feb813c283f|https://www.cgsecurity.org/testdisk-7.2.tar.bz2|https://distfiles.macports.org/testdisk/testdisk-7.2.tar.bz2' ;;
+        partimage) printf '%s\n' 'PARTIMAGE|0.6.9|partimage-0.6.9.tar.bz2|https://downloads.sourceforge.net/project/partimage/stable/0.6.9|753a6c81f4be18033faed365320dc540fe5e58183eaadcd7a5b69b096fec6635|https://downloads.sourceforge.net/project/partimage/stable/0.6.9/partimage-0.6.9.tar.bz2|https://deb.debian.org/debian/pool/main/p/partimage/partimage_0.6.9.orig.tar.bz2' ;;
+        *) return 1 ;;
+    esac
+}
+
+
+rootpxe_build_verified_source_metadata() {
+    local prefix=$1 expected_version=$2 expected_source=$3 expected_site=$4 printvars_output
+    local -a printvars_lines
+    local line dl_dir='' seen_version='' seen_source='' seen_site='' seen_dl_dir=''
+
+    printvars_output=$(make -s printvars VARS="${prefix}_VERSION ${prefix}_SOURCE ${prefix}_SITE ${prefix}_DL_DIR" QUOTED_VARS= RAW_VARS=) || return 1
+    [[ $printvars_output != *$'\r'* ]] || return 1
+    mapfile -t printvars_lines <<< "$printvars_output"
+    [[ ${#printvars_lines[@]} -eq 4 ]] || return 1
+    for line in "${printvars_lines[@]}"; do
+        case "$line" in
+            "${prefix}_VERSION=${expected_version}")
+                [[ -z $seen_version ]] || return 1
+                seen_version=y
+                ;;
+            "${prefix}_SOURCE=${expected_source}")
+                [[ -z $seen_source ]] || return 1
+                seen_source=y
+                ;;
+            "${prefix}_SITE=${expected_site}")
+                [[ -z $seen_site ]] || return 1
+                seen_site=y
+                ;;
+            "${prefix}_DL_DIR="*)
+                [[ -z $seen_dl_dir ]] || return 1
+                seen_dl_dir=y
+                dl_dir=${line#"${prefix}_DL_DIR="}
+                ;;
+            *) return 1 ;;
+        esac
+    done
+    [[ $seen_version == y && $seen_source == y && $seen_site == y && $seen_dl_dir == y ]] || return 1
+    [[ -n $dl_dir && $dl_dir == /* && $dl_dir != ' '* && $dl_dir != *' ' && $dl_dir != *$'\t'* && $dl_dir != *\"* && $dl_dir != *\'* ]] || return 1
+    printf '%s\n' "$dl_dir"
+}
+
+
+rootpxe_build_verified_source_hash() {
+    local package=$1 source_name=$2 expected_hash=$3 hash_file actual_hash
+
+    hash_file="$PROJECT_DIRECTORY/Buildroot/package/$package/$package.hash"
+    actual_hash=$(awk -v source_name="$source_name" '
+        $1 == "sha256" && $3 == source_name { count++; hash = $2 }
+        END { if (count == 1) print hash; else exit 1 }
+    ' "$hash_file") || return 1
+    [[ $actual_hash =~ ^[0-9a-f]{64}$ && $actual_hash == "$expected_hash" ]] || return 1
+}
+
+
+rootpxe_build_seed_verified_source() {
+    local package=$1 spec prefix expected_version expected_source expected_site expected_hash primary_url backup_url
+    local dl_dir destination
+
+    spec=$(rootpxe_build_verified_source_spec "$package") || return 1
+    IFS='|' read -r prefix expected_version expected_source expected_site expected_hash primary_url backup_url <<< "$spec"
+    [[ -n $prefix && -n $expected_version && -n $expected_source && -n $expected_site && -n $expected_hash && -n $primary_url ]] || return 1
+    grep -Fqx "BR2_PACKAGE_${prefix}=y" .config || return 0
+    dl_dir=$(rootpxe_build_verified_source_metadata "$prefix" "$expected_version" "$expected_source" "$expected_site") || {
+        echo "Failed to resolve ${prefix} source metadata from Buildroot printvars." >&2
+        return 1
+    }
+    rootpxe_build_verified_source_hash "$package" "$expected_source" "$expected_hash" || {
+        echo "Failed to validate ${package} package hash metadata." >&2
+        return 1
+    }
+    [[ ! -L $dl_dir && ( ! -e $dl_dir || -d $dl_dir ) ]] || {
+        echo "Refusing non-directory or symbolic-link ${prefix}_DL_DIR: $dl_dir" >&2
+        return 1
+    }
+    mkdir -p -- "$dl_dir" || return 1
+    [[ -d $dl_dir && ! -L $dl_dir ]] || return 1
+    destination="$dl_dir/$expected_source"
+    if [[ -n $backup_url ]]; then
+        download_file_sha256 "$destination" "$expected_hash" "$primary_url" "$backup_url"
+    else
+        download_file_sha256 "$destination" "$expected_hash" "$primary_url"
+    fi
+}
+
+
+rootpxe_build_seed_verified_sources() {
+    local package
+
+    [[ -r .config && ! -L .config ]] || return 1
+    grep -Fqx 'BR2_PRIMARY_SITE_ONLY=y' .config && return 0
+    for package in cabextract chntpw libhivex partclone testdisk partimage; do
+        rootpxe_build_seed_verified_source "$package" || return 1
+    done
+}
+
+
 function buildFilesystem() {
     local arch="$1" filesystem_config="$PROJECT_DIRECTORY/configs/fs$1.config"
     local brURL="https://buildroot.org/downloads/buildroot-$BUILDROOT_VERSION.tar.xz"
@@ -224,14 +363,16 @@ function buildFilesystem() {
     if [[ ! -f .config ]]; then
         cp "$filesystem_config" .config
     fi
+    rootpxe_build_normalize_backup_site_config .config || return 1
     rootpxe_build_sync_glibc_gconv_config "$filesystem_config" .config || return 1
     rootpxe_build_olddefconfig "$arch" || return 1
     echo "Done"
 
     if [[ $fsDownloadOnly == "y" ]]; then
         echo "Downloading Buildroot source packages for $arch ..."
-        make source
-        cd ..
+        rootpxe_build_seed_verified_sources || return 1
+        make source || return 1
+        cd .. || return 1
         echo "$arch filesystem packages downloaded. Exiting."
         return 0
     fi
@@ -253,6 +394,7 @@ function buildFilesystem() {
                     make menuconfig || return 1
                     ;;
             esac
+            rootpxe_build_normalize_backup_site_config .config || return 1
             rootpxe_build_sync_glibc_gconv_config "$filesystem_config" .config || return 1
             rootpxe_build_olddefconfig "$arch" || return 1
         else
@@ -265,6 +407,8 @@ function buildFilesystem() {
             return
         fi
     fi
+
+    rootpxe_build_seed_verified_sources || return 1
 
     if [[ $verbose == "y" ]]; then
         case "${arch}" in

@@ -33,9 +33,10 @@ python3 tests/pxeos_release_manifest_test.py
 - `release_naming_test.py`：离线核对发布命名和选定 beta 架构契约。
 - `pxeos_release_manifest_test.py`：离线核对发布清单和固定发布频道。
 
-## 构建与运行时（2）
+## 构建与运行时（3）
 
 - `pxeos_build_kernel_regression.sh`：合并的构建下载安全、依赖和内核相关回归。
+- `pxeos_build_sources_test.py`：以离线 mock 核对六个自定义 Buildroot 包的 HTTPS 主/备用预置、唯一 SHA-256、实际 package 下载目录、`BR2_PRIMARY_SITE_ONLY` 跳过、`make source` 失败传播及 Release/Beta 公共构建 YAML 契约。
 - `pxeos_gconv_runtime_regression.sh`：核对 libhivex 所需 glibc gconv Buildroot 配置。
 
 `pxeos_build_kernel_regression.sh` 还提供可选的 `--arm64-initrd`（仅核对 arm64 initrd 格式）和 `--qemu`（格式核对后运行 QEMU smoke）模式；仅在相应构建/QEMU 环境具备时显式运行。`pxeos_partition_regression.sh` 的原生 FAT16/32 常规文件镜像段由 `PXEOS_FATGROW_TEST_*` 环境变量明确门控，只操作 regular image，不应据此推断真实块设备验证。

@@ -458,7 +458,7 @@ class WorkflowContractTests(unittest.TestCase):
             text = (ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
             self.assertIn(manifest, text)
             self.assertIn(f"--channel {channel}", text)
-            self.assertLess(text.index("Create GitHub Release") if workflow == "release.yml" else text.index("Create release"), text.index(f"--channel {channel}"))
+            self.assertLess(text.index("Create GitHub Release"), text.index(f"--channel {channel}"))
             self.assertIn("contents: write", text)
 
     def test_release_workflow_contract_keeps_generator_history_then_publisher(self) -> None:

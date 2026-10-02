@@ -56,7 +56,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.buildroot-dl
-          key: buildroot-dl-${{ hashFiles('**/build.sh') }}
+          key: buildroot-dl-${{ hashFiles('build.sh', 'download_helpers.sh', 'configs/**', 'Buildroot/package/**') }}
           restore-keys: |
             buildroot-dl-
 
@@ -80,7 +80,6 @@ jobs:
         run: |
           cd dist
           sha256sum -c ./*.sha256
-          if [[ $? -ne 0 ]]; then exit 1; fi
 
       - name: Save distribution files
         uses: actions/upload-artifact@v7
@@ -106,7 +105,6 @@ jobs:
         run: |
           cd dist
           sha256sum -c ./*.sha256
-          if [[ $? -ne 0 ]]; then exit 1; fi
 
       - name: Save distribution files
         uses: actions/upload-artifact@v7
@@ -132,7 +130,6 @@ jobs:
         run: |
           cd dist
           sha256sum -c ./*.sha256
-          if [[ $? -ne 0 ]]; then exit 1; fi
 
       - name: Save distribution files
         uses: actions/upload-artifact@v7
@@ -155,7 +152,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.buildroot-dl
-          key: buildroot-dl-${{ hashFiles('**/build.sh') }}
+          key: buildroot-dl-${{ hashFiles('build.sh', 'download_helpers.sh', 'configs/**', 'Buildroot/package/**') }}
           restore-keys: |
             buildroot-dl-
 
@@ -174,7 +171,6 @@ jobs:
         run: |
           cd dist
           sha256sum -c ./*.sha256
-          if [[ $? -ne 0 ]]; then exit 1; fi
 
       - name: Save distribution files
         uses: actions/upload-artifact@v7
@@ -205,7 +201,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.buildroot-dl
-          key: buildroot-dl-${{ hashFiles('**/build.sh') }}
+          key: buildroot-dl-${{ hashFiles('build.sh', 'download_helpers.sh', 'configs/**', 'Buildroot/package/**') }}
           restore-keys: |
             buildroot-dl-
 
@@ -224,7 +220,6 @@ jobs:
         run: |
           cd dist
           sha256sum -c ./*.sha256
-          if [[ $? -ne 0 ]]; then exit 1; fi
 
       - name: Save distribution files
         uses: actions/upload-artifact@v7
@@ -255,7 +250,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.buildroot-dl
-          key: buildroot-dl-${{ hashFiles('**/build.sh') }}
+          key: buildroot-dl-${{ hashFiles('build.sh', 'download_helpers.sh', 'configs/**', 'Buildroot/package/**') }}
           restore-keys: |
             buildroot-dl-
 
@@ -274,7 +269,6 @@ jobs:
         run: |
           cd dist
           sha256sum -c ./*.sha256
-          if [[ $? -ne 0 ]]; then exit 1; fi
 
       - name: Save distribution files
         uses: actions/upload-artifact@v7
@@ -338,12 +332,6 @@ jobs:
           echo "LINUX_KERNEL_VER=$(sed -n -e 's/^.*KERNEL_VERSION=//p' build.sh | cut -d\' -f 2)" >> "$GITHUB_ENV"
           echo "BUILDROOT_VER=$(sed -n -e 's/^.*BUILDROOT_VERSION=//p' build.sh | cut -d\' -f 2)" >> "$GITHUB_ENV"
 
-      - name: Run sha256 checksum on all files
-        run: |
-          cd distribution-files
-          sha256sum -c ./*.sha256
-          if [[ $? -ne 0 ]]; then exit 1; fi
-
       - name: Validate historical release tag
         env:
           GH_TOKEN: ${{ github.token }}
@@ -359,7 +347,12 @@ jobs:
         run: |
           python3 scripts/generate-pxeos-manifest.py --input-dir distribution-files --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --download-channel beta --output distribution-files/pxeos.json
 
-      - name: Create release
+      - name: Run final sha256 checksum
+        run: |
+          cd distribution-files
+          sha256sum -c ./*.sha256
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           name: ${{ env.RELEASE_NAME }}
