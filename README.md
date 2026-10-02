@@ -109,11 +109,11 @@ PXEOS 的协议、安全、硬件与故障处理说明已按主题拆分；本�
 
 ## 发布下载清单
 
-正式发布生成 `pxeos-latest.json`，实验发布生成 `pxeos-beta.json`。文件只包含 `kernels` 数组；每个完整架构 pair 记录其 `arch`、历史 `version`、内核和 initramfs 的 GitHub Release 下载 URL 及实际 SHA-256。x86、x64 与 arm64 的文件名遵循上表，URL 固定指向对应的可变频道。
+正式和测试发布均生成 `pxeos.json`。文件只包含 `kernels` 数组；每个完整架构 pair 记录其 `arch`、历史 `version`、内核和 initramfs 的 GitHub Release 下载 URL 及实际 SHA-256。x86、x64 与 arm64 的文件名遵循上表，URL 固定指向对应的可变频道。
 
-历史发布 tag 自动附加 GitHub run ID 与 attempt，避免同日重跑覆盖已被清单引用的二进制。手工正式版本必须是新且合法的历史 tag；已有 ref 或 release 会被拒绝。固定 `latest` 和 `beta` Release 覆盖本批次二进制、对应 SHA-256 文件及各自清单；清单 URL 固定指向该频道，`version` 仍是历史构建 tag。beta 的旧架构资源可保留，但不进入本批次 JSON；没有完整 pair 时不会移动 alias。频道更新仅允许这两个 tag，遇到不可变 Release、403 或其他非 404 API 错误会失败停止。固定频道覆盖不是原子操作，下载端应先校验资源的 SHA-256；校验失败时重新获取 JSON 后再重试下载，避免使用更新过程中的混合批次。`make_latest` 使用 GitHub Releases Update API 的字符串字段，详见[GitHub REST 文档](https://docs.github.com/en/rest/releases/releases#update-a-release)。
+正式发布显示名示例为 `Release-261002-1530`，测试发布显示名示例为 `Beta-261002-1530`；两者均使用北京时间 `YYMMDD-HHmm`。首次历史 tag 与显示名相同；同一分钟发现已有 ref 或 Release 时，仅历史 tag 追加 `-<run-id>-<attempt>`，显示名不变；追加后的 tag 仍冲突或 API 返回非 404 时会停止，不会覆盖历史发布。固定 `latest` 和 `beta` Release 分别显示为 `Latest Release` 和 `Latest Beta`，覆盖本批次二进制、对应 SHA-256 文件及各自清单；清单 URL 固定指向该频道，`version` 仍是历史构建 tag。正式历史发布与 `latest` 均不是 prerelease；测试历史发布与 `beta` 均为 prerelease，且 `beta` 不会成为 GitHub Latest。频道更新仅允许这两个 tag，遇到不可变 Release、403 或其他非 404 API 错误会失败停止。固定频道覆盖不是原子操作，下载端应先校验资源的 SHA-256；校验失败时重新获取 JSON 后再重试下载，避免使用更新过程中的混合批次。`make_latest` 使用 GitHub Releases Update API 的字符串字段，详见[GitHub REST 文档](https://docs.github.com/en/rest/releases/releases#update-a-release)。
 
-正式工作流提供“更新latest标签（最新版）”勾选项，测试工作流提供“更新beta标签（测试版本）”勾选项，均默认勾选。取消对应勾选项后仍会发布历史版本并自动生成JSON清单，但不会更新固定标签或覆盖其资源。
+正式工作流无自定义 dispatch 输入，并始终构建三种架构的完整内核和 initramfs pair。测试工作流仅提供 `arm64`、`x64` 和 `x86` 三个勾选项；每个勾选项同时控制该架构的内核和 initramfs。至少选择一种架构后，成功完成的工作流会先发布历史版本，再自动更新对应固定频道。
 
 F2FS 内核支持变更需要重新构建对应架构的内核。FAT16/32 扩容工具属于 initramfs 包：已有 `fssource<arch>` 构建缓存时，先在对应目录执行 `make pxeos-rebuild`，再重新生成 initramfs；全新构建会自动包含该包。该工具只面向 512-byte logical-sector FAT16/32 分区，不能替代分区表布局步骤。其 Linux 常规文件镜像验证尚待具备 Linux 工具链的环境完成，因此在该验证完成前不得将其标记为已发布或已通过实机验证。
 
@@ -139,3 +139,4 @@ PXEOS 自身固定控制台提示统一采用 ASCII 英文：横幅为 80 列 AS
 - [RootPXE 集成](docs/RootPXE集成.md)：Schema、布局、LVM、主机名、NVMe、permit 与重试闭环。
 - [故障处理](docs/故障处理.md)：capture/restore、attention、finish 与联调清单。
 - [文档格式](docs/文档格式.md)：现有文档格式规范。
+- [测试目录说明](tests/README.md)：说明定向回归脚本、运行边界和 fixtures 的用途。

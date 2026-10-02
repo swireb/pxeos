@@ -30,8 +30,8 @@ done
 [[ -d $resource_dir ]] || { echo 'resource directory is missing' >&2; exit 2; }
 
 case "$channel" in
-    latest) title='最新版'; prerelease=false; make_latest=true ;;
-    beta) title='测试版本'; prerelease=true; make_latest=false ;;
+    latest) title='Latest Release'; prerelease=false; make_latest=true ;;
+    beta) title='Latest Beta'; prerelease=true; make_latest=false ;;
     *) echo 'channel must be latest or beta' >&2; exit 2 ;;
 esac
 
@@ -47,7 +47,7 @@ manifest_path = pathlib.Path(sys.argv[1])
 channel = sys.argv[2]
 repo = sys.argv[3]
 resource_dir = pathlib.Path(sys.argv[4])
-if manifest_path.name != f"pxeos-{channel}.json" or manifest_path.is_symlink():
+if manifest_path.name != "pxeos.json" or manifest_path.is_symlink():
     raise SystemExit("manifest filename does not match the requested channel")
 try:
     document = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -174,7 +174,7 @@ fi
 if [[ $release_exists == true ]]; then
     "$gh_bin" api --method PATCH "$release_endpoint/$release_id" \
         -f name="$title" \
-        -f body="PXEOS $title 下载清单；内核和 initrd URL 指向此固定频道。" \
+        -f body="PXEOS download manifest for this channel." \
         -F prerelease="$prerelease" \
         -f make_latest="$make_latest"
 else
@@ -182,7 +182,7 @@ else
         -f tag_name="$channel" \
         -f target_commitish="$target" \
         -f name="$title" \
-        -f body="PXEOS $title 下载清单；内核和 initrd URL 指向此固定频道。" \
+        -f body="PXEOS download manifest for this channel." \
         -F prerelease="$prerelease" \
         -f make_latest="$make_latest"
 fi

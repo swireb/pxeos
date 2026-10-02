@@ -54,7 +54,7 @@ class ManifestTests(unittest.TestCase):
                 "--download-channel",
                 "latest",
                 "--output",
-                str(self.dist / "pxeos-latest.json"),
+                str(self.dist / "pxeos.json"),
                 *extra,
             ],
             text=True,
@@ -69,7 +69,7 @@ class ManifestTests(unittest.TestCase):
         result = self.generate("--require-all")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        manifest = json.loads((self.dist / "pxeos-latest.json").read_text())
+        manifest = json.loads((self.dist / "pxeos.json").read_text())
         self.assertEqual(set(manifest), {"kernels"})
         self.assertEqual([entry["arch"] for entry in manifest["kernels"]], ["x86", "x64", "arm64"])
         self.assertEqual({entry["version"] for entry in manifest["kernels"]}, {"v1.2.3"})
@@ -93,7 +93,7 @@ class ManifestTests(unittest.TestCase):
         result = self.generate()
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        kernels = json.loads((self.dist / "pxeos-latest.json").read_text())["kernels"]
+        kernels = json.loads((self.dist / "pxeos.json").read_text())["kernels"]
         self.assertEqual([entry["arch"] for entry in kernels], ["x64"])
 
     def test_empty_build_emits_an_empty_manifest_for_partial_beta_publication(self) -> None:
@@ -101,7 +101,7 @@ class ManifestTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
-            json.loads((self.dist / "pxeos-latest.json").read_text()), {"kernels": []}
+            json.loads((self.dist / "pxeos.json").read_text()), {"kernels": []}
         )
 
     def test_require_all_rejects_partial_build(self) -> None:
@@ -110,7 +110,7 @@ class ManifestTests(unittest.TestCase):
         result = self.generate("--require-all")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((self.dist / "pxeos-latest.json").exists())
+        self.assertFalse((self.dist / "pxeos.json").exists())
 
     def test_mutable_alias_is_not_a_valid_historical_tag(self) -> None:
         self.write_pair("bzImage", "init.xz")
@@ -127,13 +127,13 @@ class ManifestTests(unittest.TestCase):
                 "--download-channel",
                 "latest",
                 "--output",
-                str(self.dist / "pxeos-latest.json"),
+                str(self.dist / "pxeos.json"),
             ],
             text=True,
             capture_output=True,
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((self.dist / "pxeos-latest.json").exists())
+        self.assertFalse((self.dist / "pxeos.json").exists())
 
 
 class PublisherTests(unittest.TestCase):
@@ -144,7 +144,7 @@ class PublisherTests(unittest.TestCase):
         self.bin_dir.mkdir()
         self.log = self.workdir / "gh.log"
         self.state = self.workdir / "gh.state"
-        self.manifest = self.workdir / "pxeos-latest.json"
+        self.manifest = self.workdir / "pxeos.json"
         assets = {"x86": ("bzImage32", "init_32.xz"), "x64": ("bzImage", "init.xz"), "arm64": ("arm_Image", "arm_init.cpio.gz")}
         kernels = []
         for arch, names in assets.items():
@@ -197,10 +197,7 @@ class PublisherTests(unittest.TestCase):
         self.tempdir.cleanup()
 
     def publish(self, channel: str, **environment: str) -> subprocess.CompletedProcess[str]:
-        if channel == "beta" and self.manifest.name != "pxeos-beta.json":
-            beta_manifest = self.workdir / "pxeos-beta.json"
-            self.manifest.rename(beta_manifest)
-            self.manifest = beta_manifest
+        if channel == "beta":
             self.manifest.write_text(self.manifest.read_text().replace("/latest/", "/beta/"))
         env = os.environ | {
             "PATH": git_bash_path(self.bin_dir) + ":/usr/bin",
@@ -240,6 +237,7 @@ class PublisherTests(unittest.TestCase):
         self.assertIn("ref=refs/tags/latest", log)
         self.assertNotIn("refs/tags/beta", log)
         self.assertIn("POST repos/swireb/pxeos/releases", log)
+        self.assertIn("name=Latest Release", log)
         self.assertIn("prerelease=false", log)
         self.assertIn("make_latest=true", log)
 
@@ -251,6 +249,7 @@ class PublisherTests(unittest.TestCase):
         self.assertIn("PATCH repos/swireb/pxeos/git/refs/tags/beta", log)
         self.assertIn("force=true", log)
         self.assertIn("PATCH repos/swireb/pxeos/releases/123", log)
+        self.assertIn("name=Latest Beta", log)
         self.assertIn("prerelease=true", log)
         self.assertIn("make_latest=false", log)
 
@@ -267,6 +266,27 @@ class PublisherTests(unittest.TestCase):
         result = self.publish("beta")
 
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_manifest_name_is_shared_but_channel_urls_and_tags_remain_distinct(self) -> None:
+        latest = self.publish("latest")
+        beta = self.publish("beta")
+
+        self.assertEqual(latest.returncode, 0, latest.stderr)
+        self.assertEqual(beta.returncode, 0, beta.stderr)
+        uploads = self.log.read_text(encoding="utf-8")
+        self.assertIn("release upload latest", uploads)
+        self.assertIn("release upload beta", uploads)
+        self.assertGreaterEqual(uploads.count("pxeos.json --clobber --repo swireb/pxeos"), 2)
+
+    def test_legacy_channel_specific_manifest_name_is_rejected(self) -> None:
+        legacy = self.workdir / "pxeos-latest.json"
+        self.manifest.rename(legacy)
+        self.manifest = legacy
+
+        result = self.publish("latest")
+
+        self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.log.exists())
 
     def test_invalid_manifest_does_not_call_alias_api(self) -> None:
@@ -351,8 +371,8 @@ class PublisherTests(unittest.TestCase):
         ]
         self.assertEqual(len(uploads), 14)
         self.assertTrue(all("--clobber" in line for line in uploads))
-        self.assertTrue(uploads[6].endswith("pxeos-latest.json --clobber --repo swireb/pxeos"))
-        self.assertTrue(uploads[13].endswith("pxeos-latest.json --clobber --repo swireb/pxeos"))
+        self.assertTrue(uploads[6].endswith("pxeos.json --clobber --repo swireb/pxeos"))
+        self.assertTrue(uploads[13].endswith("pxeos.json --clobber --repo swireb/pxeos"))
 
     def test_first_resource_upload_failure_does_not_upload_manifest(self) -> None:
         result = self.publish("latest", GH_UPLOAD_FAIL="bzImage32")
@@ -362,7 +382,7 @@ class PublisherTests(unittest.TestCase):
             line for line in self.log.read_text(encoding="utf-8").splitlines() if line.startswith("UPLOAD ")
         ]
         self.assertTrue(uploads)
-        self.assertNotIn("pxeos-latest.json", "\n".join(uploads))
+        self.assertNotIn("pxeos.json", "\n".join(uploads))
 
     def test_immutable_release_and_forbidden_release_have_zero_writes(self) -> None:
         for release_state in ("immutable", "forbidden"):
@@ -388,7 +408,7 @@ class PublisherTests(unittest.TestCase):
         uploads = self.log.read_text(encoding="utf-8").splitlines()
         self.assertIn("UPLOAD bzImage", "\n".join(uploads))
         self.assertIn("UPLOAD init.xz", "\n".join(uploads))
-        self.assertTrue(uploads[-1].endswith("pxeos-beta.json --clobber --repo swireb/pxeos"))
+        self.assertTrue(uploads[-1].endswith("pxeos.json --clobber --repo swireb/pxeos"))
         self.assertNotIn("bzImage32", "\n".join(uploads))
         self.assertNotIn("arm_Image", "\n".join(uploads))
 
@@ -432,8 +452,8 @@ class PublisherTests(unittest.TestCase):
 class WorkflowContractTests(unittest.TestCase):
     def test_workflows_generate_channel_specific_manifests_after_history_release(self) -> None:
         for workflow, manifest, channel in (
-            ("release.yml", "pxeos-latest.json", "latest"),
-            ("beta.yml", "pxeos-beta.json", "beta"),
+            ("release.yml", "pxeos.json", "latest"),
+            ("beta.yml", "pxeos.json", "beta"),
         ):
             text = (ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
             self.assertIn(manifest, text)
@@ -479,63 +499,46 @@ class WorkflowContractTests(unittest.TestCase):
                 "pxeos-latest-release",
             )
 
-    def test_fixed_channel_dispatch_inputs_gate_only_channel_publish(self) -> None:
-        workflows = {
-            "release.yml": ("publish_latest", "latest", "更新latest标签（最新版）"),
-            "beta.yml": ("publish_beta", "beta", "更新beta标签（测试版本）"),
-        }
-        for workflow, (input_name, channel, description) in workflows.items():
-            text = (ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
-            self.assertIn(f"{input_name}:", text)
-            self.assertIn("type: boolean", text)
-            self.assertIn("default: true", text)
-            self.assertIn("required: false", text)
-            self.assertIn(f'description: "{description}"', text)
-            self.assertIn(
-                f"if: ${{{{ inputs.{input_name} == true }}}}",
-                text,
-            )
-            publish_marker = (
-                "Publish latest download manifest"
-                if channel == "latest"
-                else "Publish beta download manifest"
-            )
-            create_marker = (
-                "Create GitHub Release" if channel == "latest" else "Create release"
-            )
-            history_block = text[
-                text.index(create_marker) : text.index(publish_marker)
-            ]
-            self.assertNotIn(input_name, history_block)
-
-            try:
-                import yaml
-            except ImportError:
-                yaml = None
-            if yaml is not None:
-                document = yaml.safe_load(text)
-                if True in document and "on" not in document:
-                    document["on"] = document.pop(True)
-                inputs = document["on"]["workflow_dispatch"]["inputs"]
-                self.assertEqual(inputs[input_name]["type"], "boolean")
-                self.assertIs(inputs[input_name]["default"], True)
-                self.assertIs(inputs[input_name]["required"], False)
-                self.assertEqual(inputs[input_name]["description"], description)
-
+    def test_beta_architecture_inputs_validate_and_gate_complete_pairs(self) -> None:
         beta = (ROOT / ".github" / "workflows" / "beta.yml").read_text(encoding="utf-8")
-        input_checks_start = beta.index("  input_checks:")
-        input_checks = beta[input_checks_start : beta.index("  download_filesystem_packages")]
-        for build_input in (
-            "init_arm64",
-            "init_x64",
-            "init_x86",
-            "kernel_arm64",
-            "kernel_x64",
-            "kernel_x86",
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML is unavailable")
+        document = yaml.safe_load(beta)
+        if True in document and "on" not in document:
+            document["on"] = document.pop(True)
+
+        inputs = document["on"]["workflow_dispatch"]["inputs"]
+        self.assertEqual(set(inputs), {"arm64", "x64", "x86"})
+        for arch in inputs:
+            self.assertEqual(inputs[arch], {"type": "boolean", "default": True, "required": False, "description": arch})
+
+        validation = document["jobs"]["input_checks"]["steps"][0]["run"]
+        for values, expected in (
+            (("false", "false", "false"), False),
+            (("true", "false", "false"), True),
+            (("true", "false", "true"), True),
+            (("true", "true", "true"), True),
         ):
-            self.assertIn(build_input, input_checks)
-        self.assertIn("No kernels or inits selected", input_checks)
-        self.assertNotIn("publish_beta", input_checks)
+            with self.subTest(values=values):
+                result = subprocess.run(
+                    [BASH, "-c", validation],
+                    text=True,
+                    capture_output=True,
+                    env=os.environ | dict(zip(("ARM64", "X64", "X86"), values)),
+                )
+                self.assertEqual(result.returncode == 0, expected, result.stderr)
+
+        jobs = document["jobs"]
+        self.assertEqual(jobs["download_filesystem_packages"]["if"], "${{ inputs.arm64 || inputs.x64 || inputs.x86 }}")
+        for arch in ("arm64", "x64", "x86"):
+            self.assertEqual(jobs[f"build_kernel_{arch}"]["if"], f"${{{{ inputs.{arch} }}}}")
+            self.assertEqual(jobs[f"build_initrd_{arch}"]["if"], f"${{{{ inputs.{arch} }}}}")
+            self.assertIn("download_filesystem_packages", jobs[f"build_initrd_{arch}"]["needs"])
+        self.assertIn("input_checks", jobs["release"]["needs"])
+        self.assertIn("download_filesystem_packages", jobs["release"]["needs"])
+        self.assertNotIn("publish_beta", beta)
 
 
 if __name__ == "__main__":
