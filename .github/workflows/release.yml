@@ -12,6 +12,11 @@ on:
         type: string
         description: "Official Release PXEOS Version"
         required: false
+      publish_latest:
+        type: boolean
+        default: true
+        required: false
+        description: "更新latest标签（最新版）"
 
 permissions:
   contents: read
@@ -268,6 +273,7 @@ jobs:
             distribution-files/init_32.xz.sha256
 
       - name: Publish latest download manifest
+        if: ${{ inputs.publish_latest == true }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

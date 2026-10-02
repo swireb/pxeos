@@ -3,6 +3,11 @@ name: Build Experimental
 on:
   workflow_dispatch:
     inputs:
+      publish_beta:
+        type: boolean
+        default: true
+        required: false
+        description: "更新beta标签（测试版本）"
       init_arm64:
         type: boolean
         default: true
@@ -416,6 +421,7 @@ jobs:
             distribution-files/*
 
       - name: Publish beta download manifest
+        if: ${{ inputs.publish_beta == true }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

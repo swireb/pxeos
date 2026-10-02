@@ -435,15 +435,15 @@ class WorkflowContractTests(unittest.TestCase):
             ("release.yml", "pxeos-latest.json", "latest"),
             ("beta.yml", "pxeos-beta.json", "beta"),
         ):
-            text = (ROOT / ".github" / "workflows" / workflow).read_text()
+            text = (ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
             self.assertIn(manifest, text)
             self.assertIn(f"--channel {channel}", text)
             self.assertLess(text.index("Create GitHub Release") if workflow == "release.yml" else text.index("Create release"), text.index(f"--channel {channel}"))
             self.assertIn("contents: write", text)
 
     def test_release_workflow_contract_keeps_generator_history_then_publisher(self) -> None:
-        release = (ROOT / ".github" / "workflows" / "release.yml").read_text()
-        beta = (ROOT / ".github" / "workflows" / "beta.yml").read_text()
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        beta = (ROOT / ".github" / "workflows" / "beta.yml").read_text(encoding="utf-8")
         self.assertLess(
             release.index("Validate historical release tag"),
             release.index("Generate latest download manifest"),
@@ -478,6 +478,64 @@ class WorkflowContractTests(unittest.TestCase):
                 parsed["jobs"]["release"]["concurrency"]["group"],
                 "pxeos-latest-release",
             )
+
+    def test_fixed_channel_dispatch_inputs_gate_only_channel_publish(self) -> None:
+        workflows = {
+            "release.yml": ("publish_latest", "latest", "更新latest标签（最新版）"),
+            "beta.yml": ("publish_beta", "beta", "更新beta标签（测试版本）"),
+        }
+        for workflow, (input_name, channel, description) in workflows.items():
+            text = (ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
+            self.assertIn(f"{input_name}:", text)
+            self.assertIn("type: boolean", text)
+            self.assertIn("default: true", text)
+            self.assertIn("required: false", text)
+            self.assertIn(f'description: "{description}"', text)
+            self.assertIn(
+                f"if: ${{{{ inputs.{input_name} == true }}}}",
+                text,
+            )
+            publish_marker = (
+                "Publish latest download manifest"
+                if channel == "latest"
+                else "Publish beta download manifest"
+            )
+            create_marker = (
+                "Create GitHub Release" if channel == "latest" else "Create release"
+            )
+            history_block = text[
+                text.index(create_marker) : text.index(publish_marker)
+            ]
+            self.assertNotIn(input_name, history_block)
+
+            try:
+                import yaml
+            except ImportError:
+                yaml = None
+            if yaml is not None:
+                document = yaml.safe_load(text)
+                if True in document and "on" not in document:
+                    document["on"] = document.pop(True)
+                inputs = document["on"]["workflow_dispatch"]["inputs"]
+                self.assertEqual(inputs[input_name]["type"], "boolean")
+                self.assertIs(inputs[input_name]["default"], True)
+                self.assertIs(inputs[input_name]["required"], False)
+                self.assertEqual(inputs[input_name]["description"], description)
+
+        beta = (ROOT / ".github" / "workflows" / "beta.yml").read_text(encoding="utf-8")
+        input_checks_start = beta.index("  input_checks:")
+        input_checks = beta[input_checks_start : beta.index("  download_filesystem_packages")]
+        for build_input in (
+            "init_arm64",
+            "init_x64",
+            "init_x86",
+            "kernel_arm64",
+            "kernel_x64",
+            "kernel_x86",
+        ):
+            self.assertIn(build_input, input_checks)
+        self.assertIn("No kernels or inits selected", input_checks)
+        self.assertNotIn("publish_beta", input_checks)
 
 
 if __name__ == "__main__":

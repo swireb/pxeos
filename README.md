@@ -113,6 +113,8 @@ PXEOS 的协议、安全、硬件与故障处理说明已按主题拆分；本�
 
 历史发布 tag 自动附加 GitHub run ID 与 attempt，避免同日重跑覆盖已被清单引用的二进制。手工正式版本必须是新且合法的历史 tag；已有 ref 或 release 会被拒绝。固定 `latest` 和 `beta` Release 覆盖本批次二进制、对应 SHA-256 文件及各自清单；清单 URL 固定指向该频道，`version` 仍是历史构建 tag。beta 的旧架构资源可保留，但不进入本批次 JSON；没有完整 pair 时不会移动 alias。频道更新仅允许这两个 tag，遇到不可变 Release、403 或其他非 404 API 错误会失败停止。固定频道覆盖不是原子操作，下载端应先校验资源的 SHA-256；校验失败时重新获取 JSON 后再重试下载，避免使用更新过程中的混合批次。`make_latest` 使用 GitHub Releases Update API 的字符串字段，详见[GitHub REST 文档](https://docs.github.com/en/rest/releases/releases#update-a-release)。
 
+正式工作流提供“更新latest标签（最新版）”勾选项，测试工作流提供“更新beta标签（测试版本）”勾选项，均默认勾选。取消对应勾选项后仍会发布历史版本并自动生成JSON清单，但不会更新固定标签或覆盖其资源。
+
 F2FS 内核支持变更需要重新构建对应架构的内核。FAT16/32 扩容工具属于 initramfs 包：已有 `fssource<arch>` 构建缓存时，先在对应目录执行 `make pxeos-rebuild`，再重新生成 initramfs；全新构建会自动包含该包。该工具只面向 512-byte logical-sector FAT16/32 分区，不能替代分区表布局步骤。其 Linux 常规文件镜像验证尚待具备 Linux 工具链的环境完成，因此在该验证完成前不得将其标记为已发布或已通过实机验证。
 
 ## SSH 调试模式
