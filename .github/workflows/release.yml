@@ -13,6 +13,9 @@ on:
         description: "Official Release PXEOS Version"
         required: false
 
+permissions:
+  contents: read
+
 defaults:
   run:
     shell: bash
@@ -23,15 +26,26 @@ jobs:
     
     steps:
       - name: Validate Input Logic
+        env:
+          IS_OFFICIAL_RELEASE: ${{ inputs.is_official_release }}
+          OFFICIAL_PXEOS_VERSION: ${{ inputs.official_pxeos_version }}
         run: |
-          is_official="${{ inputs.is_official_release }}"
-          pxeos_version="${{ inputs.official_pxeos_version }}"
+          is_official="$IS_OFFICIAL_RELEASE"
+          pxeos_version="$OFFICIAL_PXEOS_VERSION"
           if [[ "$is_official" == "true" && "$pxeos_version" == "" ]]; then
             echo "Error: Official Release was checked, but no PXEOS version was entered!"
             exit 1
           fi
           if [[ "$is_official" == "false" && "$pxeos_version" != "" ]]; then
             echo "Error: PXEOS version was entered, but Official Release checkbox was not selected!"
+            exit 1
+          fi
+          if [[ "$is_official" == "true" && ! "$pxeos_version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "Error: Official PXEOS version is not a valid historical tag!"
+            exit 1
+          fi
+          if [[ "$pxeos_version" == "latest" || "$pxeos_version" == "beta" ]]; then
+            echo "Error: Official PXEOS version cannot use a channel alias!"
             exit 1
           fi
 
@@ -175,6 +189,11 @@ jobs:
         build_initrd_x64,
       ]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: pxeos-latest-release
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v6
       - name: Download all artifacts
@@ -187,7 +206,7 @@ jobs:
       - name: Set default release and tag names
         run: |
           echo "RELEASE_NAME=Latest from $(date '+%Y-%m-%d')" >> $GITHUB_ENV
-          echo "TAG_NAME=$(date '+%Y%m%d')" >> $GITHUB_ENV
+          echo "TAG_NAME=$(date '+%Y%m%d')_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}" >> $GITHUB_ENV
 
       - name: Get versions from build.sh
         run: |
@@ -197,10 +216,26 @@ jobs:
       # DO NOT change the release name format. PXEOS systems rely on this naming convention.
       - name: Override for Official PXEOS release
         if: ${{ inputs.is_official_release == true }}
+        env:
+          OFFICIAL_PXEOS_VERSION: ${{ inputs.official_pxeos_version }}
         run: |
-          pxeos_version="${{ inputs.official_pxeos_version }}"
+          pxeos_version="$OFFICIAL_PXEOS_VERSION"
           echo "RELEASE_NAME=PXEOS $pxeos_version kernels and inits" >> $GITHUB_ENV
           echo "TAG_NAME=$pxeos_version" >> $GITHUB_ENV
+
+      - name: Validate historical release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$TAG_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo 'Invalid historical release tag.' >&2; exit 1; }
+          [[ "$TAG_NAME" != latest && "$TAG_NAME" != beta ]] || { echo 'Historical release tag collides with a channel alias.' >&2; exit 1; }
+          bash scripts/check-release-tag.sh --repo "$GITHUB_REPOSITORY" --tag "$TAG_NAME"
+
+      - name: Generate latest download manifest
+        env:
+          RELEASE_TAG: ${{ env.TAG_NAME }}
+        run: |
+          python3 scripts/generate-pxeos-manifest.py --input-dir distribution-files --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --download-channel latest --output distribution-files/pxeos-latest.json --require-all
 
       - name: Run final sha256 checksum
         run: |
@@ -210,12 +245,14 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
+          fail_on_unmatched_files: true
           name: ${{ env.RELEASE_NAME }}
           body: |
             PXEOS System Release
             - Linux kernel: ${{ env.LINUX_KERNEL_VER }}
             - Buildroot: ${{ env.BUILDROOT_VER }}
           tag_name: ${{ env.TAG_NAME }}
+          target_commitish: ${{ github.sha }}
           files: |
             distribution-files/arm_Image
             distribution-files/arm_Image.sha256
@@ -229,3 +266,14 @@ jobs:
             distribution-files/init.xz.sha256
             distribution-files/init_32.xz
             distribution-files/init_32.xz.sha256
+
+      - name: Publish latest download manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/publish-channel.sh \
+            --repo "$GITHUB_REPOSITORY" \
+            --channel latest \
+            --target "$GITHUB_SHA" \
+            --manifest distribution-files/pxeos-latest.json \
+            --resource-dir distribution-files

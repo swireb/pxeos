@@ -107,6 +107,12 @@ PXEOS 的协议、安全、硬件与故障处理说明已按主题拆分；本�
 
 修改 initramfs、内核或驱动配置后，必须按目标架构重新构建同批次的内核与 initramfs 产物；发布或回退不得只替换单个内核或 initramfs。完整硬件验证边界见[硬件兼容性](docs/硬件兼容性.md#构建与回退边界)。
 
+## 发布下载清单
+
+正式发布生成 `pxeos-latest.json`，实验发布生成 `pxeos-beta.json`。文件只包含 `kernels` 数组；每个完整架构 pair 记录其 `arch`、历史 `version`、内核和 initramfs 的 GitHub Release 下载 URL 及实际 SHA-256。x86、x64 与 arm64 的文件名遵循上表，URL 固定指向对应的可变频道。
+
+历史发布 tag 自动附加 GitHub run ID 与 attempt，避免同日重跑覆盖已被清单引用的二进制。手工正式版本必须是新且合法的历史 tag；已有 ref 或 release 会被拒绝。固定 `latest` 和 `beta` Release 覆盖本批次二进制、对应 SHA-256 文件及各自清单；清单 URL 固定指向该频道，`version` 仍是历史构建 tag。beta 的旧架构资源可保留，但不进入本批次 JSON；没有完整 pair 时不会移动 alias。频道更新仅允许这两个 tag，遇到不可变 Release、403 或其他非 404 API 错误会失败停止。固定频道覆盖不是原子操作，下载端应先校验资源的 SHA-256；校验失败时重新获取 JSON 后再重试下载，避免使用更新过程中的混合批次。`make_latest` 使用 GitHub Releases Update API 的字符串字段，详见[GitHub REST 文档](https://docs.github.com/en/rest/releases/releases#update-a-release)。
+
 F2FS 内核支持变更需要重新构建对应架构的内核。FAT16/32 扩容工具属于 initramfs 包：已有 `fssource<arch>` 构建缓存时，先在对应目录执行 `make pxeos-rebuild`，再重新生成 initramfs；全新构建会自动包含该包。该工具只面向 512-byte logical-sector FAT16/32 分区，不能替代分区表布局步骤。其 Linux 常规文件镜像验证尚待具备 Linux 工具链的环境完成，因此在该验证完成前不得将其标记为已发布或已通过实机验证。
 
 ## SSH 调试模式

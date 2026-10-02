@@ -28,6 +28,9 @@ on:
         default: true
         description: "Create x86 kernel"
 
+permissions:
+  contents: read
+
 defaults:
   run:
     shell: bash
@@ -38,13 +41,20 @@ jobs:
 
     steps:
       - name: Make sure at least one workflow input is selected
+        env:
+          INIT_ARM64: ${{ inputs.init_arm64 }}
+          INIT_X64: ${{ inputs.init_x64 }}
+          INIT_X86: ${{ inputs.init_x86 }}
+          KERNEL_ARM64: ${{ inputs.kernel_arm64 }}
+          KERNEL_X64: ${{ inputs.kernel_x64 }}
+          KERNEL_X86: ${{ inputs.kernel_x86 }}
         run: |
-          init_arm64="${{ inputs.init_arm64 }}"
-          init_x64="${{ inputs.init_x64 }}"
-          init_x86="${{ inputs.init_x86 }}"
-          kernel_arm64="${{ inputs.kernel_arm64 }}"
-          kernel_x64="${{ inputs.kernel_x64 }}"
-          kernel_x86="${{ inputs.kernel_x86 }}"
+          init_arm64="$INIT_ARM64"
+          init_x64="$INIT_X64"
+          init_x86="$INIT_X86"
+          kernel_arm64="$KERNEL_ARM64"
+          kernel_x64="$KERNEL_X64"
+          kernel_x86="$KERNEL_X86"
           if [[ "$init_arm64" == "false" && "$init_x64" == "false" && "$init_x86" == "false" && "$kernel_arm64" == "false" && "$kernel_x64" == "false" && "$kernel_x86" == "false" ]]; then
             echo "No kernels or inits selected to build."
             exit 1
@@ -316,6 +326,11 @@ jobs:
       !contains(needs.*.result, 'cancelled')
 
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: pxeos-beta-release
+      cancel-in-progress: false
 
     steps:
       - name: Checkout code
@@ -334,7 +349,7 @@ jobs:
 
       - name: Set tag name variable
         run: |
-          echo "TAG_NAME=EXP_$(date '+%Y%m%d')" >> $GITHUB_ENV
+          echo "TAG_NAME=EXP_$(date '+%Y%m%d')_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}" >> $GITHUB_ENV
 
       - name: Get Linux Kernel version from build.sh
         run: |
@@ -344,6 +359,12 @@ jobs:
         run: |
           echo "BUILDROOT_VER=$(cat build.sh | sed -n -e 's/^.*BUILDROOT_VERSION=//p' | cut -d\' -f 2)" >> $GITHUB_ENV
 
+      - name: Generate beta download manifest
+        env:
+          RELEASE_TAG: ${{ env.TAG_NAME }}
+        run: |
+          python3 scripts/generate-pxeos-manifest.py --input-dir distribution-files --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --download-channel beta --output distribution-files/pxeos-beta.json
+
       - name: Run sha256 checksum on all files
         run: |
           cd distribution-files
@@ -351,15 +372,22 @@ jobs:
           if [[ $? -ne 0 ]]; then exit 1; fi
 
       - name: Create release body
+        env:
+          KERNEL_ARM64: ${{ inputs.kernel_arm64 }}
+          KERNEL_X64: ${{ inputs.kernel_x64 }}
+          KERNEL_X86: ${{ inputs.kernel_x86 }}
+          INIT_ARM64: ${{ inputs.init_arm64 }}
+          INIT_X64: ${{ inputs.init_x64 }}
+          INIT_X86: ${{ inputs.init_x86 }}
         run: |
           release_body_text="WARNING! This is an experimental releases. Backup your previous kernels/inits before installing these.\n\n"
           # 
-          if [[ "${{ inputs.kernel_arm64 }}" == "true" || "${{ inputs.kernel_x64 }}" == "true" || "${{ inputs.kernel_x86 }}" == "true" ]]; then
-            release_body_text+="Linux kernel ${{ env.LINUX_KERNEL_VER}}\n"
+          if [[ "$KERNEL_ARM64" == "true" || "$KERNEL_X64" == "true" || "$KERNEL_X86" == "true" ]]; then
+            release_body_text+="Linux kernel $LINUX_KERNEL_VER\n"
           fi
           # 
-          if [[ "${{ inputs.init_arm64 }}" == "true" || "${{ inputs.init_x64 }}" == "true" || "${{ inputs.init_x86 }}" == "true" ]]; then
-            release_body_text+="Buildroot ${{ env.BUILDROOT_VER}}"
+          if [[ "$INIT_ARM64" == "true" || "$INIT_X64" == "true" || "$INIT_X86" == "true" ]]; then
+            release_body_text+="Buildroot $BUILDROOT_VER"
           fi
           # GH Actions way of making a multiline text environment variable
           {
@@ -368,12 +396,32 @@ jobs:
             echo EOF
           } >> "$GITHUB_ENV"
 
+      - name: Validate historical release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$TAG_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo 'Invalid historical release tag.' >&2; exit 1; }
+          [[ "$TAG_NAME" != latest && "$TAG_NAME" != beta ]] || { echo 'Historical release tag collides with a channel alias.' >&2; exit 1; }
+          bash scripts/check-release-tag.sh --repo "$GITHUB_REPOSITORY" --tag "$TAG_NAME"
+
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
           name: ${{ env.RELEASE_NAME }}
           body: ${{ env.RELEASE_BODY_TEXT }}
           tag_name: ${{ env.TAG_NAME }}
+          target_commitish: ${{ github.sha }}
           prerelease: true
           files: |
             distribution-files/*
+
+      - name: Publish beta download manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/publish-channel.sh \
+            --repo "$GITHUB_REPOSITORY" \
+            --channel beta \
+            --target "$GITHUB_SHA" \
+            --manifest distribution-files/pxeos-beta.json \
+            --resource-dir distribution-files
