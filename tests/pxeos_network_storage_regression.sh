@@ -504,6 +504,7 @@ for command in mdadm pxeos pxeos.debug poweroff reboot sleep loadkeys; do
 printf '%s:%s\n' "$(basename "$0")" "$*" >>"$PXEOS_S99_LOG"
 case "$(basename "$0")" in
   pxeos) exit "${PXEOS_S99_PXEOS_RC:-0}" ;;
+  poweroff|reboot) exit "${PXEOS_S99_POWER_RC:-0}" ;;
 esac
 EOF
     chmod +x "$tmp/mock/$command"
@@ -512,7 +513,16 @@ done
 sed \
     -e "s|/tmp/pxeos.shutdown|$tmp/pxeos.shutdown|g" \
     -e "s|/tmp/pxeos.failure_action|$tmp/pxeos.failure_action|g" \
-    "$s99" >"$tmp/S99pxeos"
+    -e "s|/.pxeos-quiet-shutdown|$tmp/.pxeos-quiet-shutdown|g" \
+    -e "s|/proc/sys/kernel/printk|$tmp/kernel-printk|g" \
+    "$s99" | awk '
+        /^[[:space:]]*printf / && /%-7s %s\\n/ {
+            print
+            print "    printf " sprintf("%c", 39) "message:%s\\n" sprintf("%c", 39) " " sprintf("%c", 34) "$message" sprintf("%c", 34) " >>" sprintf("%c", 34) "$PXEOS_S99_LOG" sprintf("%c", 34)
+            next
+        }
+        { print }
+    ' >"$tmp/S99pxeos"
 chmod +x "$tmp/S99pxeos"
 
 : >"$tmp/debug-s99.log"
@@ -525,25 +535,93 @@ run_normal_s99() {
     local pxeos_rc="$2"
     local shutdown_value="$3"
     local failure_action="$4"
+    local marker_state="${5:-none}"
+    local printk_state="${6:-ready}"
+    local power_rc="${7:-0}"
     local log="$tmp/$name.log"
     : >"$log"
-    rm -f "$tmp/pxeos.shutdown" "$tmp/pxeos.failure_action"
+    rm -f "$tmp/pxeos.shutdown" "$tmp/pxeos.failure_action" "$tmp/.pxeos-quiet-shutdown"
+    if [[ -d $tmp/kernel-printk ]]; then
+        rmdir "$tmp/kernel-printk"
+    else
+        rm -f "$tmp/kernel-printk"
+    fi
+    if [[ $printk_state == unavailable ]]; then
+        mkdir "$tmp/kernel-printk"
+    else
+        printf '7 4 1 7\n' >"$tmp/kernel-printk"
+    fi
+    if [[ $marker_state == unsafe-symlink ]]; then
+        printf 'marker target\n' >"$tmp/marker-target"
+        ln -s "$tmp/marker-target" "$tmp/.pxeos-quiet-shutdown"
+    elif [[ $marker_state == existing-regular ]]; then
+        : >"$tmp/.pxeos-quiet-shutdown"
+        chmod 600 "$tmp/.pxeos-quiet-shutdown"
+    fi
     [[ -n $shutdown_value ]] && printf '%s\n' "$shutdown_value" >"$tmp/pxeos.shutdown"
     [[ -n $failure_action ]] && printf '%s\n' "$failure_action" >"$tmp/pxeos.failure_action"
-    PXEOS_S99_LOG="$log" PXEOS_S99_PXEOS_RC="$pxeos_rc" PATH="$tmp/mock:$PATH" \
-        mdraid=true isdebug='' shutdown=0 bash "$tmp/S99pxeos" >/dev/null
+    if PXEOS_S99_LOG="$log" PXEOS_S99_PXEOS_RC="$pxeos_rc" PXEOS_S99_POWER_RC="$power_rc" PATH="$tmp/mock:$PATH" \
+        mdraid=true isdebug='' shutdown=0 bash "$tmp/S99pxeos" >/dev/null; then
+        s99_rc=0
+    else
+        s99_rc=$?
+    fi
+    printf '%s\n' "$s99_rc" >"$log.rc"
     printf '%s\n' "$log"
 }
 
 normal_log=$(run_normal_s99 normal-success-reboot 0 '' '')
-expected=$'mdadm:--auto-detect\nmdadm:--assemble --scan\nmdadm:--incremental --run --scan\npxeos:\nsleep:5\nreboot:-f'
-[[ $(<"$normal_log") == "$expected" ]] || fail '普通成功路径未保留 RAID、任务和重启顺序'
+expected=$'mdadm:--auto-detect\nmdadm:--assemble --scan\nmdadm:--incremental --run --scan\npxeos:\nmessage:Task completed. Rebooting in 5s.\nsleep:5\nreboot:-f'
+[[ $(<"$normal_log") == "$expected" ]] || fail '普通成功路径未保留完成提示、RAID、任务和重启顺序'
+[[ -f $tmp/.pxeos-quiet-shutdown && ! -L $tmp/.pxeos-quiet-shutdown ]] || fail '普通成功重启路径未在等待后创建静默标记'
+[[ $(<"$tmp/kernel-printk") == 0 ]] || fail '普通成功重启路径未降低内核控制台日志级别'
 normal_log=$(run_normal_s99 normal-success-poweroff 0 1 '')
-grep -Fxq 'poweroff:' "$normal_log" || fail '普通成功关机路径改变'
+expected=$'mdadm:--auto-detect\nmdadm:--assemble --scan\nmdadm:--incremental --run --scan\npxeos:\nmessage:Task completed. Powering off in 5s.\nsleep:5\npoweroff:'
+[[ $(<"$normal_log") == "$expected" ]] || fail '普通成功关机路径未在等待前提示或改变'
+[[ -f $tmp/.pxeos-quiet-shutdown && ! -L $tmp/.pxeos-quiet-shutdown ]] || fail '普通成功关机路径未在等待后创建静默标记'
+[[ $(<"$tmp/kernel-printk") == 0 ]] || fail '普通成功关机路径未降低内核控制台日志级别'
+symlink_supported=1
+printf 'marker target\n' >"$tmp/marker-target"
+if ! ln -s "$tmp/marker-target" "$tmp/symlink-probe" 2>/dev/null || [[ ! -L $tmp/symlink-probe ]]; then
+    symlink_supported=0
+fi
+rm -f "$tmp/symlink-probe"
+if [[ $symlink_supported -eq 1 ]]; then
+    normal_log=$(run_normal_s99 normal-success-unsafe-marker 0 '' '' unsafe-symlink)
+    expected=$'mdadm:--auto-detect\nmdadm:--assemble --scan\nmdadm:--incremental --run --scan\npxeos:\nmessage:Task completed. Rebooting in 5s.\nsleep:5\nmessage:Quiet shutdown marker already exists. Leaving normal shutdown messages enabled.\nreboot:-f'
+    [[ $(<"$normal_log") == "$expected" ]] || fail '不安全静默标记未保留正常重启与可见警告'
+    [[ $(<"$tmp/kernel-printk") == '7 4 1 7' ]] || fail '不安全静默标记错误改变内核控制台日志级别'
+else
+    printf 'SKIP: unsafe quiet-shutdown symlink case (real symlink unavailable)\n'
+fi
+normal_log=$(run_normal_s99 normal-success-printk-failure 0 '' '' none unavailable)
+expected=$'mdadm:--auto-detect\nmdadm:--assemble --scan\nmdadm:--incremental --run --scan\npxeos:\nmessage:Task completed. Rebooting in 5s.\nsleep:5\nmessage:Could not read kernel console log level. Leaving normal shutdown messages enabled.\nreboot:-f'
+[[ $(<"$normal_log") == "$expected" ]] || fail '内核控制台日志设置失败未保留重启与可见警告'
+[[ ! -e $tmp/.pxeos-quiet-shutdown && ! -L $tmp/.pxeos-quiet-shutdown ]] || fail '内核控制台日志设置失败后未移除静默标记'
+normal_log=$(run_normal_s99 normal-success-poweroff-failure 0 1 '' none ready 23)
+expected=$'mdadm:--auto-detect\nmdadm:--assemble --scan\nmdadm:--incremental --run --scan\npxeos:\nmessage:Task completed. Powering off in 5s.\nsleep:5\npoweroff:\nmessage:poweroff command failed with code: 23. Quiet shutdown was disabled.'
+[[ $(<"$normal_log") == "$expected" ]] || fail '关机命令失败未恢复可见错误收尾'
+[[ $(<"$normal_log.rc") == 23 ]] || fail '关机命令失败未保留原退出码'
+[[ $(<"$tmp/kernel-printk") == '7' ]] || fail '关机命令失败后未恢复内核控制台日志级别'
+[[ ! -e $tmp/.pxeos-quiet-shutdown && ! -L $tmp/.pxeos-quiet-shutdown ]] || fail '关机命令失败后未移除静默标记'
+normal_log=$(run_normal_s99 normal-success-reboot-failure 0 '' '' none ready 23)
+expected=$'mdadm:--auto-detect\nmdadm:--assemble --scan\nmdadm:--incremental --run --scan\npxeos:\nmessage:Task completed. Rebooting in 5s.\nsleep:5\nreboot:-f\nmessage:reboot command failed with code: 23. Quiet shutdown was disabled.'
+[[ $(<"$normal_log") == "$expected" ]] || fail '重启命令失败未恢复可见错误收尾'
+[[ $(<"$normal_log.rc") == 23 ]] || fail '重启命令失败未保留原退出码'
+[[ $(<"$tmp/kernel-printk") == '7' ]] || fail '重启命令失败后未恢复内核控制台日志级别'
+[[ ! -e $tmp/.pxeos-quiet-shutdown && ! -L $tmp/.pxeos-quiet-shutdown ]] || fail '重启命令失败后未移除静默标记'
+normal_log=$(run_normal_s99 existing-marker-poweroff-failure 0 1 '' existing-regular ready 23)
+expected=$'mdadm:--auto-detect\nmdadm:--assemble --scan\nmdadm:--incremental --run --scan\npxeos:\nmessage:Task completed. Powering off in 5s.\nsleep:5\nmessage:Quiet shutdown marker already exists. Leaving normal shutdown messages enabled.\npoweroff:\nmessage:poweroff command failed with code: 23. Quiet shutdown was disabled.'
+[[ $(<"$normal_log") == "$expected" ]] || fail '已有普通静默标记的关机失败路径不正确'
+[[ $(<"$normal_log.rc") == 23 ]] || fail '已有普通静默标记的关机失败未保留原退出码'
+[[ $(<"$tmp/kernel-printk") == '7 4 1 7' ]] || fail '已有普通静默标记错误改变内核控制台日志级别'
+[[ -f $tmp/.pxeos-quiet-shutdown && ! -L $tmp/.pxeos-quiet-shutdown ]] || fail '已有普通静默标记的关机失败错误删除 marker'
 normal_log=$(run_normal_s99 normal-failure-reboot 9 '' '')
 grep -Fxq 'reboot:-f' "$normal_log" || fail '普通失败重启路径改变'
+[[ ! -e $tmp/.pxeos-quiet-shutdown && ! -L $tmp/.pxeos-quiet-shutdown ]] || fail '普通失败重启路径错误创建静默标记'
 normal_log=$(run_normal_s99 normal-failure-poweroff 9 '' shutdown)
 grep -Fxq 'poweroff:' "$normal_log" || fail '普通失败关机路径改变'
+[[ ! -e $tmp/.pxeos-quiet-shutdown && ! -L $tmp/.pxeos-quiet-shutdown ]] || fail '普通失败关机路径错误创建静默标记'
 printf 'PASS: PXEOS SSH debug mode regression\n'
 )
 # ===== PXEOS SSH 调试模式回归结束 =====

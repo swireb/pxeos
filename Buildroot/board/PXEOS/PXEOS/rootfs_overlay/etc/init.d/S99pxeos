@@ -24,6 +24,66 @@ pxeos_init_message() {
     printf '%-7s %s\n' "[$level]" "$message"
 }
 
+pxeos_quiet_shutdown_marker='/.pxeos-quiet-shutdown'
+pxeos_quiet_shutdown_console_loglevel=''
+pxeos_quiet_shutdown_marker_created=0
+pxeos_quiet_shutdown_console_changed=0
+
+pxeos_remove_quiet_shutdown_marker() {
+    local marker="$pxeos_quiet_shutdown_marker"
+
+    if [[ $pxeos_quiet_shutdown_marker_created -eq 1 && -f $marker && ! -L $marker && -O $marker ]]; then
+        rm -f -- "$marker"
+    fi
+    pxeos_quiet_shutdown_marker_created=0
+}
+
+pxeos_enable_quiet_shutdown() {
+    local marker="$pxeos_quiet_shutdown_marker"
+
+    pxeos_quiet_shutdown_marker_created=0
+    pxeos_quiet_shutdown_console_loglevel=''
+    pxeos_quiet_shutdown_console_changed=0
+    if [[ -e $marker || -L $marker ]]; then
+        pxeos_init_message WARN 'Quiet shutdown marker already exists. Leaving normal shutdown messages enabled.'
+        return 1
+    fi
+    if ! (umask 077; set -C; : >"$marker") 2>/dev/null; then
+        pxeos_init_message WARN 'Could not create quiet shutdown marker. Leaving normal shutdown messages enabled.'
+        return 1
+    fi
+    pxeos_quiet_shutdown_marker_created=1
+    if [[ ! -f $marker || -L $marker || ! -O $marker ]] || ! chmod 600 -- "$marker" 2>/dev/null; then
+        pxeos_remove_quiet_shutdown_marker
+        pxeos_init_message WARN 'Quiet shutdown marker is invalid. Leaving normal shutdown messages enabled.'
+        return 1
+    fi
+    if ! read -r pxeos_quiet_shutdown_console_loglevel _ </proc/sys/kernel/printk \
+        || [[ ! $pxeos_quiet_shutdown_console_loglevel =~ ^([0-9]|1[0-5])$ ]]; then
+        pxeos_remove_quiet_shutdown_marker
+        pxeos_init_message WARN 'Could not read kernel console log level. Leaving normal shutdown messages enabled.'
+        return 1
+    fi
+    if ! printf '0\n' >/proc/sys/kernel/printk; then
+        pxeos_remove_quiet_shutdown_marker
+        pxeos_init_message WARN 'Could not lower kernel console log level for shutdown. Leaving normal shutdown messages enabled.'
+        return 1
+    fi
+    pxeos_quiet_shutdown_console_changed=1
+}
+
+pxeos_restore_quiet_shutdown() {
+    local action="$1" action_rc="$2"
+
+    if [[ $pxeos_quiet_shutdown_console_changed -eq 1 ]] \
+        && ! printf '%s\n' "$pxeos_quiet_shutdown_console_loglevel" >/proc/sys/kernel/printk; then
+        pxeos_init_message WARN 'Could not restore kernel console log level after power action failure.'
+    fi
+    pxeos_quiet_shutdown_console_changed=0
+    pxeos_remove_quiet_shutdown_marker
+    pxeos_init_message ERROR "$action command failed with code: $action_rc. Quiet shutdown was disabled."
+}
+
 pxeos_manual_task_handoff() {
     local handoff_dir handoff_file
     local -a fields
@@ -82,18 +142,22 @@ fi
 pxeos
 rc=$?
 if [[ $rc -eq 0 ]]; then
-    sleep 5 >/dev/null 2>&1
     # 优先读取 checkin 下发并落盘的 shutdown（0/1）
     shutdown_local="$shutdown"
     if [[ -f /tmp/pxeos.shutdown ]]; then
         shutdown_local="$(tr -d '\r\n\0' </tmp/pxeos.shutdown)"
     fi
     if [[ "$shutdown_local" == "1" ]]; then
-        pxeos_init_message INFO 'Task completed. Powering off; following shutdown messages are normal.'
-        poweroff >/dev/null 2>&1
+        pxeos_init_message INFO 'Task completed. Powering off in 5s.'
     else
-        pxeos_init_message INFO 'Task completed. Rebooting now.'
-        reboot -f >/dev/null 2>&1
+        pxeos_init_message INFO 'Task completed. Rebooting in 5s.'
+    fi
+    sleep 5 >/dev/null 2>&1
+    pxeos_enable_quiet_shutdown || true
+    if [[ "$shutdown_local" == "1" ]]; then
+        poweroff >/dev/null 2>&1 || { power_rc=$?; pxeos_restore_quiet_shutdown poweroff "$power_rc"; exit "$power_rc"; }
+    else
+        reboot -f >/dev/null 2>&1 || { reboot_rc=$?; pxeos_restore_quiet_shutdown reboot "$reboot_rc"; exit "$reboot_rc"; }
     fi
 else
     pxeos_init_message WARN "Task exited with code: $rc."

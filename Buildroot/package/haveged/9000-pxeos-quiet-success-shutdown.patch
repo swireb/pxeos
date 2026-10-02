@@ -1,0 +1,44 @@
+--- a/src/haveged.c
++++ b/src/haveged.c
+@@ -624,6 +624,28 @@ static int get_poolsize(   /* RETURN: number of bits  */
+       error_exit("Couldn't get poolsize");
+    return max_bits;
+ }
++
++static int pxeos_quiet_shutdown_marker_is_valid(void)
++{
++   struct stat st;
++
++   return lstat("/.pxeos-quiet-shutdown", &st) == 0
++      && S_ISREG(st.st_mode)
++      && st.st_uid == 0
++      && (st.st_mode & 07777) == 0600
++      && st.st_nlink == 1;
++}
++
++static void pxeos_quiet_shutdown_exit(void)
++{
++#ifndef NO_DAEMON
++   if (params->detached!=0) {
++      unlink(params->pid_file);
++   }
++#endif
++   havege_destroy(handle);
++   exit(params->exit_code);
++}
+ /**
+  * Run as a daemon writing to random device entropy pool
+  */
+@@ -682,8 +704,11 @@ static void run_daemon(    /* RETURN: nothing   */
+       fd_set read_fd;
+ #endif
+ 
+-      if (params->exit_code > 128)
++      if (params->exit_code > 128) {
++         if (params->exit_code == 128 + SIGTERM && pxeos_quiet_shutdown_marker_is_valid())
++            pxeos_quiet_shutdown_exit();
+          error_exit("Stopping due to signal %d\n", params->exit_code - 128);
++         }
+ 
+       t[1] = time(NULL);
+       if (t[1] - t[0] > params->time_interval) {

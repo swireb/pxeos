@@ -1,0 +1,76 @@
+--- a/init/init.c
++++ b/init/init.c
+@@ -755,25 +755,42 @@ static void pause_and_low_level_reboot(unsigned magic)
+ 	_exit_SUCCESS();
+ }
+ 
+-static void run_shutdown_and_kill_processes(void)
++static int pxeos_quiet_shutdown_marker_is_valid(void)
+ {
++	struct stat st;
++
++	return lstat("/.pxeos-quiet-shutdown", &st) == 0
++		&& S_ISREG(st.st_mode)
++		&& st.st_uid == 0
++		&& (st.st_mode & 07777) == 0600
++		&& st.st_nlink == 1;
++}
++
++static int run_shutdown_and_kill_processes(void)
++{
++	int quiet_shutdown = pxeos_quiet_shutdown_marker_is_valid();
++
+ 	/* Run everything to be run at "shutdown".  This is done _prior_
+ 	 * to killing everything, in case people wish to use scripts to
+ 	 * shut things down gracefully... */
+ 	run_actions(SHUTDOWN);
+ 
+-	message(L_CONSOLE | L_LOG, "The system is going down NOW!");
++	if (!quiet_shutdown)
++		message(L_CONSOLE | L_LOG, "The system is going down NOW!");
+ 
+ 	/* Send signals to every process _except_ pid 1 */
+ 	kill(-1, SIGTERM);
+-	message(L_CONSOLE, "Sent SIG%s to all processes", "TERM");
++	if (!quiet_shutdown)
++		message(L_CONSOLE, "Sent SIG%s to all processes", "TERM");
+ 	sync();
+ 	sleep1();
+ 
+ 	kill(-1, SIGKILL);
+-	message(L_CONSOLE, "Sent SIG%s to all processes", "KILL");
++	if (!quiet_shutdown)
++		message(L_CONSOLE, "Sent SIG%s to all processes", "KILL");
+ 	sync();
+ 	/*sleep1(); - callers take care about making a pause */
++	return quiet_shutdown;
+ }
+ 
+ /* Signal handling by init:
+@@ -812,6 +829,7 @@ static void halt_reboot_pwoff(int sig)
+ {
+ 	const char *m;
+ 	unsigned rb;
++	int quiet_shutdown;
+ 
+ 	/* We may call run() and it unmasks signals,
+ 	 * including the one masked inside this signal handler.
+@@ -821,7 +839,7 @@ static void halt_reboot_pwoff(int sig)
+ 	 */
+ 	reset_sighandlers_and_unblock_sigs();
+ 
+-	run_shutdown_and_kill_processes();
++	quiet_shutdown = run_shutdown_and_kill_processes();
+ 
+ 	m = "halt";
+ 	rb = RB_HALT_SYSTEM;
+@@ -832,7 +850,8 @@ static void halt_reboot_pwoff(int sig)
+ 		m = "poweroff";
+ 		rb = RB_POWER_OFF;
+ 	}
+-	message(L_CONSOLE, "Requesting system %s", m);
++	if (!quiet_shutdown)
++		message(L_CONSOLE, "Requesting system %s", m);
+ 	pause_and_low_level_reboot(rb);
+ 	/* not reached */
+ }
