@@ -481,10 +481,14 @@ class CabextractDownloadTests(unittest.TestCase):
         self.assertIn("  input_checks:\n", beta)
         release_publish = self.workflow_steps(RELEASE_WORKFLOW, "release")
         beta_publish = self.workflow_steps(BETA_WORKFLOW, "release")
-        self.assertLess(
-            release_publish.index("Generate latest download manifest"),
-            release_publish.index("Run final sha256 checksum"),
-        )
+        release_order = [
+            "Generate release download manifest",
+            "Run final sha256 checksum",
+            "Create GitHub Release",
+            "Generate latest download manifest",
+            "Publish latest download manifest",
+        ]
+        self.assertEqual(sorted(release_order, key=release_publish.index), release_order)
         self.assertLess(
             beta_publish.index("Generate beta download manifest"),
             beta_publish.index("Run final sha256 checksum"),

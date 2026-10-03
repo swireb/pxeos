@@ -242,11 +242,11 @@ jobs:
           fallback_tag="${TAG_NAME}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           TAG_NAME=$(bash scripts/check-release-tag.sh --repo "$GITHUB_REPOSITORY" --tag "$TAG_NAME" --fallback-tag "$fallback_tag")
           echo "TAG_NAME=$TAG_NAME" >> "$GITHUB_ENV"
-      - name: Generate latest download manifest
+      - name: Generate release download manifest
         env:
           RELEASE_TAG: ${{ env.TAG_NAME }}
         run: |
-          python3 scripts/generate-pxeos-manifest.py --input-dir distribution-files --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --download-channel latest --output distribution-files/pxeos.json --require-all
+          python3 scripts/generate-pxeos-manifest.py --input-dir distribution-files --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --output distribution-files/pxeos.json --require-all
       - name: Run final sha256 checksum
         run: |
           cd distribution-files
@@ -277,6 +277,13 @@ jobs:
             distribution-files/init.xz.sha256
             distribution-files/init_32.xz
             distribution-files/init_32.xz.sha256
+            distribution-files/pxeos.json
+      - name: Generate latest download manifest
+        env:
+          RELEASE_TAG: ${{ env.TAG_NAME }}
+        run: |
+          mkdir -p channel-files
+          python3 scripts/generate-pxeos-manifest.py --input-dir distribution-files --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --download-channel latest --output channel-files/pxeos.json --require-all
       - name: Publish latest download manifest
         env:
           GH_TOKEN: ${{ github.token }}
@@ -285,5 +292,5 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --channel latest \
             --target "$GITHUB_SHA" \
-            --manifest distribution-files/pxeos.json \
+            --manifest channel-files/pxeos.json \
             --resource-dir distribution-files

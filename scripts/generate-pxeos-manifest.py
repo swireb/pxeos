@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""从 PXEOS 发行产物生成带固定频道下载 URL 的清单。"""
+"""从 PXEOS 发行产物生成清单。
+
+省略下载频道时，资源 URL 固定指向传入的历史 release tag；显式指定
+``latest`` 或 ``beta`` 时，资源 URL 指向对应的可变频道。
+"""
 
 from __future__ import annotations
 
@@ -26,7 +30,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--repo", required=True)
     parser.add_argument("--tag", required=True)
-    parser.add_argument("--download-channel", choices=("latest", "beta"), required=True)
+    parser.add_argument("--download-channel", choices=("latest", "beta"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--require-all", action="store_true")
     return parser.parse_args()
@@ -48,12 +52,13 @@ def asset(path: Path, repository: str, channel: str) -> dict[str, str]:
 
 
 def generate(
-    input_dir: Path, repository: str, tag: str, channel: str, require_all: bool
+    input_dir: Path, repository: str, tag: str, channel: str | None, require_all: bool
 ) -> dict[str, list[dict[str, object]]]:
     if not REPOSITORY_PATTERN.fullmatch(repository):
         raise ValueError("--repo must be an owner/repository reference")
     if not TAG_PATTERN.fullmatch(tag) or tag in MUTABLE_ALIASES:
         raise ValueError("--tag must be a historical release tag, not latest or beta")
+    download_ref = tag if channel is None else channel
 
     kernels: list[dict[str, object]] = []
     missing: list[str] = []
@@ -72,8 +77,8 @@ def generate(
                 {
                     "arch": architecture,
                     "version": tag,
-                    "kernel": asset(kernel, repository, channel),
-                    "initrd": asset(initrd, repository, channel),
+                    "kernel": asset(kernel, repository, download_ref),
+                    "initrd": asset(initrd, repository, download_ref),
                 }
             )
         elif require_all:

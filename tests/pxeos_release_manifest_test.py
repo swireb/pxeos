@@ -40,23 +40,29 @@ class ManifestTests(unittest.TestCase):
         (self.dist / kernel).write_bytes((kernel + "\\n").encode())
         (self.dist / initrd).write_bytes((initrd + "\\n").encode())
 
-    def generate(self, *extra: str) -> subprocess.CompletedProcess[str]:
+    def generate(
+        self,
+        *extra: str,
+        download_channel: str | None = "latest",
+        output_name: str = "pxeos.json",
+    ) -> subprocess.CompletedProcess[str]:
+        command = [
+            sys.executable,
+            str(GENERATOR),
+            "--input-dir",
+            str(self.dist),
+            "--repo",
+            "swireb/pxeos",
+            "--tag",
+            "v1.2.3",
+            "--output",
+            str(self.dist / output_name),
+        ]
+        if download_channel is not None:
+            command.extend(("--download-channel", download_channel))
+        command.extend(extra)
         return subprocess.run(
-            [
-                sys.executable,
-                str(GENERATOR),
-                "--input-dir",
-                str(self.dist),
-                "--repo",
-                "swireb/pxeos",
-                "--tag",
-                "v1.2.3",
-                "--download-channel",
-                "latest",
-                "--output",
-                str(self.dist / "pxeos.json"),
-                *extra,
-            ],
+            command,
             text=True,
             capture_output=True,
         )
@@ -112,8 +118,59 @@ class ManifestTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.dist / "pxeos.json").exists())
 
-    def test_mutable_alias_is_not_a_valid_historical_tag(self) -> None:
+    def test_omitted_channel_uses_historical_tag_and_explicit_channels_remain_distinct(self) -> None:
+        self.write_pair("bzImage32", "init_32.xz")
         self.write_pair("bzImage", "init.xz")
+        self.write_pair("arm_Image", "arm_init.cpio.gz")
+        for directory in ("history", "latest", "beta"):
+            (self.dist / directory).mkdir()
+
+        historical = self.generate(
+            "--require-all", download_channel=None, output_name="history/pxeos.json"
+        )
+        latest = self.generate(
+            "--require-all", download_channel="latest", output_name="latest/pxeos.json"
+        )
+        beta = self.generate(
+            "--require-all", download_channel="beta", output_name="beta/pxeos.json"
+        )
+
+        for result in (historical, latest, beta):
+            self.assertEqual(result.returncode, 0, result.stderr)
+        documents = {
+            name: json.loads((self.dist / name / "pxeos.json").read_text())
+            for name in ("history", "latest", "beta")
+        }
+        self.assertEqual(
+            [entry["version"] for entry in documents["history"]["kernels"]],
+            ["v1.2.3"] * 3,
+        )
+        for index, historical_entry in enumerate(documents["history"]["kernels"]):
+            latest_entry = documents["latest"]["kernels"][index]
+            beta_entry = documents["beta"]["kernels"][index]
+            for role in ("kernel", "initrd"):
+                self.assertEqual(historical_entry[role]["sha256"], latest_entry[role]["sha256"])
+                self.assertEqual(historical_entry[role]["sha256"], beta_entry[role]["sha256"])
+                name = historical_entry[role]["url"].rsplit("/", 1)[1]
+                self.assertEqual(
+                    historical_entry[role]["url"],
+                    f"https://github.com/swireb/pxeos/releases/download/v1.2.3/{name}",
+                )
+                self.assertEqual(
+                    latest_entry[role]["url"],
+                    f"https://github.com/swireb/pxeos/releases/download/latest/{name}",
+                )
+                self.assertEqual(
+                    beta_entry[role]["url"],
+                    f"https://github.com/swireb/pxeos/releases/download/beta/{name}",
+                )
+
+    def test_collision_suffixed_tag_is_used_for_historical_version_and_urls(self) -> None:
+        self.write_pair("bzImage32", "init_32.xz")
+        self.write_pair("bzImage", "init.xz")
+        self.write_pair("arm_Image", "arm_init.cpio.gz")
+        tag = "Release-261003-0342-1234-2"
+        output = self.dist / "pxeos.json"
         result = subprocess.run(
             [
                 sys.executable,
@@ -123,17 +180,49 @@ class ManifestTests(unittest.TestCase):
                 "--repo",
                 "swireb/pxeos",
                 "--tag",
-                "latest",
-                "--download-channel",
-                "latest",
+                tag,
                 "--output",
-                str(self.dist / "pxeos.json"),
+                str(output),
+                "--require-all",
             ],
             text=True,
             capture_output=True,
         )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((self.dist / "pxeos.json").exists())
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = json.loads(output.read_text())
+        self.assertEqual(len(manifest["kernels"]), 3)
+        for entry in manifest["kernels"]:
+            self.assertEqual(entry["version"], tag)
+            for role in ("kernel", "initrd"):
+                name = entry[role]["url"].rsplit("/", 1)[1]
+                self.assertEqual(
+                    entry[role]["url"],
+                    f"https://github.com/swireb/pxeos/releases/download/{tag}/{name}",
+                )
+
+    def test_mutable_alias_is_not_a_valid_historical_tag(self) -> None:
+        self.write_pair("bzImage", "init.xz")
+        for tag in ("latest", "beta"):
+            with self.subTest(tag=tag):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(GENERATOR),
+                        "--input-dir",
+                        str(self.dist),
+                        "--repo",
+                        "swireb/pxeos",
+                        "--tag",
+                        tag,
+                        "--output",
+                        str(self.dist / "pxeos.json"),
+                    ],
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((self.dist / "pxeos.json").exists())
 
 
 class PublisherTests(unittest.TestCase):
@@ -472,6 +561,37 @@ class WorkflowContractTests(unittest.TestCase):
             release.index("Create GitHub Release"),
             release.index("Publish latest download manifest"),
         )
+        self.assertIn("- name: Generate release download manifest", release)
+        self.assertIn("mkdir -p channel-files", release)
+        self.assertIn(
+            "python3 scripts/generate-pxeos-manifest.py --input-dir distribution-files "
+            '--repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --output '
+            "distribution-files/pxeos.json --require-all",
+            release,
+        )
+        self.assertIn(
+            "python3 scripts/generate-pxeos-manifest.py --input-dir distribution-files "
+            '--repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --download-channel latest '
+            "--output channel-files/pxeos.json --require-all",
+            release,
+        )
+        release_order = [
+            "Validate historical release tag",
+            "Generate release download manifest",
+            "Run final sha256 checksum",
+            "Create GitHub Release",
+            "Generate latest download manifest",
+            "Publish latest download manifest",
+        ]
+        self.assertEqual(sorted(release_order, key=release.index), release_order)
+        release_files = release.split("          files: |", 1)[1].split(
+            "      - name: Generate latest download manifest", 1
+        )[0]
+        attachments = [line.strip() for line in release_files.splitlines() if line.strip()]
+        self.assertEqual(len(attachments), 13)
+        self.assertIn("distribution-files/pxeos.json", attachments)
+        self.assertIn("--manifest channel-files/pxeos.json", release)
+        self.assertIn("--resource-dir distribution-files", release)
         self.assertIn("--require-all", release)
         self.assertNotIn("--require-all", beta)
         for text in (release, beta):

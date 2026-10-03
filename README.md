@@ -109,9 +109,9 @@ PXEOS 的协议、安全、硬件与故障处理说明已按主题拆分；本�
 
 ## 发布下载清单
 
-正式和测试发布均生成 `pxeos.json`。文件只包含 `kernels` 数组；每个完整架构 pair 记录其 `arch`、历史 `version`、内核和 initramfs 的 GitHub Release 下载 URL 及实际 SHA-256。x86、x64 与 arm64 的文件名遵循上表，URL 固定指向对应的可变频道。
+正式和测试发布均生成 `pxeos.json`。文件只包含 `kernels` 数组；每个完整架构 pair 记录其 `arch`、历史 `version`、内核和 initramfs 的 GitHub Release 下载 URL 及实际 SHA-256。x86、x64 与 arm64 的文件名遵循上表。正式历史发布附件中的清单 URL 固定指向该历史 tag；正式 `latest` 频道另有独立的频道清单，测试发布继续使用 `beta` 频道清单。
 
-正式发布显示名示例为 `Release-261002-1530`，测试发布显示名示例为 `Beta-261002-1530`；两者均使用北京时间 `YYMMDD-HHmm`。首次历史 tag 与显示名相同；同一分钟发现已有 ref 或 Release 时，仅历史 tag 追加 `-<run-id>-<attempt>`，显示名不变；追加后的 tag 仍冲突或 API 返回非 404 时会停止，不会覆盖历史发布。固定 `latest` 和 `beta` Release 分别显示为 `Latest Release` 和 `Latest Beta`，覆盖本批次二进制、对应 SHA-256 文件及各自清单；清单 URL 固定指向该频道，`version` 仍是历史构建 tag。正式历史发布与 `latest` 均不是 prerelease；测试历史发布与 `beta` 均为 prerelease，且 `beta` 不会成为 GitHub Latest。频道更新仅允许这两个 tag，遇到不可变 Release、403 或其他非 404 API 错误会失败停止。固定频道覆盖不是原子操作，下载端应先校验资源的 SHA-256；校验失败时重新获取 JSON 后再重试下载，避免使用更新过程中的混合批次。`make_latest` 使用 GitHub Releases Update API 的字符串字段，详见[GitHub REST 文档](https://docs.github.com/en/rest/releases/releases#update-a-release)。
+正式发布显示名示例为 `Release-261002-1530`，测试发布显示名示例为 `Beta-261002-1530`；两者均使用北京时间 `YYMMDD-HHmm`。首次历史 tag 与显示名相同；同一分钟发现已有 ref 或 Release 时，仅历史 tag 追加 `-<run-id>-<attempt>`，显示名不变；追加后的 tag 仍冲突或 API 返回非 404 时会停止，不会覆盖历史发布。固定 `latest` 和 `beta` Release 分别显示为 `Latest Release` 和 `Latest Beta`，覆盖本批次二进制、对应 SHA-256 文件及各自频道清单；频道清单 URL 固定指向该频道，`version` 仍是历史构建 tag，正式历史发布附件中的清单 URL 不会随频道更新而改变。正式历史发布与 `latest` 均不是 prerelease；测试历史发布与 `beta` 均为 prerelease，且 `beta` 不会成为 GitHub Latest。频道更新仅允许这两个 tag，遇到不可变 Release、403 或其他非 404 API 错误会失败停止。固定频道覆盖不是原子操作，下载端应先校验资源的 SHA-256；校验失败时重新获取 JSON 后再重试下载，避免使用更新过程中的混合批次。`make_latest` 使用 GitHub Releases Update API 的字符串字段，详见[GitHub REST 文档](https://docs.github.com/en/rest/releases/releases#update-a-release)。
 
 正式工作流无自定义 dispatch 输入，并始终构建三种架构的完整内核和 initramfs pair。测试工作流仅提供 `arm64`、`x64` 和 `x86` 三个勾选项；每个勾选项同时控制该架构的内核和 initramfs。至少选择一种架构后，成功完成的工作流会先发布历史版本，再自动更新对应固定频道。
 
