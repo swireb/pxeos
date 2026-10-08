@@ -1006,6 +1006,12 @@ schemaRevision=1; schemaHash=$(rootpxe_canonical_json_hash "$tmp/lvm-mbr-schema.
 jq --arg hash "$schemaHash" '. + {schemaHash:$hash}' "$tmp/lvm-layout.json" >"$tmp/lvm-mbr-layout.json"
 rootpxe_validate_deployment_layout /dev/sda "$tmp/lvm-mbr-schema.json" "$tmp/lvm-mbr-layout.json" || fail mbr-lvm-without-extended-rejected
 rm -f "$rootpxe_resolved_layout_file"; unset rootpxe_resolved_layout_file schemaRevision schemaHash
+# Fixed父PV也必须穿过生产物理布局解析器；后续LVM解析会以同一冻结值复核。
+schemaRevision=1; schemaHash=$(rootpxe_canonical_json_hash "$tmp/lvm-mbr-schema.json")
+printf '{"schemaHash":"%s","partitions":[{"number":1,"mode":"fixed","fixedBytes":268435456}],"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"preserveOriginal","volumes":[{"uuid":"lv-root","mode":"fixed","fixedBytes":67108864}]}]}' "$schemaHash" >"$tmp/lvm-mbr-fixed-layout.json"
+rootpxe_validate_deployment_layout /dev/sda "$tmp/lvm-mbr-schema.json" "$tmp/lvm-mbr-fixed-layout.json" || fail mbr-lvm-fixed-parent-resolver-rejected
+jq -e 'length == 1 and .[0].number == 1 and .[0].resolvedSectors == 524288' "$rootpxe_resolved_layout_file" >/dev/null || fail mbr-lvm-fixed-parent-resolver-geometry
+rm -f "$rootpxe_resolved_layout_file"; unset rootpxe_resolved_layout_file schemaRevision schemaHash
 cat >"$tmp/capture/d2.partitions" <<'EOF'
 label: dos
 device: /dev/sda
@@ -1616,7 +1622,7 @@ node -e 'const extent=4194304,capacity=100*extent,min=9*extent,fixed=10*extent,r
 # accept only grow-only fixed/remaining sizes with a remaining PV: it recreates swap
 # after a possible lvextend and preserves its captured UUID.
 cat >"$tmp/swap-grow-schema.json" <<'EOF'
-{"version":2,"logicalSectorBytes":512,"lvm":{"version":1,"captureMode":"per_lv","resizePolicy":"grow_only","pvs":[{"partitionNumber":1,"uuid":"pv-1","vgUuid":"vg-1","originalBytes":268435456,"minBytes":268435456,"peStartBytes":1048576,"artifact":"d1p1.lvm.pv.meta","vgConfigArtifact":"d1p1.lvm.vg.cfg"}],"vgs":[{"name":"vg0","uuid":"vg-1","extentBytes":4194304,"pvPartitionNumbers":[1],"originalFreeBytes":0,"lvs":[{"name":"root","uuid":"lv-root","layout":"linear","originalBytes":67108864,"minBytes":67108864,"fs":"ext4","role":"data","resizable":true,"artifact":"d1p1.lvm.lv.root.img"},{"name":"swap","uuid":"lv-swap","layout":"linear","originalBytes":33554432,"minBytes":33554432,"fs":"swap","role":"swap","resizable":false,"artifact":"","swapUuid":"swap-uuid"}]}]}}
+{"version":2,"logicalSectorBytes":512,"partitions":[{"number":1,"originalSectors":524288}],"lvm":{"version":1,"captureMode":"per_lv","resizePolicy":"grow_only","pvs":[{"partitionNumber":1,"uuid":"pv-1","vgUuid":"vg-1","originalBytes":268435456,"minBytes":268435456,"peStartBytes":1048576,"artifact":"d1p1.lvm.pv.meta","vgConfigArtifact":"d1p1.lvm.vg.cfg"}],"vgs":[{"name":"vg0","uuid":"vg-1","extentBytes":4194304,"pvPartitionNumbers":[1],"originalFreeBytes":0,"lvs":[{"name":"root","uuid":"lv-root","layout":"linear","originalBytes":67108864,"minBytes":67108864,"fs":"ext4","role":"data","resizable":true,"artifact":"d1p1.lvm.lv.root.img"},{"name":"swap","uuid":"lv-swap","layout":"linear","originalBytes":33554432,"minBytes":33554432,"fs":"swap","role":"swap","resizable":false,"artifact":"","swapUuid":"swap-uuid"}]}]}}
 EOF
 printf '%s\n' '[{"number":1,"resolvedSectors":524288}]' >"$tmp/swap-grow-partitions.json"
 for swap_layout in \
@@ -1638,9 +1644,31 @@ printf '%s\n' '{"version":2,"partitions":[{"number":1,"mode":"original"}],"lvm":
 jq() { rootpxe_test_real_jq "$@"; }
 rootpxe_validate_lvm_deployment_layout "$tmp/swap-grow-schema.json" "$tmp/swap-grow-layout.json" "$tmp/swap-grow-partitions.json" && fail lvm-original-pv-must-not-allow-lv-growth
 unset -f jq
-printf '%s\n' '{"version":2,"partitions":[{"number":1,"mode":"fixed","fixedBytes":268435456}],"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"preserveOriginal","volumes":[{"uuid":"lv-root","mode":"original"},{"uuid":"lv-swap","mode":"original"}]}]}' >"$tmp/swap-grow-layout.json"
+printf '%s\n' '{"version":2,"partitions":[{"number":1,"mode":"fixed","fixedBytes":268435456}],"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"preserveOriginal","volumes":[{"uuid":"lv-root","mode":"fixed","fixedBytes":67108864},{"uuid":"lv-swap","mode":"original"}]}]}' >"$tmp/swap-grow-layout.json"
 jq() { rootpxe_test_real_jq "$@"; }
-rootpxe_validate_lvm_deployment_layout "$tmp/swap-grow-schema.json" "$tmp/swap-grow-layout.json" "$tmp/swap-grow-partitions.json" && fail lvm-pv-fixed-must-reject
+rootpxe_validate_lvm_deployment_layout "$tmp/swap-grow-schema.json" "$tmp/swap-grow-layout.json" "$tmp/swap-grow-partitions.json" || fail lvm-pv-fixed-must-derive-from-lvs
+printf '%s\n' '{"version":2,"partitions":[{"number":1,"mode":"fixed","fixedBytes":268697600}],"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"preserveOriginal","volumes":[{"uuid":"lv-root","mode":"fixed","fixedBytes":67108864},{"uuid":"lv-swap","mode":"original"}]}]}' >"$tmp/swap-grow-layout.json"
+rootpxe_validate_lvm_deployment_layout "$tmp/swap-grow-schema.json" "$tmp/swap-grow-layout.json" "$tmp/swap-grow-partitions.json" && fail lvm-pv-fixed-tamper-must-reject
+unset -f jq
+# 四个LV混合原始/固定大小的总和超过捕获PV基线时，PXEOS必须与管理端一致地派生并核对父PV。
+cat >"$tmp/four-lv-schema.json" <<'EOF'
+{"version":2,"logicalSectorBytes":512,"partitions":[{"number":1,"originalSectors":524288}],"lvm":{"version":1,"captureMode":"per_lv","resizePolicy":"grow_only","pvs":[{"partitionNumber":1,"uuid":"pv-four","vgUuid":"vg-four","originalBytes":268435456,"minBytes":268435456,"peStartBytes":1048576}],"vgs":[{"name":"vg-four","uuid":"vg-four","extentBytes":4194304,"pvPartitionNumbers":[1],"originalFreeBytes":0,"lvs":[{"name":"root","uuid":"lv-root-four","layout":"linear","originalBytes":67108864,"minBytes":67108864,"fs":"ext4","role":"data","resizable":true,"artifact":"root.img"},{"name":"swap","uuid":"lv-swap-four","layout":"linear","originalBytes":33554432,"minBytes":33554432,"fs":"swap","role":"swap","resizable":false,"artifact":"","swapUuid":"swap-four"},{"name":"data","uuid":"lv-data-four","layout":"linear","originalBytes":83886080,"minBytes":83886080,"fs":"xfs","role":"data","resizable":true,"artifact":"data.img"},{"name":"logs","uuid":"lv-logs-four","layout":"linear","originalBytes":83886080,"minBytes":83886080,"fs":"ext4","role":"data","resizable":true,"artifact":"logs.img"}]}]}}
+EOF
+printf '%s\n' '[{"number":1,"resolvedSectors":854016}]' >"$tmp/four-lv-partitions.json"
+printf '%s\n' '{"version":2,"partitions":[{"number":1,"mode":"fixed","fixedBytes":437256192}],"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"preserveOriginal","volumes":[{"uuid":"lv-root-four","mode":"fixed","fixedBytes":134217728},{"uuid":"lv-swap-four","mode":"original"},{"uuid":"lv-data-four","mode":"fixed","fixedBytes":134217728},{"uuid":"lv-logs-four","mode":"fixed","fixedBytes":134217728}]}]}' >"$tmp/four-lv-layout.json"
+jq() { rootpxe_test_real_jq "$@"; }
+rootpxe_validate_lvm_deployment_layout "$tmp/four-lv-schema.json" "$tmp/four-lv-layout.json" "$tmp/four-lv-partitions.json" || fail four-lv-derived-parent
+rootpxe_test_real_jq -e '.pvBytes == 437256192 and ([.volumes[].resolvedBytes] | add) == 436207616' "$rootpxe_resolved_lvm_layout_file" >/dev/null || fail four-lv-derived-parent-result
+rm -f "$rootpxe_resolved_lvm_layout_file"; unset rootpxe_resolved_lvm_layout_file
+printf '%s\n' '{"version":2,"partitions":[{"number":1,"mode":"fixed","fixedBytes":4503599627370496}],"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"preserveOriginal","volumes":[{"uuid":"lv-root-four","mode":"fixed","fixedBytes":4503599627370496},{"uuid":"lv-swap-four","mode":"original"},{"uuid":"lv-data-four","mode":"fixed","fixedBytes":4503599627370496},{"uuid":"lv-logs-four","mode":"original"}]}]}' >"$tmp/four-lv-unsafe-layout.json"
+rootpxe_validate_lvm_deployment_layout "$tmp/four-lv-schema.json" "$tmp/four-lv-unsafe-layout.json" "$tmp/four-lv-partitions.json" && fail four-lv-json-safe-sum-must-reject
+cat >"$tmp/lvm-rounding-schema.json" <<'EOF'
+{"version":2,"logicalSectorBytes":1,"partitions":[{"number":1,"originalSectors":1}],"lvm":{"version":1,"captureMode":"per_lv","resizePolicy":"grow_only","pvs":[{"partitionNumber":1,"uuid":"pv-round","vgUuid":"vg-round","originalBytes":1,"minBytes":1,"peStartBytes":0}],"vgs":[{"name":"vg-round","uuid":"vg-round","extentBytes":1,"pvPartitionNumbers":[1],"originalFreeBytes":0,"lvs":[{"name":"root","uuid":"lv-round","layout":"linear","originalBytes":1,"minBytes":1,"fs":"ext4","role":"data","resizable":true,"artifact":"round.img"}]}]}}
+EOF
+printf '%s\n' '[{"number":1,"resolvedSectors":1}]' >"$tmp/lvm-rounding-partitions.json"
+printf '%s\n' '{"version":2,"partitions":[{"number":1,"mode":"fixed","fixedBytes":9007199254740991}],"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"preserveOriginal","volumes":[{"uuid":"lv-round","mode":"fixed","fixedBytes":9007199254740991}]}]}' >"$tmp/lvm-rounding-layout.json"
+rootpxe_validate_lvm_deployment_layout "$tmp/lvm-rounding-schema.json" "$tmp/lvm-rounding-layout.json" "$tmp/lvm-rounding-partitions.json" && fail lvm-json-safe-rounding-must-reject
+rm -f "$tmp/four-lv-unsafe-layout.json" "$tmp/lvm-rounding-schema.json" "$tmp/lvm-rounding-partitions.json" "$tmp/lvm-rounding-layout.json"
 unset -f jq
 printf '%s\n' '{"version":2,"partitions":[{"number":1,"mode":"remaining"}],"lvm":[{"pvPartitionNumber":1,"freeSpacePolicy":"allocateToRemaining","volumes":[{"uuid":"lv-root","mode":"original"},{"uuid":"lv-swap","mode":"fixed","fixedBytes":29360128}]}]}' >"$tmp/swap-grow-layout.json"
 jq() { rootpxe_test_real_jq "$@"; }

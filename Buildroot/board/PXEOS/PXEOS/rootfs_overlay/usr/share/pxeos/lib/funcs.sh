@@ -1326,7 +1326,7 @@ rootpxe_validate_deployment_layout() {
             if (($mode|type) != "string" or ($mode|IN("original","fixed","remaining")|not)) then error("unknown mode") else . end |
             if $mode == "fixed" and ((($o.fixedBytes // null)|type) != "number" or ($o.fixedBytes <= 0)) then error("invalid fixed mode") else . end |
             if ($mode == "original" or $mode == "remaining") and ($o|has("fixedBytes")) then error("unexpected mode field") else . end |
-            if $p.role == "lvm_pv" and ($mode|IN("original","remaining")|not) then error("invalid lvm pv mode") else . end |
+            if $p.role == "lvm_pv" and ($mode|IN("original","fixed","remaining")|not) then error("invalid lvm pv mode") else . end |
             if $mode != "original" and (physical_growth_supported($p;$logical;($s.lvm // null))|not) then error("partition growth unsupported") else . end |
             if $mode == "fixed" and $o.fixedBytes < ($p.originalSectors * $logical) then error("original size violated") else . end |
             {p:$p,o:$o,mode:$mode} ] as $items |
@@ -1420,21 +1420,26 @@ rootpxe_validate_lvm_deployment_layout() {
     chmod 600 "$rootpxe_resolved_lvm_layout_file"
     jq -n --slurpfile schema "$schema_file" --slurpfile layout "$layout_file" --slurpfile partitions "$partition_plan" '
       def bynum($n): (.[] | select(.number == $n));
+      def safe_nonnegative: type == "number" and floor == . and . >= 0 and . <= 9007199254740991;
       def modebytes($v;$capacity;$extent):
         if $v.mode == "original" then $v.originalBytes
         elif $v.mode == "fixed" then $v.fixedBytes
         else 0 end;
       ($schema[0]) as $s | ($layout[0]) as $l | ($partitions[0]) as $resolved |
       ($s.lvm) as $ls | ($l.lvm // []) as $ll |
+      ([$ll[]? | (.volumes // [])[] | select(.mode == "remaining")] | length) as $globalRemaining |
       if ($ls.version != 1 or $ls.captureMode != "per_lv" or $ls.resizePolicy != "grow_only" or ($ls.pvs|length)!=1 or ($ls.vgs|length)!=1 or ($ll|length)!=1) then error("invalid lvm topology") else . end |
+      if $globalRemaining > 1 then error("multiple remaining lvm volumes") else . end |
       ($ls.pvs[0]) as $pv | ($ls.vgs[0]) as $vg | ($ll[0]) as $plan |
       ($l.partitions // $l) as $physicalLayout |
       ([$physicalLayout[] | select(.number == $pv.partitionNumber)] | if length == 1 then .[0] else error("lvm pv layout missing") end) as $pvPlan |
       ($pvPlan.mode // "original") as $pvMode |
-      if ($pvMode|IN("original","remaining")|not) or ($pvMode == "original" and ([$plan.volumes[] | select((.mode // "original") != "original")] | length) != 0) then error("lvm pv and lv mode mismatch") else . end |
+      if ($pvMode|IN("original","fixed","remaining")|not) or ($pvMode == "original" and ([$plan.volumes[] | select((.mode // "original") != "original")] | length) != 0) then error("lvm pv and lv mode mismatch") else . end |
       if ([$plan.volumes[] | select(has("percentage"))] | length) != 0 then error("percentage mode is retired") else . end |
       if ($pv.vgUuid != $vg.uuid or $pv.partitionNumber != $vg.pvPartitionNumbers[0] or $plan.pvPartitionNumber != $pv.partitionNumber or ($plan.freeSpacePolicy|IN("preserveOriginal","allocateToRemaining")|not) or ($plan.volumes|length) != ($vg.lvs|length)) then error("lvm identity mismatch") else . end |
+      ((($s.partitions // []) | map(select(.number == $pv.partitionNumber))) | if length == 1 then .[0] else null end) as $sourcePV |
       ([$resolved[] | select(.number == $pv.partitionNumber)]|if length==1 then .[0] else error("resolved pv missing") end) as $resolvedPV |
+      if (($s.logicalSectorBytes|safe_nonnegative|not) or $s.logicalSectorBytes == 0 or ($resolvedPV.resolvedSectors|safe_nonnegative|not) or $resolvedPV.resolvedSectors > (9007199254740991 / $s.logicalSectorBytes | floor)) then error("unsafe pv capacity") else . end |
       ($resolvedPV.resolvedSectors * $s.logicalSectorBytes) as $pvBytes |
       if ($pvBytes < $pv.originalBytes or $pvBytes < $pv.minBytes or $pv.peStartBytes < 0 or $pv.peStartBytes >= $pvBytes) then error("invalid pv capacity") else . end |
       (((($pvBytes - $pv.peStartBytes - (if $plan.freeSpacePolicy == "preserveOriginal" then $vg.originalFreeBytes else 0 end)) / $vg.extentBytes)|floor) * $vg.extentBytes) as $capacity |
@@ -1449,7 +1454,22 @@ rootpxe_validate_lvm_deployment_layout() {
         if $v.mode == "fixed" and (($v.fixedBytes|type)!="number" or $v.fixedBytes < $lv.minBytes or ($v.fixedBytes % $vg.extentBytes)!=0) then error("invalid fixed lvm volume") else . end |
         if ($v.mode == "original" or $v.mode == "remaining") and ($v|has("fixedBytes")) then error("unexpected lvm fields") else . end |
         {schema:$lv,layout:$v}] as $items |
-      if ([$items[].layout|select(.mode=="remaining")]|length)>1 then error("lvm mode totals") else . end |
+      if ([$items[].layout|select(.mode=="remaining")]|length)>1 then error("multiple remaining lvm volumes") else . end |
+      if $pvMode == "fixed" then
+        if $sourcePV == null or $plan.freeSpacePolicy != "preserveOriginal" or ([$items[].layout|select(.mode=="remaining")]|length) != 0 or ([$items[].layout|select(.mode=="fixed")]|length) == 0 then error("fixed pv is not derived from fixed lvs")
+        else
+          if (([$sourcePV.originalSectors, $pv.originalBytes, $pv.minBytes, $pv.peStartBytes, $vg.originalFreeBytes, $vg.extentBytes] | all(safe_nonnegative) | not) or $sourcePV.originalSectors > (9007199254740991 / $s.logicalSectorBytes | floor) or ([$items[] | if .layout.mode == "fixed" then .layout.fixedBytes else .schema.originalBytes end] | all(safe_nonnegative) | not)) then error("unsafe fixed pv capacity")
+          else
+          ([$items[] | if .layout.mode == "fixed" then .layout.fixedBytes else .schema.originalBytes end] | add) as $lvBytes |
+          ($pv.peStartBytes + $vg.originalFreeBytes) as $metadataBytes |
+          ($metadataBytes + $lvBytes) as $lvRequiredBytes |
+          ([$sourcePV.originalSectors * $s.logicalSectorBytes, $pv.originalBytes, $pv.minBytes, $lvRequiredBytes] | max) as $rawPVBytes |
+          ((262144 / $s.logicalSectorBytes | floor | if . < 1 then 1 else . end) * $s.logicalSectorBytes) as $pvAlignmentBytes |
+          (($rawPVBytes / $pvAlignmentBytes | ceil) * $pvAlignmentBytes) as $derivedPVBytes |
+          if $lvBytes > 9007199254740991 or $metadataBytes > 9007199254740991 or $lvRequiredBytes > 9007199254740991 or $rawPVBytes > 9007199254740991 or $derivedPVBytes > 9007199254740991 or ($pvPlan|has("fixedBytes")|not) or $pvPlan.fixedBytes != $derivedPVBytes or $pvBytes != $derivedPVBytes then error("fixed pv capacity mismatch") else . end
+          end
+        end
+      else . end |
       ($items | map(. + {bytes:modebytes((.schema + .layout);$capacity;$vg.extentBytes)})) as $pre |
       ($pre|map(.bytes)|add) as $used |
       if $used > $capacity then error("lvm capacity exceeded") else . end |
