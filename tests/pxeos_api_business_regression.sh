@@ -596,7 +596,11 @@ case "$*" in
   *'schemaHash'*) echo hash ;;
   *'.logicalSectorBytes'*) echo $SCHEMA_SECTOR ;;
   *'.originalDiskBytes'*) echo ${SCHEMA_ORIGINAL:-102400000} ;;
-  *) cat ;;
+  *)
+    for arg; do
+      [[ -e $arg ]] && exec "${REAL_JQ:?}" "$@"
+    done
+    exit 2 ;;
 esac
 EOF
 cat >$tmp/mock/blockdev <<'EOF'
@@ -884,6 +888,19 @@ rootpxe_linux_test_jq() {
 # Linux device names passed through jq --arg.
 rootpxe_lvm_json_jq() { rootpxe_linux_test_jq "$@"; }
 rootpxe_linux_lvm_path_readable() { [[ ${MODE:-} != linux_lvm_postverify_fail ]]; }
+
+# The command-flow jq mock must delegate file-backed partition-table queries to
+# the real jq.  A compound query must retain its original program, while an
+# unknown no-file query must fail immediately instead of waiting on stdin.
+partition_table_fixture=$tmp/partition-table-fixture.json
+printf '%s\n' '{"partitionTable":"mbr","partitions":[]}' >"$partition_table_fixture"
+[[ $(jq -er '.partitionTable' "$partition_table_fixture") == mbr ]] || fail mock-jq-partition-table-read
+jq -e '.partitionTable == "gpt"' "$partition_table_fixture" >/dev/null && fail mock-jq-partition-table-compound-must-reject
+set +e
+jq -e '.unknown' >/dev/null 2>&1
+mock_jq_unknown_rc=$?
+set -e
+[[ $mock_jq_unknown_rc -eq 2 ]] || fail mock-jq-unknown-must-fail-fast
 
 # n no longer has a legacy deployment path.  The required snapshot files are
 # checked before disk permission and the old table/fill preparation is never
@@ -1244,7 +1261,19 @@ grep -Fq '"originalSectors":8192,"minSectors":8192' $rootpxe_original_schema_fil
 grep -Fq '"lvm"' $rootpxe_original_schema_file && fail mbr-v2-empty-lvm-must-be-omitted
 node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1]));const e=s.partitions.find(p=>p.kind==="extended"),l=s.partitions.find(p=>p.kind==="logical");if(!e||!l||"parentNumber" in e||!("ebrReservedSectors" in e)||"ebrReservedSectors" in l||"logicalNumbers" in l)process.exit(1)' "$rootpxe_original_schema_file" || fail mbr-v2-field-boundaries
 grep -Fq 'extended container must be derived' $funcs || fail mbr-derived-layout-guard
-grep -Fq 'derived extended geometry invalid' $funcs || fail mbr-derived-layout-geometry
+# The old implementation exposed a fixed "derived extended geometry invalid"
+# diagnostic.  The resolver now reports the specific geometry guard instead;
+# bind this assertion to live behavior by rejecting a logical partition whose
+# parent does not match the captured extended container, before any layout
+# result can be published.
+grep -Fq 'invalid logical parent' $funcs || fail mbr-derived-layout-parent-guard
+mbr_bad_parent_layout=$tmp/mbr-bad-parent-layout
+printf '{"version":2,"partitionTable":"mbr","logicalSectorBytes":512,"originalDiskBytes":102400000,"partitions":[{"number":1,"kind":"extended","typeGuid":"0x05","startSectors":2048,"originalSectors":8192,"minSectors":8192,"ebrReservedSectors":2},{"number":5,"kind":"logical","typeGuid":"0x83","parentNumber":2,"startSectors":2050,"originalSectors":2048,"minSectors":1024,"resizable":true,"role":"data"}]}' >$tmp/mbr-bad-parent-schema
+SCHEMAHASH=$(rootpxe_canonical_json_hash $tmp/mbr-bad-parent-schema)
+printf '{"schemaHash":"%s","partitions":[{"number":1,"mode":"derived"},{"number":5,"mode":"original"}]}' "$SCHEMAHASH" >$mbr_bad_parent_layout
+MODE=layout_apply; TARGET_BYTES=102400000; export MODE TARGET_BYTES
+rootpxe_validate_deployment_layout /dev/mock $tmp/mbr-bad-parent-schema $mbr_bad_parent_layout && fail mbr-derived-layout-parent-must-reject
+unset MODE TARGET_BYTES
 
 badlogical=$tmp/badlogical; mkdir -p $badlogical; : >$badlogical/d1p5.img
 printf 'label: dos\n/dev/mock5 : start=4096, size=1024, type=83\n' >$badlogical/d1.partitions
@@ -1292,7 +1321,7 @@ node -e 'const a=512,r=Math.floor((7000-3500)/a)*a;if(r!==3072||r%a)process.exit
 # Layout target capacity is converted through bytes into source Schema sectors:
 # a 102400000-byte 4Kn target remains 200000 512-byte Schema sectors.
 schema=$tmp/schema; layoutfile=$tmp/layout
-printf '{"logicalSectorBytes":512,"originalDiskBytes":102400000}\n' >$schema; printf '{}\n' >$layoutfile
+printf '{"version":1,"partitionTable":"gpt","logicalSectorBytes":512,"originalDiskBytes":102400000,"partitions":[{"number":1,"startSectors":2048,"originalSectors":8192,"minSectors":8192,"role":"data","resizable":false,"fs":"ext4","artifact":"d1p1.img"}]}\n' >$schema; printf '{}\n' >$layoutfile
 SCHEMA_SECTOR=512; SCHEMA_ORIGINAL=102400000
 SCHEMAHASH=$(rootpxe_canonical_json_hash $schema)
 TEST_SECTOR=4096
@@ -1307,7 +1336,7 @@ grep -Fq -- '--argjson target 200000' $tmp/jq-args || fail target-byte-sector-co
 # passed to jq and independently pin the EBR-derived extent arithmetic.
 mbr_schema=$tmp/mbr-layout-schema
 mbr_layout=$tmp/mbr-layout
-printf '{"version":2,"partitionTable":"mbr","logicalSectorBytes":512,"originalDiskBytes":102400000,"partitions":[{"number":1,"kind":"extended","startSectors":2048,"originalSectors":8192,"ebrReservedSectors":2},{"number":5,"kind":"logical","parentNumber":1,"startSectors":2050,"originalSectors":2048,"minSectors":1024,"resizable":true,"role":"data"}]}' >$mbr_schema
+printf '{"version":2,"partitionTable":"mbr","logicalSectorBytes":512,"originalDiskBytes":102400000,"partitions":[{"number":1,"kind":"extended","typeGuid":"0x05","startSectors":2048,"originalSectors":8192,"minSectors":8192,"ebrReservedSectors":2},{"number":5,"kind":"logical","typeGuid":"0x83","parentNumber":1,"startSectors":2050,"originalSectors":2048,"minSectors":1024,"resizable":true,"role":"data"}]}' >$mbr_schema
 SCHEMAHASH=$(rootpxe_canonical_json_hash $mbr_schema)
 printf '{"schemaHash":"%s","partitions":[{"number":1,"mode":"derived"},{"number":5,"mode":"original"}]}' "$SCHEMAHASH" >$mbr_layout
 schemaHash=$SCHEMAHASH; schemaRevision=1; SCHEMA_SECTOR=512; TEST_SECTOR=512
@@ -1502,7 +1531,7 @@ makeAllSwapSystems() { :; }
 expansion_schema=$tmp/expansion-schema.json
 expansion_plan=$tmp/expansion-plan.json
 cat >$expansion_schema <<'EOF'
-{"version":2,"partitionTable":"mbr","originalDiskBytes":100000000,"logicalSectorBytes":512,"partitions":[{"number":1,"kind":"primary","originalSectors":1024},{"number":2,"kind":"primary","originalSectors":1024},{"number":3,"kind":"extended","originalSectors":2048}]}
+{"version":2,"partitionTable":"mbr","originalDiskBytes":100000000,"logicalSectorBytes":512,"partitions":[{"number":1,"kind":"primary","originalSectors":1024},{"number":2,"kind":"primary","originalSectors":1024},{"number":3,"kind":"extended","typeGuid":"0x05","originalSectors":2048}]}
 EOF
 cat >$expansion_plan <<'EOF'
 [{"number":1,"resolvedSectors":2048},{"number":2,"resolvedSectors":1024},{"number":3,"resolvedSectors":4096}]
@@ -2037,7 +2066,7 @@ must_have "$overlay/bin/pxeos.sysinfo" 'rootpxe_console_message INFO "System MAC
 must_have "$overlay/bin/pxeos.auto.reg" 'rootpxe_console_message INFO "Server response: $response_line"'
 must_have "$overlay/bin/pxeos.man.reg" 'pinnedpubkey "$manual_spki_pin"'
 must_have "$overlay/bin/pxeos.man.reg" 'DIALOG_ESC=10 DIALOG_ERROR=255'
-must_have "$overlay/bin/pxeos.man.reg" '${pxeapi%/}/manual/$1'
+must_have "$overlay/bin/pxeos.man.reg" '${pxeapi%/}/manual/$action'
 must_have "$overlay/bin/pxeos.man.reg" 'manual_token'
 must_not_have "$overlay/bin/pxeos.auto.reg" 'echo "$res"'
 must_not_have "$overlay/bin/pxeos.man.reg" 'hostnameloop.php'

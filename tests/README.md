@@ -54,7 +54,7 @@ python3 tests/pxeos_release_manifest_test.py
 - `pxeos_https_control_regression.sh`：以 `jq` 和临时文件核对 HTTPS 参数、请求截止、脱敏和 curl PID 清理。
 - `pxeos_network_storage_regression.sh`：合并的网络故障诊断、存储和相关离线回归。
 
-## 捕获、恢复、存储与分区（13）
+## 捕获、恢复、存储与分区（17）
 
 - `pxeos_capture_regression.sh`：合并核对 capture 收尾、发布与进度管线。
 - `pxeos_capture_resume_regression.sh`：核对 capture marker、恢复衔接和交接状态。
@@ -69,6 +69,12 @@ python3 tests/pxeos_release_manifest_test.py
 - `pxeos_lvm_schema_jq_regression.sh`：以真实 `jq` 核对 LVM capture schema 过滤程序。
 - `pxeos_lvm_udev_rules_regression.sh`：核对 LVM udev 同步及移除 systemd 专用自动激活规则。
 - `pxeos_var_mount_regression.sh`：核对独立 `/var` 初始化时的 fstab 挂载处理。
+- `pxeos_lvm_multi_regression.sh`：核对同一磁盘上 1/2/3/5 组彼此独立的一 PV/一 VG/多 linear LV，覆盖正序与倒序布局；默认执行叶级集成回归。
+- `pxeos_mbr_partition_contract_regression.sh`：核对 DOS/MBR 分区编号、32 位 LBA 与 GPT 边界契约，同时检查 Schema object 和 resolved partition array 两种输入形态。
+- `pxeos_lvm_naming_contract.sh`：核对 pinned LVM2 官方名称 127 字节边界、保留前缀/内部片段及连字符转义 mapper 名边界。
+- `pxeos_lvm_capture_scan_contract.sh`：核对 LVM 初次扫描 warning、目标 PV 缺失时 fail-closed，以及普通无 LVM 盘的正向路径。
+
+上述脚本均按单脚本独立运行；本目录仍不提供一键 full suite，也不因此宣称 CI、真实磁盘或实机部署已验证。
 
 ## Windows、显示与部署身份（11）
 

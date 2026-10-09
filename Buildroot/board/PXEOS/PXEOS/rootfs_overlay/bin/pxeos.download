@@ -199,6 +199,13 @@ rootpxe_validate_deployment_layout "$hd" "$originalSchemaFile" "$deploymentLayou
 rootpxe_validate_growth_capability "$originalSchemaFile" "$rootpxe_resolved_layout_file" "$imagePath" || handleError "PXEOS_STAGE=layout_validation CODE=UNSUPPORTED_FILESYSTEM_GROWTH REASON=validated_layout_requires_unsupported_growth"
 fi
 rootpxe_validate_restore_artifacts "$imagePath" "$imgType" "$imgPartitionType" "${originalSchemaFile:-}" || handleError "PXEOS_STAGE=restore_preflight CODE=REQUIRED_ARTIFACT_MISSING REASON=target_write_not_started"
+# The LVM metadata/payload and host-conflict barrier is deliberately before
+# every permit, hook, partition writer, and ordinary Partclone restore.  It
+# only derives future partition path strings; it never needs a partition that
+# has not been created yet.
+if [[ ${imgType:-} == [Nn] && -n ${rootpxe_resolved_lvm_layout_file:-} ]]; then
+    rootpxe_lvm_preflight_restore_groups "$imagePath" "$hd" || handleError "PXEOS_STAGE=restore_preflight CODE=LVM_EARLY_PREFLIGHT_FAILED REASON=group_metadata_payload_or_host_conflict"
+fi
 if [[ ${mc:-no} == yes ]]; then
     rootpxe_multicast_build_manifest "$imagePath" || handleError "PXEOS_STAGE=restore_preflight CODE=MULTICAST_MANIFEST_INVALID REASON=artifact_set_is_not_safe_or_complete"
     rootpxe_multicast_join || handleError "PXEOS_STAGE=restore_preflight CODE=MULTICAST_JOIN_FAILED REASON=controller_join_rejected"

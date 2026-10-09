@@ -88,7 +88,7 @@ rootpxe_partition_progress_source_metadata() (
 )
 rootpxe_partition_progress_plan_disk() (
     [[ ${rootpxe_partition_progress_enabled:-no} == yes ]] || return 0
-    local disk="$1" disk_number="$2" part number source_bytes fs source_kind items='[]' plan tmp kind item_status item_message lv_name lv_uuid lv_path lv_size lv_fs parent_key
+    local disk="$1" disk_number="$2" part number source_bytes fs source_kind items='[]' plan tmp kind item_status item_message lv_name lv_uuid lv_path lv_size lv_fs parent_key capture_group capture_facts capture_lv_facts capture_vg
     command -v jq >/dev/null 2>&1 || return 0
     [[ ${progress_attempt:-} =~ ^[1-9][0-9]*$ ]] || return 0
     getPartitions "$disk" || return 0
@@ -104,14 +104,21 @@ rootpxe_partition_progress_plan_disk() (
         # Capture plans are immutable. A PV without every prepared LV fact
         # would publish a misleading container-only denominator, so reject it
         # before adding any item or replacing the prior snapshot.
-        if [[ ${rootpxe_lvm_active:-no} == yes && $part == "${rootpxe_lvm_pv_path:-}" ]]; then
-            [[ -r ${rootpxe_lvm_lv_facts_file:-} ]] || return 1
-            awk -F'|' 'NF == 5 && $1 != "" && $2 != "" && $3 ~ /^\/dev\// && $4 ~ /^[1-9][0-9]*$/ && $5 ~ /^(ext2|ext3|ext4|xfs|swap)$/ && !seen_uuid[$2]++ && !seen_path[$3]++ { count++; next } { bad=1 } END { exit(count > 0 && !bad ? 0 : 1) }' "$rootpxe_lvm_lv_facts_file" || return 1
+        if rootpxe_lvm_is_pv_partition "$part"; then
+            capture_group=$(rootpxe_lvm_capture_group_for_partition "$number" 2>/dev/null || true)
+            [[ -n $capture_group ]] || return 1
+        else
+            capture_group=""
         fi
-        [[ ${rootpxe_lvm_active:-no} == yes && $part == "${rootpxe_lvm_pv_path:-}" ]] && { kind=container; source_bytes=0; item_status=pending; item_message=''; }
-        [[ -r ${rootpxe_resolved_lvm_layout_file:-} ]] && jq -e --argjson number "$number" '.pv.partitionNumber == $number' "$rootpxe_resolved_lvm_layout_file" >/dev/null 2>&1 && { kind=container; source_bytes=0; item_status=pending; item_message=''; }
+        if [[ -n $capture_group ]]; then
+            IFS='|' read -r capture_facts capture_lv_facts capture_vg <<<"$capture_group"
+            [[ -r $capture_lv_facts ]] || return 1
+            awk -F'|' 'NF == 5 && $1 != "" && $2 != "" && $3 ~ /^\/dev\// && $4 ~ /^[1-9][0-9]*$/ && $5 ~ /^(ext2|ext3|ext4|xfs|swap)$/ && !seen_uuid[$2]++ && !seen_path[$3]++ { count++; next } { bad=1 } END { exit(count > 0 && !bad ? 0 : 1) }' "$capture_lv_facts" || return 1
+            kind=container; source_bytes=0; item_status=pending; item_message=''
+        fi
+        [[ -r ${rootpxe_resolved_lvm_layout_file:-} ]] && jq -e --argjson number "$number" 'if (.groups? | type) == "array" then any(.groups[]; .pv.partitionNumber == $number) else .pv.partitionNumber == $number end' "$rootpxe_resolved_lvm_layout_file" >/dev/null 2>&1 && { kind=container; source_bytes=0; item_status=pending; item_message=''; }
         items=$(jq -c --arg key "d${disk_number}:p${number}" --arg label "$part" --arg kind "$kind" --arg fs "$fs" --arg status "$item_status" --arg message "$item_message" --argjson disk "$disk_number" --argjson number "$number" --argjson weight "$source_bytes" '. + [{key:$key,kind:$kind,diskIndex:$disk,partitionNumber:$number,label:$label,filesystem:$fs,weightBytes:$weight,status:$status,sequence:0} + (if ($message|length)>0 then {message:$message} else {} end)]' <<<"$items" 2>/dev/null) || return 0
-        if [[ $kind == container && -r ${rootpxe_lvm_lv_facts_file:-} ]]; then
+        if [[ $kind == container && -n $capture_group && -r $capture_lv_facts ]]; then
             while IFS='|' read -r lv_name lv_uuid lv_path lv_size lv_fs extra; do
                 # The pre-plan preparation window publishes this complete
                 # five-field record atomically.  Never re-probe an LV here:
@@ -121,15 +128,15 @@ rootpxe_partition_progress_plan_disk() (
                 case $lv_fs in ext2|ext3|ext4|xfs) kind=lv ;; swap) kind=swap; lv_size=0 ;; *) return 1 ;; esac
                 parent_key="d${disk_number}:p${number}"
                 items=$(jq -c --arg key "${parent_key}:lv:${lv_uuid}" --arg parent "$parent_key" --arg label "$lv_path" --arg fs "$lv_fs" --arg kind "$kind" --argjson disk "$disk_number" --argjson number "$number" --argjson weight "$lv_size" '. + [{key:$key,kind:$kind,diskIndex:$disk,partitionNumber:$number,label:$label,filesystem:$fs,weightBytes:$weight,parentKey:$parent,status:"pending",sequence:0}]' <<<"$items" 2>/dev/null) || return 0
-            done <"$rootpxe_lvm_lv_facts_file"
+            done <"$capture_lv_facts"
         elif [[ $kind == container && -r ${rootpxe_resolved_lvm_layout_file:-} ]]; then
             while IFS=$'\t' read -r lv_name lv_uuid lv_fs lv_size; do
                 lv_size=${lv_size//$'\r'/}
                 [[ $lv_size =~ ^[1-9][0-9]*$ && -n $lv_uuid ]] || continue
                 case $lv_fs in ext2|ext3|ext4|xfs) kind=lv ;; swap) kind=swap; lv_size=0 ;; *) continue ;; esac
-                parent_key="d${disk_number}:p${number}"; lv_path="/dev/$(jq -r '.vg.name' "$rootpxe_resolved_lvm_layout_file" 2>/dev/null)/$lv_name"
+                parent_key="d${disk_number}:p${number}"; lv_path="/dev/$(jq -r --argjson number "$number" 'if (.groups? | type) == "array" then (.groups[] | select(.pv.partitionNumber == $number) | .vg.name) else .vg.name end' "$rootpxe_resolved_lvm_layout_file" 2>/dev/null)/$lv_name"
                 items=$(jq -c --arg key "${parent_key}:lv:${lv_uuid}" --arg parent "$parent_key" --arg label "$lv_path" --arg fs "$lv_fs" --arg kind "$kind" --argjson disk "$disk_number" --argjson number "$number" --argjson weight "$lv_size" '. + [{key:$key,kind:$kind,diskIndex:$disk,partitionNumber:$number,label:$label,filesystem:$fs,weightBytes:$weight,parentKey:$parent,status:"pending",sequence:0}]' <<<"$items" 2>/dev/null) || return 0
-            done < <(jq -r '.volumes[] | [.name,.uuid,.fs,(.originalBytes // .resolvedBytes)] | @tsv' "$rootpxe_resolved_lvm_layout_file" 2>/dev/null)
+            done < <(jq -r --argjson number "$number" 'if (.groups? | type) == "array" then (.groups[] | select(.pv.partitionNumber == $number) | .volumes[]) else .volumes[] end | [.name,.uuid,.fs,(.originalBytes // .resolvedBytes)] | @tsv' "$rootpxe_resolved_lvm_layout_file" 2>/dev/null)
         fi
     done
     [[ $items != '[]' ]] || return 0
@@ -511,6 +518,35 @@ rootpxe_lvm_trim() { sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$1"; }
 rootpxe_lvm_safe_identifier() { [[ $1 =~ ^[A-Za-z0-9._:+-]{1,160}$ ]]; }
 rootpxe_lvm_storage_identifier() { [[ $1 =~ ^[A-Za-z0-9._+-]{1,160}$ ]]; }
 rootpxe_lvm_storage_filename() { [[ $1 =~ ^[A-Za-z0-9._+-]{1,255}$ ]]; }
+# LVM passes VG/LV names as positional operands.  Keep their grammar separate
+# from UUIDs and artifact names so a captured name can never be parsed as an
+# option or an internal LVM implementation name.
+rootpxe_lvm_validate_vg_name() {
+    [[ $1 =~ ^[A-Za-z0-9+_.][A-Za-z0-9+_.-]{0,126}$ && $1 != . && $1 != .. ]]
+}
+rootpxe_lvm_validate_lv_name() {
+    [[ $1 =~ ^[A-Za-z0-9+_.][A-Za-z0-9+_.-]{0,126}$ && $1 != . && $1 != .. ]] || return 1
+    case $1 in
+        snapshot*|pvmove*|*_cdata*|*_cmeta*|*_corig*|*_cpool*|*_cvol*|*_wcorig*|*_mimage*|*_mlog*|*_rimage*|*_rmeta*|*_tdata*|*_tmeta*|*_vdata*|*_imeta*|*_iorig*|*_pmspare*|*_vorigin*) return 1 ;;
+    esac
+}
+rootpxe_lvm_validate_mapper_name() {
+    local vg_name="$1" lv_name="$2" escaped_vg escaped_lv
+    rootpxe_lvm_validate_vg_name "$vg_name" && rootpxe_lvm_validate_lv_name "$lv_name" || return 1
+    escaped_vg=${vg_name//-/--}; escaped_lv=${lv_name//-/--}
+    (( ${#escaped_vg} + 1 + ${#escaped_lv} <= 127 ))
+}
+rootpxe_lvm_pv_sidecar_binds_uuid() {
+    local file="$1" wanted="$2"
+    [[ -r $file ]] || return 1
+    # pvdisplay -m emits one `PV UUID <id>` fact.  Do not accept a UUID merely
+    # mentioned by an arbitrary comment or another field in the sidecar.
+    awk -v wanted="$wanted" '
+      /^[[:space:]]*#/ { next }
+      $1 == "PV" && $2 == "UUID" { if (NF != 3 || seen++) bad=1; else value=$3 }
+      END { exit(!bad && seen == 1 && value == wanted ? 0 : 1) }
+    ' "$file"
+}
 # Keep the LVM report parser bound to the packaged jq executable.  Tests may
 # replace this helper after sourcing the library, but an inherited shell
 # function or an environment-provided executable name must not change the
@@ -521,23 +557,91 @@ rootpxe_lvm_partition_path() {
     [[ $number =~ ^[1-9][0-9]*$ ]] || return 1
     [[ $disk == *[0-9] ]] && printf '%sp%s\n' "$disk" "$number" || printf '%s%s\n' "$disk" "$number"
 }
+rootpxe_lvm_cleanup_capture_stage() {
+    local stage="${rootpxe_lvm_capture_stage:-}" parent="${rootpxe_lvm_capture_stage_parent:-}"
+    # The manifest is tiny and belongs in /tmp.  Payload staging must instead
+    # live under the configured image backend (SMB/NFS/local image_path), not
+    # PXEOS's small tmpfs.  Remove only the exact mktemp directory we created.
+    if [[ -n $parent && $stage == "$parent"/.rootpxe-lvm-groups.* && $stage =~ /\.rootpxe-lvm-groups\.[A-Za-z0-9]+$ && -d $stage ]]; then
+        rm -rf -- "$stage"
+    fi
+    unset rootpxe_lvm_capture_stage rootpxe_lvm_capture_stage_parent
+}
+rootpxe_lvm_cleanup_capture_groups() {
+    local dir="${rootpxe_lvm_groups_dir:-}" item
+    rootpxe_lvm_cleanup_capture_stage
+    if [[ $dir =~ ^/tmp/rootpxe-lvm-groups\.[A-Za-z0-9]+$ && -d $dir ]]; then
+        for item in "$dir"/*; do [[ -e $item ]] && rm -f -- "$item"; done
+        rmdir "$dir" 2>/dev/null || true
+    fi
+    unset rootpxe_lvm_group_dispatch rootpxe_lvm_groups_dir rootpxe_lvm_groups_file rootpxe_lvm_group_count rootpxe_lvm_group_pv_path rootpxe_lvm_capture_fragment_path rootpxe_lvm_captured
+}
 rootpxe_lvm_is_pv_partition() {
     local part="$1" number
     [[ ${rootpxe_lvm_active:-no} == yes ]] || return 1
     getPartitionNumber "$part"; number=$part_number
+    if [[ ${rootpxe_lvm_group_dispatch:-no} == yes && -r ${rootpxe_lvm_groups_file:-} ]]; then
+        awk -F'|' -v wanted="$number" '$1 == wanted { found++ } END { exit(found == 1 ? 0 : 1) }' "$rootpxe_lvm_groups_file"
+        return
+    fi
     [[ $number == "${rootpxe_lvm_pv_number:-}" ]]
 }
 rootpxe_lvm_reset_capture_facts() {
     rm -f -- "${rootpxe_lvm_facts_file:-}" "${rootpxe_lvm_lv_facts_file:-}"
+    # A multi-group dispatcher owns its private manifest until it has either
+    # published the combined schema or reported the group-specific failure.
+    # Do not erase it while resetting one internal single-group executor.
+    [[ ${rootpxe_lvm_group_dispatch:-no} == yes ]] || rootpxe_lvm_cleanup_capture_groups
     unset rootpxe_lvm_active rootpxe_lvm_captured rootpxe_lvm_facts_file rootpxe_lvm_lv_facts_file rootpxe_lvm_pv_path rootpxe_lvm_pv_number rootpxe_lvm_pv_uuid rootpxe_lvm_vg_name rootpxe_lvm_vg_uuid rootpxe_lvm_pv_bytes rootpxe_lvm_pe_start_bytes rootpxe_lvm_vg_extent_bytes rootpxe_lvm_vg_free_bytes
 }
 rootpxe_lvm_remove_probe_files() { rm -f -- "$@"; }
+rootpxe_lvm_normalize_private_swap_artifacts() {
+    local plans="$1" normalized
+    [[ -r $plans ]] || return 1
+    normalized=$(mktemp "${plans}.swap.XXXXXX") || return 1
+    rootpxe_lvm_json_jq '
+      .groups |= map(.volumes |= map(
+        if .fs == "swap" and ((has("artifact") | not) or .artifact == null)
+        then .artifact = "" else . end))
+    ' "$plans" >"$normalized" && mv "$normalized" "$plans" || { rm -f -- "$normalized"; return 1; }
+}
+rootpxe_lvm_capture_lv_facts_prepared() {
+    local facts="$1"
+    [[ -r $facts ]] || return 1
+    awk -F'|' 'NF == 5 && $1 != "" && $2 != "" && $3 ~ /^\/dev\// && $4 ~ /^[1-9][0-9]*$/ && $5 ~ /^(ext2|ext3|ext4|xfs|swap)$/ { found=1; next } { bad=1 } END { exit(found && !bad ? 0 : 1) }' "$facts" 2>/dev/null
+}
+rootpxe_lvm_validate_capture_artifact_names() {
+    local facts="$1" part="$2"
+    [[ $part =~ ^[1-9][0-9]*$ && -r $facts ]] || return 1
+    LC_ALL=C awk -F'|' -v part="$part" '
+      (NF == 4 || NF == 5) && $1 ~ /^[A-Za-z0-9+_.][A-Za-z0-9+_.-]{0,159}$/ && $1 != "." && $1 != ".." && $2 != "" && $3 ~ /^\/dev\// && $4 ~ /^[1-9][0-9]*$/ {
+        if (NF == 5 && $5 == "swap") { found=1; next }
+        if (NF == 5 && $5 !~ /^(ext2|ext3|ext4|xfs)$/) bad=1
+        key=tolower("d1p" part ".lvm.lv." $1 ".img")
+        if (seen[key]++) bad=1
+        found=1
+        next
+      }
+      { bad=1 }
+      END { exit(found && !bad ? 0 : 1) }
+    ' "$facts"
+}
+rootpxe_lvm_capture_report() {
+    local output="$1" diagnostic rc
+    shift
+    diagnostic=$(mktemp /tmp/rootpxe-lvm-report.XXXXXX) || return 1
+    chmod 600 "$diagnostic" || { rm -f -- "$diagnostic"; return 1; }
+    LC_ALL=C "$@" >"$output" 2>"$diagnostic"; rc=$?
+    [[ ! -s $diagnostic ]] || rc=1
+    rm -f -- "$diagnostic"
+    return "$rc"
+}
 # Return 0 for no LVM or for the only supported topology; return non-zero for
 # any LVM that cannot be captured safely.  The caller distinguishes this from
 # ordinary non-LVM images via rootpxe_lvm_active.
-rootpxe_lvm_capture_preflight() {
-    local disk="$1" image_path="$2" target_parts="" pv_path pv_uuid vg_name vg_uuid pe_start count=0 all_count=0 pvs_json vgs_json lvs_json pvs_rows vgs_rows lvs_rows vg_row="" vg_count=0
-    local -A seen_lv_names=()
+rootpxe_lvm_capture_preflight_single() {
+    local disk="$1" image_path="$2" target_parts="" group_pv="${rootpxe_lvm_group_pv_path:-}" pv_path pv_uuid vg_name vg_uuid pe_start count=0 all_count=0 pvs_json vgs_json lvs_json pvs_rows vgs_rows lvs_rows vg_row="" vg_count=0
+    local -A seen_lv_names=() seen_lv_uuid=() seen_lv_identity=()
     rootpxe_lvm_reset_capture_facts
     command -v pvs >/dev/null 2>&1 || return 1
     command -v vgs >/dev/null 2>&1 || return 1
@@ -560,7 +664,7 @@ rootpxe_lvm_capture_preflight() {
     # `pvs` exits successfully with no rows on an ordinary non-LVM disk.  It
     # is not a topology failure: let the target-PV count below record the
     # explicit non-LVM state instead of pausing every normal n capture.
-    if ! pvs --reportformat json --units b --nosuffix -o pv_name,pv_uuid,vg_name,vg_uuid,pv_size,pe_start >"$pvs_json" 2>/dev/null || ! rootpxe_lvm_json_jq -e '
+    if ! rootpxe_lvm_capture_report "$pvs_json" pvs --reportformat json --units b --nosuffix -o pv_name,pv_uuid,vg_name,vg_uuid,pv_size,pe_start || ! rootpxe_lvm_json_jq -e '
       (.report|type == "array" and length == 1 and (.[0]|type == "object") and ((.[0].pv? // [])|type == "array") and all((.[0].pv? // [])[]; type == "object" and (.pv_name|type == "string") and (.pv_uuid|type == "string") and (.vg_name|type == "string") and (.vg_uuid|type == "string") and (.pv_size|type == "string") and (.pe_start|type == "string" and test("^[0-9]+$"))))' "$pvs_json" >/dev/null; then
         rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1
     fi
@@ -568,7 +672,7 @@ rootpxe_lvm_capture_preflight() {
     while IFS=$'\t' read -r pv_path pv_uuid vg_name vg_uuid pv_size pe_start; do
         pv_path=$(rootpxe_lvm_trim "$pv_path"); pv_uuid=$(rootpxe_lvm_trim "$pv_uuid"); vg_name=$(rootpxe_lvm_trim "$vg_name"); vg_uuid=$(rootpxe_lvm_trim "$vg_uuid"); pv_size=$(rootpxe_lvm_trim "$pv_size"); pe_start=$(rootpxe_lvm_trim "$pe_start")
         [[ -n $pv_path ]] || continue
-        if [[ $target_parts == *"|$pv_path|"* ]]; then
+        if [[ $target_parts == *"|$pv_path|"* && ( -z $group_pv || $pv_path == "$group_pv" ) ]]; then
             count=$((count + 1)); printf '%s|%s|%s|%s|%s|%s\n' "$pv_path" "$pv_uuid" "$vg_name" "$vg_uuid" "$pv_size" "$pe_start" >>"$rootpxe_lvm_facts_file"
         fi
     done <"$pvs_rows"
@@ -577,7 +681,7 @@ rootpxe_lvm_capture_preflight() {
     [[ $count -eq 1 ]] || { rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
     IFS='|' read -r rootpxe_lvm_pv_path rootpxe_lvm_pv_uuid rootpxe_lvm_vg_name rootpxe_lvm_vg_uuid pv_size pe_start <"$rootpxe_lvm_facts_file"
     rootpxe_lvm_pv_path=$(rootpxe_lvm_trim "$rootpxe_lvm_pv_path"); rootpxe_lvm_pv_uuid=$(rootpxe_lvm_trim "$rootpxe_lvm_pv_uuid"); rootpxe_lvm_vg_name=$(rootpxe_lvm_trim "$rootpxe_lvm_vg_name"); rootpxe_lvm_vg_uuid=$(rootpxe_lvm_trim "$rootpxe_lvm_vg_uuid"); pe_start=$(rootpxe_lvm_trim "$pe_start")
-    rootpxe_lvm_safe_identifier "$rootpxe_lvm_pv_uuid" && rootpxe_lvm_storage_identifier "$rootpxe_lvm_vg_name" && rootpxe_lvm_safe_identifier "$rootpxe_lvm_vg_uuid" || { rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+    rootpxe_lvm_safe_identifier "$rootpxe_lvm_pv_uuid" && rootpxe_lvm_validate_vg_name "$rootpxe_lvm_vg_name" && rootpxe_lvm_safe_identifier "$rootpxe_lvm_vg_uuid" || { rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
     getPartitionNumber "$rootpxe_lvm_pv_path"; rootpxe_lvm_pv_number=$part_number
     rootpxe_lvm_pv_bytes=$(blockdev --getsize64 "$rootpxe_lvm_pv_path" 2>/dev/null) || { rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
     [[ $rootpxe_lvm_pv_bytes =~ ^[1-9][0-9]*$ && $pe_start =~ ^[0-9]+$ ]] || { rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
@@ -587,7 +691,7 @@ rootpxe_lvm_capture_preflight() {
         [[ $vg_uuid == "$rootpxe_lvm_vg_uuid" ]] && all_count=$((all_count + 1)) && [[ $pv_path == "$rootpxe_lvm_pv_path" ]] || true
     done <"$pvs_rows"
     [[ $all_count -eq 1 ]] || { rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
-    if ! vgs --reportformat json --units b --nosuffix -o vg_name,vg_uuid,vg_extent_size,vg_free >"$vgs_json" 2>/dev/null || ! rootpxe_lvm_json_jq -e '(.report|type == "array" and length == 1 and ((.[0].vg? // [])|type == "array") and all((.[0].vg? // [])[]; (.vg_name|type == "string") and (.vg_uuid|type == "string") and (.vg_extent_size|type == "string" and test("^[1-9][0-9]*$")) and (.vg_free|type == "string" and test("^[0-9]+$"))))' "$vgs_json" >/dev/null; then rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; fi
+    if ! rootpxe_lvm_capture_report "$vgs_json" vgs --reportformat json --units b --nosuffix -o vg_name,vg_uuid,vg_extent_size,vg_free || ! rootpxe_lvm_json_jq -e '(.report|type == "array" and length == 1 and ((.[0].vg? // [])|type == "array") and all((.[0].vg? // [])[]; (.vg_name|type == "string") and (.vg_uuid|type == "string") and (.vg_extent_size|type == "string" and test("^[1-9][0-9]*$")) and (.vg_free|type == "string" and test("^[0-9]+$"))))' "$vgs_json" >/dev/null; then rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; fi
     rootpxe_lvm_json_jq -r --arg uuid "$rootpxe_lvm_vg_uuid" '.report[0].vg[] | select(.vg_uuid == $uuid) | [.vg_name,.vg_uuid,.vg_extent_size,.vg_free] | @tsv' "$vgs_json" >"$vgs_rows" || { rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
     while IFS=$'\t' read -r vg_name vg_uuid extent free; do
         vg_name=$(rootpxe_lvm_trim "$vg_name"); vg_uuid=$(rootpxe_lvm_trim "$vg_uuid"); extent=$(rootpxe_lvm_trim "$extent"); free=$(rootpxe_lvm_trim "$free")
@@ -598,14 +702,23 @@ rootpxe_lvm_capture_preflight() {
     IFS='|' read -r vg_name vg_uuid rootpxe_lvm_vg_extent_bytes rootpxe_lvm_vg_free_bytes <<<"$vg_row"
     [[ $vg_name == "$rootpxe_lvm_vg_name" ]] || { rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
     [[ $rootpxe_lvm_vg_extent_bytes =~ ^[1-9][0-9]*$ && $rootpxe_lvm_vg_free_bytes =~ ^[0-9]+$ && $((rootpxe_lvm_pe_start_bytes)) -lt $((rootpxe_lvm_pv_bytes)) ]] || { rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
-    local lv_name lv_uuid lv_path lv_size lv_attr segtype origin pool data metadata
-    if ! lvs --reportformat json --units b --nosuffix -o vg_name,vg_uuid,lv_name,lv_uuid,lv_path,lv_size,lv_attr,segtype,origin,pool_lv,data_lv,metadata_lv --select "vg_uuid=$rootpxe_lvm_vg_uuid" "$rootpxe_lvm_vg_name" >"$lvs_json" 2>/dev/null || ! rootpxe_lvm_json_jq -e --arg name "$rootpxe_lvm_vg_name" --arg uuid "$rootpxe_lvm_vg_uuid" '(.report|type == "array" and length == 1 and ((.[0].lv? // [])|type == "array") and all((.[0].lv? // [])[]; (.vg_name == $name) and (.vg_uuid == $uuid) and (.lv_name|type == "string") and (.lv_uuid|type == "string") and (.lv_path|type == "string") and (.lv_size|type == "string" and test("^[1-9][0-9]*$")) and (.segtype|type == "string") and ((.origin == null or (.origin|type == "string")) and (.pool_lv == null or (.pool_lv|type == "string")) and (.data_lv == null or (.data_lv|type == "string")) and (.metadata_lv == null or (.metadata_lv|type == "string")))) )' "$lvs_json" >/dev/null; then rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; fi
+    local lv_name lv_uuid lv_path lv_size lv_attr segtype origin pool data metadata lv_identity
+    if ! rootpxe_lvm_capture_report "$lvs_json" lvs --reportformat json --units b --nosuffix -o vg_name,vg_uuid,lv_name,lv_uuid,lv_path,lv_size,lv_attr,segtype,origin,pool_lv,data_lv,metadata_lv --select "vg_uuid=$rootpxe_lvm_vg_uuid" "$rootpxe_lvm_vg_name" || ! rootpxe_lvm_json_jq -e --arg name "$rootpxe_lvm_vg_name" --arg uuid "$rootpxe_lvm_vg_uuid" '(.report|type == "array" and length == 1 and ((.[0].lv? // [])|type == "array") and all((.[0].lv? // [])[]; (.vg_name == $name) and (.vg_uuid == $uuid) and (.lv_name|type == "string") and (.lv_uuid|type == "string") and (.lv_path|type == "string") and (.lv_size|type == "string" and test("^[1-9][0-9]*$")) and (.segtype|type == "string") and ((.origin == null or (.origin|type == "string")) and (.pool_lv == null or (.pool_lv|type == "string")) and (.data_lv == null or (.data_lv|type == "string")) and (.metadata_lv == null or (.metadata_lv|type == "string")))) )' "$lvs_json" >/dev/null; then rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; fi
     rootpxe_lvm_json_jq -r --arg name "$rootpxe_lvm_vg_name" --arg uuid "$rootpxe_lvm_vg_uuid" '.report[0].lv[] | select(.vg_name == $name and .vg_uuid == $uuid) | [.lv_name,.lv_uuid,.lv_path,.lv_size,.lv_attr,.segtype,(.origin // ""),(.pool_lv // ""),(.data_lv // ""),(.metadata_lv // "")] | @tsv' "$lvs_json" >"$lvs_rows" || { rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
     while IFS=$'\t' read -r lv_name lv_uuid lv_path lv_size lv_attr segtype origin pool data metadata; do
         lv_name=$(rootpxe_lvm_trim "$lv_name"); lv_uuid=$(rootpxe_lvm_trim "$lv_uuid"); lv_path=$(rootpxe_lvm_trim "$lv_path"); lv_size=$(rootpxe_lvm_trim "$lv_size"); segtype=$(rootpxe_lvm_trim "$segtype"); origin=$(rootpxe_lvm_trim "$origin"); pool=$(rootpxe_lvm_trim "$pool"); data=$(rootpxe_lvm_trim "$data"); metadata=$(rootpxe_lvm_trim "$metadata")
         [[ -n $lv_name ]] || continue
-        rootpxe_lvm_storage_identifier "$lv_name" && rootpxe_lvm_safe_identifier "$lv_uuid" && [[ $lv_path == /dev/* && $lv_size =~ ^[1-9][0-9]*$ && $segtype == linear && -z $origin && -z $pool && -z $data && -z $metadata && ${seen_lv_names[${lv_name,,}]:-0} -eq 0 ]] || { rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
-        seen_lv_names[${lv_name,,}]=1
+        rootpxe_lvm_validate_mapper_name "$rootpxe_lvm_vg_name" "$lv_name" && rootpxe_lvm_safe_identifier "$lv_uuid" && [[ $lv_path == /dev/* && $lv_size =~ ^[1-9][0-9]*$ && $segtype == linear && -z $origin && -z $pool && -z $data && -z $metadata ]] || { rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+        # Asking for segtype switches LVM reporting to segment rows.  A
+        # multi-segment linear LV is still one LV, but every segment must
+        # agree on its identity; do not silently collapse conflicting rows.
+        lv_identity="$lv_name|$lv_path|$lv_size|$lv_attr|$origin|$pool|$data|$metadata"
+        if [[ ${seen_lv_uuid[$lv_uuid]:-0} -eq 1 ]]; then
+            [[ ${seen_lv_identity[$lv_uuid]:-} == "$lv_identity" ]] || { rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+            continue
+        fi
+        [[ ${seen_lv_names[$lv_name]:-0} -eq 0 ]] || { rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+        seen_lv_names[$lv_name]=1; seen_lv_uuid[$lv_uuid]=1; seen_lv_identity[$lv_uuid]="$lv_identity"
         printf '%s|%s|%s|%s\n' "$lv_name" "$lv_uuid" "$lv_path" "$lv_size" >>"$rootpxe_lvm_lv_facts_file"
     done <"$lvs_rows"
     [[ -s $rootpxe_lvm_lv_facts_file ]] || { rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
@@ -613,7 +726,7 @@ rootpxe_lvm_capture_preflight() {
     rootpxe_lvm_active=yes
     export rootpxe_lvm_active rootpxe_lvm_facts_file rootpxe_lvm_lv_facts_file rootpxe_lvm_pv_path rootpxe_lvm_pv_number rootpxe_lvm_pv_uuid rootpxe_lvm_vg_name rootpxe_lvm_vg_uuid rootpxe_lvm_pv_bytes rootpxe_lvm_pe_start_bytes rootpxe_lvm_vg_extent_bytes rootpxe_lvm_vg_free_bytes
 }
-rootpxe_lvm_prepare_capture_lv_facts() {
+rootpxe_lvm_prepare_capture_lv_facts_single() {
     local facts="${rootpxe_lvm_lv_facts_file:-}" vg="${rootpxe_lvm_vg_name:-}" vg_uuid="${rootpxe_lvm_vg_uuid:-}"
     local stage states activated lvs_json prepare_rc=0
     [[ ${rootpxe_lvm_active:-no} == yes ]] || return 0
@@ -809,15 +922,16 @@ rootpxe_activate_lvm_vg() {
     return 0
 }
 
-rootpxe_capture_lvm_volumes() {
-    local image_path="$1" pv_artifact vg_artifact lv_name lv_uuid lv_path lv_size fs swap_uuid artifact fifo=/tmp/pigz1 producer writer progress_decoder min_bytes pv_min_bytes stage vg_active=no rootpxe_lvm_capture_status_file rootpxe_lvm_capture_status_rc lvm_schema_stderr lvm_schema_rc vgchange_rc=0
+rootpxe_capture_lvm_volumes_single() {
+    local image_path="$1" fragment_path="${rootpxe_lvm_capture_fragment_path:-}" pv_artifact vg_artifact lv_name lv_uuid lv_path lv_size fs swap_uuid artifact fifo=/tmp/pigz1 producer writer progress_decoder min_bytes pv_min_bytes stage vg_active=no rootpxe_lvm_capture_status_file rootpxe_lvm_capture_status_rc lvm_schema_stderr lvm_schema_rc vgchange_rc=0
     rootpxe_lvm_capture_error_code=LVM_CAPTURE_FAILED
     rootpxe_lvm_capture_error_reason=unknown
     [[ ${rootpxe_lvm_active:-no} == yes && ${rootpxe_lvm_captured:-no} != yes ]] || return 0
     rootpxe_lvm_is_pv_partition "$rootpxe_lvm_pv_path" || return 1
-    if ! awk -F'|' 'NF == 5 && $1 != "" && $2 != "" && $3 ~ /^\/dev\// && $4 ~ /^[1-9][0-9]*$/ && $5 ~ /^(ext2|ext3|ext4|xfs|swap)$/ { found=1; next } { bad=1 } END { exit(found && !bad ? 0 : 1) }' "${rootpxe_lvm_lv_facts_file:-/dev/null}" 2>/dev/null; then
-        rootpxe_lvm_prepare_capture_lv_facts || return 1
+    if ! rootpxe_lvm_capture_lv_facts_prepared "${rootpxe_lvm_lv_facts_file:-/dev/null}"; then
+        rootpxe_lvm_prepare_capture_lv_facts_single || return 1
     fi
+    rootpxe_lvm_validate_capture_artifact_names "$rootpxe_lvm_lv_facts_file" "$rootpxe_lvm_pv_number" || return 1
     rootpxe_partition_progress_item "d1:p${rootpxe_lvm_pv_number}" preparing - "准备抓取 LVM 物理卷"
     rootpxe_lvm_capture_status_file=$(mktemp /tmp/rootpxe-lvm-capture-status.XXXXXX) || return 1
     stage=$(mktemp -d "$image_path/.rootpxe-lvm.XXXXXX") || { rm -f -- "$rootpxe_lvm_capture_status_file"; return 1; }
@@ -845,7 +959,7 @@ rootpxe_capture_lvm_volumes() {
             rootpxe_console_message WARN 'LVM capture display metadata was unavailable; continuing without optional source mappings.'
         fi
     fi
-    pvdisplay -m --units b "$rootpxe_lvm_pv_path" >"$stage/$pv_artifact" 2>/dev/null || return 1
+    LC_ALL=C pvdisplay -m --units b "$rootpxe_lvm_pv_path" >"$stage/$pv_artifact" 2>/dev/null || return 1
     vgcfgbackup -f "$stage/$vg_artifact" "$rootpxe_lvm_vg_name" >/dev/null 2>&1 || return 1
     : >"$stage/d1.lvm.capture.tsv" || return 1
     while IFS='|' read -r lv_name lv_uuid lv_path lv_size fs extra; do
@@ -903,7 +1017,7 @@ rootpxe_capture_lvm_volumes() {
     fi
     jq -e '.version == 1 and .captureMode == "per_lv" and .resizePolicy == "grow_only" and (.pvs|length) == 1 and (.vgs|length) == 1' "$stage/d1.lvm.schema.json" >/dev/null || return 1
     rm -f -- "$stage/d1.lvm.capture.tsv" || return 1
-    [[ ! -e "$image_path/d1.lvm.schema.json" && ! -e "$image_path/$pv_artifact" && ! -e "$image_path/$vg_artifact" && ! -e "$image_path/d1p${rootpxe_lvm_pv_number}.img" && ! -e "$image_path/d1p${rootpxe_lvm_pv_number}.img.000" ]] || return 1
+    [[ ( -n $fragment_path || ! -e "$image_path/d1.lvm.schema.json" ) && ! -e "$image_path/$pv_artifact" && ! -e "$image_path/$vg_artifact" && ! -e "$image_path/d1p${rootpxe_lvm_pv_number}.img" && ! -e "$image_path/d1p${rootpxe_lvm_pv_number}.img.000" ]] || return 1
     while IFS='|' read -r lv_name lv_uuid lv_path lv_size; do
         fs=$(blkid -s TYPE -o value "$lv_path" 2>/dev/null | tr -d '\r\n')
         [[ $fs == swap ]] && continue
@@ -912,9 +1026,13 @@ rootpxe_capture_lvm_volumes() {
     done <"$rootpxe_lvm_lv_facts_file"
     mv "$stage/$pv_artifact" "$image_path/$pv_artifact" || return 1
     mv "$stage/$vg_artifact" "$image_path/$vg_artifact" || return 1
-    # The schema is the commit marker.  Never publish it before every sidecar
-    # and LV payload has reached its final location.
-    mv "$stage/d1.lvm.schema.json" "$image_path/d1.lvm.schema.json" || return 1
+    # A dispatcher receives a private per-group fragment.  Only it can merge
+    # all fragments and publish the image-level commit marker.
+    if [[ -n $fragment_path ]]; then
+        [[ ! -e $fragment_path ]] && mv "$stage/d1.lvm.schema.json" "$fragment_path" || return 1
+    else
+        mv "$stage/d1.lvm.schema.json" "$image_path/d1.lvm.schema.json" || return 1
+    fi
     )
     rootpxe_lvm_capture_status_rc=$?
     if [[ $rootpxe_lvm_capture_status_rc -ne 0 && -r $rootpxe_lvm_capture_status_file ]]; then
@@ -928,6 +1046,172 @@ rootpxe_capture_lvm_volumes() {
     rootpxe_lvm_captured=yes
     export rootpxe_lvm_captured
     rootpxe_partition_progress_item "d1:p${rootpxe_lvm_pv_number}" completed - "LVM 物理卷及逻辑卷抓取完成"
+}
+
+# Multi-PV capture remains intentionally bounded: every selected PV is paired
+# with exactly one VG by the existing single-group verifier.  This manifest is
+# internal-only; the public schema continues to use its established pvs/vgs
+# arrays.  The manifest is frozen before any capture writer is started.
+rootpxe_lvm_capture_group_load() {
+    local line="$1" extra
+    IFS='|' read -r rootpxe_lvm_pv_number rootpxe_lvm_pv_path rootpxe_lvm_pv_uuid rootpxe_lvm_vg_name rootpxe_lvm_vg_uuid rootpxe_lvm_pv_bytes rootpxe_lvm_pe_start_bytes rootpxe_lvm_vg_extent_bytes rootpxe_lvm_vg_free_bytes rootpxe_lvm_facts_file rootpxe_lvm_lv_facts_file extra <<<"$line"
+    [[ -z $extra && $rootpxe_lvm_pv_number =~ ^[1-9][0-9]*$ && $rootpxe_lvm_pv_path == /dev/* && $rootpxe_lvm_pv_bytes =~ ^[1-9][0-9]*$ && $rootpxe_lvm_pe_start_bytes =~ ^[0-9]+$ && $rootpxe_lvm_vg_extent_bytes =~ ^[1-9][0-9]*$ && $rootpxe_lvm_vg_free_bytes =~ ^[0-9]+$ && -r $rootpxe_lvm_facts_file && -r $rootpxe_lvm_lv_facts_file ]] || return 1
+    rootpxe_lvm_safe_identifier "$rootpxe_lvm_pv_uuid" && rootpxe_lvm_safe_identifier "$rootpxe_lvm_vg_uuid" && rootpxe_lvm_validate_vg_name "$rootpxe_lvm_vg_name" || return 1
+    # Captured is a dispatcher-wide completion flag.  Never carry it into the
+    # next internal single-group executor or that executor would silently
+    # skip its fragment and leave an incomplete schema.
+    unset rootpxe_lvm_captured
+    rootpxe_lvm_active=yes
+    export rootpxe_lvm_active rootpxe_lvm_facts_file rootpxe_lvm_lv_facts_file rootpxe_lvm_pv_path rootpxe_lvm_pv_number rootpxe_lvm_pv_uuid rootpxe_lvm_vg_name rootpxe_lvm_vg_uuid rootpxe_lvm_pv_bytes rootpxe_lvm_pe_start_bytes rootpxe_lvm_vg_extent_bytes rootpxe_lvm_vg_free_bytes
+}
+
+rootpxe_lvm_capture_preflight() {
+    local disk="$1" image_path="$2" scan rows candidate member member_type target_part group_pv pv_copy lv_copy number lv_name lv_uuid lv_path lv_size
+    local -A seen_pv=() seen_pv_uuid=() seen_vg_uuid=() seen_vg_name=() seen_lv_uuid=() target_lvm_parts=() scanned_lvm_parts=()
+    # A new public capture transaction supersedes any fully captured manifest.
+    # Internal per-group preflight uses the _single helper and never reaches
+    # this boundary, so its frozen facts remain available to later partitions.
+    rootpxe_lvm_cleanup_capture_groups
+    rootpxe_lvm_reset_capture_facts
+    command -v pvs >/dev/null 2>&1 || return 1
+    getPartitions "$disk"
+    [[ -n ${parts:-} ]] || return 1
+    # Preserve the original disk-wide topology gate even when there are no
+    # LVM PV rows.  Otherwise a LUKS/mdraid member could be misclassified as
+    # an ordinary no-LVM capture by the multi-group wrapper.
+    for member in $parts; do
+        member_type=$(blkid -s TYPE -o value "$member" 2>/dev/null | tr -d '\r\n')
+        case $member_type in
+            crypto_LUKS|linux_raid_member) return 1 ;;
+            LVM2_member) target_lvm_parts[$member]=1 ;;
+        esac
+    done
+    scan=$(mktemp /tmp/rootpxe-lvm-groups-scan.XXXXXX) || return 1
+    rows=$(mktemp /tmp/rootpxe-lvm-groups-rows.XXXXXX) || { rm -f -- "$scan"; return 1; }
+    chmod 600 "$scan" "$rows" || { rm -f -- "$scan" "$rows"; return 1; }
+    if ! rootpxe_lvm_capture_report "$scan" pvs --reportformat json --units b --nosuffix -o pv_name || ! rootpxe_lvm_json_jq -e '(.report|type=="array" and length==1 and ((.[0].pv? // [])|type=="array") and all((.[0].pv? // [])[]; (.pv_name|type=="string")))' "$scan" >/dev/null || ! rootpxe_lvm_json_jq -r '.report[0].pv[]|.pv_name' "$scan" >"$rows"; then
+        rm -f -- "$scan" "$rows"; return 1
+    fi
+    rootpxe_lvm_groups_dir=$(mktemp -d /tmp/rootpxe-lvm-groups.XXXXXX) || { rm -f -- "$scan" "$rows"; return 1; }
+    chmod 700 "$rootpxe_lvm_groups_dir" || { rm -f -- "$scan" "$rows"; return 1; }
+    rootpxe_lvm_groups_file="$rootpxe_lvm_groups_dir/groups"
+    : >"$rootpxe_lvm_groups_file" || { rm -f -- "$scan" "$rows"; return 1; }
+    chmod 600 "$rootpxe_lvm_groups_file" || { rm -f -- "$scan" "$rows"; return 1; }
+    rootpxe_lvm_group_dispatch=yes
+    while IFS= read -r candidate; do
+        candidate=$(rootpxe_lvm_trim "$candidate")
+        [[ -n $candidate && ${target_lvm_parts[$candidate]:-0} -eq 1 ]] && scanned_lvm_parts[$candidate]=1
+        member=no; for target_part in $parts; do [[ $target_part == "$candidate" ]] && { member=yes; break; }; done
+        [[ -n $candidate && $member == yes ]] || continue
+        group_pv="$candidate"; rootpxe_lvm_group_pv_path="$group_pv"; export rootpxe_lvm_group_pv_path
+        rootpxe_lvm_capture_preflight_single "$disk" "$image_path" || { rm -f -- "$scan" "$rows"; rootpxe_lvm_cleanup_capture_groups; return 1; }
+        [[ ${rootpxe_lvm_active:-no} == yes ]] || { rm -f -- "$scan" "$rows"; rootpxe_lvm_cleanup_capture_groups; return 1; }
+        number="$rootpxe_lvm_pv_number"
+        [[ ${seen_pv[$number]:-0} -eq 0 && ${seen_pv_uuid[$rootpxe_lvm_pv_uuid]:-0} -eq 0 && ${seen_vg_uuid[$rootpxe_lvm_vg_uuid]:-0} -eq 0 && ${seen_vg_name[$rootpxe_lvm_vg_name]:-0} -eq 0 ]] || { rm -f -- "$scan" "$rows"; rootpxe_lvm_cleanup_capture_groups; return 1; }
+        seen_pv[$number]=1; seen_pv_uuid[$rootpxe_lvm_pv_uuid]=1; seen_vg_uuid[$rootpxe_lvm_vg_uuid]=1; seen_vg_name[$rootpxe_lvm_vg_name]=1
+        pv_copy="$rootpxe_lvm_groups_dir/p${number}.pv"; lv_copy="$rootpxe_lvm_groups_dir/p${number}.lv"
+        cp -- "$rootpxe_lvm_facts_file" "$pv_copy" && cp -- "$rootpxe_lvm_lv_facts_file" "$lv_copy" || { rm -f -- "$scan" "$rows"; rootpxe_lvm_cleanup_capture_groups; return 1; }
+        while IFS='|' read -r lv_name lv_uuid lv_path lv_size; do
+            [[ -n $lv_name && -n $lv_uuid && -n $lv_path && $lv_size =~ ^[1-9][0-9]*$ && ${seen_lv_uuid[$lv_uuid]:-0} -eq 0 ]] || { rm -f -- "$scan" "$rows"; rootpxe_lvm_cleanup_capture_groups; return 1; }
+            seen_lv_uuid[$lv_uuid]=1
+        done <"$lv_copy"
+        printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$number" "$rootpxe_lvm_pv_path" "$rootpxe_lvm_pv_uuid" "$rootpxe_lvm_vg_name" "$rootpxe_lvm_vg_uuid" "$rootpxe_lvm_pv_bytes" "$rootpxe_lvm_pe_start_bytes" "$rootpxe_lvm_vg_extent_bytes" "$rootpxe_lvm_vg_free_bytes" "$pv_copy" "$lv_copy" >>"$rootpxe_lvm_groups_file" || { rm -f -- "$scan" "$rows"; rootpxe_lvm_cleanup_capture_groups; return 1; }
+    done <"$rows"
+    unset rootpxe_lvm_group_pv_path
+    rm -f -- "$scan" "$rows"
+    for target_part in "${!target_lvm_parts[@]}"; do
+        [[ ${scanned_lvm_parts[$target_part]:-0} -eq 1 ]] || { rootpxe_lvm_cleanup_capture_groups; return 1; }
+    done
+    rootpxe_lvm_group_count=$(wc -l <"$rootpxe_lvm_groups_file")
+    if [[ $rootpxe_lvm_group_count == 0 ]]; then rootpxe_lvm_cleanup_capture_groups; rootpxe_lvm_active=no; export rootpxe_lvm_active; return 0; fi
+    [[ $rootpxe_lvm_group_count =~ ^[1-9][0-9]*$ ]] || { rootpxe_lvm_cleanup_capture_groups; return 1; }
+    rootpxe_lvm_capture_group_load "$(head -n 1 "$rootpxe_lvm_groups_file")" || { rootpxe_lvm_cleanup_capture_groups; return 1; }
+    export rootpxe_lvm_group_dispatch rootpxe_lvm_groups_dir rootpxe_lvm_groups_file rootpxe_lvm_group_count
+}
+
+rootpxe_lvm_prepare_capture_lv_facts() {
+    local line
+    [[ ${rootpxe_lvm_group_dispatch:-no} == yes ]] || { rootpxe_lvm_prepare_capture_lv_facts_single; return; }
+    [[ -r ${rootpxe_lvm_groups_file:-} ]] || return 1
+    while IFS= read -r line; do
+        rootpxe_lvm_capture_group_load "$line" || return 1
+        rootpxe_lvm_capture_lv_facts_prepared "$rootpxe_lvm_lv_facts_file" || rootpxe_lvm_prepare_capture_lv_facts_single || return 1
+        # group_load points the single executor at the manifest's own LV
+        # facts file, so its atomic rewrite already updates the frozen entry.
+    done <"$rootpxe_lvm_groups_file"
+}
+
+rootpxe_capture_lvm_volumes() {
+    local image_path="$1" line fragment combined capture_stage artifact artifacts_file
+    local -a fragments=()
+    [[ ${rootpxe_lvm_group_dispatch:-no} == yes ]] || { rootpxe_capture_lvm_volumes_single "$image_path"; return; }
+    if [[ ${rootpxe_lvm_captured:-no} == yes && -e "$image_path/d1.lvm.schema.json" ]]; then return 0; fi
+    [[ -r ${rootpxe_lvm_groups_file:-} && ${rootpxe_lvm_group_count:-0} =~ ^[1-9][0-9]*$ && ! -e "$image_path/d1.lvm.schema.json" ]] || return 1
+    # Freeze prepared facts and reject payload-name case collisions across
+    # every group before creating any image staging directory or writer.
+    rootpxe_lvm_prepare_capture_lv_facts || return 1
+    while IFS= read -r line; do
+        rootpxe_lvm_capture_group_load "$line" || return 1
+        rootpxe_lvm_validate_capture_artifact_names "$rootpxe_lvm_lv_facts_file" "$rootpxe_lvm_pv_number" || return 1
+    done <"$rootpxe_lvm_groups_file"
+    rootpxe_lvm_capture_stage_parent="$image_path"
+    capture_stage=$(mktemp -d "$image_path/.rootpxe-lvm-groups.XXXXXX") || { rootpxe_lvm_cleanup_capture_groups; return 1; }
+    rootpxe_lvm_capture_stage="$capture_stage"
+    chmod 700 "$capture_stage" || { rootpxe_lvm_cleanup_capture_groups; return 1; }
+    while IFS= read -r line; do
+        rootpxe_lvm_capture_group_load "$line" || { rootpxe_lvm_cleanup_capture_groups; return 1; }
+        fragment="$rootpxe_lvm_groups_dir/p${rootpxe_lvm_pv_number}.schema.json"
+        rootpxe_lvm_capture_fragment_path="$fragment"; export rootpxe_lvm_capture_fragment_path
+        # A group never publishes into the image directory directly.  All
+        # sidecars and payloads remain in this root-owned staging directory
+        # until every group has completed and the combined manifest validates.
+        rootpxe_capture_lvm_volumes_single "$capture_stage" || { rootpxe_lvm_cleanup_capture_groups; return 1; }
+        [[ -r $fragment ]] || { rootpxe_lvm_cleanup_capture_groups; return 1; }
+        fragments+=("$fragment")
+    done <"$rootpxe_lvm_groups_file"
+    unset rootpxe_lvm_capture_fragment_path
+    # Keep the commit marker on the image backend with the staged payloads so
+    # the final rename cannot degrade into a cross-filesystem copy.
+    combined="$capture_stage/combined.schema.json"
+    rootpxe_lvm_json_jq -s 'reduce .[] as $group ({version:1,captureMode:"per_lv",resizePolicy:"grow_only",pvs:[],vgs:[]}; .pvs += $group.pvs | .vgs += $group.vgs)' "${fragments[@]}" >"$combined" || { rootpxe_lvm_cleanup_capture_groups; return 1; }
+    rootpxe_lvm_json_jq -e --argjson count "$rootpxe_lvm_group_count" '
+      .version==1 and .captureMode=="per_lv" and .resizePolicy=="grow_only" and
+      (.pvs|length)==$count and (.vgs|length)==$count and
+      ([.pvs[].partitionNumber]|unique|length)==$count and ([.pvs[].uuid]|unique|length)==$count and
+      ([.vgs[].uuid]|unique|length)==$count and ([.vgs[].name]|unique|length)==$count and
+      ([.vgs[]|.lvs[]|.uuid]|unique|length)==([.vgs[]|.lvs[]]|length) and
+      ([.pvs[] | (.artifact,.vgConfigArtifact)] + [.vgs[]|.lvs[]|select(.artifact != "")|.artifact] | map(ascii_downcase) | unique | length) == ([.pvs[] | (.artifact,.vgConfigArtifact)] + [.vgs[]|.lvs[]|select(.artifact != "")|.artifact] | length) and
+      (. as $schema | all($schema.pvs[]; . as $pv | ([$schema.vgs[]|select(.uuid == $pv.vgUuid and .pvPartitionNumbers == [$pv.partitionNumber])]|length)==1))
+    ' "$combined" >/dev/null || { rootpxe_lvm_cleanup_capture_groups; return 1; }
+    artifacts_file="$rootpxe_lvm_groups_dir/artifacts"
+    rootpxe_lvm_json_jq -r '[.pvs[] | (.artifact,.vgConfigArtifact)] + [.vgs[]|.lvs[]|select(.artifact != "")|.artifact] | .[]' "$combined" >"$artifacts_file" || { rootpxe_lvm_cleanup_capture_groups; return 1; }
+    while IFS= read -r artifact; do
+        artifact=$(rootpxe_lvm_trim "$artifact")
+        rootpxe_lvm_storage_filename "$artifact" && rootpxe_safe_relative_path "$artifact" >/dev/null && [[ -r "$capture_stage/$artifact" && ! -e "$image_path/$artifact" ]] || { rootpxe_lvm_cleanup_capture_groups; return 1; }
+    done <"$artifacts_file"
+    while IFS= read -r artifact; do
+        artifact=$(rootpxe_lvm_trim "$artifact")
+        mv "$capture_stage/$artifact" "$image_path/$artifact" || { rootpxe_lvm_cleanup_capture_groups; return 1; }
+    done <"$artifacts_file"
+    mv "$combined" "$image_path/d1.lvm.schema.json" || { rootpxe_lvm_cleanup_capture_groups; return 1; }
+    # Later savePartition calls still need the frozen manifest to recognize
+    # every PV, but payload staging is no longer needed after publication.
+    rootpxe_lvm_cleanup_capture_stage
+    rootpxe_lvm_captured=yes; export rootpxe_lvm_captured
+}
+
+rootpxe_lvm_capture_group_for_partition() {
+    local wanted="$1" line number _ _ _ vg _ _ _ _ facts lvfacts
+    [[ $wanted =~ ^[1-9][0-9]*$ ]] || return 1
+    if [[ ${rootpxe_lvm_group_dispatch:-no} == yes && -r ${rootpxe_lvm_groups_file:-} ]]; then
+        while IFS= read -r line; do
+            IFS='|' read -r number _ _ vg _ _ _ _ _ facts lvfacts <<<"$line"
+            [[ $number == "$wanted" && -r $facts && -r $lvfacts ]] && { printf '%s|%s|%s\n' "$facts" "$lvfacts" "$vg"; return 0; }
+        done <"$rootpxe_lvm_groups_file"
+        return 1
+    fi
+    [[ ${rootpxe_lvm_active:-no} == yes && ${rootpxe_lvm_pv_number:-} == "$wanted" && -r ${rootpxe_lvm_facts_file:-} && -r ${rootpxe_lvm_lv_facts_file:-} ]] || return 1
+    printf '%s|%s|%s\n' "$rootpxe_lvm_facts_file" "$rootpxe_lvm_lv_facts_file" "$rootpxe_lvm_vg_name"
 }
 
 # Capture-time growth facts are deliberately read-only.  The deployment
@@ -1109,7 +1393,17 @@ rootpxe_build_original_schema() {
             ([.partitions[] | select(.kind == "extended" and (.number < 1 or .number > 4 or .role != "extended_container" or .artifact != "" or .resizable != false or .ebrReservedSectors != 2 or has("parentNumber")))] | length) == 0 and
             ([.partitions[] | select(.kind == "logical" and (.number < 5 or (.parentNumber|type) != "number" or has("ebrReservedSectors") or has("logicalNumbers")))] | length) == 0)
          else false end) and
-        (if has("lvm") then (.lvm.version == 1 and .lvm.captureMode == "per_lv" and .lvm.resizePolicy == "grow_only" and (.lvm.pvs|length)==1 and (.lvm.vgs|length)==1) else true end)
+        (if has("lvm") then
+          .lvm as $l | ($l.pvs|type) == "array" and ($l.vgs|type) == "array" and
+          ($l.version == 1 and $l.captureMode == "per_lv" and $l.resizePolicy == "grow_only" and
+           ($l.pvs|length) > 0 and ($l.vgs|length) == ($l.pvs|length) and
+           ([$l.pvs[].partitionNumber]|unique|length) == ($l.pvs|length) and
+           ([$l.pvs[].uuid]|unique|length) == ($l.pvs|length) and
+           ([$l.vgs[].uuid]|unique|length) == ($l.vgs|length) and
+           ([$l.vgs[].name]|unique|length) == ($l.vgs|length) and
+           ([$l.vgs[]|.lvs[]|.uuid]|unique|length) == ([$l.vgs[]|.lvs[]]|length) and
+           (. as $schema | all($l.pvs[]; . as $pv | ([$l.vgs[]|select(.uuid == $pv.vgUuid and .pvPartitionNumbers == [$pv.partitionNumber])]|length) == 1)))
+         else true end)
       else false end' "$rootpxe_original_schema_file" >/dev/null || { rm -f "$rootpxe_original_schema_file"; return 1; }
     export rootpxe_original_schema_file
 }
@@ -1244,10 +1538,68 @@ rootpxe_canonical_json_hash() {
     printf '%s' "$canonical" | sha256sum | awk '{print $1}'
 }
 
+# util-linux's DOS writer has a finite partition-number table.  Validate this
+# independently of the target capacity, both before a permit and again just
+# before sfdisk receives the resolved layout.
+rootpxe_validate_partition_lba_contract() {
+    local table="$1" file="$2" size_field="$3"
+    [[ $table == mbr || $table == gpt ]] || return 1
+    rootpxe_lvm_json_jq -e --arg table "$table" --arg size "$size_field" '
+      def posint: (type == "number") and (floor == .) and (. >= 1);
+      # jq numbers are IEEE-754 doubles.  Keep GPT geometry inside the exact
+      # JSON integer range; the 32-bit DOS limits apply only to MBR.
+      def safeint: (type == "number") and (floor == .) and (. >= 0) and (. <= 9007199254740991);
+      def lba32: safeint and (. <= 4294967295);
+      def extent: .[$size] as $value | ($value | posint) and ($value <= 9007199254740991);
+      def ends32: .startSectors as $start | .[$size] as $length |
+        ($start | lba32) and ($length | posint) and ($length <= 4294967295) and
+        ($start <= 4294967295 - ($length - 1));
+      def normalized_type:
+        (.typeGuid // .type // "") | tostring | ascii_downcase | sub("^0x"; "") | sub("^0+"; "");
+      def extended_type: normalized_type | IN("5", "f", "85");
+      (if type == "object" then .partitions
+       elif type == "array" then .
+       else null end) as $parts |
+      ($parts | type == "array" and length > 0 and
+       all(.[]; . as $part | ($part.number | posint) and
+         (if $table == "mbr" then ($part | ends32) else (($part.startSectors | posint) and ($part.startSectors <= 9007199254740991) and ($part | extent)) end)) and
+       ([$parts[].number] | unique | length) == ($parts | length)) and
+      if $table == "gpt" then
+        ($parts | length <= 128 and all(.[]; .number <= 128 and
+          ((.kind // "") | IN("extended", "logical") | not) and (extended_type | not)))
+      else
+        ($parts | all(.[]; .number <= 60)) and
+        if ([$parts[] | select(has("kind"))] | length) == 0 then
+          ($parts | all(.[]; .number <= 4 and (extended_type | not)))
+        else
+          ([$parts[] | select(.kind == "extended")] ) as $extended |
+          ([$parts[] | select(.kind == "logical")] ) as $logical |
+          ($parts | all(.[];
+            if .kind == "primary" then (.number <= 4 and (extended_type | not))
+            elif .kind == "extended" then (.number <= 4 and extended_type)
+            elif .kind == "logical" then (.number >= 5 and .number <= 60 and (extended_type | not) and (.parentNumber | posint and . <= 4))
+            else false end)) and
+          (($extended | length) <= 1) and
+          (if ($logical | length) == 0 then ($extended | length) == 0
+           else ($extended | length) == 1 and
+                all($logical[]; .parentNumber == $extended[0].number) and
+                # The kernel reconstructs logical partition numbers from the
+                # EBR chain in sequence.  A sparse set would be renumbered by
+                # the writer, invalidating the frozen partition identity.
+                ([$logical[] | .number] | sort) == [range(5; 5 + ($logical | length))]
+           end)
+        end
+      end
+    ' "$file" >/dev/null
+}
+
 rootpxe_validate_deployment_layout() {
     local disk="$1" schema_file="$2" layout_file="$3" schema_logical original_disk_bytes target_bytes target_sectors source_hash layout_hash
     [[ -r $schema_file && -r $layout_file ]] || return 1
     command -v jq >/dev/null 2>&1 || return 1
+    local schema_table
+    schema_table=$(jq -er '.partitionTable' "$schema_file" 2>/dev/null) || return 1
+    rootpxe_validate_partition_lba_contract "$schema_table" "$schema_file" originalSectors || return 1
     # MBR extended containers use derived geometry and EBR reconstruction;
     # they are not independently resizable filesystems.
     jq -e '([.partitions[] | select(.role == "other")] | length) == 0' "$schema_file" >/dev/null 2>&1 || return 1
@@ -1277,9 +1629,16 @@ rootpxe_validate_deployment_layout() {
           def verified_lvm_pv($p;$lvm):
             $lvm != null and $p.fs == "LVM2_member" and
             $lvm.version == 1 and $lvm.captureMode == "per_lv" and $lvm.resizePolicy == "grow_only" and
-            ($lvm.pvs|type) == "array" and ($lvm.pvs|length) == 1 and
-            ($lvm.vgs|type) == "array" and ($lvm.vgs|length) == 1 and
-            ([$lvm.pvs[] | select(.partitionNumber == $p.number)] | length) == 1;
+            ($lvm.pvs|type) == "array" and ($lvm.vgs|type) == "array" and
+            ($lvm.pvs|length) > 0 and ($lvm.vgs|length) == ($lvm.pvs|length) and
+            ([$lvm.pvs[].partitionNumber]|unique|length) == ($lvm.pvs|length) and
+            ([$lvm.pvs[].uuid]|unique|length) == ($lvm.pvs|length) and
+            ([$lvm.vgs[].uuid]|unique|length) == ($lvm.vgs|length) and
+            ([$lvm.vgs[].name]|unique|length) == ($lvm.vgs|length) and
+            ([$lvm.vgs[]|.lvs[]|.uuid]|unique|length) == ([$lvm.vgs[]|.lvs[]]|length) and
+            ([$lvm.pvs[] | select(.partitionNumber == $p.number)] | length) == 1 and
+            ($lvm as $all | [$all.pvs[] | select(.partitionNumber == $p.number)] | .[0] as $pv |
+             ([$all.vgs[] | select(.uuid == $pv.vgUuid and .pvPartitionNumbers == [$p.number])] | length) == 1);
           def physical_growth_supported($p;$logical;$lvm):
             ($p.fs // "") as $fs |
             ($p.role // "") as $role |
@@ -1406,7 +1765,7 @@ rootpxe_validate_deployment_layout() {
 # Resolve only the LVM extension after the physical partition layout has been
 # resolved.  The result is a root-only plan; it intentionally contains no
 # command text and is safe to validate before a disk permit is requested.
-rootpxe_validate_lvm_deployment_layout() {
+rootpxe_validate_lvm_deployment_layout_single() {
     local schema_file="$1" layout_file="$2" partition_plan="$3"
     rm -f -- "${rootpxe_resolved_lvm_layout_file:-}"; unset rootpxe_resolved_lvm_layout_file
     command -v jq >/dev/null 2>&1 || return 1
@@ -1444,8 +1803,10 @@ rootpxe_validate_lvm_deployment_layout() {
       if ($pvBytes < $pv.originalBytes or $pvBytes < $pv.minBytes or $pv.peStartBytes < 0 or $pv.peStartBytes >= $pvBytes) then error("invalid pv capacity") else . end |
       (((($pvBytes - $pv.peStartBytes - (if $plan.freeSpacePolicy == "preserveOriginal" then $vg.originalFreeBytes else 0 end)) / $vg.extentBytes)|floor) * $vg.extentBytes) as $capacity |
       if $capacity < 0 then error("pv capacity exhausted") else . end |
-      [range(0;($vg.lvs|length)) as $i | ($vg.lvs[$i]) as $lv | ($plan.volumes[$i]) as $v |
-        if ($v.uuid != $lv.uuid or ($v.mode|IN("original","fixed","remaining")|not)) then error("lvm volume identity") else . end |
+      [$vg.lvs[] as $lv |
+        ([$plan.volumes[] | select(.uuid == $lv.uuid)]) as $matches |
+        (if ($matches|length) != 1 then error("lvm volume identity") else $matches[0] end) as $v |
+        if (($v.mode|IN("original","fixed","remaining")|not)) then error("lvm volume identity") else . end |
         # Swap has no payload and is recreated after a possible lvextend.  It
         # remains resizable=false in capture metadata, so accept non-original
         # modes only for the exact typed swap schema contract.
@@ -1484,7 +1845,7 @@ rootpxe_validate_lvm_deployment_layout() {
 # Restore metadata and per-LV payloads only after a matching deploy permit.
 # The PV never has a raw payload: doing so would overwrite the layout just
 # resolved from the immutable task snapshot.
-rootpxe_restore_lvm_volumes() {
+rootpxe_restore_lvm_volumes_single() {
     local rootpxe_restore_status_file rootpxe_restore_status_rc plan="${rootpxe_resolved_lvm_layout_file:-}"
     rootpxe_restore_lvm_error_code=LVM_RESTORE_PREFLIGHT_FAILED
     rootpxe_restore_lvm_error_reason=preflight_or_validation
@@ -1497,7 +1858,7 @@ rootpxe_restore_lvm_volumes() {
         printf '%s|%s\n' "$1" "$2" >"$rootpxe_restore_status_file"
         return 1
     }
-    local image_path="$1" target_disk="$2" plan="${rootpxe_resolved_lvm_layout_file:-}" pv vg pv_part pv_path parent_progress_key pv_meta vg_cfg lv_name lv_uuid lv_fs lv_artifact lv_bytes swap_uuid target_id actual_size current_size pv_original pv_bytes vg_uuid extent lv_list expected_lvs prevalidated_lvs=0 restored_lvs=0 xfs_mount="" vg_active=no vgs_json pvs_json lvs_json
+    local image_path="$1" target_disk="$2" plan="${rootpxe_resolved_lvm_layout_file:-}" pv vg pv_part pv_path parent_progress_key pv_meta vg_cfg lv_name lv_uuid lv_fs lv_artifact lv_bytes swap_uuid target_id actual_size current_size pv_original pv_bytes vg_uuid extent lv_list expected_lvs prevalidated_lvs=0 restored_lvs=0 xfs_mount="" vg_active=no vgs_json pvs_json lvs_json vgs_diag pvs_diag
     local -A seen_lv_names=() seen_artifacts=()
     trap '[[ -n $xfs_mount ]] && umount "$xfs_mount" >/dev/null 2>&1 || true; [[ -n $xfs_mount ]] && rmdir "$xfs_mount" >/dev/null 2>&1 || true; [[ $vg_active == yes && -n $vg && -n $vg_uuid ]] && vgchange -an --select "vg_uuid=$vg_uuid" "$vg" >/dev/null 2>&1 || true; rm -f -- "${lv_list:-}"' EXIT
     [[ ${rootpxe_disk_permit_granted:-no} == yes && -r $plan ]] || { rootpxe_restore_lvm_fail LVM_RESTORE_PERMIT_FAILED permit_or_plan; return 1; }
@@ -1510,12 +1871,12 @@ rootpxe_restore_lvm_volumes() {
     parent_progress_key="d1:p${pv_part}"
     rootpxe_partition_progress_item "$parent_progress_key" preparing - "准备重建 LVM 物理卷"
     pv_meta=$(jq -er '.pv.artifact' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED pv_artifact; return 1; }; vg_cfg=$(jq -er '.pv.vgConfigArtifact' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED vg_config_artifact; return 1; }
-    rootpxe_lvm_safe_identifier "$pv" && rootpxe_lvm_storage_identifier "$vg" && rootpxe_lvm_safe_identifier "$vg_uuid" || { rootpxe_restore_lvm_fail LVM_RESTORE_IDENTIFIER_INVALID pv_or_vg; return 1; }
+    rootpxe_lvm_safe_identifier "$pv" && rootpxe_lvm_validate_vg_name "$vg" && rootpxe_lvm_safe_identifier "$vg_uuid" || { rootpxe_restore_lvm_fail LVM_RESTORE_IDENTIFIER_INVALID pv_or_vg; return 1; }
     rootpxe_safe_relative_path "$pv_meta" >/dev/null && rootpxe_safe_relative_path "$vg_cfg" >/dev/null || { rootpxe_restore_lvm_fail LVM_RESTORE_ARTIFACT_PATH_INVALID pv_or_vg_config; return 1; }
     [[ -r "$image_path/$pv_meta" && -r "$image_path/$vg_cfg" ]] || { rootpxe_restore_lvm_fail LVM_RESTORE_METADATA_ARTIFACT_MISSING pv_or_vg_config; return 1; }
     # The PV sidecar is not a decorative artifact: it binds the restore file
     # to the captured PV UUID before any destructive LVM command is issued.
-    grep -F -- "$pv" "$image_path/$pv_meta" >/dev/null 2>&1 || { rootpxe_restore_lvm_fail LVM_RESTORE_PV_METADATA_MISMATCH pv_uuid; return 1; }
+    rootpxe_lvm_pv_sidecar_binds_uuid "$image_path/$pv_meta" "$pv" || { rootpxe_restore_lvm_fail LVM_RESTORE_PV_METADATA_MISMATCH pv_uuid; return 1; }
     [[ $pv_original =~ ^[1-9][0-9]*$ && $extent =~ ^[1-9][0-9]*$ ]] || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_SIZE_INVALID pv_or_extent; return 1; }
     # Process substitution would hide jq's exit status from the while loop.
     # Materialise and validate the whole NUL-framed LV list before *any* LVM
@@ -1534,16 +1895,16 @@ rootpxe_restore_lvm_volumes() {
                          (.uuid|type=="string" and test("^[A-Za-z0-9._:+-]{1,160}$")) and
                          (.fs|IN("ext2","ext3","ext4","xfs","swap")) and
                          (.resolvedBytes|type=="number" and . > 0)) and
-       ([$volumes[].name|ascii_downcase]|unique|length) == ($volumes|length))
+       ([$volumes[].name]|unique|length) == ($volumes|length))
     ' "$plan" >/dev/null || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_PLAN_INVALID schema; return 1; }
     # Validate every payload contract before metadata writes.  Artifact names
     # are deliberately restricted to one Windows-safe filename: schema paths
     # are never interpreted as directories and are not scanned for fallbacks.
     [[ -s $lv_list ]] || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_LIST_EMPTY_FAILED empty; return 1; }
     while IFS= read -r -d '' lv_name && IFS= read -r -d '' lv_uuid && IFS= read -r -d '' lv_fs && IFS= read -r -d '' lv_artifact && IFS= read -r -d '' lv_bytes && IFS= read -r -d '' swap_uuid; do
-        rootpxe_lvm_storage_identifier "$lv_name" && rootpxe_lvm_safe_identifier "$lv_uuid" && [[ $lv_bytes =~ ^[1-9][0-9]*$ ]] || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_PLAN_INVALID "lv_${lv_name}_identity_or_size"; return 1; }
-        [[ ${seen_lv_names[${lv_name,,}]:-0} -eq 0 ]] || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_PLAN_INVALID "lv_${lv_name}_duplicate"; return 1; }
-        seen_lv_names[${lv_name,,}]=1
+        rootpxe_lvm_validate_mapper_name "$vg" "$lv_name" && rootpxe_lvm_safe_identifier "$lv_uuid" && [[ $lv_bytes =~ ^[1-9][0-9]*$ ]] || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_PLAN_INVALID "lv_${lv_name}_identity_or_size"; return 1; }
+        [[ ${seen_lv_names[$lv_name]:-0} -eq 0 ]] || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_PLAN_INVALID "lv_${lv_name}_duplicate"; return 1; }
+        seen_lv_names[$lv_name]=1
         case $lv_fs in ext2|ext3|ext4|xfs)
             [[ -n $lv_artifact ]] && rootpxe_lvm_storage_filename "$lv_artifact" && rootpxe_safe_relative_path "$lv_artifact" >/dev/null && [[ -r "$image_path/$lv_artifact" && ${seen_artifacts[${lv_artifact,,}]:-0} -eq 0 ]] || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_ARTIFACT_INVALID_OR_MISSING "lv_${lv_name}"; return 1; }
             seen_artifacts[${lv_artifact,,}]=1
@@ -1559,6 +1920,40 @@ rootpxe_restore_lvm_volumes() {
     [[ $prevalidated_lvs -eq $expected_lvs ]] || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_LIST_COUNT_FAILED parsed; return 1; }
     pv_bytes=$(jq -er '.pvBytes' "$plan") || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_FIELD_FAILED pv_bytes; return 1; }
     [[ $pv_bytes =~ ^[1-9][0-9]*$ && $pv_bytes -ge $pv_original ]] || { rootpxe_restore_lvm_fail LVM_RESTORE_PLAN_SIZE_INVALID pv_bytes; return 1; }
+    # A host VG with the requested name but a different UUID is never a
+    # restoration candidate.  Detect it before pvcreate/vgcfgrestore so an
+    # unrelated local VG cannot be selected by name during metadata import.
+    # Do not pass the requested VG name to vgs: a clean target has no VG yet
+    # and some LVM versions return non-zero for that lookup.  A successful
+    # complete report with no matching row is the expected empty-disk case.
+    vgs_diag=$(mktemp /tmp/rootpxe-lvm-vgs-query.XXXXXX) || { rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED vgs_diag_create; return 1; }
+    chmod 600 "$vgs_diag" || { rm -f -- "$vgs_diag"; rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED vgs_diag_permissions; return 1; }
+    vgs_json=$(LC_ALL=C vgs --reportformat json -o vg_name,vg_uuid 2>"$vgs_diag") || { rm -f -- "$vgs_diag"; rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED vgs; return 1; }
+    [[ ! -s $vgs_diag ]] || { rm -f -- "$vgs_diag"; rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED vgs_diagnostic; return 1; }
+    rm -f -- "$vgs_diag"
+    rootpxe_lvm_json_jq -e --arg name "$vg" --arg uuid "$vg_uuid" '
+      (.report|type == "array" and length == 1 and ((.[0].vg? // [])|type == "array") and
+       ((.[0].vg // []) | map(select(.vg_name == $name or .vg_uuid == $uuid)) |
+        all(.[]; (.vg_name == $name and .vg_uuid == $uuid))))
+    ' <<<"$vgs_json" >/dev/null || { rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_CONFLICT name_or_uuid; return 1; }
+    # If an active host VG already presents this identity, its only PV must be
+    # the permitted target partition.  Matching VG/PV UUIDs on a source disk
+    # are otherwise indistinguishable to vgcfgrestore and must fail closed.
+    pvs_diag=$(mktemp /tmp/rootpxe-lvm-pvs-query.XXXXXX) || { rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED pvs_diag_create; return 1; }
+    chmod 600 "$pvs_diag" || { rm -f -- "$pvs_diag"; rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED pvs_diag_permissions; return 1; }
+    pvs_json=$(LC_ALL=C pvs --reportformat json -o pv_name,pv_uuid,vg_name,vg_uuid 2>"$pvs_diag") || { rm -f -- "$pvs_diag"; rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED pvs; return 1; }
+    [[ ! -s $pvs_diag ]] || { rm -f -- "$pvs_diag"; rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED pvs_diagnostic; return 1; }
+    rm -f -- "$pvs_diag"
+    rootpxe_lvm_json_jq -e --arg path "$pv_path" --arg pv "$pv" --arg vg "$vg" --arg vguuid "$vg_uuid" '
+      (.report|type == "array" and length == 1 and ((.[0].pv? // [])|type == "array") and
+       ((.[0].pv // []) | map(select(.pv_uuid == $pv or .vg_name == $vg or .vg_uuid == $vguuid)) |
+        (length == 0 or (length == 1 and .[0].pv_name == $path and .[0].pv_uuid == $pv and .[0].vg_name == $vg and .[0].vg_uuid == $vguuid))))
+    ' <<<"$pvs_json" >/dev/null || { rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_CONFLICT existing_pv_not_target; return 1; }
+    # The multi-group dispatcher invokes this exact validation path for every
+    # group before it permits the first metadata write.  Keep the branch here,
+    # immediately before pvcreate, so a future field added above cannot bypass
+    # the all-group no-write barrier.
+    [[ ${rootpxe_lvm_restore_preflight_only:-no} == yes ]] && return 0
     pvcreate --uuid "$pv" --restorefile "$image_path/$vg_cfg" -ff -y "$pv_path" || { rootpxe_restore_lvm_fail LVM_PV_CREATE_FAILED pvcreate; return 1; }
     vgcfgrestore -f "$image_path/$vg_cfg" "$vg" || { rootpxe_restore_lvm_fail LVM_VG_CONFIG_RESTORE_FAILED vgcfgrestore; return 1; }
     if [[ $pv_bytes -gt $pv_original ]]; then
@@ -1572,12 +1967,18 @@ rootpxe_restore_lvm_volumes() {
     vg_active=yes
     rootpxe_partition_progress_item "$parent_progress_key" running - "正在恢复 LVM 逻辑卷"
     vgs_json=$(vgs --reportformat json -o vg_name,vg_uuid "$vg" 2>/dev/null) || return 1
-    rootpxe_lvm_json_jq -e --arg name "$vg" --arg uuid "$vg_uuid" '(.report|type=="array" and length==1 and ((.[0].vg? // [])|type=="array") and ((.[0].vg? // [])|length==1) and .[0].vg[0].vg_name==$name and .[0].vg[0].vg_uuid==$uuid)' <<<"$vgs_json" >/dev/null || return 1
+    rootpxe_lvm_json_jq -e --arg name "$vg" --arg uuid "$vg_uuid" '
+      (.report | (type == "array" and length == 1)) and
+      ((.report[0].vg? // []) | (type == "array" and length == 1)) and
+      .report[0].vg[0].vg_name == $name and .report[0].vg[0].vg_uuid == $uuid
+    ' <<<"$vgs_json" >/dev/null || return 1
     pvs_json=$(pvs --reportformat json -o pv_name,pv_uuid,vg_name,vg_uuid "$pv_path" 2>/dev/null) || return 1
     rootpxe_lvm_json_jq -e --arg path "$pv_path" --arg pv "$pv" --arg vg "$vg" --arg vguuid "$vg_uuid" '
-      (.report|type=="array" and length==1 and ((.[0].pv? // [])|type=="array") and ((.[0].pv? // [])|length==1) and
-       .[0].pv[0].pv_name==$path and .[0].pv[0].pv_uuid==$pv and .[0].pv[0].vg_name==$vg and .[0].pv[0].vg_uuid==$vguuid)
-    ' <<<"$pvs_json" >/dev/null || { rm -f "$lv_list"; return 1; }
+      (.report | (type == "array" and length == 1)) and
+      ((.report[0].pv? // []) | (type == "array" and length == 1)) and
+      .report[0].pv[0].pv_name == $path and .report[0].pv[0].pv_uuid == $pv and
+      .report[0].pv[0].vg_name == $vg and .report[0].pv[0].vg_uuid == $vguuid
+    ' <<<"$pvs_json" >/dev/null || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_RESTORE_PV_IDENTITY_FAILED restored_pv; return 1; }
     # The list was fully validated before pvcreate.  Re-read its NUL framing
     # here only to bind each verified schema entry to the restored LV.
     while IFS= read -r -d '' lv_name && IFS= read -r -d '' lv_uuid && IFS= read -r -d '' lv_fs && IFS= read -r -d '' lv_artifact && IFS= read -r -d '' lv_bytes && IFS= read -r -d '' swap_uuid; do
@@ -1641,6 +2042,285 @@ rootpxe_restore_lvm_volumes() {
         [[ $pv_part =~ ^[1-9][0-9]*$ ]] && rootpxe_partition_progress_item "d1:p${pv_part}" failed - "LVM 恢复失败"
     fi
     return "$rootpxe_restore_status_rc"
+}
+
+# Multi-group images retain the public v1 LVM arrays.  Runtime plans use a
+# private groups[] wrapper so an old, single-object task snapshot remains
+# readable while every new group can be preflighted independently.
+rootpxe_validate_lvm_deployment_layout() {
+    local schema_file="$1" layout_file="$2" partition_plan="$3" count row pv_uuid vg_uuid part vg_matches work rows_file mini_schema mini_layout group_plan combined
+    local -A seen_plan_pv=() seen_pv_uuid=() seen_vg_uuid=()
+    count=$(rootpxe_lvm_json_jq -er 'if (.lvm? | type) == "object" and (.lvm.pvs? | type) == "array" then (.lvm.pvs|length) else 0 end' "$schema_file" 2>/dev/null) || return 1
+    [[ $count =~ ^[0-9]+$ ]] || return 1
+    [[ $count -le 1 ]] && { rootpxe_validate_lvm_deployment_layout_single "$schema_file" "$layout_file" "$partition_plan"; return; }
+    rootpxe_lvm_json_jq -e --slurpfile layout "$layout_file" '
+      def storage: type == "string" and test("^[A-Za-z0-9._+-]{1,160}$");
+      def ident: type == "string" and test("^[A-Za-z0-9._:+-]{1,160}$");
+      .lvm as $s | ($layout[0].lvm // []) as $plans |
+      ($s.pvs|length) as $n |
+      ($s.version == 1 and $s.captureMode == "per_lv" and $s.resizePolicy == "grow_only" and
+       ($s.pvs|type) == "array" and ($s.vgs|type) == "array" and ($s.vgs|length) == $n and
+       ($plans|type) == "array" and ($plans|length) == $n and
+       ([ $s.pvs[] | .partitionNumber ] | unique | length) == $n and
+       ([ $s.pvs[] | .uuid ] | unique | length) == $n and
+       ([ $s.vgs[] | .uuid ] | unique | length) == $n and
+       ([ $s.vgs[] | .name ] | unique | length) == $n and
+       ([ $s.vgs[] | .lvs[] | .uuid ] | unique | length) == ([ $s.vgs[] | .lvs[] ] | length) and
+       ([ $s.vgs[] | .lvs[] | select(.artifact != "") | .artifact | ascii_downcase ] | unique | length) == ([ $s.vgs[] | .lvs[] | select(.artifact != "") ] | length) and
+       ([ $plans[] | .volumes[]? | select(.mode == "remaining") ] | length) <= 1)
+    ' "$schema_file" >/dev/null || return 1
+    work=$(mktemp -d /tmp/rootpxe-resolved-lvm-groups.XXXXXX) || return 1
+    chmod 700 "$work" || { rmdir "$work" 2>/dev/null || true; return 1; }
+    rows_file="$work/pv-vg.rows"
+    rootpxe_lvm_json_jq -r '.lvm as $l | $l.pvs[] | . as $pv | [$pv.uuid,$pv.vgUuid,($pv.partitionNumber|tostring),([$l.vgs[] | select(.uuid == $pv.vgUuid)] | length)] | @tsv' "$schema_file" >"$rows_file" || { rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
+    [[ $(wc -l <"$rows_file") == "$count" ]] || { rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
+    while IFS=$'\t' read -r pv_uuid vg_uuid part vg_matches; do
+        pv_uuid=$(rootpxe_lvm_trim "$pv_uuid"); vg_uuid=$(rootpxe_lvm_trim "$vg_uuid"); part=$(rootpxe_lvm_trim "$part")
+        vg_matches=$(rootpxe_lvm_trim "$vg_matches")
+        [[ $pv_uuid && $vg_uuid && $part =~ ^[1-9][0-9]*$ && $vg_matches == 1 && ${seen_pv_uuid[$pv_uuid]:-0} -eq 0 && ${seen_vg_uuid[$vg_uuid]:-0} -eq 0 && ${seen_plan_pv[$part]:-0} -eq 0 ]] || { rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
+        seen_pv_uuid[$pv_uuid]=1; seen_vg_uuid[$vg_uuid]=1; seen_plan_pv[$part]=1
+        mini_schema="$work/p${part}.schema.json"; mini_layout="$work/p${part}.layout.json"
+        rootpxe_lvm_json_jq --arg pv "$pv_uuid" --arg vg "$vg_uuid" '.lvm |= (. + {pvs:[.pvs[] | select(.uuid == $pv)],vgs:[.vgs[] | select(.uuid == $vg)]})' "$schema_file" >"$mini_schema" || { rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
+        rootpxe_lvm_json_jq --argjson part "$part" '.lvm = [(.lvm // [])[] | select(.pvPartitionNumber == $part)]' "$layout_file" >"$mini_layout" || { rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
+        rootpxe_validate_lvm_deployment_layout_single "$mini_schema" "$mini_layout" "$partition_plan" || { rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
+        group_plan="$rootpxe_resolved_lvm_layout_file"
+        [[ -r $group_plan ]] && cp -- "$group_plan" "$work/p${part}.plan.json" || { rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
+        rm -f -- "$group_plan"; unset rootpxe_resolved_lvm_layout_file
+    done <"$rows_file"
+    combined=$(mktemp /tmp/rootpxe-resolved-lvm.XXXXXX) || { rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
+    chmod 600 "$combined" || { rm -f -- "$combined" "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
+    rootpxe_lvm_json_jq -s '{groups:.}' "$work"/*.plan.json >"$combined" || { rm -f -- "$combined" "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
+    rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true
+    rootpxe_resolved_lvm_layout_file="$combined"; export rootpxe_resolved_lvm_layout_file
+}
+
+rootpxe_lvm_restore_metadata_binds_group() {
+    local image_path="$1" plan="$2" plans="$3" pv vg_uuid vg_name cfg other_pv other_vg ids_file lvs_file expected_ids
+    pv=$(rootpxe_lvm_json_jq -er '.pv.uuid' "$plan") || return 1
+    vg_uuid=$(rootpxe_lvm_json_jq -er '.vg.uuid' "$plan") || return 1
+    vg_name=$(rootpxe_lvm_json_jq -er '.vg.name' "$plan") || return 1
+    cfg=$(rootpxe_lvm_json_jq -er '.pv.vgConfigArtifact' "$plan") || return 1
+    [[ -r "$image_path/$cfg" ]] || return 1
+    # vgcfgbackup contains the PV identifier inside its physical_volumes
+    # stanza.  Require exactly one member there and reject a reference to a
+    # different group from this immutable deployment plan.
+    lvs_file=$(mktemp /tmp/rootpxe-lvm-vgcfg-lvs.XXXXXX) || return 1
+    chmod 600 "$lvs_file" || { rm -f -- "$lvs_file"; return 1; }
+    rootpxe_lvm_json_jq -r '.volumes[] | [.name,.uuid] | @tsv' "$plan" >"$lvs_file" || { rm -f -- "$lvs_file"; return 1; }
+    # Parse the canonical vgcfgbackup hierarchy rather than accepting an
+    # arbitrary comment containing a UUID.  The exact top-level VG, its id,
+    # its sole PV stanza/id and the complete LV name/id set must agree with
+    # the immutable plan before pvcreate is allowed.
+    awk -v wanted_vg="$vg_name" -v wanted_vg_uuid="$vg_uuid" -v wanted_pv="$pv" '
+      NR == FNR { sub(/\r$/, ""); if (NF != 2 || seen_name[$1]++ || seen_uuid[$2]++) bad=1; else { want_uuid[$1]=$2; want_count++ }; next }
+      { sub(/\r$/, "") }
+      /^[[:space:]]*#/ { next }
+      {
+        opens=gsub(/\{/, "{"); closes=gsub(/\}/, "}")
+        if (depth == 0 && $0 ~ /^[[:space:]]*[A-Za-z0-9_.+-]+[[:space:]]*\{/) { top_count++; top_name=$0; sub(/^[[:space:]]*/, "", top_name); sub(/[[:space:]]*\{.*/, "", top_name) }
+        if (depth == 1 && $0 ~ /^[[:space:]]*physical_volumes[[:space:]]*\{/) { section="pv"; section_depth=depth+1 }
+        else if (depth == 1 && $0 ~ /^[[:space:]]*logical_volumes[[:space:]]*\{/) { section="lv"; section_depth=depth+1 }
+        else if (section != "" && depth == section_depth && $0 ~ /^[[:space:]]*[A-Za-z0-9_.+-]+[[:space:]]*\{/) { entry=$0; sub(/^[[:space:]]*/, "", entry); sub(/[[:space:]]*\{.*/, "", entry); entry_depth=depth+1; if (section == "pv") pv_count++; else { lv_count++; if (!(entry in want_uuid)) bad=1; current_lv=entry } }
+        if ($0 ~ /^[[:space:]]*id[[:space:]]*=[[:space:]]*"[^"]+"/) {
+          value=$0; sub(/^[^"]*"/, "", value); sub(/".*/, "", value)
+          if (depth == 1) { if (seen_root_id++) bad=1; root_id=value }
+          else if (section == "pv" && depth == entry_depth) { if (seen_pv_id++) bad=1; pv_id=value; if (entry != "pv0" && entry !~ /^pv[0-9]+$/) bad=1 }
+          else if (section == "lv" && depth == entry_depth) { if (current_lv == "" || value != want_uuid[current_lv] || seen_lv[current_lv]++ || seen_lv_id[value]++) bad=1; else found_lv++ }
+          else bad=1
+        }
+        depth += opens - closes
+        if (depth < 0) bad=1
+        if (entry != "" && depth < entry_depth) { entry=""; entry_depth=0; current_lv="" }
+        if (section != "" && depth < section_depth) { section=""; entry=""; entry_depth=0; current_lv="" }
+      }
+      END { exit(!bad && depth == 0 && top_count == 1 && top_name == wanted_vg && root_id == wanted_vg_uuid && pv_count == 1 && pv_id == wanted_pv && lv_count == want_count && found_lv == want_count ? 0 : 1) }
+    ' "$lvs_file" "$image_path/$cfg" || { rm -f -- "$lvs_file"; return 1; }
+    rm -f -- "$lvs_file"
+    ids_file="${plans}.identities"
+    rootpxe_lvm_json_jq -r '.groups[] | [.pv.uuid,.vg.uuid] | @tsv' "$plans" >"$ids_file" || return 1
+    expected_ids=$(rootpxe_lvm_json_jq -er '.groups|length' "$plans") || { rm -f -- "$ids_file"; return 1; }
+    [[ $expected_ids =~ ^[1-9][0-9]*$ && $(wc -l <"$ids_file") == "$expected_ids" ]] || { rm -f -- "$ids_file"; return 1; }
+    while IFS=$'\t' read -r other_pv other_vg; do
+        other_pv=$(rootpxe_lvm_trim "$other_pv"); other_vg=$(rootpxe_lvm_trim "$other_vg")
+        [[ $other_pv == "$pv" && $other_vg == "$vg_uuid" ]] && continue
+        ! grep -F -- "$other_pv" "$image_path/$cfg" >/dev/null 2>&1 || return 1
+        ! grep -F -- "$other_vg" "$image_path/$cfg" >/dev/null 2>&1 || return 1
+    done <"$ids_file"
+    rm -f -- "$ids_file"
+}
+
+# Read-only barrier for every LVM group.  It intentionally runs before the
+# partition table exists: metadata/payload binding and host-name/UUID conflicts
+# must be rejected before any ordinary partition writer can start.
+rootpxe_lvm_preflight_restore_groups() {
+    # Run in a subshell so the EXIT trap always removes only this invocation's
+    # private mktemp directory and cannot alter the caller's trap state.
+    (
+    local image_path="$1" target_disk="$2" original_plan="${rootpxe_resolved_lvm_layout_file:-}" plans work groups_file artifacts_file group index=0 count group_count payload_count pv vg_uuid vg_name pv_part pv_path pv_meta pvs_json vgs_json pvs_diag vgs_diag
+    [[ -n $original_plan && -r $original_plan && -f $original_plan ]] || return 1
+    work=$(mktemp -d /tmp/rootpxe-lvm-early-preflight.XXXXXX) || return 1
+    [[ $work =~ ^/tmp/rootpxe-lvm-early-preflight\.[A-Za-z0-9]+$ && -d $work ]] || return 1
+    chmod 700 "$work" || { rmdir -- "$work" 2>/dev/null || true; return 1; }
+    rootpxe_lvm_early_preflight_cleanup() {
+        [[ $work =~ ^/tmp/rootpxe-lvm-early-preflight\.[A-Za-z0-9]+$ && -d $work ]] || return 0
+        rm -f -- "$work"/*
+        rmdir -- "$work" 2>/dev/null || true
+    }
+    trap rootpxe_lvm_early_preflight_cleanup EXIT
+    plans="$work/groups.json"
+    if rootpxe_lvm_json_jq -e '.groups? | type == "array"' "$original_plan" >/dev/null 2>&1; then
+        cp -- "$original_plan" "$plans" || return 1
+    else
+        rootpxe_lvm_json_jq -c '{groups:[.]}' "$original_plan" >"$plans" || return 1
+    fi
+    rootpxe_lvm_normalize_private_swap_artifacts "$plans" || return 1
+    # Reject every malformed, incomplete, duplicate, or case-fold-colliding
+    # artifact before looking at a target partition or asking for a permit.
+    rootpxe_lvm_json_jq -e '
+      def ident: type == "string" and test("^[A-Za-z0-9._:+-]{1,160}$");
+      def vgname: type == "string" and test("^[A-Za-z0-9+_.][A-Za-z0-9+_.-]{0,126}$") and (. != ".") and (. != "..");
+      def lvname: type == "string" and test("^[A-Za-z0-9+_.][A-Za-z0-9+_.-]{0,126}$") and (. != ".") and (. != "..") and
+        (test("^(snapshot|pvmove)") | not) and
+        (test("_cdata|_cmeta|_corig|_cpool|_cvol|_wcorig|_mimage|_mlog|_rimage|_rmeta|_tdata|_tmeta|_vdata|_imeta|_iorig|_pmspare|_vorigin") | not);
+      def positive: type == "number" and . > 0 and floor == .;
+      def artifact: type == "string" and test("^[A-Za-z0-9._+-]{1,255}$") and (. != ".") and (. != "..");
+      .groups as $groups |
+      ($groups | type == "array" and length > 0 and
+       all($groups[];
+         (.pv | type == "object") and (.vg | type == "object") and
+         (.volumes | type == "array" and length > 0) and
+         (.pv.uuid | ident) and (.pv.partitionNumber | positive) and
+         (.pv.originalBytes | positive) and (.pv.artifact | artifact) and
+         (.pv.vgConfigArtifact | artifact) and (.vg.uuid | ident) and
+         (.vg.name | vgname) and (.vg.extentBytes | positive) and
+         (.pvBytes | positive) and
+         (.vg.name as $vg | all(.volumes[];
+           (.name | lvname) and
+           (($vg | gsub("-"; "--") | length) + 1 + (.name | gsub("-"; "--") | length) <= 127) and
+           (.uuid | ident) and (.fs | type == "string") and
+           (.resolvedBytes | positive) and
+           (if .fs == "swap" then (.artifact | type == "string" and length == 0) and (.swapUuid | ident)
+            else (.fs == "ext2" or .fs == "ext3" or .fs == "ext4" or .fs == "xfs") and (.artifact | artifact) and ((.swapUuid // "") == "")
+            end))) and
+         ([.volumes[].name] | unique | length) == (.volumes | length)) and
+       ([$groups[].pv.uuid] | unique | length) == ($groups | length) and
+       ([$groups[].pv.partitionNumber] | unique | length) == ($groups | length) and
+       ([$groups[].vg.uuid] | unique | length) == ($groups | length) and
+       ([$groups[].vg.name] | unique | length) == ($groups | length) and
+       ([$groups[].volumes[].uuid] | unique | length) == ([$groups[].volumes[]] | length) and
+       ([ $groups[] | .pv.uuid, .vg.uuid, (.volumes[].uuid) ] | unique | length) ==
+       ([ $groups[] | .pv.uuid, .vg.uuid, (.volumes[].uuid) ] | length) and
+       ([ $groups[] | .pv.artifact, .pv.vgConfigArtifact,
+          (.volumes[] | select(.artifact != "") | .artifact) | ascii_downcase ] | unique | length) ==
+       ([ $groups[] | .pv.artifact, .pv.vgConfigArtifact,
+          (.volumes[] | select(.artifact != "") | .artifact) ] | length))
+    ' "$plans" >/dev/null || return 1
+    count=$(rootpxe_lvm_json_jq -er '.groups|length' "$plans") || return 1
+    [[ $count =~ ^[1-9][0-9]*$ ]] || return 1
+    groups_file="$work/groups.jsonl"
+    rootpxe_lvm_json_jq -c '.groups[]' "$plans" >"$groups_file" || return 1
+    [[ $(wc -l <"$groups_file") == "$count" ]] || return 1
+    while IFS= read -r group; do
+        index=$((index + 1))
+        printf '%s\n' "$group" >"$work/g${index}.json" || return 1
+        rootpxe_lvm_restore_metadata_binds_group "$image_path" "$work/g${index}.json" "$plans" || return 1
+        pv=$(rootpxe_lvm_json_jq -er '.pv.uuid' "$work/g${index}.json") || return 1
+        pv_meta=$(rootpxe_lvm_json_jq -er '.pv.artifact' "$work/g${index}.json") || return 1
+        rootpxe_lvm_pv_sidecar_binds_uuid "$image_path/$pv_meta" "$pv" || return 1
+        artifacts_file="$work/g${index}.artifacts"
+        rootpxe_lvm_json_jq -r '.volumes[] | select(.fs != "swap") | .artifact' "$work/g${index}.json" >"$artifacts_file" || return 1
+        payload_count=$(rootpxe_lvm_json_jq -er '[.volumes[] | select(.fs != "swap")] | length' "$work/g${index}.json") || return 1
+        [[ $payload_count =~ ^[0-9]+$ && $(wc -l <"$artifacts_file") == "$payload_count" ]] || return 1
+        while IFS= read -r pv_meta; do
+            pv_meta=$(rootpxe_lvm_trim "$pv_meta")
+            [[ -n $pv_meta && -r "$image_path/$pv_meta" ]] || return 1
+        done <"$artifacts_file"
+    done <"$groups_file"
+    group_count=$index
+    [[ $group_count -eq $count ]] || return 1
+    pvs_diag="$work/pvs.err"; vgs_diag="$work/vgs.err"
+    pvs_json=$(LC_ALL=C pvs --reportformat json -o pv_name,pv_uuid,vg_name,vg_uuid 2>"$pvs_diag") || return 1
+    vgs_json=$(LC_ALL=C vgs --reportformat json -o vg_name,vg_uuid 2>"$vgs_diag") || return 1
+    [[ ! -s $pvs_diag && ! -s $vgs_diag ]] || return 1
+    rootpxe_lvm_json_jq -e 'type == "object" and (.report | type == "array" and length == 1) and
+      (.report[0] | type == "object" and (.pv | type == "array") and
+       all(.pv[]; type == "object" and (.pv_name | type == "string" and length > 0) and
+                      (.pv_uuid | type == "string" and length > 0) and
+                      (.vg_name | type == "string") and (.vg_uuid | type == "string")))' <<<"$pvs_json" >/dev/null || return 1
+    rootpxe_lvm_json_jq -e 'type == "object" and (.report | type == "array" and length == 1) and
+      (.report[0] | type == "object" and (.vg | type == "array") and
+       all(.vg[]; type == "object" and (.vg_name | type == "string" and length > 0) and
+                      (.vg_uuid | type == "string" and length > 0)))' <<<"$vgs_json" >/dev/null || return 1
+    for ((index=1; index<=group_count; index++)); do
+        pv=$(rootpxe_lvm_json_jq -er '.pv.uuid' "$work/g${index}.json") || return 1
+        vg_uuid=$(rootpxe_lvm_json_jq -er '.vg.uuid' "$work/g${index}.json") || return 1
+        vg_name=$(rootpxe_lvm_json_jq -er '.vg.name' "$work/g${index}.json") || return 1
+        pv_part=$(rootpxe_lvm_json_jq -er '.pv.partitionNumber' "$work/g${index}.json") || return 1
+        pv_path=$(rootpxe_lvm_partition_path "$target_disk" "$pv_part") || return 1
+        rootpxe_lvm_json_jq -e --arg path "$pv_path" --arg pv "$pv" --arg vg_uuid "$vg_uuid" --arg vg_name "$vg_name" '
+          [.report[0].pv[] | select(.pv_uuid == $pv or .vg_uuid == $vg_uuid or .vg_name == $vg_name)] as $matches |
+          ($matches | length <= 1) and
+          all($matches[]; .pv_name == $path and .pv_uuid == $pv and .vg_uuid == $vg_uuid and .vg_name == $vg_name)
+        ' <<<"$pvs_json" >/dev/null || return 1
+        rootpxe_lvm_json_jq -e --arg vg_uuid "$vg_uuid" --arg vg_name "$vg_name" '
+          [.report[0].vg[] | select(.vg_uuid == $vg_uuid or .vg_name == $vg_name)] as $matches |
+          ($matches | length <= 1) and
+          all($matches[]; .vg_uuid == $vg_uuid and .vg_name == $vg_name)
+        ' <<<"$vgs_json" >/dev/null || return 1
+    done
+    )
+}
+
+rootpxe_restore_lvm_volumes() {
+    local image_path="$1" target_disk="$2" original_plan="${rootpxe_resolved_lvm_layout_file:-}" plans groups_file work group index=0 group_count
+    [[ -r $original_plan ]] || { rootpxe_restore_lvm_error_code=LVM_RESTORE_PERMIT_FAILED; rootpxe_restore_lvm_error_reason=permit_or_plan; return 1; }
+    work=$(mktemp -d /tmp/rootpxe-lvm-restore-groups.XXXXXX) || return 1
+    chmod 700 "$work" || { rmdir "$work" 2>/dev/null || true; return 1; }
+    plans="$work/groups.json"
+    if rootpxe_lvm_json_jq -e '.groups? | type == "array"' "$original_plan" >/dev/null 2>&1; then
+        cp -- "$original_plan" "$plans" || { rmdir "$work" 2>/dev/null || true; return 1; }
+    else
+        rootpxe_lvm_json_jq -c '{groups:[.]}' "$original_plan" >"$plans" || { rmdir "$work" 2>/dev/null || true; return 1; }
+    fi
+    rootpxe_lvm_normalize_private_swap_artifacts "$plans" || { rm -f -- "$plans"; rmdir "$work" 2>/dev/null || true; return 1; }
+    rootpxe_lvm_json_jq -e '
+      def ident: type == "string" and test("^[A-Za-z0-9._:+-]{1,160}$");
+      def storage: type == "string" and test("^[A-Za-z0-9._+-]{1,255}$") and (. != ".") and (. != "..");
+      def vgname: type == "string" and test("^[A-Za-z0-9+_.][A-Za-z0-9+_.-]{0,126}$") and (. != ".") and (. != "..");
+      def lvname: type == "string" and test("^[A-Za-z0-9+_.][A-Za-z0-9+_.-]{0,126}$") and (. != ".") and (. != "..") and
+        (test("^(snapshot|pvmove)") | not) and
+        (test("_cdata|_cmeta|_corig|_cpool|_cvol|_wcorig|_mimage|_mlog|_rimage|_rmeta|_tdata|_tmeta|_vdata|_imeta|_iorig|_pmspare|_vorigin") | not);
+      .groups as $groups | ($groups|type == "array" and length > 0 and
+       all($groups[]; (.pv|type == "object") and (.vg|type == "object") and (.volumes|type == "array" and length > 0) and (.pv.uuid|ident) and (.vg.uuid|ident) and (.vg.name|vgname) and (.pv.partitionNumber|type == "number" and floor == . and . >= 1) and (.pv.artifact|storage) and (.pv.vgConfigArtifact|storage) and (.vg.name as $vg | all(.volumes[]; (.name|lvname) and (($vg | gsub("-"; "--") | length) + 1 + (.name | gsub("-"; "--") | length) <= 127)))) and
+       ([$groups[].pv.uuid]|unique|length) == ($groups|length) and
+       ([$groups[].pv.partitionNumber]|unique|length) == ($groups|length) and
+       ([$groups[].vg.uuid]|unique|length) == ($groups|length) and
+       ([$groups[].vg.name]|unique|length) == ($groups|length) and
+       ([$groups[].volumes[].uuid]|unique|length) == ([$groups[].volumes[]]|length) and
+       ([ $groups[] | .pv.uuid, .vg.uuid, (.volumes[].uuid) ] | unique | length) ==
+       ([ $groups[] | .pv.uuid, .vg.uuid, (.volumes[].uuid) ] | length) and
+       ([ $groups[] | .pv.artifact,.pv.vgConfigArtifact,(.volumes[] | select(.artifact != "") | .artifact) | ascii_downcase ] | unique | length) == ([ $groups[] | .pv.artifact,.pv.vgConfigArtifact,(.volumes[] | select(.artifact != "") | .artifact) ] | length))
+    ' "$plans" >/dev/null || { rm -f -- "$plans"; rmdir "$work" 2>/dev/null || true; return 1; }
+    groups_file="$work/groups.jsonl"
+    rootpxe_lvm_json_jq -c '.groups[]' "$plans" >"$groups_file" || { rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
+    group_count=$(rootpxe_lvm_json_jq -er '.groups|length' "$plans") || { rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
+    [[ $group_count =~ ^[1-9][0-9]*$ && $(wc -l <"$groups_file") == "$group_count" ]] || { rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
+    while IFS= read -r group; do
+        index=$((index + 1)); printf '%s\n' "$group" >"$work/g${index}.json" || { rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
+        rootpxe_lvm_restore_metadata_binds_group "$image_path" "$work/g${index}.json" "$plans" || { rootpxe_restore_lvm_error_code=LVM_RESTORE_METADATA_MISMATCH; rootpxe_restore_lvm_error_reason=group_metadata; rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
+    done <"$groups_file"
+    # All restorefiles are structurally bound before the first single-group
+    # plan preflight.  A later foreign/corrupt metadata file therefore cannot
+    # leave an earlier group even provisionally prepared for writing.
+    for ((index=1; index<=group_count; index++)); do
+        rootpxe_resolved_lvm_layout_file="$work/g${index}.json" rootpxe_lvm_restore_preflight_only=yes rootpxe_restore_lvm_volumes_single "$image_path" "$target_disk" || { rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
+    done
+    for ((index=1; index<=group_count; index++)); do
+        rootpxe_resolved_lvm_layout_file="$work/g${index}.json" rootpxe_lvm_restore_preflight_only=no rootpxe_restore_lvm_volumes_single "$image_path" "$target_disk" || { rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
+    done
+    rootpxe_resolved_lvm_layout_file="$original_plan"; export rootpxe_resolved_lvm_layout_file
+    rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true
+    return 0
 }
 
 rootpxe_sfdisk_layout_fingerprint() {
@@ -1782,6 +2462,8 @@ rootpxe_apply_deployment_layout() {
     (( total_sectors > 0 )) || { rootpxe_layout_apply_failed LAYOUT_TARGET_GEOMETRY_INVALID zero_target_sectors; return 1; }
     table=$(awk '/^label:/{print tolower($2); count++} END{if(count != 1) exit 1}' "$template") || { rootpxe_layout_apply_failed LAYOUT_TEMPLATE_INVALID partition_table_type_missing; return 1; }
     [[ $table == gpt || $table == dos ]] || { rootpxe_layout_apply_failed LAYOUT_TEMPLATE_INVALID unsupported_partition_table_type; return 1; }
+    [[ $table != dos ]] || table=mbr
+    rootpxe_validate_partition_lba_contract "$table" "$rootpxe_resolved_layout_file" resolvedSectors || { rootpxe_layout_apply_failed LAYOUT_PLAN_INVALID mbr_or_gpt_partition_contract; return 1; }
     template_sector=$(awk '/^sector-size:/{print $2; count++} END{if(count != 1) exit 1}' "$template") || { rootpxe_layout_apply_failed LAYOUT_TEMPLATE_INVALID sector_size_missing; return 1; }
     [[ $template_sector =~ ^[1-9][0-9]*$ && $template_sector == "$logical" ]] || { rootpxe_layout_apply_failed LAYOUT_TEMPLATE_INVALID sector_size_mismatch; return 1; }
     if [[ $table == gpt ]]; then
@@ -4173,7 +4855,7 @@ rootpxe_linux_validate_vg_target_pvs() {
 rootpxe_linux_lvm_path_readable() { [[ -b $1 && -r $1 ]]; }
 rootpxe_linux_lvs_for_vg_json() {
     local vg_name="$1" vg_uuid="$2" output="$3" lvs_json
-    rootpxe_lvm_storage_identifier "$vg_name" && rootpxe_lvm_safe_identifier "$vg_uuid" || return 1
+    rootpxe_lvm_validate_vg_name "$vg_name" && rootpxe_lvm_safe_identifier "$vg_uuid" || return 1
     lvs_json=$(lvs --reportformat json -o vg_name,vg_uuid,lv_name,lv_path,lv_active --select "vg_uuid=$vg_uuid" "$vg_name" 2>/dev/null) || return 1
     rootpxe_lvm_json_jq -e --arg name "$vg_name" --arg uuid "$vg_uuid" '(.report|type == "array" and length == 1 and ((.[0].lv? // [])|type == "array") and ((.[0].lv? // [])|length > 0) and all((.[0].lv? // [])[]; (.vg_name == $name) and (.vg_uuid == $uuid) and (.lv_name|type == "string") and (.lv_path|type == "string") and (.lv_active|type == "string")))' <<<"$lvs_json" >/dev/null || return 1
     rootpxe_lvm_json_jq -r '.report[0].lv[] | [.lv_name,.lv_path,.lv_active] | @tsv' <<<"$lvs_json" >"$output"
@@ -6321,7 +7003,7 @@ rootpxe_validate_growth_capability() {
         # no filesystem; only its logical members require a grow tool.
         select(($schema.version == 2 and $schema.partitionTable == "mbr" and $source.kind == "extended" and $source.role == "extended_container" and (($source.fs // "") == "") and (($source.artifact // "") == "")) | not) |
         (($schema.lvm // null) as $lvm |
-         {number:$source.number,fs:($source.fs // ""),role:($source.role // ""),uuid:($source.uuid // null),recreatedSwap:((($source.kind // "") != "extended") and ($source.fs == "swap") and ($source.role == "swap") and ((($source | has("artifact")) | not) or $source.artifact == "") and (($source.uuid|type) == "string") and (($source.uuid | gsub("[[:space:]]"; "") | length) > 0)),resizable:($source.resizable == true),fsVariant:($source.fsVariant // ""),verifiedLvm:(($source.role == "lvm_pv") and ($source.fs == "LVM2_member") and ($lvm != null) and ($lvm.version == 1) and ($lvm.captureMode == "per_lv") and ($lvm.resizePolicy == "grow_only") and (($lvm.pvs|type) == "array") and (($lvm.pvs|length) == 1) and (($lvm.vgs|type) == "array") and (($lvm.vgs|length) == 1) and ([$lvm.pvs[] | select(.partitionNumber == $source.number)] | length) == 1),logicalSectorBytes:($schema.logicalSectorBytes // null)}) | @json
+         {number:$source.number,fs:($source.fs // ""),role:($source.role // ""),uuid:($source.uuid // null),recreatedSwap:((($source.kind // "") != "extended") and ($source.fs == "swap") and ($source.role == "swap") and ((($source | has("artifact")) | not) or $source.artifact == "") and (($source.uuid|type) == "string") and (($source.uuid | gsub("[[:space:]]"; "") | length) > 0)),resizable:($source.resizable == true),fsVariant:($source.fsVariant // ""),verifiedLvm:(($source.role == "lvm_pv") and ($source.fs == "LVM2_member") and ($lvm != null) and ($lvm.version == 1) and ($lvm.captureMode == "per_lv") and ($lvm.resizePolicy == "grow_only") and (($lvm.pvs|type) == "array") and (($lvm.vgs|type) == "array") and ([ $lvm.pvs[] | select(.partitionNumber == $source.number) ] | length) == 1 and ($lvm as $all | ([ $all.pvs[] | select(.partitionNumber == $source.number) ] | .[0]) as $pv | ([ $all.vgs[] | select(.uuid == $pv.vgUuid and .pvPartitionNumbers == [$source.number]) ] | length) == 1)),logicalSectorBytes:($schema.logicalSectorBytes // null)}) | @json
     ' "$schema_file") || return 1
     while IFS= read -r row; do
         [[ -n $row ]] || continue

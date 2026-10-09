@@ -8,11 +8,18 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/rootpxe-mpa-permit.XXXXXX")
 trap 'rm -rf -- "$tmp"' EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
+# Git Bash does not expose the production kernel command line at /proc/cmdline.
+# Keep the imported production function body intact while redirecting only this
+# fixture's read to a private temporary file.
+cmdline="$tmp/cmdline"
+: >"$cmdline"
+
 # Run the downloader's two local dispatch functions without its top-level
 # checkin/mount flow.  All destructive commands are replaced by event writers
 # to ordinary temp files.
 test_funcs="$tmp/funcs.sh"
-sed -e '/partition-funcs\.sh/d' -e '/restore-preflight\.sh/d' -e '/capture-recovery\.sh/d' -e '/deployment-identity\.sh/d' "$funcs" >"$test_funcs"
+sed -e '/partition-funcs\.sh/d' -e '/restore-preflight\.sh/d' -e '/capture-recovery\.sh/d' -e '/deployment-identity\.sh/d' -e "s|</proc/cmdline|<$cmdline|g" "$funcs" >"$test_funcs"
+! grep -Fq '</proc/cmdline' "$test_funcs" || fail 'temporary funcs retained /proc/cmdline'
 cp "$progress_lib" "$tmp/partclone-progress.sh"
 download_functions="$tmp/download-functions.sh"
 awk '/^preparePartitions\(\)/,/^findHDDInfo$/{ if ($0 ~ /^findHDDInfo$/) exit; print }' "$download" >"$download_functions"
@@ -56,6 +63,7 @@ cat >"$entry_stubs" <<'EOF'
 rootpxe_storage_path(){ printf '%s\n' "$tmp/image"; }
 rootpxe_deployment_identity_policy_enabled(){ return 1; }
 rootpxe_deployment_identity_cleanup_private(){ :; }
+rootpxe_multicast_cleanup(){ :; }
 rootpxe_validate_fixed_image_lvm_inventory(){ :; }
 rootpxe_validate_restore_artifacts(){ printf 'preflight\n' >>"$events"; }
 getMACAddresses(){ printf x; }

@@ -26,6 +26,20 @@ awk '/^rootpxe_partition_progress_initialize_runtime\(\)/ { copy=1 } /^REG_LOCAL
 # shellcheck source=/dev/null
 . "$tmp/progress-functions.sh"
 
+# The progress helpers are extracted before the LVM implementation section.
+# Provide the legacy single-group view that the production lookup helper also
+# supplies when no frozen groups manifest exists.
+rootpxe_lvm_capture_group_for_partition() {
+    local wanted="$1"
+    [[ ${rootpxe_lvm_active:-no} == yes && ${rootpxe_lvm_pv_number:-} == "$wanted" && -r ${rootpxe_lvm_facts_file:-} && -r ${rootpxe_lvm_lv_facts_file:-} ]] || return 1
+    printf '%s|%s|%s\n' "$rootpxe_lvm_facts_file" "$rootpxe_lvm_lv_facts_file" "$rootpxe_lvm_vg_name"
+}
+rootpxe_lvm_is_pv_partition() {
+    local part="$1"
+    getPartitionNumber "$part" || return 1
+    [[ ${rootpxe_lvm_active:-no} == yes && $part_number == "${rootpxe_lvm_pv_number:-}" ]]
+}
+
 getPartitions() { parts='/dev/vda1 /dev/vda2'; }
 getPartitionNumber() {
     case $1 in /dev/vda1) part_number=1 ;; /dev/vda2) part_number=2 ;; *) return 1 ;; esac
@@ -267,6 +281,15 @@ rootpxe_capture_lvm_volumes() {
     rootpxe_partition_progress_item 'd1:p1' completed - 'LVM 物理卷及逻辑卷抓取完成'
 }
 savePartition /dev/vda1 1 "$tmp" all
+# Restore the legacy facts-aware predicate after the savePartition lifecycle
+# spy.  The later progress-plan assertions exercise a resolved plan without
+# frozen capture facts, so an unconditional PV predicate would incorrectly
+# require a nonexistent capture-group record.
+rootpxe_lvm_is_pv_partition() {
+    local part="$1"
+    getPartitionNumber "$part" || return 1
+    [[ ${rootpxe_lvm_active:-no} == yes && $part_number == "${rootpxe_lvm_pv_number:-}" ]]
+}
 lvm_save_event=$(last_item_event)
 assert_eq "$(jq -r '.percent == null' "$lvm_save_event")" true 'LVM container save entry must not report a generic 0 percent'
 lvm_pv_lifecycle=$(
@@ -281,10 +304,14 @@ assert_eq "$lvm_pv_lifecycle" $'preparing\tnull\nrunning\tnull\ncompleted\tnull'
 # LVM filesystem facts must be collected in a short, reversible activation
 # window before planning.  These source LVs begin inactive; both are activated,
 # probed, deactivated, and only then published with an FS column.
-awk '/^rootpxe_lvm_prepare_capture_lv_facts\(\)/ { copy=1 } /^rootpxe_xfs_capture_preflight\(\)/ { exit } copy { print }' "$funcs" >"$tmp/lvm-fs-prepare.sh"
+awk '/^rootpxe_lvm_prepare_capture_lv_facts_single\(\)/ { copy=1 } /^rootpxe_capture_lvm_volumes_single\(\)/ { exit } copy { print }' "$funcs" >"$tmp/lvm-fs-prepare.sh"
 # shellcheck source=/dev/null
 . "$tmp/lvm-fs-prepare.sh"
+# The public entry now dispatches a frozen groups manifest.  This focused
+# legacy fixture deliberately exercises the preserved single-group executor.
+rootpxe_lvm_prepare_capture_lv_facts() { rootpxe_lvm_prepare_capture_lv_facts_single; }
 rootpxe_lvm_lv_facts_file="$tmp/lvm-source-facts"
+rootpxe_lvm_facts_file="$tmp/lvm-pv-facts"; printf 'mock-pv\n' >"$rootpxe_lvm_facts_file"
 rootpxe_lvm_vg_name=vg0
 rootpxe_lvm_vg_uuid=vg-1
 rootpxe_lvm_active=yes

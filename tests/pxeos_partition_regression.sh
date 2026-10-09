@@ -1162,13 +1162,13 @@ printf ' swap | lv-swap | /dev/vg0/swap | 33554432 | -wi-a----- | linear |  |  |
 EOF
 cat >"$tmp/bin/blockdev" <<'EOF'
 #!/usr/bin/env bash
-case "$1" in --getsize64) case "$2" in /dev/mock1) echo 268435456;; /dev/vg0/root) [[ -f ${LVM_SIZE_STATE:-} ]] && cat "$LVM_SIZE_STATE" || echo 67108864;; /dev/vg0/swap) [[ -f ${SWAP_SIZE_STATE:-} ]] && cat "$SWAP_SIZE_STATE" || echo 33554432;; *) echo 209715200;; esac;; --getss|--getpbsz) echo 512;; *) exit 1;; esac
+case "$1" in --getsize64) case "$2" in /dev/mock1|/dev/mock2) echo 268435456;; /dev/vg0/root|/dev/vg1/root) [[ -f ${LVM_SIZE_STATE:-} && $2 == /dev/vg0/root ]] && cat "$LVM_SIZE_STATE" || echo 67108864;; /dev/vg0/swap) [[ -f ${SWAP_SIZE_STATE:-} ]] && cat "$SWAP_SIZE_STATE" || echo 33554432;; *) echo 209715200;; esac;; --getss|--getpbsz) echo 512;; *) exit 1;; esac
 EOF
 cat >"$tmp/bin/blkid" <<'EOF'
 #!/usr/bin/env bash
 echo "blkid:$*" >>"$LVM_TRACE"
 for last; do :; done
-case " $* " in *' TYPE '*) [[ ${LVM_MODE:-ok} == crypt ]] && { echo crypto_LUKS; exit 0; }; [[ ${LVM_MODE:-ok} == mdraid ]] && { echo linux_raid_member; exit 0; }; [[ $last == /dev/vg0/swap ]] && echo swap || echo "${LVM_FS:-ext4}";; *' UUID '*) [[ $last == /dev/vg0/swap ]] && echo swap-uuid || echo root-uuid;; esac
+case " $* " in *' TYPE '*) [[ ${LVM_MODE:-ok} == crypt ]] && { echo crypto_LUKS; exit 0; }; [[ ${LVM_MODE:-ok} == mdraid ]] && { echo linux_raid_member; exit 0; }; [[ $last == /dev/vg0/swap || ( ${LVM_MODE:-ok} == casefold_swap && $last == /dev/vg0/ROOT ) ]] && echo swap || echo "${LVM_FS:-ext4}";; *' UUID '*) [[ $last == /dev/vg0/swap || ( ${LVM_MODE:-ok} == casefold_swap && $last == /dev/vg0/ROOT ) ]] && echo swap-uuid || echo root-uuid;; esac
 EOF
 cat >"$tmp/bin/pvdisplay" <<'EOF'
 #!/usr/bin/env bash
@@ -1176,11 +1176,21 @@ echo "pvdisplay:$*" >>"$LVM_TRACE"
 for arg in "$@"; do
   [[ $arg != --nosuffix ]] || { echo 'unsupported pvdisplay option: --nosuffix' >&2; exit 64; }
 done
-[[ ${PV_FAIL:-0} == 1 ]] && exit 1; echo 'PV UUID pv-1'
+[[ ${PV_FAIL:-0} == 1 ]] && exit 1; pv_uuid=pv-1; [[ ${LVM_MODE:-ok} == multi || ${LVM_MODE:-ok} == case_names ]] && [[ $* == *'/dev/mock2'* ]] && pv_uuid=pv-2; echo "PV UUID $pv_uuid"
 EOF
 cat >"$tmp/bin/vgcfgbackup" <<'EOF'
 #!/usr/bin/env bash
-[[ ${VG_FAIL:-0} == 1 ]] && exit 1; while (($#)); do [[ $1 == -f ]] && { echo pv-1 >"$2"; exit 0; }; shift; done; exit 1
+[[ ${VG_FAIL:-0} == 1 ]] && exit 1
+file=""; vg=""
+while (($#)); do
+  if [[ $1 == -f && $# -ge 2 ]]; then file=$2; shift 2; else vg=$1; shift; fi
+done
+[[ -n $file && -n $vg ]] || exit 1
+if [[ $vg == vg1 ]]; then
+  printf '%s\n' 'vg1 {' ' id = "vg-2"' ' physical_volumes {' '  pv0 {' '   id = "pv-2"' '  }' ' }' ' logical_volumes {' '  root {' '   id = "lv-root-2"' '  }' ' }' '}' >"$file"
+else
+  printf '%s\n' 'vg0 {' ' id = "vg-1"' ' physical_volumes {' '  pv0 {' '   id = "pv-1"' '  }' ' }' ' logical_volumes {' '  root {' '   id = "lv-root"' '  }' '  swap {' '   id = "lv-swap"' '  }' ' }' '}' >"$file"
+fi
 EOF
 cat >"$tmp/bin/resize2fs" <<'EOF'
 #!/usr/bin/env bash
@@ -1286,7 +1296,15 @@ case "$args" in
 esac
 [[ $args == *'if has("lvm") then'* || $args == *'--argjson number'* ]] && exit 0
 [[ $args == *'has("lvm")'* ]] && { [[ ${LVM_LEGACY_SCHEMA:-0} == 1 ]] && exit 1 || exit 0; }
-if [[ $args == *'--rawfile lvs'* ]]; then [[ -n ${JQ_ARGS_LOG:-} ]] && printf '%s\n' "$args" >>"$JQ_ARGS_LOG"; echo '{"version":1,"captureMode":"per_lv","resizePolicy":"grow_only","pvs":[{"partitionNumber":1,"uuid":"pv-1","vgUuid":"vg-1","originalBytes":268435456,"minBytes":268435456,"peStartBytes":1048576,"artifact":"d1p1.lvm.pv.meta","vgConfigArtifact":"d1p1.lvm.vg.cfg"}],"vgs":[{"name":"vg0","uuid":"vg-1","extentBytes":4194304,"pvPartitionNumbers":[1],"originalFreeBytes":0,"lvs":[{"name":"root","uuid":"lv-root","layout":"linear","originalBytes":67108864,"minBytes":67108864,"fs":"ext4","role":"data","resizable":true,"artifact":"d1p1.lvm.lv.root.img"},{"name":"swap","uuid":"lv-swap","layout":"linear","originalBytes":33554432,"minBytes":33554432,"fs":"swap","role":"swap","resizable":false,"artifact":"","swapUuid":"swap-uuid"}]}]}'; exit 0; fi
+if [[ $args == *'--rawfile lvs'* ]]; then
+  [[ -n ${JQ_ARGS_LOG:-} ]] && printf '%s\n' "$args" >>"$JQ_ARGS_LOG"
+  if [[ ${LVM_MODE:-ok} == casefold_swap ]]; then
+    echo '{"version":1,"captureMode":"per_lv","resizePolicy":"grow_only","pvs":[{"partitionNumber":1,"uuid":"pv-1","vgUuid":"vg-1","originalBytes":268435456,"minBytes":268435456,"peStartBytes":1048576,"artifact":"d1p1.lvm.pv.meta","vgConfigArtifact":"d1p1.lvm.vg.cfg"}],"vgs":[{"name":"vg0","uuid":"vg-1","extentBytes":4194304,"pvPartitionNumbers":[1],"originalFreeBytes":0,"lvs":[{"name":"root","uuid":"lv-root","layout":"linear","originalBytes":67108864,"minBytes":67108864,"fs":"ext4","role":"data","resizable":true,"artifact":"d1p1.lvm.lv.root.img"},{"name":"ROOT","uuid":"lv-swap-upper","layout":"linear","originalBytes":33554432,"minBytes":33554432,"fs":"swap","role":"swap","resizable":false,"artifact":"","swapUuid":"swap-uuid"}]}]}'
+  else
+    echo '{"version":1,"captureMode":"per_lv","resizePolicy":"grow_only","pvs":[{"partitionNumber":1,"uuid":"pv-1","vgUuid":"vg-1","originalBytes":268435456,"minBytes":268435456,"peStartBytes":1048576,"artifact":"d1p1.lvm.pv.meta","vgConfigArtifact":"d1p1.lvm.vg.cfg"}],"vgs":[{"name":"vg0","uuid":"vg-1","extentBytes":4194304,"pvPartitionNumbers":[1],"originalFreeBytes":0,"lvs":[{"name":"root","uuid":"lv-root","layout":"linear","originalBytes":67108864,"minBytes":67108864,"fs":"ext4","role":"data","resizable":true,"artifact":"d1p1.lvm.lv.root.img"},{"name":"swap","uuid":"lv-swap","layout":"linear","originalBytes":33554432,"minBytes":33554432,"fs":"swap","role":"swap","resizable":false,"artifact":"","swapUuid":"swap-uuid"}]}]}'
+  fi
+  exit 0
+fi
 EOF
 chmod +x "$tmp/bin"/*
 # funcs.sh imports kernel arguments at source time.  Redirect that read to an
@@ -1321,6 +1339,7 @@ rootpxe_lvm_trim() {
 # dominates this mock matrix and obscures whether a failure is handled by the
 # production preflight rather than by the test runner timeout.
 pvs() {
+  local second_vg
   case " $* " in
     *'reportformat json'*)
       if [[ -n ${LINUX_PVS_JSON:-} ]]; then
@@ -1330,7 +1349,9 @@ pvs() {
       [[ ${PVS_FAIL:-0} != 1 ]] || return 1
       [[ ${LVM_MODE:-ok} != badjson ]] || { printf '{bad json\n'; return 0; }
       [[ ${LVM_MODE:-ok} != none ]] || { printf '{"report":[{"pv":[]}]}\n'; return 0; }
-      if [[ ${LVM_MODE:-ok} == multi ]]; then printf '{"report":[{"pv":[{"pv_name":"/dev/mock1","pv_uuid":"pv-1","vg_name":"vg0","vg_uuid":"vg-1","pv_size":"268435456","pe_start":"1048576"},{"pv_name":"/dev/mock2","pv_uuid":"pv-2","vg_name":"vg0","vg_uuid":"vg-1","pv_size":"268435456","pe_start":"1048576"}]}]}\n';
+      if [[ ${LVM_MODE:-ok} == multi || ${LVM_MODE:-ok} == case_names ]]; then
+        second_vg=vg1; [[ ${LVM_MODE:-ok} == case_names ]] && second_vg=VG0
+        printf '{"report":[{"pv":[{"pv_name":"/dev/mock1","pv_uuid":"pv-1","vg_name":"vg0","vg_uuid":"vg-1","pv_size":"268435456","pe_start":"1048576"},{"pv_name":"/dev/mock2","pv_uuid":"pv-2","vg_name":"%s","vg_uuid":"vg-2","pv_size":"268435456","pe_start":"1048576"}]}]}\n' "$second_vg"
       elif [[ ${LVM_MODE:-ok} == unassigned ]]; then printf '{"report":[{"pv":[{"pv_name":"/dev/mock1","pv_uuid":"pv-1","vg_name":"","vg_uuid":"","pv_size":"268435456","pe_start":"1048576"}]}]}\n';
       elif [[ ${LVM_MODE:-ok} == cross ]]; then printf '{"report":[{"pv":[{"pv_name":"/dev/mock1","pv_uuid":"pv-1","vg_name":"vg0","vg_uuid":"vg-1","pv_size":"268435456","pe_start":"1048576"},{"pv_name":"/dev/foreign1","pv_uuid":"pv-2","vg_name":"vg0","vg_uuid":"vg-1","pv_size":"268435456","pe_start":"1048576"}]}]}\n';
       else printf '{"report":[{"pv":[{"pv_name":"/dev/mock1","pv_uuid":"pv-1","vg_name":"vg0","vg_uuid":"vg-1","pv_size":"268435456","pe_start":"1048576"}]}]}\n'; fi
@@ -1338,17 +1359,23 @@ pvs() {
   esac
   return 0
 }
-vgs() { [[ ${VGS_FAIL:-0} != 1 ]] || return 1; [[ ${LVM_MODE:-ok} != bad-vgs-json ]] || { printf '{bad json\n'; return 0; }; printf '{"report":[{"vg":[{"vg_name":"vg0","vg_uuid":"vg-1","vg_extent_size":"4194304","vg_free":"0"}]}]}\n'; }
+vgs() { local second_vg; [[ ${VGS_FAIL:-0} != 1 ]] || return 1; [[ ${LVM_MODE:-ok} != bad-vgs-json ]] || { printf '{bad json\n'; return 0; }; [[ ${LVM_MODE:-ok} == multi || ${LVM_MODE:-ok} == case_names ]] && { second_vg=vg1; [[ ${LVM_MODE:-ok} == case_names ]] && second_vg=VG0; printf '{"report":[{"vg":[{"vg_name":"vg0","vg_uuid":"vg-1","vg_extent_size":"4194304","vg_free":"0"},{"vg_name":"%s","vg_uuid":"vg-2","vg_extent_size":"4194304","vg_free":"0"}]}]}\n' "$second_vg"; return 0; }; printf '{"report":[{"vg":[{"vg_name":"vg0","vg_uuid":"vg-1","vg_extent_size":"4194304","vg_free":"0"}]}]}\n'; }
 lvs() {
+  local root swap multi_root rows
   [[ ${LVS_FAIL:-0} != 1 ]] || return 1
   [[ ${LVM_MODE:-ok} != bad-lvs-json ]] || { printf '{bad json\n'; return 0; }
   [[ ${LVM_MODE:-ok} != casefold ]] || { printf '{"report":[{"lv":[{"vg_name":"vg0","vg_uuid":"vg-1","lv_name":"root","lv_uuid":"lv-root","lv_path":"/dev/vg0/root","lv_size":"67108864","lv_attr":"-wi-a-----","segtype":"linear","origin":null,"pool_lv":null,"data_lv":null,"metadata_lv":null,"lv_active":"active"},{"vg_name":"vg0","vg_uuid":"vg-1","lv_name":"ROOT","lv_uuid":"lv-root-upper","lv_path":"/dev/vg0/ROOT","lv_size":"67108864","lv_attr":"-wi-a-----","segtype":"linear","origin":null,"pool_lv":null,"data_lv":null,"metadata_lv":null,"lv_active":"active"}]}]}\n'; return 0; }
   root='{"vg_name":"vg0","vg_uuid":"vg-1","lv_name":"root","lv_uuid":"lv-root","lv_path":"/dev/vg0/root","lv_size":"67108864","lv_attr":"-wi-a-----","segtype":"'"${LVM_SEGTYPE:-linear}"'","origin":null,"pool_lv":null,"data_lv":null,"metadata_lv":null,"lv_active":"active"}'
   swap='{"vg_name":"vg0","vg_uuid":"vg-1","lv_name":"swap","lv_uuid":"lv-swap","lv_path":"/dev/vg0/swap","lv_size":"33554432","lv_attr":"-wi-a-----","segtype":"linear","origin":null,"pool_lv":null,"data_lv":null,"metadata_lv":null,"lv_active":"active"}'
+  swap_similar='{"vg_name":"vg0","vg_uuid":"vg-1","lv_name":"ROOT","lv_uuid":"lv-swap-upper","lv_path":"/dev/vg0/ROOT","lv_size":"33554432","lv_attr":"-wi-a-----","segtype":"linear","origin":null,"pool_lv":null,"data_lv":null,"metadata_lv":null,"lv_active":"active"}'
+  multi_root='{"vg_name":"vg1","vg_uuid":"vg-2","lv_name":"root","lv_uuid":"lv-root-2","lv_path":"/dev/vg1/root","lv_size":"67108864","lv_attr":"-wi-a-----","segtype":"linear","origin":null,"pool_lv":null,"data_lv":null,"metadata_lv":null,"lv_active":"active"}'
+  [[ ${LVM_MODE:-ok} == case_names ]] && multi_root=${multi_root//vg1/VG0}
+  [[ ${LVM_MODE:-ok} != casefold_swap ]] || { printf '{"report":[{"lv":[%s,%s]}]}\n' "$root" "$swap_similar"; return 0; }
   case " $* " in
     *' vg0/root '*) rows=$root ;;
     *' vg0/swap '*) rows=$swap ;;
-    *) rows="$root,$swap" ;;
+    *' vg1/root '*|*' VG0/root '*) rows=$multi_root ;;
+    *) [[ ( ${LVM_MODE:-ok} == multi || ${LVM_MODE:-ok} == case_names ) && ( $* == *vg1* || $* == *VG0* ) ]] && rows=$multi_root || rows="$root,$swap" ;;
   esac
   printf '{"report":[{"lv":[%s]}]}\n' "$rows"
 }
@@ -1581,16 +1608,53 @@ unset -f jq
 "$real_jq" -e '.version == 1 and .captureMode == "per_lv" and .resizePolicy == "grow_only" and (.pvs | length) == 1 and (.vgs | length) == 1' "$real_jq_image/d1.lvm.schema.json" >/dev/null || fail real-jq-schema-content
 
 for bad_mode in badjson bad-vgs-json bad-lvs-json; do export LVM_MODE="$bad_mode"; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail "$bad_mode-must-reject"; unset LVM_MODE; done
-export LVM_MODE=multi; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail multipv; unset LVM_MODE
+multi_image="$tmp/multi-image"; mkdir -p "$multi_image"
+jq() { rootpxe_test_real_jq "$@"; }
+export LVM_MODE=multi LINUX_TARGET_PARTS='/dev/mock1 /dev/mock2'; rootpxe_lvm_capture_preflight /dev/mock "$multi_image" || fail multi-independent-preflight
+[[ ${rootpxe_lvm_group_count:-} == 2 && -r ${rootpxe_lvm_groups_file:-/dev/null} ]] || fail multi-independent-manifest
+: >"$LVM_TRACE"; rootpxe_capture_lvm_volumes "$multi_image" || fail multi-independent-capture
+[[ -r "$multi_image/d1.lvm.schema.json" && -r "$multi_image/d1p1.lvm.lv.root.img" && -r "$multi_image/d1p2.lvm.lv.root.img" ]] || fail multi-independent-artifacts
+rootpxe_test_real_jq -e '(.pvs|length)==2 and (.vgs|length)==2 and ([.vgs[].lvs[].name]|map(select(.=="root"))|length)==2 and ([.vgs[].lvs[].artifact|select(.!="")]|unique|length)==2' "$multi_image/d1.lvm.schema.json" >/dev/null || fail multi-independent-schema
+grep -Fq 'vgchange:-ay --select vg_uuid=vg-1 vg0' "$LVM_TRACE" && grep -Fq 'vgchange:-ay --select vg_uuid=vg-2 vg1' "$LVM_TRACE" || fail multi-independent-vg-activation
+unset -f jq
+unset LINUX_TARGET_PARTS LVM_MODE
+rootpxe_lvm_reset_capture_facts
+export LVM_MODE=case_names LINUX_TARGET_PARTS='/dev/mock1 /dev/mock2'
+rootpxe_lvm_capture_preflight /dev/mock "$multi_image" || fail case-distinct-vg-names-must-accept
+[[ ${rootpxe_lvm_group_count:-} == 2 ]] || fail case-distinct-vg-names-manifest
+unset LINUX_TARGET_PARTS
+unset LVM_MODE
 export LVM_MODE=unassigned; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail unassigned-target-pv; unset LVM_MODE
-export LVM_MODE=casefold; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail casefold-lv-name; unset LVM_MODE
+casefold_image="$tmp/casefold-image"; mkdir -p "$casefold_image"
+export LVM_MODE=casefold
+rootpxe_lvm_capture_preflight /dev/mock "$casefold_image" || fail casefold-lv-names-must-accept
+[[ ${rootpxe_lvm_active:-no} == yes ]] || fail casefold-preflight-not-active
+: >"$LVM_TRACE"
+rootpxe_capture_lvm_volumes "$casefold_image" && fail casefold-artifact-collision-must-reject
+! grep -Eq '^(pvdisplay:|vgcfgbackup:|partclone\.|upload:)' "$LVM_TRACE" || fail casefold-collision-wrote-before-validation
+[[ -z $(find "$casefold_image" -mindepth 1 -type f -print -quit) ]] || fail casefold-collision-modified-image
+unset LVM_MODE
+rootpxe_lvm_reset_capture_facts
+swap_image="$tmp/swap-no-artifact-image"; mkdir -p "$swap_image"
+export LVM_MODE=casefold_swap
+rootpxe_lvm_capture_preflight /dev/mock "$swap_image" || fail swap-no-artifact-similar-name-must-accept
+rootpxe_lvm_prepare_capture_lv_facts || fail swap-no-artifact-similar-name-prepare
+grep -R -Fq 'ROOT|lv-swap-upper|/dev/vg0/ROOT|33554432|swap' "$rootpxe_lvm_groups_dir" || fail swap-no-artifact-similar-name-fs
+unset LVM_MODE
+rootpxe_lvm_reset_capture_facts
 rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" || fail facts-after-multipv
-: >"$LVM_TRACE"; export PV_FAIL=1; rootpxe_capture_lvm_volumes "$tmp/image" && fail sidecar-failure; unset PV_FAIL
+pv_fail_image="$tmp/pv-fail-image"; mkdir -p "$pv_fail_image"
+rootpxe_lvm_capture_preflight /dev/mock "$pv_fail_image" || fail pv-fail-preflight
+: >"$LVM_TRACE"; export PV_FAIL=1; rootpxe_capture_lvm_volumes "$pv_fail_image" && fail sidecar-failure; unset PV_FAIL
 grep -Fq 'vgchange:-an --select vg_uuid=vg-1 vg0' "$LVM_TRACE" || fail failed-capture-vg-not-deactivated
-export WRITER_FAIL=1; rootpxe_capture_lvm_volumes "$tmp/image" && fail writer-failure
+writer_fail_image="$tmp/writer-fail-image"; mkdir -p "$writer_fail_image"
+rootpxe_lvm_capture_preflight /dev/mock "$writer_fail_image" || fail writer-fail-preflight
+export WRITER_FAIL=1; rootpxe_capture_lvm_volumes "$writer_fail_image" && fail writer-failure
 [[ ${rootpxe_lvm_capture_error_code:-} == LVM_LV_WRITER_FAILED && ${rootpxe_lvm_capture_error_reason:-} == lv_root_ext4 ]] || fail writer-failure-specific-error
 unset WRITER_FAIL
-: >"$LVM_TRACE"; export UPLOAD_FAIL=1; rootpxe_capture_lvm_volumes "$tmp/image" && fail upload-failure; unset UPLOAD_FAIL
+upload_fail_image="$tmp/upload-fail-image"; mkdir -p "$upload_fail_image"
+rootpxe_lvm_capture_preflight /dev/mock "$upload_fail_image" || fail upload-fail-preflight
+: >"$LVM_TRACE"; export UPLOAD_FAIL=1; rootpxe_capture_lvm_volumes "$upload_fail_image" && fail upload-failure; unset UPLOAD_FAIL
 export LVM_MODE=cross; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail cross-disk-vg; unset LVM_MODE
 export LVM_SEGTYPE=thin; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail thin-topology; unset LVM_SEGTYPE
 export LVM_MODE=crypt; rootpxe_lvm_capture_preflight /dev/mock "$tmp/image" && fail crypt-topology; unset LVM_MODE
@@ -1682,11 +1746,34 @@ jq() { rootpxe_test_real_jq "$@"; }
 rootpxe_validate_lvm_deployment_layout "$tmp/lvm-role-swap-schema.json" "$tmp/lvm-role-swap-layout.json" "$tmp/swap-grow-partitions.json" && fail lvm-role-swap-non-swap-must-be-protected
 unset -f jq
 
-rootpxe_resolved_lvm_layout_file="$tmp/plan.json"; printf '{}' >"$rootpxe_resolved_lvm_layout_file"; rootpxe_disk_permit_granted=no
+rootpxe_resolved_lvm_layout_file="$tmp/plan.json"
+cat >"$rootpxe_resolved_lvm_layout_file" <<'EOF'
+{"pv":{"uuid":"pv-1","partitionNumber":1,"originalBytes":268435456,"artifact":"d1p1.lvm.pv.meta","vgConfigArtifact":"d1p1.lvm.vg.cfg"},"vg":{"name":"vg0","uuid":"vg-1","extentBytes":4194304},"pvBytes":268435456,"volumes":[{"name":"root","uuid":"lv-root","fs":"ext4","artifact":"d1p1.lvm.lv.root.img","resolvedBytes":67108864},{"name":"swap","uuid":"lv-swap","fs":"swap","artifact":"","swapUuid":"swap-uuid","resolvedBytes":33554432}]}
+EOF
+rootpxe_disk_permit_granted=no
 rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail no-permit
 [[ ${rootpxe_restore_lvm_error_code:-} == LVM_RESTORE_PERMIT_FAILED && ${rootpxe_restore_lvm_error_reason:-} == permit_or_plan ]] || fail no-permit-specific-error
 [[ ! -s "$LVM_TRACE" ]] || fail no-permit-write
-echo pv-1 >"$tmp/image/d1p1.lvm.pv.meta"; echo pv-1 >"$tmp/image/d1p1.lvm.vg.cfg"; : >"$tmp/image/d1p1.lvm.lv.root.img"
+printf '%s\n' 'PV UUID pv-1' >"$tmp/image/d1p1.lvm.pv.meta"
+cat >"$tmp/image/d1p1.lvm.vg.cfg" <<'EOF'
+vg0 {
+ id = "vg-1"
+ physical_volumes {
+  pv0 {
+   id = "pv-1"
+  }
+ }
+ logical_volumes {
+  root {
+   id = "lv-root"
+  }
+  swap {
+   id = "lv-swap"
+  }
+ }
+}
+EOF
+: >"$tmp/image/d1p1.lvm.lv.root.img"
 rootpxe_disk_stable_identity() { echo target-1; }; rootpxe_disk_permit_granted=yes; rootpxe_disk_permit_target_id=target-1; rootpxe_disk_permit_operation=deploy_write
 writeImage() { echo "writeImage:$*" >>"$LVM_TRACE"; [[ ${WRITE_FAIL:-0} != 1 ]]; }
 cat >"$rootpxe_resolved_lvm_layout_file" <<'EOF'
@@ -1730,6 +1817,47 @@ rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail swap-missing-artifact
 [[ ${rootpxe_restore_lvm_error_code:-} == LVM_PV_CREATE_FAILED && ${rootpxe_restore_lvm_error_reason:-} == pvcreate ]] || fail swap-missing-artifact-specific-error
 grep -Fq 'pvcreate:' "$LVM_TRACE" || fail swap-missing-artifact-did-not-reach-pvcreate
 unset -f pvcreate
+
+# Private restore plans may come from older resolvers that omitted swap.artifact
+# or serialized it as null.  Early group preflight and the restore dispatcher
+# normalize only that private copy; the caller's plan remains byte-for-byte
+# unchanged and all metadata/payload bindings still apply.
+for swap_compatibility in missing null; do
+  case "$swap_compatibility" in
+    missing) jq 'del(.volumes[] | select(.fs == "swap") | .artifact)' "$tmp/plan.json" >"$tmp/swap-early-missing.json" ; compat_plan="$tmp/swap-early-missing.json" ;;
+    null) jq '(.volumes[] | select(.fs == "swap")).artifact = null' "$tmp/plan.json" >"$tmp/swap-early-null.json" ; compat_plan="$tmp/swap-early-null.json" ;;
+  esac
+  compat_hash=$(sha256sum "$compat_plan" | awk '{print $1}')
+  rootpxe_resolved_lvm_layout_file="$compat_plan"
+  rootpxe_lvm_preflight_restore_groups "$tmp/image" /dev/mock || fail "swap-$swap_compatibility-early-preflight"
+  [[ $(sha256sum "$compat_plan" | awk '{print $1}') == "$compat_hash" ]] || fail "swap-$swap_compatibility-early-mutated-plan"
+done
+pvcreate() { echo "pvcreate:$*" >>"$LVM_TRACE"; return 1; }
+rootpxe_resolved_lvm_layout_file="$tmp/swap-early-null.json"; : >"$LVM_TRACE"
+rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail swap-null-dispatcher-must-stop-at-fake-pvcreate
+[[ ${rootpxe_restore_lvm_error_code:-} == LVM_PV_CREATE_FAILED && ${rootpxe_restore_lvm_error_reason:-} == pvcreate ]] || fail swap-null-dispatcher-specific-error
+grep -Fq 'pvcreate:' "$LVM_TRACE" || fail swap-null-dispatcher-did-not-reach-pvcreate
+unset -f pvcreate
+
+# False/non-empty swap artifacts and a missing non-swap payload are invalid.
+# Each rejection must happen before pvcreate/vgcfgrestore/writeImage and must
+# leave the submitted private plan unchanged.
+for invalid_plan_name in swap-false swap-nonempty data-missing; do
+  case "$invalid_plan_name" in
+    swap-false) jq '(.volumes[] | select(.fs == "swap")).artifact = false' "$tmp/plan.json" >"$tmp/$invalid_plan_name.json" ;;
+    swap-nonempty) jq '(.volumes[] | select(.fs == "swap")).artifact = "swap.img"' "$tmp/plan.json" >"$tmp/$invalid_plan_name.json" ;;
+    data-missing) jq 'del(.volumes[] | select(.fs != "swap") | .artifact)' "$tmp/plan.json" >"$tmp/$invalid_plan_name.json" ;;
+  esac
+  invalid_plan="$tmp/$invalid_plan_name.json"
+  invalid_hash=$(sha256sum "$invalid_plan" | awk '{print $1}')
+  rootpxe_resolved_lvm_layout_file="$invalid_plan"; : >"$LVM_TRACE"
+  rootpxe_lvm_preflight_restore_groups "$tmp/image" /dev/mock && fail "$invalid_plan_name-early-must-reject"
+  [[ ! -s "$LVM_TRACE" ]] || fail "$invalid_plan_name-early-wrote-before-validation"
+  rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail "$invalid_plan_name-must-reject"
+  [[ ! -s "$LVM_TRACE" ]] || fail "$invalid_plan_name-wrote-before-validation"
+  [[ $(sha256sum "$invalid_plan" | awk '{print $1}') == "$invalid_hash" ]] || fail "$invalid_plan_name-mutated-plan"
+done
+
 rootpxe_resolved_lvm_layout_file="$tmp/plan.json"
 sed 's/"name":"swap","uuid":"lv-swap","fs":"swap","artifact":"","swapUuid":"swap-uuid","resolvedBytes":33554432/"name":"ROOT","uuid":"lv-root-upper","fs":"ext4","artifact":"d1p1.lvm.lv.root.img","resolvedBytes":33554432/' "$rootpxe_resolved_lvm_layout_file" >"$tmp/casefold-plan.json"
 rootpxe_resolved_lvm_layout_file="$tmp/casefold-plan.json"; : >"$LVM_TRACE"
@@ -1787,12 +1915,34 @@ rootpxe_resolved_lvm_layout_file="$tmp/xfs-plan.json"; export XFS_REPAIR_RC=1; :
 rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail restore-xfs-post-check-must-fail
 [[ ${rootpxe_restore_lvm_error_code:-} == LVM_XFS_POST_RESTORE_CHECK_FAILED && ${rootpxe_restore_lvm_error_reason:-} == lv_root ]] || fail restore-xfs-post-check-specific-error
 unset XFS_REPAIR_RC; rootpxe_resolved_lvm_layout_file="$tmp/plan.json"
+# A wrong existing target identity is rejected before pvcreate and must leave
+# every writer untouched.
 pvs() { printf '{"report":[{"pv":[{"pv_name":"/dev/mock1","pv_uuid":"pv-1","vg_name":"vg0","vg_uuid":"wrong-vg"}]}]}\n'; }
 : >"$LVM_TRACE"
-rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail restore-pv-vg-identity-must-fail
-grep -Fq 'pvcreate:' "$LVM_TRACE" || fail restore-pv-vg-identity-did-not-reach-postcreate-check
-! grep -Fq 'writeImage:' "$LVM_TRACE" || fail restore-pv-vg-identity-wrote-lv
-grep -Fq 'vgchange:-an --select vg_uuid=vg-1 vg0' "$LVM_TRACE" || fail restore-pv-vg-identity-did-not-cleanup
+rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail restore-pv-vg-identity-precreate-must-fail
+! grep -Fq 'pvcreate:' "$LVM_TRACE" || fail restore-pv-vg-identity-precreate-wrote-pv
+! grep -Fq 'writeImage:' "$LVM_TRACE" || fail restore-pv-vg-identity-precreate-wrote-lv
+[[ ${rootpxe_restore_lvm_error_code:-} == LVM_RESTORE_EXISTING_VG_CONFLICT && ${rootpxe_restore_lvm_error_reason:-} == existing_pv_not_target ]] || fail restore-pv-vg-identity-precreate-specific-error
+
+# A separate post-create fault first reports a clean target, then changes the
+# pvs report only after pvcreate.  This proves the post-create identity guard
+# is reached, no LV payload is written, and the active VG is deactivated.
+postcreate_pvs_state="$tmp/postcreate-pvs-state"; rm -f "$postcreate_pvs_state"
+pvs() {
+  if [[ -e $postcreate_pvs_state ]]; then
+    printf '{"report":[{"pv":[{"pv_name":"/dev/mock1","pv_uuid":"pv-1","vg_name":"vg0","vg_uuid":"wrong-vg"}]}]}\n'
+  else
+    printf '{"report":[{"pv":[{"pv_name":"/dev/mock1","pv_uuid":"pv-1","vg_name":"vg0","vg_uuid":"vg-1"}]}]}\n'
+  fi
+}
+pvcreate() { echo "pvcreate:$*" >>"$LVM_TRACE"; : >"$postcreate_pvs_state"; return 0; }
+: >"$LVM_TRACE"
+rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail restore-pv-vg-identity-postcreate-must-fail
+grep -Fq 'pvcreate:' "$LVM_TRACE" || fail restore-pv-vg-identity-postcreate-did-not-reach-pvcreate
+! grep -Fq 'writeImage:' "$LVM_TRACE" || fail restore-pv-vg-identity-postcreate-wrote-lv
+grep -Fq 'vgchange:-an --select vg_uuid=vg-1 vg0' "$LVM_TRACE" || fail restore-pv-vg-identity-postcreate-did-not-cleanup
+[[ ${rootpxe_restore_lvm_error_code:-} == LVM_RESTORE_PV_IDENTITY_FAILED && ${rootpxe_restore_lvm_error_reason:-} == restored_pv ]] || fail restore-pv-vg-identity-postcreate-specific-error
+unset -f pvcreate
 pvs() { printf '{"report":[{"pv":[{"pv_name":"/dev/mock1","pv_uuid":"pv-1","vg_name":"vg0","vg_uuid":"vg-1"}]}]}\n'; }
 sed 's/d1p1\.lvm\.lv\.root\.img/d1p1.lvm.lv.name|safe.img/' "$rootpxe_resolved_lvm_layout_file" >"$tmp/pipe-plan.json"
 rootpxe_resolved_lvm_layout_file="$tmp/pipe-plan.json"; : >"$LVM_TRACE"; rootpxe_restore_lvm_volumes "$tmp/image" /dev/mock && fail pipe-artifact-must-reject
