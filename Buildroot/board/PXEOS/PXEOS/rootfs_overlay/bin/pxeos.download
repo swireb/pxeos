@@ -193,6 +193,11 @@ if [[ ${resumeStage:-} == customizing_hostname || ${resumeStage:-} == post_deplo
     . /bin/pxeos.imgcomplete
     exit 0
 fi
+if [[ ${imgType:-} == mpa ]]; then
+    rootpxe_require_unused_target_disks $disks || exit 1
+else
+    rootpxe_require_unused_target_disks "$hd" || exit 1
+fi
 if [[ ${imgType:-} == [Nn] ]]; then
     rootpxe_require_single_disk_layout_metadata "$sector_metadata" "${originalSchemaFile:-}" "${deploymentLayoutFile:-}" || handleError "PXEOS_STAGE=layout_validation CODE=N_LAYOUT_METADATA_MISSING REASON=${rootpxe_layout_metadata_reason:-unknown}"
 rootpxe_validate_deployment_layout "$hd" "$originalSchemaFile" "$deploymentLayoutFile" || handleError "PXEOS_STAGE=layout_validation CODE=INVALID_DEPLOYMENT_LAYOUT REASON=pre_permit_validation_failed"
@@ -216,9 +221,9 @@ if [[ ${mc:-no} == yes ]]; then
     rootpxe_multicast_watchdog_start || handleError "PXEOS_STAGE=restore_preflight CODE=MULTICAST_STATUS_MONITOR_FAILED REASON=unable_to_start_session_heartbeat"
 fi
 if [[ ${imgType:-} == mpa ]]; then
-    rootpxe_plan_mpa_disk_permits "$imagePath" || handleError "PXEOS_STAGE=permit CODE=MPA_TARGET_MAPPING_INVALID REASON=unable_to_bind_complete_target_disk_set"
+    rootpxe_plan_mpa_disk_permits "$imagePath" || handleError "PXEOS_STAGE=permit CODE=${rootpxe_nvme_format_scope_code:-MPA_TARGET_MAPPING_INVALID} REASON=${rootpxe_nvme_format_scope_reason:-unable_to_bind_complete_target_disk_set}"
 else
-    rootpxe_plan_deploy_disk_operation "$hd" "$sector_metadata" || handleError "PXEOS_STAGE=permit CODE=TARGET_IDENTITY_UNAVAILABLE REASON=unable_to_bind_target_disk"
+    rootpxe_plan_deploy_disk_operation "$hd" "$sector_metadata" || handleError "PXEOS_STAGE=permit CODE=${rootpxe_nvme_format_scope_code:-TARGET_IDENTITY_UNAVAILABLE} REASON=${rootpxe_nvme_format_scope_reason:-unable_to_bind_target_disk}"
     rootpxe_mpa_permit_is_batch=no
 fi
 while :; do
@@ -261,10 +266,24 @@ if rootpxe_deployment_identity_policy_enabled; then
     fi || handleError "PXEOS_STAGE=deployment_identity_plan CODE=IDENTITY_PLAN_FAILED REASON=source_metadata_or_permit_binding_invalid"
 fi
 rootpxe_run_pre_deploy_script || handleError "PXEOS_STAGE=pre_deploy_script CODE=PRE_DEPLOY_SCRIPT_FAILED REASON=${rootpxe_deploy_script_error:-unknown}"
+if [[ ${imgType:-} == mpa ]]; then
+    rootpxe_require_unused_target_disks $disks || exit 1
+else
+    rootpxe_require_unused_target_disks "$hd" || exit 1
+fi
+case ${imgType:-} in
+    [Nn]|mps|dd) enableWriteCache "$hd" ;;
+esac
 [[ ${mc:-no} != yes ]] || rootpxe_multicast_session_guard || handleError "PXEOS_STAGE=init CODE=MULTICAST_SESSION_CANCELLED REASON=session_watchdog_stopped_before_layout"
 rootpxe_stage init "pxeos download started, storage mounted"
 [[ $nombr -eq 1 ]] && rootpxe_console_message INFO 'Skipping partition layout: single-partition restore.' || preparePartitions
 if [[ ${imgType:-} == [Nn] ]]; then
+    unset rootpxe_nvme_reformatted_disk
+    validateImageSectorSize "$hd" "$sector_metadata" || handleError "PXEOS_STAGE=sector_validation CODE=LOGICAL_SECTOR_MISMATCH REASON=sector_alignment_failed"
+    if [[ -n ${rootpxe_nvme_reformatted_disk:-} ]]; then
+        hd=$rootpxe_nvme_reformatted_disk
+        disks=$hd
+    fi
     # NVMe reformat may have changed logical geometry; resolve once more before
     # the final sfdisk write and verify the table after applying it.
     rootpxe_validate_deployment_layout "$hd" "$originalSchemaFile" "$deploymentLayoutFile" || handleError "PXEOS_STAGE=layout_validation CODE=INVALID_DEPLOYMENT_LAYOUT REASON=post_format_validation_failed"

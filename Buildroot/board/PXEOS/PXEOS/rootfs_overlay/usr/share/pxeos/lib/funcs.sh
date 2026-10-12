@@ -2440,11 +2440,13 @@ rootpxe_restore_deployment_boot_code() {
     # boot-code region and never the MBR partition entries (446-511), so this
     # cannot reintroduce the source disk layout after it has been resolved for
     # the target disk.
+    rootpxe_require_unused_target_disks "$disk" || return 1
     dd if="$boot_file" of="$disk" bs=1 count=440 conv=notrunc >/dev/null 2>&1 || return 1
     [[ $restore_embedding == yes && $expected_bytes -gt $logical ]] || return 0
     # saveGRUB captures only the pre-first-partition region.  Keep the final
     # MBR entries/signature at 440-511 intact, then restore only the captured
     # embedding area up to (never into) the first final partition.
+    rootpxe_require_unused_target_disks "$disk" || return 1
     dd if="$boot_file" of="$disk" bs=1 skip="$logical" seek="$logical" count=$((expected_bytes - logical)) conv=notrunc >/dev/null 2>&1
 }
 
@@ -2515,6 +2517,7 @@ rootpxe_apply_deployment_layout() {
     # Let this n-layout path own the kernel reread.  util-linux otherwise
     # requests BLKRRPART as part of sfdisk, where transient device busy races
     # lose the original error context before the bounded retry below can run.
+    rootpxe_require_unused_target_disks "$disk" || { rm -f "$map" "$output"; return 1; }
     flock "$disk" sfdisk --no-reread --no-tell-kernel "$disk" <"$output" >/dev/null 2>"$write_stderr" || { rm -f "$map" "$output"; rootpxe_layout_apply_failed SFDISK_WRITE_FAILED sfdisk_write_failed "$write_stderr"; return 1; }
     rm -f "$write_stderr"
     partprobe_stderr=$(mktemp /tmp/rootpxe-layout-partprobe.XXXXXX.err) || { rm -f "$map" "$output"; rootpxe_layout_apply_failed PARTPROBE_FAILED diagnostic_create_failed; return 1; }
@@ -3268,6 +3271,131 @@ rootpxe_stage() {
 #   rootpxe_disk_permit_granted=yes
 #   rootpxe_disk_permit_target_id=<ID_WWN or ID_SERIAL>
 #   rootpxe_disk_permit_operation=nvme_format+deploy_write
+rootpxe_target_use_fail() {
+    rootpxe_target_use_code="$1"
+    rootpxe_target_use_reason="$2"
+    return 1
+}
+
+rootpxe_target_stat_device_id() {
+    local value="$1" major minor
+    [[ $value =~ ^block\ special\ file\|([0-9a-fA-F]{1,8}):([0-9a-fA-F]{1,8})$ ]] || return 1
+    major=${BASH_REMATCH[1]}; minor=${BASH_REMATCH[2]}
+    printf '%s:%s\n' "$((16#$major))" "$((16#$minor))"
+}
+
+# A read-only snapshot, not a reservation: repeat immediately before writers.
+# Match device numbers rather than paths so mounted DM/LVM descendants count.
+# Active but unmounted LVs and read-only diagnostic block FDs are permitted.
+rootpxe_target_disk_use_preflight() {
+    local -x LC_ALL=C
+    local disk="$1" tool canonical info device_id graph ids state swap_path swap_type swap_info swap_id
+    local fd_dir fd fd_info fd_id flags mode
+    rootpxe_target_use_code=""; rootpxe_target_use_reason=""
+    for tool in lsblk jq stat readlink awk; do
+        command -v "$tool" >/dev/null 2>&1 || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE required_tool_missing; return 1; }
+    done
+    canonical=$(readlink -f -- "$disk" 2>/dev/null) || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE target_path_unavailable; return 1; }
+    [[ $canonical == /dev/* && $canonical != *[[:space:]]* ]] || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE target_path_invalid; return 1; }
+    info=$(stat -L -c '%F|%t:%T' -- "$canonical" 2>/dev/null) || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE target_stat_failed; return 1; }
+    device_id=$(rootpxe_target_stat_device_id "$info") || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE target_not_block_device; return 1; }
+    graph=$(lsblk -J -p -o NAME,TYPE,MAJ:MIN -- "$canonical" 2>/dev/null) || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE device_graph_failed; return 1; }
+    ids=$(jq -er --arg target "$canonical" --arg id "$device_id" '
+        def valid: type == "object" and (.name | type == "string" and startswith("/dev/"))
+            and (.type | type == "string" and length > 0)
+            and (."maj:min" | type == "string" and test("^[0-9]+:[0-9]+$"))
+            and ((has("children") | not) or (.children | type == "array" and all(.[]; valid)));
+        if type == "object" and (.blockdevices | type == "array" and length == 1)
+            and (.blockdevices[0] | valid) and .blockdevices[0]."maj:min" == $id
+        then .blockdevices[0] | recurse(.children[]?) | ."maj:min"
+        else error("invalid device graph") end' <<<"$graph" 2>/dev/null) || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE device_graph_invalid; return 1; }
+    [[ -n $ids && -r /proc/self/mountinfo ]] || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE mount_state_unreadable; return 1; }
+    state=$(awk -v ids="$ids" '
+        BEGIN { n=split(ids,a,"\n"); for(i=1;i<=n;i++) selected[a[i]]=1 }
+        { count++; separator=0; for(i=7;i<=NF;i++) if($i=="-") {separator=i;break}
+          if(NF<10 || $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+:[0-9]+$/ || !separator || NF<separator+3) bad=1
+          if($3 in selected) used=1 }
+        END { if(bad || !count) exit 2; if(used) print "mounted"; else print "unused" }
+        ' /proc/self/mountinfo 2>/dev/null) || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE mount_state_invalid; return 1; }
+    [[ $state == unused ]] || { rootpxe_target_use_fail TARGET_DISK_IN_USE mounted; return 1; }
+    if [[ ! -e /proc/swaps && ! -L /proc/swaps ]]; then
+        # With CONFIG_SWAP disabled the kernel has no /proc/swaps entry.
+        # Only a complete, CRC-checked read of this running kernel's config
+        # may prove that; never fall back for an existing unreadable entry.
+        command -v zcat >/dev/null 2>&1 && [[ -r /proc/config.gz ]] || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE swap_capability_unavailable; return 1; }
+        state=$(zcat /proc/config.gz 2>/dev/null) || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE swap_capability_read_failed; return 1; }
+        awk '/^# CONFIG_SWAP is not set$/ {disabled++} /^CONFIG_SWAP=/ {assigned++}
+            END {exit !(disabled==1 && assigned==0)}' <<<"$state" || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE swap_capability_not_proven; return 1; }
+        state=""
+    else
+        [[ -r /proc/swaps ]] || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE swap_state_unreadable; return 1; }
+        state=$(awk 'NR==1 { if(NF!=5 || $1!="Filename" || $2!="Type" || $3!="Size" || $4!="Used" || $5!="Priority") exit 2; next }
+            { if(NF!=5 || ($2!="partition" && $2!="file") || $3!~/^[0-9]+$/ || $4!~/^[0-9]+$/ || $5!~/^-?[0-9]+$/) exit 2; print $1 "|" $2 }
+            END { if(NR==0) exit 2 }' /proc/swaps 2>/dev/null) || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE swap_state_invalid; return 1; }
+    fi
+    while IFS='|' read -r swap_path swap_type; do
+        [[ -n $swap_path ]] || continue
+        swap_info=$(stat -L -c '%F|%t:%T' -- "$swap_path" 2>/dev/null) || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE swap_device_unavailable; return 1; }
+        if [[ $swap_type == partition ]]; then
+            swap_id=$(rootpxe_target_stat_device_id "$swap_info") || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE swap_device_invalid; return 1; }
+            if [[ $'\n'$ids$'\n' == *$'\n'"$swap_id"$'\n'* ]]; then
+                rootpxe_target_use_fail TARGET_DISK_IN_USE active_swap; return 1
+            fi
+        fi
+    done <<<"$state"
+    for fd_dir in /proc/[0-9]*/fd; do
+        [[ -d $fd_dir ]] || continue
+        [[ -r $fd_dir && -x $fd_dir ]] || { [[ ! -d $fd_dir ]] && continue; rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE block_fd_directory_unreadable; return 1; }
+        for fd in "$fd_dir"/*; do
+            [[ -L $fd ]] || continue
+            if ! fd_info=$(stat -L -c '%F|%t:%T' -- "$fd" 2>/dev/null); then
+                [[ ! -L $fd ]] && continue
+                rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE block_fd_stat_failed; return 1
+            fi
+            [[ $fd_info == 'block special file|'* ]] || continue
+            fd_id=$(rootpxe_target_stat_device_id "$fd_info") || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE block_fd_device_invalid; return 1; }
+            [[ $'\n'$ids$'\n' == *$'\n'"$fd_id"$'\n'* ]] || continue
+            if ! flags=$(awk '$1=="flags:" { if(NF!=2 || $2!~/^[0-7]+$/) exit 2; value=$2; count++ }
+                END { if(count!=1) exit 2; print value }' "${fd_dir%/fd}/fdinfo/${fd##*/}" 2>/dev/null); then
+                [[ ! -L $fd ]] && continue
+                rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE block_fd_flags_unavailable; return 1
+            fi
+            # FD numbers can be closed/reused while fdinfo is read.  Recheck
+            # the current object before interpreting its access-mode flags.
+            [[ -L $fd ]] || continue
+            if ! fd_info=$(stat -L -c '%F|%t:%T' -- "$fd" 2>/dev/null); then
+                [[ ! -L $fd ]] && continue
+                rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE block_fd_recheck_failed; return 1
+            fi
+            [[ $fd_info =~ ^[^\|]+\|[0-9a-fA-F]{1,8}:[0-9a-fA-F]{1,8}$ ]] || {
+                rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE block_fd_recheck_invalid; return 1
+            }
+            [[ $fd_info == 'block special file|'* ]] || continue
+            fd_id=$(rootpxe_target_stat_device_id "$fd_info") || { rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE block_fd_device_invalid; return 1; }
+            [[ $'\n'$ids$'\n' == *$'\n'"$fd_id"$'\n'* ]] || continue
+            # The low octal digit contains O_ACCMODE; no large-flag overflow.
+            mode=$(( ${flags: -1} & 3 ))
+            case $mode in
+                0) ;;
+                1|2) rootpxe_target_use_fail TARGET_DISK_IN_USE writable_block_fd; return 1 ;;
+                *) rootpxe_target_use_fail TARGET_DISK_STATE_UNAVAILABLE block_fd_flags_invalid; return 1 ;;
+            esac
+        done
+    done
+    return 0
+}
+
+rootpxe_require_unused_target_disks() {
+    local target
+    (( $# > 0 )) || { handleError "PXEOS_STAGE=target_use CODE=TARGET_DISK_STATE_UNAVAILABLE REASON=target_set_empty"; return 1; }
+    for target in "$@"; do
+        rootpxe_target_disk_use_preflight "$target" || {
+            handleError "PXEOS_STAGE=target_use CODE=$rootpxe_target_use_code TARGET=$target REASON=$rootpxe_target_use_reason"
+            return 1
+        }
+    done
+}
+
 rootpxe_disk_stable_identity() {
     local LC_ALL=C
     local disk="$1" properties line="" property hash
@@ -3349,6 +3477,24 @@ rootpxe_nvme_wait_for_reenumeration() {
     return 1
 }
 
+rootpxe_nvme_format_scope_safe() {
+    local LC_ALL=C disk="$1" controller fna
+    rootpxe_nvme_format_scope_reason=""
+    rootpxe_nvme_format_scope_code=""
+    controller=$(nvme id-ctrl "$disk" -o json 2>/dev/null) &&
+        fna=$(jq -er '.fna | if type == "number" and . >= 0 and . <= 255 and floor == . then . else error("invalid FNA") end' <<<"$controller" 2>/dev/null) || {
+            rootpxe_nvme_format_scope_reason=format_scope_unavailable
+            rootpxe_nvme_format_scope_code=NVME_FORMAT_SCOPE_UNAVAILABLE
+            return 1
+        }
+    [[ $fna =~ ^[0-9]+$ && $((fna & 1)) == 0 ]] || {
+        rootpxe_nvme_format_scope_reason=format_scope_unsafe
+        rootpxe_nvme_format_scope_code=NVME_FORMAT_SCOPE_UNSAFE
+        return 1
+    }
+    return 0
+}
+
 rootpxe_nvme_reformat_to_sector_size() {
     local disk="$1" wanted_sector_size="$2" expected_id="$3" stable_id lbaf wait_result source_sector
     [[ $(basename "$disk") =~ ^nvme[0-9]+n[0-9]+$ ]] || return 1
@@ -3358,7 +3504,11 @@ rootpxe_nvme_reformat_to_sector_size() {
     rootpxe_nvme_permit_matches "$stable_id" || return 1
     lbaf=$(rootpxe_nvme_find_metadata_free_lbaf "$disk" "$wanted_sector_size")
     [[ $lbaf =~ ^[0-9]+$ ]] || return 1
+    rootpxe_require_unused_target_disks "$disk" || return 1
     rootpxe_nvme_wait_for_cancel || return 1
+    rootpxe_require_unused_target_disks "$disk" || return 1
+    [[ $(rootpxe_disk_stable_identity "$disk") == "$stable_id" ]] || return 1
+    rootpxe_nvme_format_scope_safe "$disk" || return 1
     source_sector=$(blockdev --getss "$disk" 2>/dev/null) || return 1
     rootpxe_stage nvme_formatting "code=NVME_FORMAT_STARTED source_sector=$source_sector target_sector=$wanted_sector_size target_id=$stable_id lbaf=$lbaf" || true
     # From this command onward a disk operation has started and safe abort is no longer possible.
@@ -3377,6 +3527,7 @@ rootpxe_nvme_reformat_to_sector_size() {
 
 rootpxe_plan_deploy_disk_operation() {
     local disk="$1" partition_file="$2" image_sector target_sector target_id candidate_lbaf
+    rootpxe_nvme_format_scope_reason=""; rootpxe_nvme_format_scope_code=""
     target_id=$(rootpxe_disk_stable_identity "$disk") || return 1
     rootpxe_planned_disk_operation=deploy_write
     if [[ -r $partition_file ]]; then
@@ -3389,6 +3540,7 @@ rootpxe_plan_deploy_disk_operation() {
             [[ $(basename "$disk") =~ ^nvme[0-9]+n[0-9]+$ ]] || return 1
             candidate_lbaf=$(rootpxe_nvme_find_metadata_free_lbaf "$disk" "$image_sector")
             [[ $candidate_lbaf =~ ^[0-9]+$ ]] || return 1
+            rootpxe_nvme_format_scope_safe "$disk" || return 1
             rootpxe_planned_disk_operation=nvme_format+deploy_write
         fi
     fi
@@ -3448,6 +3600,10 @@ validateImageSectorSize() {
     target_sector=$(blockdev --getss "$disk" 2>/dev/null) || handleError "PXEOS_STAGE=sector_validation CODE=TARGET_SECTOR_QUERY_FAILED REASON=unable_to_read_target_sector"
     [[ $image_sector == "$target_sector" ]] && return 0
     rootpxe_nvme_reformat_to_sector_size "$disk" "$image_sector" "${rootpxe_disk_permit_target_id:-}" && return 0
+    [[ -z ${rootpxe_nvme_format_scope_code:-} ]] || {
+        handleError "PXEOS_STAGE=sector_validation CODE=$rootpxe_nvme_format_scope_code REASON=$rootpxe_nvme_format_scope_reason"
+        return 1
+    }
     handleError "PXEOS_STAGE=sector_validation CODE=LOGICAL_SECTOR_MISMATCH REASON=image_${image_sector}_target_${target_sector}"
 }
 # Below Are non parameterized functions
@@ -3671,17 +3827,23 @@ enableWriteCache()  {
     esac
     debugPause
 }
-# Accept only the exact dosfstools 4.2 dirty-bit-only diagnostic observed on
+# Accept only the exact dosfstools 4.2 dirty-bit diagnostic observed on
 # PXEOS.  Exit status 1 alone is not sufficient: it also represents other
-# recoverable errors and internal inconsistencies.  LC_ALL=C makes this
+# recoverable errors and internal inconsistencies.  The only permitted boot
+# difference is the primary dirty-state byte 65:01/00; every other difference
+# remains fatal.  LC_ALL=C makes this
 # parser stable; the optional three-line CP850 fallback is emitted by builds
 # whose iconv cannot convert to ANSI_X3.4-1968 in that locale.
 rootpxe_fat_dirty_only_diagnostic() {
     local output_file="$1"
     [[ -r $output_file ]] || return 1
     LC_ALL=C awk '
-        BEGIN { version=dirty=remove=unchanged=stats=0; cp_to=cp_from=cp_internal=0; invalid=0 }
+        BEGIN { version=dirty=remove=unchanged=stats=0; cp_to=cp_from=cp_internal=0; boot_intro=boot_detail=boot_diff=boot_skip=0; invalid=0 }
         /^fsck\.fat 4\.2 \(2021-01-31\)$/ { version++; next }
+        /^There are differences between boot sector and its backup\.$/ { boot_intro++; next }
+        /^This is mostly harmless\. Differences: \(offset:original\/backup\)$/ { boot_detail++; next }
+        /^  65:01\/00$/ { boot_diff++; next }
+        /^  Not automatically fixing this\.$/ { boot_skip++; next }
         /^Dirty bit is set\. Fs was not properly unmounted and some data may be corrupt\.$/ { dirty++; next }
         /^ Automatically removing dirty bit\.$/ { remove++; next }
         /^Leaving filesystem unchanged\.$/ { unchanged++; next }
@@ -3691,21 +3853,34 @@ rootpxe_fat_dirty_only_diagnostic() {
         /^[^:[:cntrl:]]+: [0-9]+ files, [0-9]+\/[0-9]+ clusters$/ { stats++; next }
         /^[[:space:]]*$/ { next }
         { invalid=1 }
-        END { exit !(invalid == 0 && version == 1 && dirty == 1 && remove == 1 && unchanged == 1 && stats == 1 && ((cp_to == 0 && cp_from == 0 && cp_internal == 0) || (cp_to == 1 && cp_from == 1 && cp_internal == 1))) }
+        END { exit !(invalid == 0 && version == 1 && dirty == 1 && remove == 1 && unchanged == 1 && stats == 1 && ((boot_intro == 0 && boot_detail == 0 && boot_diff == 0 && boot_skip == 0) || (boot_intro == 1 && boot_detail == 1 && boot_diff == 1 && boot_skip == 1)) && ((cp_to == 0 && cp_from == 0 && cp_internal == 0) || (cp_to == 1 && cp_from == 1 && cp_internal == 1))) }
     ' "$output_file"
 }
 
+rootpxe_fat_require_unmounted() {
+    local part="${1:-}" mount_output mount_state
+    [[ -n $part ]] || return 16
+    command -v findmnt >/dev/null 2>&1 || { printf 'PXEOS cannot check FAT mount state: findmnt is unavailable.\n' >&2; return 16; }
+    if mount_output=$(LC_ALL=C findmnt -rn -S "$part" 2>&1); then
+        mount_state=0
+    else
+        mount_state=$?
+    fi
+    # Exit 1 with no diagnostic means no matching mount.  A mounted target,
+    # an error exit, or even a diagnostic accompanying exit 1 is not proof
+    # that the target is safe for fsck.
+    [[ $mount_state -eq 1 && -z $mount_output ]] || { printf 'PXEOS cannot confirm an unmounted FAT target (findmnt status %s).\n' "$mount_state" >&2; return 16; }
+}
+
 rootpxe_fat_growth_preflight() {
-    local part="$1" output_file="$2" status mount_state repair_status
+    local part="$1" output_file="$2" status repair_status
     [[ -n $part && -n $output_file ]] || return 16
+    rootpxe_fat_require_unmounted "$part" >"$output_file" 2>&1 || return 16
     LC_ALL=C fsck.fat -n "$part" >"$output_file" 2>&1
     status=$?
     [[ $status -eq 0 ]] && return 0
     [[ $status -eq 1 ]] && rootpxe_fat_dirty_only_diagnostic "$output_file" || return "$status"
-    command -v findmnt >/dev/null 2>&1 || return 16
-    findmnt -rn -S "$part" >/dev/null 2>&1
-    mount_state=$?
-    [[ $mount_state -eq 1 ]] || return 16
+    rootpxe_fat_require_unmounted "$part" >>"$output_file" 2>&1 || return 16
     printf '\nPXEOS accepted the exact dirty-bit-only diagnostic; running fsck.fat -a.\n' >>"$output_file"
     if LC_ALL=C fsck.fat -a "$part" >>"$output_file" 2>&1; then
         repair_status=0
@@ -3714,6 +3889,7 @@ rootpxe_fat_growth_preflight() {
     fi
     [[ $repair_status -eq 0 || $repair_status -eq 1 ]] || return "$repair_status"
     printf '\nPXEOS verifying FAT after automatic repair.\n' >>"$output_file"
+    rootpxe_fat_require_unmounted "$part" >>"$output_file" 2>&1 || return 16
     LC_ALL=C fsck.fat -n "$part" >>"$output_file" 2>&1
 }
 
@@ -3803,6 +3979,7 @@ expandPartition() {
             fi
             btrfs filesystem resize max /tmp/btrfs >>/tmp/btrfslog.txt 2>&1
             if [[ $? -gt 0 ]]; then
+                umount /tmp/btrfs >>/tmp/btrfslog.txt 2>&1 || true
                 echo "Failed"
                 debugPause
                 handleError "Could not resize btrfs partition (${FUNCNAME[0]})\n   Info: $(cat /tmp/btrfslog.txt)\n   Args Passed: $*"
@@ -3837,6 +4014,7 @@ expandPartition() {
                 command -v pxeosfatgrow >/dev/null 2>&1 || { echo "Failed"; debugPause; handleError "FAT grow tool is unavailable for $part (${FUNCNAME[0]})"; }
                 rootpxe_fat_growth_preflight "$part" /tmp/pxeosfatgrow-fsck.txt || { echo "Failed"; debugPause; handleError "FAT filesystem check failed before growth for $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/pxeosfatgrow-fsck.txt)\n   Args Passed: $*"; }
                 pxeosfatgrow "$part" >/tmp/pxeosfatgrow.txt 2>&1 || { echo "Failed"; debugPause; handleError "Could not grow FAT filesystem on $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/pxeosfatgrow.txt)\n   Args Passed: $*"; }
+                rootpxe_fat_require_unmounted "$part" >/tmp/pxeosfatgrow-fsck.txt 2>&1 || { echo "Failed"; debugPause; handleError "FAT mount state check failed after growth for $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/pxeosfatgrow-fsck.txt)\n   Args Passed: $*"; }
                 LC_ALL=C fsck.fat -n "$part" >/tmp/pxeosfatgrow-fsck.txt 2>&1 || { echo "Failed"; debugPause; handleError "FAT filesystem check failed after growth for $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/pxeosfatgrow-fsck.txt)\n   Args Passed: $*"; }
                 echo "Done"
             fi
@@ -4459,6 +4637,7 @@ writeImage()  {
         wait "$pid" || child_status=$?
         return "$child_status"
     }
+    rootpxe_require_unused_target_disks "$target" || return 1
     mkfifo /tmp/pigz1 || handleError "PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_SETUP_FAILED REASON=unable_to_create_restore_fifo"
     [[ $mc != yes ]] || rootpxe_multicast_runtime_begin /tmp/pigz1 || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_SETUP_FAILED REASON=unable_to_register_multicast_restore_fifo"
     if [[ $mc != yes ]]; then
@@ -5765,7 +5944,6 @@ findHDDInfo() {
                     [[ $diskSize -gt 2199023255552 ]] && layPartSize="2tB"
                     rootpxe_console_message INFO "Using disk device: $hd."
                     [[ $imgType == +([nN]) ]] && validResizeOS
-                    enableWriteCache "$hd"
                     ;;
                 up)
                     dots "Reading Partition Tables"
@@ -5920,6 +6098,7 @@ correctVistaMBR() {
             handleError "Could not remove the fix file (${FUNCNAME[0]})\n   Args Passed: $*"
             ;;
     esac
+    rootpxe_require_unused_target_disks "$disk" || return 1
     dd if=/mbr.mbr of="$disk" count=1 bs=512 >/dev/null 2>&1
     case $? in
         0)
@@ -6225,6 +6404,7 @@ restoreGRUB() {
     MBRFileName "$imagePath" "$disk_number" "tmpMBR" "$sgdisk"
     local count=$(du -B 512 $tmpMBR | awk '{print $1}')
     [[ $count -eq 8 || $count -eq 63 ]] && count=1
+    rootpxe_require_unused_target_disks "$disk" || return 1
     dd if=$tmpMBR of=$disk bs=512 count=$count >/dev/null 2>&1
     runPartprobe "$disk"
 }
@@ -6428,6 +6608,7 @@ clearPartitionTables() {
     local disk="$1"
     [[ -z $disk ]] && handleError "No disk passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ $nombr -eq 1 ]] && return
+    rootpxe_require_unused_target_disks "$disk" || return 1
     dots "Erasing current MBR/GPT Tables"
     sgdisk -Z $disk >/dev/null 2>&1
     case $? in
@@ -6495,7 +6676,9 @@ restorePartitionTablesAndBootLoaders() {
     if [[ $table_type == GPT ]]; then
         dots "Restoring Partition Tables (GPT)"
         restoreGRUB "$disk" "$disk_number" "$imagePath" "true"
+        rootpxe_require_unused_target_disks "$disk" || return 1
         sgdisk -z $disk >/dev/null 2>&1
+        rootpxe_require_unused_target_disks "$disk" || return 1
         sgdisk -gl $tmpMBR $disk >/tmp/sgdisk-gl.err 2>&1
         sgdiskexit="$?"
         if [[ ! $sgdiskexit -eq 0 ]]; then
@@ -7039,7 +7222,7 @@ rootpxe_validate_growth_capability() {
             # sectors.  This is a source-schema capability gate before the
             # permit; the post-restore FAT diagnostic remains authoritative
             # for BPB and filesystem consistency.
-            vfat:*|fat:*) [[ $fs_variant == FAT32 && $logical_sector == 512 ]] && command -v fsck.fat >/dev/null 2>&1 && command -v pxeosfatgrow >/dev/null 2>&1 || return 1 ;;
+            vfat:*|fat:*) [[ $fs_variant == FAT32 && $logical_sector == 512 ]] && command -v findmnt >/dev/null 2>&1 && command -v fsck.fat >/dev/null 2>&1 && command -v pxeosfatgrow >/dev/null 2>&1 || return 1 ;;
             xfs:*) command -v xfs_growfs >/dev/null 2>&1 || return 1 ;;
             LVM2_member:lvm_pv) [[ $verified_lvm == true ]] || return 1 ;;
             *) return 1 ;;

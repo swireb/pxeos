@@ -81,6 +81,7 @@ applySfdiskPartitions() {
     local file="$2"
     [[ -z $disk ]] && handleError "No disk passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $file ]] && handleError "No file to receive from passed (${FUNCNAME[0]})\n   Args Passed: $*"
+    rootpxe_require_unused_target_disks "$disk" || return 1
     flock "$disk" sfdisk "$disk" < "$file" >/dev/null 2>&1 || handleError "Failed to apply partition table (${FUNCNAME[0]})"
 }
 # $1 is the name of the disk drive
@@ -181,6 +182,7 @@ restoreEBR() {
     [[ ! $hasEBR -gt 0 ]] && return
     [[ ! -e $file ]] && return
     dots "Restoring EBR for ($part)"
+    rootpxe_require_unused_target_disks "$disk" || return 1
     dd of=$part if=$file bs=512 count=1 >/dev/null 2>&1
     case $? in
         0)

@@ -61,6 +61,7 @@ entry="$tmp/pxeos.download"
 entry_stubs="$tmp/entry-stubs.sh"
 cat >"$entry_stubs" <<'EOF'
 rootpxe_storage_path(){ printf '%s\n' "$tmp/image"; }
+rootpxe_require_unused_target_disks(){ :; } # 本入口仅核对模拟多盘 permit 顺序。
 rootpxe_deployment_identity_policy_enabled(){ return 1; }
 rootpxe_deployment_identity_cleanup_private(){ :; }
 rootpxe_multicast_cleanup(){ :; }

@@ -113,11 +113,17 @@ printf '%s' '{"logicalSectorBytes":512,"partitions":[{"number":1,"originalSector
 printf '%s' '{"logicalSectorBytes":4096,"partitions":[{"number":1,"originalSectors":100,"fs":"vfat","fsVariant":"FAT32","resizable":true,"role":"efi","typeGuid":""}]}' >"$schema_fat4096"
 printf '%s' '{"partitions":[{"number":1,"originalSectors":100,"fs":"vfat","fsVariant":"FAT32","resizable":true,"role":"efi","typeGuid":""}]}' >"$schema_fat_missing_logical"
 printf '%s' '[{"number":1,"resolvedSectors":100}]' >"$resolved_same"
-fsck.fat(){ :; }; pxeosfatgrow(){ :; }
+fsck.fat(){ :; }; pxeosfatgrow(){ :; }; findmnt(){ :; }
 rootpxe_validate_growth_capability "$schema_fat512" "$resolved" || fail fat-512-growth-rejected
+command(){
+  [[ $1 == -v && $2 == findmnt ]] && return 1
+  builtin command "$@"
+}
+if rootpxe_validate_growth_capability "$schema_fat512" "$resolved"; then fail fat-findmnt-missing-accepted; fi
+unset -f command
 if rootpxe_validate_growth_capability "$schema_fat4096" "$resolved"; then fail fat-4096-growth-accepted; fi
 if rootpxe_validate_growth_capability "$schema_fat_missing_logical" "$resolved"; then fail fat-missing-logical-growth-accepted; fi
-unset -f fsck.fat pxeosfatgrow
+unset -f fsck.fat pxeosfatgrow findmnt
 rootpxe_validate_growth_capability "$schema_fat4096" "$resolved_same" || fail fat-same-size-rejected
 
 # Legacy physical swap did not carry resizable=true, but only the exact

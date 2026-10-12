@@ -666,6 +666,7 @@ export MOCK_ERROR_FILE="$tmp/restore-error"
 set +e
 (
     source "$tmp/funcs.sh" 2>/dev/null
+    rootpxe_require_unused_target_disks() { :; } # 恢复 writer 使用模拟设备。
     handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 92; }
     imgFormat=5
     imgLegacy=''
@@ -711,6 +712,7 @@ set +e
 (
     source "$tmp/funcs.sh" 2>/dev/null
     : > "$MOCK_CAT_ARGS"
+    rootpxe_require_unused_target_disks() { :; }
     ROOTPXE_PROGRESS_STATUS_FILE="$tmp/restore-progress"
     export ROOTPXE_PROGRESS_STATUS_FILE
     handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 94; }
@@ -745,6 +747,7 @@ set +e
 (
     source "$tmp/funcs.sh" 2>/dev/null
     handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 95; }
+    rootpxe_require_unused_target_disks() { :; }
     ROOTPXE_PROGRESS_STATUS_FILE="$tmp/split-no-match-progress"
     export ROOTPXE_PROGRESS_STATUS_FILE
     imgFormat=5
@@ -768,6 +771,7 @@ set +e
 (
     source "$tmp/funcs.sh" 2>/dev/null
     handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 96; }
+    rootpxe_require_unused_target_disks() { :; }
     imgFormat=5
     imgLegacy=''
     storage=mock
@@ -801,6 +805,7 @@ set +e
 (
     source "$tmp/funcs.sh" 2>/dev/null
     handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 93; }
+    rootpxe_require_unused_target_disks() { :; }
     imgFormat=5
     imgLegacy=''
     storage=mock

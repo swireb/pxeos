@@ -16,6 +16,7 @@ case_run() (
   eval "$(sed "s|/tmp/pigz1|$fifo|g" "$multicast")"
   eval "$(printf '%s\n' "$write" | sed "s|/tmp/pigz1|$fifo|g")"
   rootpxe_validate_runtime_img_format(){ :; }
+  rootpxe_require_unused_target_disks(){ :; } # FIFO/恢复流程 mock，不访问真实块设备。
   rootpxe_partclone_progress_start(){ echo progress_start >>"$trace"; }
   rootpxe_partclone_progress_wait(){ echo progress_wait >>"$trace"; :; }
   rootpxe_partclone_progress_abort(){ echo progress_abort >>"$trace"; :; }

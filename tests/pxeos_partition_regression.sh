@@ -21,6 +21,9 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 must_have() { grep -Fq -- "$2" "$1" || fail "$1 缺少 $2"; }
 must_not_call_format() { [[ ! -e "$tmp/nvme-format.log" ]] || fail "拒绝路径意外调用 nvme format"; }
 
+bash "$root/tests/pxeos_fat_preflight_regression.sh"
+bash "$root/tests/pxeos_btrfs_cleanup_regression.sh"
+
 # 先对实现边界作静态断言；随后用 gawk 与 mock nvme 进行行为验证。
 must_have "$funcs" 'validateImageSectorSize()'
 must_have "$funcs" 'rootpxe_nvme_reformat_to_sector_size()'
@@ -205,6 +208,7 @@ cat >"$tmp/mock/nvme" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:-}" in
+  id-ctrl) printf '{"fna":0}\n' ;;
   id-ns) printf '%s\n' "${MOCK_NVME_ID_NS:-}" ;;
   format)
     printf '%s\n' "$*" >>"$MOCK_FORMAT_LOG"
@@ -259,6 +263,7 @@ export PATH="$tmp/mock:$PATH"
 export ismajordebug=0
 # shellcheck disable=SC1090
 . "$tmp/funcs.sh"
+rootpxe_require_unused_target_disks() { :; } # 本段使用模拟设备；真实门禁另有定向回归。
 
 run_nvme() {
     local expected_id="$1"
@@ -377,6 +382,7 @@ must_not_call_format
     fsTypeSetting() { fstype=fat; }
     runPartprobe() { printf 'partprobe:%s\n' "$1" >>"$FAT_TRACE"; }
     handleError() { printf 'error:%s\n' "$*" >>"$FAT_TRACE"; exit 91; }
+    findmnt() { return 1; }
     fsck.fat() {
         printf 'fsck:%s\n' "$*" >>"$FAT_TRACE"
         FAT_FSCK_CALLS=$(( ${FAT_FSCK_CALLS:-0} + 1 ))
@@ -431,6 +437,7 @@ for fat_failure in pre_fail grow_fail post_fail missing_fsck missing_helper; do
         fsTypeSetting() { fstype=fat; }
         runPartprobe() { printf 'UNEXPECTED:partprobe\n' >>"$FAT_TRACE"; }
         handleError() { printf 'error:%s\n' "$*" >>"$FAT_TRACE"; exit 91; }
+        findmnt() { return 1; }
         fsck.fat() {
             printf 'fsck:%s\n' "$*" >>"$FAT_TRACE"
             FAT_FSCK_CALLS=$(( ${FAT_FSCK_CALLS:-0} + 1 ))
@@ -557,6 +564,7 @@ for fat_preflight_case in dirty_ok repair_two mounted post_fail dirty_corruption
             ;;
         mounted)
             [[ $fat_preflight_status -eq 16 ]] || fail fat-preflight-mounted-must-fail
+            ! grep -Fq 'fsck:' "$tmp/fat-preflight-$fat_preflight_case.trace" || fail fat-preflight-mounted-must-not-check
             ! grep -Fq 'fsck:-a ' "$tmp/fat-preflight-$fat_preflight_case.trace" || fail fat-preflight-mounted-must-not-repair
             ;;
         post_fail)
@@ -567,7 +575,7 @@ for fat_preflight_case in dirty_ok repair_two mounted post_fail dirty_corruption
         dirty_corruption)
             [[ $fat_preflight_status -eq 1 ]] || fail fat-preflight-corruption-must-fail
             ! grep -Fq 'fsck:-a ' "$tmp/fat-preflight-$fat_preflight_case.trace" || fail fat-preflight-corruption-must-not-repair
-            ! grep -Fq 'findmnt:' "$tmp/fat-preflight-$fat_preflight_case.trace" || fail fat-preflight-corruption-must-not-check-mount
+            [[ $(grep -Fc 'findmnt:' "$tmp/fat-preflight-$fat_preflight_case.trace") -eq 1 ]] || fail fat-preflight-corruption-must-only-check-mount-before-fsck
             ;;
     esac
 done
@@ -866,6 +874,7 @@ sed -e "s|/usr/share/pxeos|$overlay/usr/share/pxeos|g" -e "s|</proc/cmdline|<\"$
 cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
 # shellcheck disable=SC1090
 ismajordebug=0; . "$tmp/funcs.sh"
+rootpxe_require_unused_target_disks() { :; }
 export BTRFS_MODE=single
 [[ $(rootpxe_capture_partition_growth_facts /dev/mockbtrfs btrfs 512) == 'true|' ]] || fail btrfs-single-device-growable
 for btrfs_mode in multi incomplete missing; do
@@ -1318,6 +1327,7 @@ cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress
 # shellcheck disable=SC1090
 ismajordebug=0
 . "$tmp/funcs.sh"
+rootpxe_require_unused_target_disks() { :; }
 rootpxe_test_real_jq() {
     local arg converted=()
     for arg in "$@"; do

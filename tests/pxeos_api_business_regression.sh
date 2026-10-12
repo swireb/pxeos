@@ -868,6 +868,7 @@ export PATH=$tmp/mock:$PATH
 ismajordebug=0
 isdebug=0
 . $tmp/funcs.sh
+rootpxe_require_unused_target_disks() { :; } # 布局 writer 的设备全部为 mock。
 rootpxe_deployment_identity_linux_state_root="$tmp/linuxroot"
 rootpxe_deployment_identity_linux_policy_enabled() { return 1; }
 rootpxe_deployment_identity_windows_policy_enabled() { return 1; }
@@ -1373,6 +1374,7 @@ unset TARGET_BYTES MODE
 # discovery succeeds.  This never runs nvme format.
 printf 'sector-size: 512\n' >$tmp/sector.partitions
 rootpxe_disk_stable_identity() { echo disk-id; }
+rootpxe_nvme_format_scope_safe() { :; } # FNA 范围门禁由独立 fake-nvme 回归覆盖。
 rootpxe_nvme_find_metadata_free_lbaf() { return 1; }
 rootpxe_plan_deploy_disk_operation /dev/sda $tmp/sector.partitions && fail nonnvme-mismatch-permit
 rootpxe_plan_deploy_disk_operation /dev/nvme0n1 $tmp/sector.partitions && fail nvme-no-lbaf-permit

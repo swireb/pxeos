@@ -14,7 +14,7 @@ real_jq=$(command -v jq) || fail 'jq is required'
 # but precedes permit planning, hooks, partition layout, and Partclone work.
 artifact_line=$(grep -n '^rootpxe_validate_restore_artifacts ' "$download" | head -n1 | cut -d: -f1)
 early_line=$(grep -n '^    rootpxe_lvm_preflight_restore_groups ' "$download" | head -n1 | cut -d: -f1)
-permit_line=$(grep -n '^if \[\[ \${imgType:-} == mpa \]\]; then' "$download" | tail -n1 | cut -d: -f1)
+permit_line=$(grep -n '^    rootpxe_plan_mpa_disk_permits ' "$download" | head -n1 | cut -d: -f1)
 predeploy_line=$(grep -n '^rootpxe_run_pre_deploy_script ' "$download" | tail -n1 | cut -d: -f1)
 prepare_line=$(grep -n '^\[\[ \$nombr -eq 1 \]\].*preparePartitions' "$download" | head -n1 | cut -d: -f1)
 [[ $artifact_line =~ ^[1-9][0-9]*$ && $early_line =~ ^[1-9][0-9]*$ && $permit_line =~ ^[1-9][0-9]*$ && $predeploy_line =~ ^[1-9][0-9]*$ && $prepare_line =~ ^[1-9][0-9]*$ && $artifact_line -lt $early_line && $early_line -lt $permit_line && $early_line -lt $predeploy_line && $early_line -lt $prepare_line ]] || fail early-preflight-entrypoint-must-precede-writers
@@ -445,7 +445,9 @@ mv "$tmp/real-image/d1p2.lvm.pv.meta.good" "$tmp/real-image/d1p2.lvm.pv.meta"
 # permit/hook stub records an event, so a late-group fault proves the real
 # control-flow barrier stops before those calls.
 download_barrier="$tmp/download-prepermit-barrier.sh"
-sed -n '201,277p' "$download" >"$download_barrier"
+# 使用语义锚点提取，避免入口新增安全门禁后固定行号落入布局检查。
+awk '/^rootpxe_validate_restore_artifacts / {emit=1} emit {print}
+    emit && /^rootpxe_stage init / {exit}' "$download" >"$download_barrier"
 bash -n "$download_barrier" || fail downloader-prepermit-fragment-syntax
 assert_download_barrier() {
   local fault events
