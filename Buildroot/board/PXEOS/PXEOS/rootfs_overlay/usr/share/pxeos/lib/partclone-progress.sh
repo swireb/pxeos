@@ -1,5 +1,5 @@
 #!/bin/bash
-# Adapts Partclone 0.3.48's official ncurses VT screen when a bound Linux VT
+# Adapts Partclone 0.3.50's official ncurses VT screen when a bound Linux VT
 # is usable, and its official text-mode stderr otherwise.  It deliberately
 # stores one bounded, task-local record only.
 

@@ -126,7 +126,7 @@ F2FS 内核支持变更需要重新构建对应架构的内核。FAT16/32 扩容
 | cabextract 1.11 | cabextract.org.uk | Debian 原始源码包 |
 | chntpw 140201 | pogostick.net | MacPorts distfiles |
 | hivex 1.3.24 | download.libguestfs.org | Debian 原始源码包 |
-| partclone 0.3.48 | GitHub archive | codeload（同一上游的另一入口，不是独立镜像） |
+| partclone 0.3.50 | GitHub archive | codeload（同一上游的另一入口，不是独立镜像） |
 | testdisk 7.2 | cgsecurity.org | MacPorts distfiles |
 | partimage 0.6.9 | SourceForge | Debian 原始源码包 |
 

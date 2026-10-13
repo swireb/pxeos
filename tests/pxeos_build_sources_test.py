@@ -40,10 +40,10 @@ CUSTOM_SOURCE_SPECS = {
     ),
     "partclone": (
         "PARTCLONE",
-        "0.3.48",
-        "partclone-0.3.48.tar.gz",
-        "https://github.com/Thomas-Tsai/partclone/archive/0.3.48",
-        "af4f1c93fb2401eb617f1eafc13f115d7f583f6851a8195728d17b520fec7685",
+        "0.3.50",
+        "partclone-0.3.50.tar.gz",
+        "https://github.com/Thomas-Tsai/partclone/archive/0.3.50",
+        "ba66e6c7b46da3339bc7369ca90d647383660f8e74874a82dd8034a39193876e",
     ),
     "testdisk": (
         "TESTDISK",
@@ -74,8 +74,8 @@ CUSTOM_SOURCE_URLS = {
         "https://deb.debian.org/debian/pool/main/h/hivex/hivex_1.3.24.orig.tar.gz",
     ),
     "partclone": (
-        "https://github.com/Thomas-Tsai/partclone/archive/0.3.48/partclone-0.3.48.tar.gz",
-        "https://codeload.github.com/Thomas-Tsai/partclone/tar.gz/refs/tags/0.3.48",
+        "https://github.com/Thomas-Tsai/partclone/archive/0.3.50/partclone-0.3.50.tar.gz",
+        "https://codeload.github.com/Thomas-Tsai/partclone/tar.gz/refs/tags/0.3.50",
     ),
     "testdisk": (
         "https://www.cgsecurity.org/testdisk-7.2.tar.bz2",
@@ -354,6 +354,7 @@ class CabextractDownloadTests(unittest.TestCase):
                 self.assertTrue(package_hash.is_file())
                 self.assertIn(f"{prefix}_SITE", package_mk.read_text())
                 if package == "partclone":
+                    self.assertIn(f"PARTCLONE_VERSION = {version}\n", package_mk.read_text())
                     self.assertIn(
                         "$(call github,Thomas-Tsai,partclone,$(PARTCLONE_VERSION))",
                         package_mk.read_text(),
@@ -363,6 +364,14 @@ class CabextractDownloadTests(unittest.TestCase):
                 self.assertEqual(
                     package_hash.read_text().count(f"sha256 {expected_hash} {source}"), 1
                 )
+
+    def test_partclone_patch_tracks_pinned_release(self) -> None:
+        version = CUSTOM_SOURCE_SPECS["partclone"][1]
+        package_dir = ROOT / "Buildroot" / "package" / "partclone"
+        self.assertEqual(
+            sorted(path.name for path in package_dir.glob("partclone-*.patch")),
+            [f"partclone-{version}.patch"],
+        )
 
     def test_verified_source_spec_uses_only_the_approved_https_entries(self) -> None:
         build = BUILD.read_text()
