@@ -1,4 +1,5 @@
 #!/bin/bash
+. /usr/share/pxeos/lib/log-paths.sh
 #
 # Start the network....
 #
@@ -33,9 +34,9 @@ pxeos_network_status_finish() {
 }
 pxeos_network_acquire_dhcp() {
     local iface="$1" logfile rc address
-    logfile="/tmp/pxeos-dhcp-${iface}.log"
+    logfile="/tmp/log/dhcp.log"
     pxeos_network_status_begin "Acquiring DHCP lease on $iface"
-    if /sbin/udhcpc -i "$iface" --now >"$logfile" 2>&1; then
+    if rootpxe_log_boot_run dhcp.log "dhcp:$iface" foreground-append /sbin/udhcpc -i "$iface" --now; then
         pxeos_network_status_finish 'Done'
         address=$(/sbin/ip -4 -o addr show dev "$iface" scope global 2>/dev/null | awk 'NR == 1 { print $4 }')
         [[ -n $address ]] && pxeos_network_message INFO "IPv4 address: $address."
@@ -44,7 +45,7 @@ pxeos_network_acquire_dhcp() {
         rc=$?
     fi
     pxeos_network_status_finish "Failed (exit $rc)"
-    pxeos_network_message INFO "Details: $logfile"
+    rootpxe_log_notice dhcp.log
     return "$rc"
 }
 if [[ -n $has_usb_nic ]]; then

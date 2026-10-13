@@ -95,6 +95,10 @@ make_published "$storage/foreign" mps; printf 'other\n' >"$storage/foreign/.root
 rootpxe_capture_resume_published && { echo 'FAIL: foreign marker resumed' >&2; exit 1; }
 [[ ${rootpxe_capture_resume_error_code:-} == CAPTURE_PUBLISHED_MARKER_FOREIGN && -f $storage/foreign/.rootpxe-capture-taskid ]] || { echo 'FAIL: foreign marker changed' >&2; exit 1; }
 upload="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.upload"
+# Permit dispatch is isolated from block-device inspection in this fixture;
+# production target-use rejection is covered by its dedicated regression.
+rootpxe_require_unused_target_disks() { return 0; }
+export -f rootpxe_require_unused_target_disks
 grep -Fq 'rootpxe_wait_for_disk_permit "$capture_target_id" capture_read_write' "$upload" || { echo 'FAIL: single-disk capture must retain the legacy permit endpoint' >&2; exit 1; }
 grep -Fq 'rootpxe_wait_for_disk_permit_batch "${permit_args[@]}"' "$upload" || { echo 'FAIL: mpa capture must use the batch permit endpoint' >&2; exit 1; }
 permit_wrapper="$tmp/permit-wrapper.sh"

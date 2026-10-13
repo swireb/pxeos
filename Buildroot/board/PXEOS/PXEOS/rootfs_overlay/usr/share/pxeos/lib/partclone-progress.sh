@@ -75,28 +75,54 @@ rootpxe_partclone_progress_sample_pct() {
 }
 
 rootpxe_partclone_progress_decode() {
-    local fifo="$1" line='' char pct console_unavailable=no
+    local -x LC_ALL=C
+    local fifo="$1" line='' char pct console_unavailable=no last_console_pct=-1 last_console_time=-1 now detail='' overflow=no line_overflow=no
     # Read one byte at a time so a pipe-buffered text transformer cannot defer
     # status until Partclone exits.  The retained parser buffer is capped;
-    # console stderr still receives every byte and image stdout is untouched.
+    # image stdout is untouched.  Native diagnostic text is private, while
+    # the console gets only throttled copy percentages.
     # Console rendering is telemetry too: if it disappears, keep draining the
     # FIFO so it cannot back-pressure Partclone or change writer semantics.
     while IFS= read -r -d '' -n 1 char; do
-        if [[ $console_unavailable != yes ]]; then
-            printf '%s' "$char" >&2 || console_unavailable=yes
-        fi
         if [[ $char == $'\r' || $char == $'\n' ]]; then
+            [[ $line_overflow != yes ]] || line='[TRUNCATED: overlong Partclone diagnostic omitted]'
             if pct=$(rootpxe_partclone_progress_sample_pct "$line"); then
                 rootpxe_partclone_progress_write "$pct" partclone_progress || return 1
+                now=${SECONDS:-0}
+                if [[ $console_unavailable != yes && $pct != "$last_console_pct" ]] && (( now > last_console_time || pct == 100 )); then
+                    printf '[INFO]  Copy progress: %s%%\n' "$pct" >&2 || console_unavailable=yes
+                    last_console_pct=$pct; last_console_time=$now
+                fi
+            elif [[ $line != *'Current block:'* && $line != *'Elapsed:'* && -n $line ]]; then
+                line=$(rootpxe_log_redact "$line") || line='[Diagnostic unavailable]'
+                detail+="$line"$'\n'
+                if (( ${#detail} > 64000 )); then overflow=yes; detail=${detail: -64000}; fi
             fi
-            line=''
-        elif (( ${#line} < 4096 )); then
-            line+="$char"
+            line=''; line_overflow=no
+        else
+            if [[ $line_overflow != yes ]]; then
+                line+="$char"
+                if (( ${#line} > 4096 )); then overflow=yes; line=''; line_overflow=yes; fi
+            fi
         fi
     done <"$fifo"
+    [[ $line_overflow != yes ]] || line='[TRUNCATED: overlong Partclone diagnostic omitted]'
     if [[ -n $line ]] && pct=$(rootpxe_partclone_progress_sample_pct "$line"); then
         rootpxe_partclone_progress_write "$pct" partclone_progress || return 1
+    elif [[ -n $line ]]; then
+        line=$(rootpxe_log_redact "$line") || line='[Diagnostic unavailable]'
+        detail+="$line"
+        if (( ${#detail} > 64000 )); then overflow=yes; detail=${detail: -64000}; fi
     fi
+    if [[ -n $detail ]] && declare -F rootpxe_task_log_append >/dev/null 2>&1; then
+        detail=$(rootpxe_redact_diagnostic "$detail") || detail='[Diagnostic unavailable]'
+        detail=$(rootpxe_utf8_safe_tail "$detail" 63000) || detail='[Diagnostic unavailable]'
+        [[ $overflow != yes ]] || detail='[TRUNCATED: earlier Partclone diagnostic omitted]'$'\n'"$detail"
+        rootpxe_task_log_append "OP=partclone_text"$'\n'"$detail" || {
+            printf '[WARN]  Task log: unavailable.\n' >&2 || true
+        }
+    fi
+    return 0
 }
 
 rootpxe_partclone_vt_device_is_usable() {
@@ -244,7 +270,16 @@ rootpxe_partclone_progress_prepare() {
     [[ -n ${rootpxe_partclone_progress_run_id:-} ]] || rootpxe_partclone_progress_initialize || return 1
     rootpxe_partclone_progress_generation=$((rootpxe_partclone_progress_generation + 1))
     rootpxe_partclone_progress_write 0 partclone_started || return 1
-    rootpxe_partclone_progress_args=()
+    rootpxe_partclone_log_finish
+    rootpxe_log_raw_file || { printf '[ERROR] Raw Partclone diagnostic is unavailable.\n' >&2; return 1; }
+    rootpxe_partclone_native_log=$rootpxe_log_raw_path
+    export -n rootpxe_partclone_native_log
+    unset rootpxe_partclone_native_log_state
+    declare -gA rootpxe_partclone_native_log_state=()
+    rootpxe_partclone_native_log_state[raw]=$rootpxe_partclone_native_log
+    rootpxe_partclone_native_log_state[identity]=$(LC_ALL=C stat -c '%d:%i:%a' -- "$rootpxe_partclone_native_log") || { rm -f -- "$rootpxe_partclone_native_log"; unset rootpxe_partclone_native_log_state rootpxe_partclone_native_log; return 1; }
+    rootpxe_log_new_file partclone.log || printf '[WARN]  Diagnostic log: unavailable.\n' >&2
+    rootpxe_partclone_progress_args=(-L "$rootpxe_partclone_native_log")
     rootpxe_partclone_progress_mode=text
     rootpxe_partclone_progress_term="${TERM:-dumb}"
     rootpxe_partclone_progress_stderr_target="$fifo"
@@ -259,7 +294,7 @@ rootpxe_partclone_progress_prepare() {
             read -r rows cols <<<"$dimensions"
             if rootpxe_partclone_vt_clear_target "$tty"; then
                 rootpxe_partclone_progress_mode=gui
-                rootpxe_partclone_progress_args=(-N)
+                rootpxe_partclone_progress_args=(-N -L "$rootpxe_partclone_native_log")
                 rootpxe_partclone_progress_stderr_target="$tty"
                 rootpxe_partclone_progress_term=linux
                 rootpxe_partclone_progress_vt="$vt"
@@ -273,10 +308,26 @@ rootpxe_partclone_progress_prepare() {
             fi
         fi
     fi
-    rm -f -- "$fifo" || return 1
-    mkfifo "$fifo" || return 1
+    rm -f -- "$fifo" || { rootpxe_partclone_log_finish; return 1; }
+    mkfifo "$fifo" || { rootpxe_partclone_log_finish; return 1; }
     rootpxe_partclone_progress_fifo="$fifo"
     rootpxe_partclone_progress_prepared=yes
+}
+
+rootpxe_partclone_log_finish() {
+    local raw identity
+    [[ $(declare -p rootpxe_partclone_native_log_state 2>/dev/null) == 'declare -A '* ]] || return 0
+    raw=${rootpxe_partclone_native_log_state[raw]:-}
+    [[ -n $raw && -f $raw && ! -L $raw && -O $raw ]] || { unset rootpxe_partclone_native_log_state rootpxe_partclone_native_log; return 0; }
+    identity=$(LC_ALL=C stat -c '%d:%i:%a' -- "$raw") || return 0
+    if [[ $identity != "${rootpxe_partclone_native_log_state[identity]:-}" || $identity != *:600 ]]; then
+        unset rootpxe_partclone_native_log_state rootpxe_partclone_native_log
+        printf '[WARN]  Diagnostic log: unavailable.\n' >&2
+        return 0
+    fi
+    rootpxe_log_publish partclone.log "$raw" partclone yes || printf '[WARN]  Diagnostic log: unavailable.\n' >&2
+    rm -f -- "$raw"
+    unset rootpxe_partclone_native_log_state rootpxe_partclone_native_log
 }
 
 rootpxe_partclone_progress_start_collector() {
@@ -299,7 +350,7 @@ rootpxe_partclone_progress_start() {
 
 rootpxe_partclone_progress_wait() {
     local status=0 fifo="${rootpxe_partclone_progress_fifo:-}"
-    [[ ${rootpxe_partclone_progress_decoder_pid:-} =~ ^[0-9]+$ ]] || return 1
+    [[ ${rootpxe_partclone_progress_decoder_pid:-} =~ ^[0-9]+$ ]] || { rootpxe_partclone_log_finish; return 1; }
     if [[ ${rootpxe_partclone_progress_mode:-} == gui ]]; then
         if kill -0 "$rootpxe_partclone_progress_decoder_pid" >/dev/null 2>&1; then
             kill "$rootpxe_partclone_progress_decoder_pid" >/dev/null 2>&1 || true
@@ -313,15 +364,18 @@ rootpxe_partclone_progress_wait() {
     fi
     [[ -z $fifo ]] || rm -f -- "$fifo" || status=1
     unset rootpxe_partclone_progress_decoder_pid rootpxe_partclone_progress_fifo rootpxe_partclone_progress_prepared
+    rootpxe_partclone_log_finish
     return "$status"
 }
 
 rootpxe_partclone_progress_abort() {
-    local pid="${rootpxe_partclone_progress_decoder_pid:-}" fifo="${rootpxe_partclone_progress_fifo:-}"
+    local pid="${rootpxe_partclone_progress_decoder_pid:-}" fifo="${rootpxe_partclone_progress_fifo:-}" status=0
     if [[ $pid =~ ^[0-9]+$ ]]; then
         kill "$pid" >/dev/null 2>&1 || true
         wait "$pid" >/dev/null 2>&1 || true
     fi
-    [[ -z $fifo ]] || rm -f -- "$fifo" || return 1
+    [[ -z $fifo ]] || rm -f -- "$fifo" || status=1
     unset rootpxe_partclone_progress_decoder_pid rootpxe_partclone_progress_fifo rootpxe_partclone_progress_prepared
+    rootpxe_partclone_log_finish
+    return "$status"
 }

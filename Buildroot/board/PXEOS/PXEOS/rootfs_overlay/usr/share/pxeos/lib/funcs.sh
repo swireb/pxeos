@@ -1,5 +1,8 @@
 #!/bin/bash
 export initversion=19800101
+rootpxe_log_paths_lib=/usr/share/pxeos/lib/log-paths.sh
+[[ -r $rootpxe_log_paths_lib ]] || rootpxe_log_paths_lib="$(dirname "${BASH_SOURCE[0]}")/log-paths.sh"
+. "$rootpxe_log_paths_lib"
 . /usr/share/pxeos/lib/partition-funcs.sh
 . /usr/share/pxeos/lib/restore-preflight.sh
 . /usr/share/pxeos/lib/capture-recovery.sh
@@ -341,13 +344,217 @@ rootpxe_validate_runtime_img_format() {
 
 # Diagnostics may contain values from a task response or a helper's stderr.
 # Replace values before anything reaches the console or callback transport.
+rootpxe_task_log_release_pin() {
+    local declaration rootpxe_task_owned_pin rootpxe_task_owned_identity
+    declaration=$(declare -p rootpxe_task_log_state 2>/dev/null) || return 0
+    [[ $declaration == 'declare -A '* ]] || return 0
+    rootpxe_task_owned_pin=${rootpxe_task_log_state[pin]:-}
+    rootpxe_task_owned_identity=${rootpxe_task_log_state[pin_identity]:-}
+    [[ -n $rootpxe_task_owned_pin ]] || return 0
+    rootpxe_log_pin_release "$rootpxe_task_owned_pin" "$rootpxe_task_owned_identity" || return 1
+    unset 'rootpxe_task_log_state[pin]'
+}
+
+rootpxe_task_log_initialize() {
+    local file identity rootpxe_task_new_pin=''
+    # Associative state cannot arrive through the environment.  Definitions
+    # have no startup IO; every task entry explicitly creates a fresh attempt.
+    rootpxe_task_log_release_pin || printf '[WARN]  Task log: unavailable.\n' >&2
+    unset rootpxe_task_log_state
+    declare -gA rootpxe_task_log_state=()
+    rootpxe_log_new_file pxeos-task.log || return 1
+    file=$rootpxe_log_created_file
+    identity=$rootpxe_log_created_identity
+    exec {rootpxe_task_new_pin}<"$file" || return 1
+    if ! rootpxe_log_pin_valid "$rootpxe_task_new_pin" "$identity"; then
+        exec {rootpxe_task_new_pin}<&- || true
+        return 1
+    fi
+    rootpxe_task_log_state[file]="$file"
+    rootpxe_task_log_state[identity]="$identity"
+    rootpxe_task_log_state[directory_identity]=$rootpxe_log_created_directory_identity
+    rootpxe_task_log_state[pin]=$rootpxe_task_new_pin
+    rootpxe_task_log_state[pin_identity]=$identity
+    rootpxe_task_log_valid || return 1
+}
+
+rootpxe_task_log_valid() {
+    local declaration file identity
+    declaration=$(declare -p rootpxe_task_log_state 2>/dev/null) || return 1
+    [[ $declaration == 'declare -A '* ]] || return 1
+    rootpxe_log_pin_valid "${rootpxe_task_log_state[pin]:-}" "${rootpxe_task_log_state[pin_identity]:-}" || return 1
+    [[ ${rootpxe_task_log_state[pin_identity]} == "${rootpxe_task_log_state[identity]:-}" ]] || return 1
+    file=${rootpxe_task_log_state[file]:-}
+    [[ $file == /tmp/log/pxeos-task.log && -f $file && ! -L $file && -O $file ]] || return 1
+    [[ $(rootpxe_log_directory) == /tmp/log ]] || return 1
+    [[ $(LC_ALL=C stat -c '%d:%i:%a' -- /tmp/log) == "${rootpxe_task_log_state[directory_identity]:-}" ]] || return 1
+    identity=$(LC_ALL=C stat -c '%d:%i:%a' -- "$file" 2>/dev/null) || return 1
+    [[ $identity == "${rootpxe_task_log_state[identity]:-}" && $identity == *:600 ]]
+}
+
+rootpxe_task_log_path() {
+    rootpxe_task_log_valid || return 1
+    printf '%s\n' "${rootpxe_task_log_state[file]}"
+}
+
+rootpxe_task_log_ensure() {
+    local declaration
+    declaration=$(declare -p rootpxe_task_log_state 2>/dev/null) || declaration=''
+    if [[ $declaration == 'declare -A '* && -n ${rootpxe_task_log_state[file]:-} ]]; then
+        rootpxe_task_log_valid
+    else
+        rootpxe_task_log_initialize
+    fi
+}
+
+rootpxe_task_log_append() {
+    local -x LC_ALL=C
+    local text="$*" file size marker='[TRUNCATED: earlier task diagnostics omitted]' entry_marker='[TRUNCATED: diagnostic exceeds 64 KiB]'
+    rootpxe_task_log_ensure || return 1
+    file=${rootpxe_task_log_state[file]}
+    text=$(rootpxe_redact_diagnostic "$text") || return 1
+    if (( ${#text} > 65000 )); then
+        text=$(rootpxe_utf8_safe_prefix "$text" 65000) || return 1
+        text+=$'\n'"$entry_marker"
+    fi
+    # Lock this log inode, not a sibling .lck.  Never wait behind a logger:
+    # diagnostic contention must not backpressure an image collector.
+    (
+        flock -n -x 8 2>/dev/null || exit 1
+        rootpxe_task_log_valid || exit 1
+        [[ $(LC_ALL=C stat -L -c '%d:%i:%a' /proc/self/fd/8) == "${rootpxe_task_log_state[directory_identity]}" ]] || exit 1
+        exec 9>>/proc/self/fd/8/pxeos-task.log || exit 1
+        flock -n -x 9 2>/dev/null || exit 1
+        [[ $(LC_ALL=C stat -L -c '%d:%i:%a' /proc/self/fd/9) == "${rootpxe_task_log_state[identity]}" ]] || exit 1
+        size=$(wc -c </proc/self/fd/9) || exit 1
+        if (( size + ${#text} + 1 > 4194304 )); then
+            truncate -s 0 -- /proc/self/fd/9 || exit 1
+            printf '%s\n' "$marker" >&9 || exit 1
+        fi
+        printf '%s\n' "$text" >&9
+    ) 8</tmp/log 2>/dev/null || { rootpxe_task_log_state[unavailable]=yes; return 1; }
+    unset 'rootpxe_task_log_state[unavailable]'
+}
+
+rootpxe_task_log_notice() {
+    local path declaration
+    declaration=$(declare -p rootpxe_task_log_state 2>/dev/null) || declaration=''
+    if [[ $declaration == 'declare -A '* ]] && [[ ${rootpxe_task_log_state[unavailable]:-} != yes ]] && path=$(rootpxe_task_log_path); then
+        printf '[INFO]  Task log: %s\n' "$path"
+    else
+        printf '[WARN]  Task log: unavailable.\n'
+    fi
+}
+
+rootpxe_diagnostic_begin() {
+    local name="$1"
+    rootpxe_log_raw_file || return 1
+    # Associative state is shell-owned, never exported or accepted as scalar.
+    if [[ $(declare -p rootpxe_diagnostic_files 2>/dev/null) != 'declare -A '* ]]; then unset rootpxe_diagnostic_files; declare -gA rootpxe_diagnostic_files=(); fi
+    rootpxe_diagnostic_files[$rootpxe_log_raw_path]="$name"
+    rootpxe_log_new_file "$name" || printf '[WARN]  Diagnostic log: unavailable.\n' >&2
+    return 0
+}
+
+rootpxe_diagnostic_call() {
+    local name="$1" raw="$2" mode="$3" status target="${part:-${disk:-unknown}}"
+    shift 3
+    # Raw files are private parser buffers. Never parse a redacted/capped log.
+    case $mode in
+        internal) if "$@"; then status=0; else status=$?; fi ;;
+        append) if "$@" >>"$raw" 2>&1; then status=0; else status=$?; fi ;;
+        *) if "$@" >"$raw" 2>&1; then status=0; else status=$?; fi ;;
+    esac
+    [[ $target =~ ^[A-Za-z0-9_./:+-]+$ && ${#target} -le 200 ]] || target=unknown
+    rootpxe_log_publish "$name" "$raw" "native:target=$target:exit=$status" yes || printf '[WARN]  Diagnostic log: unavailable.\n' >&2
+    return "$status"
+}
+
+rootpxe_diagnostic_cleanup() {
+    local file
+    [[ $(declare -p rootpxe_diagnostic_files 2>/dev/null) == 'declare -A '* ]] || return 0
+    for file in "${!rootpxe_diagnostic_files[@]}"; do
+        [[ $file == /tmp/log/.raw.* || $file == /tmp/rootpxe-diagnostic.* ]] || continue
+        [[ -f $file && ! -L $file && -O $file ]] && rm -f -- "$file"
+    done
+    unset rootpxe_diagnostic_files
+}
+
+rootpxe_task_log_stream() {
+    local -x LC_ALL=C
+    local label="$1" target="$2" retained=''
+    # Approved native mutation output only.  Drain even after the byte cap or
+    # sink failure; argv/stdin/query/image data never enter this helper.
+    retained=$(rootpxe_log_diagnostic_stream) || return 1
+    retained=$(rootpxe_utf8_safe_tail "$retained" 64000) || return 1
+    rootpxe_task_log_append "OP=$label TARGET=$target"$'\n'"$retained"
+}
+
+rootpxe_run_logged_mutation() {
+    local label="$1" target="$2" status=0 collector log_status=0 rootpxe_task_log_native_fd
+    shift 2
+    [[ $label =~ ^[a-z][a-z0-9_-]{0,63}$ ]] || label=native_operation
+    [[ $target =~ ^[A-Za-z0-9_/.:+-]+$ && ${#target} -le 256 ]] || target=invalid_target
+    rootpxe_task_log_ensure || true
+    # Own only this extra FD, never global task stdio.  Save the collector
+    # before a native shell mock/helper can change the shell's last-job PID.
+    if exec {rootpxe_task_log_native_fd}> >(rootpxe_task_log_stream "$label" "$target"); then
+        collector=$!
+        if "$@" >&"$rootpxe_task_log_native_fd" 2>&1; then status=0; else status=$?; fi
+        if exec {rootpxe_task_log_native_fd}>&-; then
+            [[ -z $collector ]] || wait "$collector" || log_status=$?
+        else
+            log_status=1
+        fi
+    else
+        # A diagnostic FD failure is not an imaging failure.  This operation
+        # is approved native text, so discard it safely and retain its rc.
+        log_status=1
+        if "$@" >/dev/null 2>&1; then status=0; else status=$?; fi
+    fi
+    rootpxe_task_log_append "OP=$label TARGET=$target EXIT=$status" || log_status=1
+    if [[ $log_status -ne 0 ]]; then
+        rootpxe_task_log_state[unavailable]=yes
+        printf '[WARN]  Task log: unavailable.\n' >&2
+    fi
+    return "$status"
+}
+
+
+rootpxe_task_console_failure() {
+    local level="$1" text="$2" summary code='' log_status=0
+    text=$(rootpxe_redact_diagnostic "$text")
+    # Existing callers use both actual and escaped diagnostic newlines.
+    # Do not printf %b arbitrary diagnostic data (other escapes stay inert).
+    text=${text//\\n/$'\n'}
+    summary=${text%%$'\n'*}
+    summary=$(LC_ALL=C printf '%s' "$summary" | tr '\000-\037\177' ' ')
+    summary=$(rootpxe_utf8_safe_prefix "$summary" 160)
+    [[ $text =~ (^|[[:space:]])CODE=([A-Z0-9_]+) ]] && code=${BASH_REMATCH[2]}
+    [[ -z $code || $summary != *"CODE=$code"* ]] || summary=${summary//"CODE=$code"/}
+    rootpxe_task_log_append "$text" || log_status=1
+    rootpxe_task_log_append "LEVEL=$level CODE=${code:-unspecified} SUMMARY=$summary" || log_status=1
+    # A later successful summary append does not make a lost detail complete.
+    (( log_status == 0 )) || rootpxe_task_log_state[unavailable]=yes
+    printf '\n%-7s %s%s\n' "[$level]" "$summary" "${code:+ CODE=$code}"
+    rootpxe_task_log_notice
+}
+
 rootpxe_redact_diagnostic() {
     local text="$*" name value
     for name in task_token token execution_token smb_password smb_username smb_domain storage_password password credential; do
         value="${!name:-}"
         [[ -n $value ]] && text="${text//"$value"/[REDACTED]}"
     done
-    text=$(printf '%s' "$text" | sed -E 's/(^|[[:space:]])([[:alnum:]_.-]*(token|password|credential|secret)[[:alnum:]_.-]*[[:space:]]*=[[:space:]]*)[^[:space:]]+/\1\2[REDACTED]/Ig')
+    text=$(printf '%s' "$text" | sed -E \
+        -e 's/(^|[[:space:],{?&])("?[[:alnum:]_.-]*(token|password|credential|secret)[[:alnum:]_.-]*"?[[:space:]]*[:=][[:space:]]*)"(\\.|[^"\\])*"/\1\2"[REDACTED]"/Ig' \
+        -e "s/(^|[[:space:],{?&])('[[:alnum:]_.-]*(token|password|credential|secret)[[:alnum:]_.-]*'|[[:alnum:]_.-]*(token|password|credential|secret)[[:alnum:]_.-]*)([[:space:]]*[:=][[:space:]]*)'([^']*)'/\\1\\2\\5'[REDACTED]'/Ig" \
+        -e 's/(^|[[:space:],{?&])([[:alnum:]_.-]*(token|password|credential|secret)[[:alnum:]_.-]*[[:space:]]*=[[:space:]]*)[^[:space:],&]+/\1\2[REDACTED]/Ig')
+    # Normalize only after redaction: a quoted JSON secret may itself contain
+    # literal newline escapes.  Legacy complete argv has a dedicated label;
+    # remove that line, not unlabelled native failure details.
+    text=${text//\\n/$'\n'}
+    text=$(printf '%s' "$text" | sed '/^[[:space:]]*Args Passed:/d')
     printf '%s\n' "$text"
 }
 
@@ -378,21 +585,37 @@ rootpxe_utf8_safe_prefix() {
     printf '%s' "$prefix"
 }
 
-# The service accepts at most 256 KiB of UTF-8 message text.  Keep the full
-# redacted diagnostic locally (root-only) and append an explicit marker when
-# the callback payload is shortened.
+# The newest native diagnostic is usually the useful failure.  Use byte
+# indexing and discard leading continuation bytes when keeping its tail.
+rootpxe_utf8_safe_tail() {
+    local LC_ALL=C text="$1" maximum="$2" tail byte
+    [[ $maximum =~ ^[0-9]+$ ]] || return 1
+    (( maximum > 0 )) || return 0
+    if (( ${#text} > maximum )); then tail=${text: -maximum}; else tail=$text; fi
+    while [[ -n $tail ]]; do
+        byte=$(printf '%d' "'${tail:0:1}")
+        [[ $byte -ge 128 && $byte -le 191 ]] || break
+        tail=${tail:1}
+    done
+    printf '%s' "$tail"
+}
+
+# The service accepts at most 256 KiB of UTF-8 message text.  Retain a bounded
+# redacted diagnostic in the private task log and explicitly mark a shortened
+# callback; local retention is not a promise of a complete original payload.
 rootpxe_bound_callback_message() {
-    local message marker=' [TRUNCATED: full diagnostic retained locally]' bytes limit=262144 keep
+    local message marker path bytes limit=262144 keep
     message=$(rootpxe_redact_diagnostic "$*")
     bytes=$(LC_ALL=C printf '%s' "$message" | wc -c) || return 1
     if [[ $bytes -le $limit ]]; then
         printf '%s\n' "$message"
         return 0
     fi
-    umask 077
-    rootpxe_last_diagnostic_file="/tmp/pxeos.diagnostic.$$.log"
-    printf '%s\n' "$message" >"$rootpxe_last_diagnostic_file" || return 1
-    chmod 600 "$rootpxe_last_diagnostic_file" || return 1
+    if rootpxe_task_log_append "$message" && path=$(rootpxe_task_log_path); then
+        marker=" [TRUNCATED: Task log: $path]"
+    else
+        marker=' [TRUNCATED: Task log unavailable]'
+    fi
     keep=$((limit - $(LC_ALL=C printf '%s' "$marker" | wc -c) - 1))
     message=$(rootpxe_utf8_safe_prefix "$message" "$keep") || return 1
     while :; do
@@ -912,11 +1135,12 @@ rootpxe_xfs_restore_postcheck() {
 # success path.  Failed activation remains visible through the wrapped console
 # formatter, is deactivated defensively, and preserves the original status.
 rootpxe_activate_lvm_vg() {
-    local vg_uuid="$1" vg_name="$2" output rc=0
-    output=$(vgchange -ay --select "vg_uuid=$vg_uuid" "$vg_name" 2>&1) || rc=$?
+    local vg_uuid="$1" vg_name="$2" rc=0
+    rootpxe_run_logged_mutation vgchange "$vg_name" vgchange -ay --select "vg_uuid=$vg_uuid" "$vg_name" || rc=$?
     if [[ $rc -ne 0 ]]; then
-        [[ -z $output ]] || rootpxe_console_message ERROR "$output"
-        vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true
+        rootpxe_console_message ERROR "Volume group activation failed: $vg_name (exit $rc)."
+        rootpxe_task_log_notice
+        rootpxe_run_logged_mutation vgchange "$vg_name" vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" || true
         return "$rc"
     fi
     return 0
@@ -1954,13 +2178,14 @@ rootpxe_restore_lvm_volumes_single() {
     # immediately before pvcreate, so a future field added above cannot bypass
     # the all-group no-write barrier.
     [[ ${rootpxe_lvm_restore_preflight_only:-no} == yes ]] && return 0
-    pvcreate --uuid "$pv" --restorefile "$image_path/$vg_cfg" -ff -y "$pv_path" || { rootpxe_restore_lvm_fail LVM_PV_CREATE_FAILED pvcreate; return 1; }
-    vgcfgrestore -f "$image_path/$vg_cfg" "$vg" || { rootpxe_restore_lvm_fail LVM_VG_CONFIG_RESTORE_FAILED vgcfgrestore; return 1; }
+    rootpxe_console_message INFO "Restoring volume group: $vg."
+    rootpxe_run_logged_mutation pvcreate "$pv_path" pvcreate --uuid "$pv" --restorefile "$image_path/$vg_cfg" -ff -y "$pv_path" || { rootpxe_restore_lvm_fail LVM_PV_CREATE_FAILED pvcreate; return 1; }
+    rootpxe_run_logged_mutation vgcfgrestore "$vg" vgcfgrestore -f "$image_path/$vg_cfg" "$vg" || { rootpxe_restore_lvm_fail LVM_VG_CONFIG_RESTORE_FAILED vgcfgrestore; return 1; }
     if [[ $pv_bytes -gt $pv_original ]]; then
-        pvresize --setphysicalvolumesize "${pv_bytes}B" "$pv_path" || { rootpxe_restore_lvm_fail LVM_PV_RESIZE_FAILED pvresize; return 1; }
+        rootpxe_run_logged_mutation pvresize "$pv_path" pvresize --setphysicalvolumesize "${pv_bytes}B" "$pv_path" || { rootpxe_restore_lvm_fail LVM_PV_RESIZE_FAILED pvresize; return 1; }
     fi
-    if ! vgchange -ay --select "vg_uuid=$vg_uuid" "$vg"; then
-        vgchange -an --select "vg_uuid=$vg_uuid" "$vg" >/dev/null 2>&1 || true
+    if ! rootpxe_run_logged_mutation vgchange "$vg" vgchange -ay --select "vg_uuid=$vg_uuid" "$vg"; then
+        rootpxe_run_logged_mutation vgchange "$vg" vgchange -an --select "vg_uuid=$vg_uuid" "$vg" || true
         rootpxe_restore_lvm_fail LVM_VG_ACTIVATION_FAILED vgchange
         return 1
     fi
@@ -1986,10 +2211,11 @@ rootpxe_restore_lvm_volumes_single() {
         rootpxe_lvm_json_jq -e --arg name "$vg" --arg uuid "$vg_uuid" --arg lv "$lv_name" --arg lvuuid "$lv_uuid" '(.report|type=="array" and length==1 and ((.[0].lv? // [])|type=="array") and ((.[0].lv? // [])|length==1) and .[0].lv[0].vg_name==$name and .[0].lv[0].vg_uuid==$uuid and .[0].lv[0].lv_name==$lv and .[0].lv[0].lv_uuid==$lvuuid and .[0].lv[0].lv_path==("/dev/"+$name+"/"+$lv))' <<<"$lvs_json" >/dev/null || { rootpxe_restore_lvm_fail LVM_LV_IDENTITY_FAILED "lv_${lv_name}"; return 1; }
         current_size=$(blockdev --getsize64 "/dev/$vg/$lv_name" 2>/dev/null) || { rootpxe_restore_lvm_fail LVM_LV_SIZE_READ_FAILED "lv_${lv_name}"; return 1; }
         [[ $current_size =~ ^[1-9][0-9]*$ && $lv_bytes -ge $current_size ]] || { rootpxe_restore_lvm_fail LVM_LV_SIZE_INVALID "lv_${lv_name}"; return 1; }
-        if [[ $lv_bytes -gt $current_size ]]; then lvextend -y -L "${lv_bytes}B" "/dev/$vg/$lv_name" || { rootpxe_restore_lvm_fail LVM_LV_EXTEND_FAILED "lv_${lv_name}"; return 1; }; fi
+        if [[ $lv_bytes -gt $current_size ]]; then rootpxe_run_logged_mutation lvextend "/dev/$vg/$lv_name" lvextend -y -L "${lv_bytes}B" "/dev/$vg/$lv_name" || { rootpxe_restore_lvm_fail LVM_LV_EXTEND_FAILED "lv_${lv_name}"; return 1; }; fi
         rootpxe_partition_progress_restore_key="d1:p${pv_part}:lv:${lv_uuid}"
         if [[ $lv_fs == swap ]]; then
-            mkswap -U "$swap_uuid" "/dev/$vg/$lv_name" || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_SWAP_RECREATE_FAILED "lv_${lv_name}"; return 1; }
+            rootpxe_run_logged_mutation mkswap "/dev/$vg/$lv_name" mkswap -U "$swap_uuid" "/dev/$vg/$lv_name" || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_SWAP_RECREATE_FAILED "lv_${lv_name}"; return 1; }
+            rootpxe_console_message INFO "Swap ready: $vg/$lv_name."
             rootpxe_partition_progress_item "$rootpxe_partition_progress_restore_key" completed - "交换逻辑卷已重建"
             unset rootpxe_partition_progress_restore_key
             restored_lvs=$((restored_lvs + 1)); continue
@@ -2012,18 +2238,19 @@ rootpxe_restore_lvm_volumes_single() {
         fi
         if [[ $lv_fs == xfs && $lv_bytes -gt $current_size ]]; then
             xfs_mount=$(mktemp -d /tmp/rootpxe-xfs-grow.XXXXXX) || return 1
-            mount -o nouuid "/dev/$vg/$lv_name" "$xfs_mount" || { rootpxe_restore_lvm_fail LVM_XFS_GROW_MOUNT_FAILED "lv_${lv_name}"; return 1; }
-            xfs_growfs "$xfs_mount" || { rootpxe_restore_lvm_fail LVM_XFS_GROW_FAILED "lv_${lv_name}"; return 1; }
+            rootpxe_run_logged_mutation mount "/dev/$vg/$lv_name" mount -t xfs -o rw,nouuid "/dev/$vg/$lv_name" "$xfs_mount" || { rootpxe_restore_lvm_fail LVM_XFS_GROW_MOUNT_FAILED "lv_${lv_name}"; return 1; }
+            rootpxe_run_logged_mutation xfs_growfs "/dev/$vg/$lv_name" xfs_growfs "$xfs_mount" || { rootpxe_restore_lvm_fail LVM_XFS_GROW_FAILED "lv_${lv_name}"; return 1; }
             umount "$xfs_mount" || { rootpxe_restore_lvm_fail LVM_XFS_GROW_UNMOUNT_FAILED "lv_${lv_name}"; return 1; }
             rmdir "$xfs_mount" || return 1
             xfs_mount=""
         elif [[ $lv_fs != xfs ]]; then
-            e2fsck -pf "/dev/$vg/$lv_name"; actual_size=$?
+            if rootpxe_run_logged_mutation e2fsck "/dev/$vg/$lv_name" e2fsck -pf "/dev/$vg/$lv_name"; then actual_size=0; else actual_size=$?; fi
             [[ $actual_size -eq 0 || $actual_size -eq 1 ]] || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_EXT_CHECK_FAILED "lv_${lv_name}_${actual_size}"; return 1; }
-            resize2fs "/dev/$vg/$lv_name" || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_EXT_RESIZE_FAILED "lv_${lv_name}"; return 1; }
+            rootpxe_run_logged_mutation resize2fs "/dev/$vg/$lv_name" resize2fs "/dev/$vg/$lv_name" || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_EXT_RESIZE_FAILED "lv_${lv_name}"; return 1; }
         fi
         actual_size=$(blockdev --getsize64 "/dev/$vg/$lv_name" 2>/dev/null) || { rootpxe_restore_lvm_fail LVM_LV_FINAL_SIZE_READ_FAILED "lv_${lv_name}"; return 1; }
         [[ $actual_size == "$lv_bytes" ]] || { rootpxe_restore_lvm_fail LVM_LV_FINAL_SIZE_MISMATCH "lv_${lv_name}"; return 1; }
+        rootpxe_console_message INFO "Restored $vg/$lv_name."
         rootpxe_partition_progress_item "$rootpxe_partition_progress_restore_key" completed 100 "逻辑卷恢复完成"
         rootpxe_partition_progress_clear_current_item
         unset rootpxe_partition_progress_restore_key
@@ -2386,12 +2613,19 @@ rootpxe_layout_readback_failed() {
 }
 
 rootpxe_layout_apply_failed() {
-    local code="$1" reason="$2" diagnostics="${3:-}"
+    local code="$1" reason="$2" diagnostics="${3:-}" name=''
     rootpxe_layout_apply_code="$code"
     rootpxe_layout_apply_reason="$reason"
-    rootpxe_layout_diagnostics_file="$diagnostics"
+    rootpxe_layout_diagnostics_file=''
     rootpxe_cleanup_deployment_partition_file
-    [[ -z $diagnostics ]] || chmod 600 "$diagnostics" 2>/dev/null
+    if [[ -n $diagnostics ]]; then
+        case $code in SFDISK_WRITE_FAILED) name=sfdisk-write.log ;; PARTPROBE_FAILED) name=partition-reread.log ;; SFDISK_DUMP_FAILED) name=sfdisk-dump.log ;; esac
+        if [[ -n $name ]] && rootpxe_log_publish "$name" "$diagnostics" "$code"; then
+            rootpxe_layout_diagnostics_file="/tmp/log/$name"
+        else printf '[WARN]  Diagnostic log: unavailable.\n' >&2; fi
+        rm -f -- "$diagnostics"
+        diagnostics=$rootpxe_layout_diagnostics_file
+    fi
     # Do not print the partition table: sfdisk stderr is retained only in the
     # protected diagnostic file, while task logs receive a stable phase code.
     rootpxe_console_message ERROR "Deployment layout apply failed: $code ($reason)${diagnostics:+; diagnostics: $diagnostics}"
@@ -2512,15 +2746,18 @@ rootpxe_apply_deployment_layout() {
         sub(/size=[[:space:]]*[0-9]+/, "size=" sprintf("%12d", sizes[n]), line); print line; parts++; next }
       { print }
       END { if (devices != 1 || sectors != 1 || parts != expected || (is_gpt && (firsts != 1 || lasts != 1))) exit 21 }' "$template" >"$output" || { rm -f "$map" "$output"; rootpxe_layout_apply_failed LAYOUT_TEMPLATE_REWRITE_FAILED sfdisk_template_rewrite_failed; return 1; }
-    write_stderr=$(mktemp /tmp/rootpxe-layout-sfdisk-write.XXXXXX.err) || { rm -f "$map" "$output"; rootpxe_layout_apply_failed SFDISK_WRITE_FAILED write_diagnostic_create_failed; return 1; }
+    rootpxe_log_raw_file || { rm -f "$map" "$output"; rootpxe_layout_apply_failed SFDISK_WRITE_FAILED write_diagnostic_create_failed; return 1; }
+    write_stderr=$rootpxe_log_raw_path
     chmod 600 "$write_stderr"
     # Let this n-layout path own the kernel reread.  util-linux otherwise
     # requests BLKRRPART as part of sfdisk, where transient device busy races
     # lose the original error context before the bounded retry below can run.
-    rootpxe_require_unused_target_disks "$disk" || { rm -f "$map" "$output"; return 1; }
+    rootpxe_require_unused_target_disks "$disk" || { rm -f "$map" "$output" "$write_stderr"; return 1; }
     flock "$disk" sfdisk --no-reread --no-tell-kernel "$disk" <"$output" >/dev/null 2>"$write_stderr" || { rm -f "$map" "$output"; rootpxe_layout_apply_failed SFDISK_WRITE_FAILED sfdisk_write_failed "$write_stderr"; return 1; }
+    rootpxe_log_publish sfdisk-write.log "$write_stderr" sfdisk_write || printf '[WARN]  Diagnostic log: unavailable.\n' >&2
     rm -f "$write_stderr"
-    partprobe_stderr=$(mktemp /tmp/rootpxe-layout-partprobe.XXXXXX.err) || { rm -f "$map" "$output"; rootpxe_layout_apply_failed PARTPROBE_FAILED diagnostic_create_failed; return 1; }
+    rootpxe_log_raw_file || { rm -f "$map" "$output"; rootpxe_layout_apply_failed PARTPROBE_FAILED diagnostic_create_failed; return 1; }
+    partprobe_stderr=$rootpxe_log_raw_path
     chmod 600 "$partprobe_stderr"
     # Kernel partition-table reread is the synchronization point after the
     # no-reread sfdisk write.  It can transiently fail while udev observes the
@@ -2535,14 +2772,17 @@ rootpxe_apply_deployment_layout() {
         (( reread_attempt < reread_max )) && sleep 1
     done
     [[ $reread_ok -eq 1 ]] || { rm -f "$map" "$output"; rootpxe_layout_apply_failed PARTPROBE_FAILED partition_table_reread_failed "$partprobe_stderr"; return 1; }
+    rootpxe_log_publish partition-reread.log "$partprobe_stderr" partition_reread || printf '[WARN]  Diagnostic log: unavailable.\n' >&2
     rm -f "$partprobe_stderr"
     verify=$(mktemp /tmp/rootpxe-layout-verify.XXXXXX) || { rm -f "$map" "$output"; rootpxe_layout_apply_failed SFDISK_DUMP_FAILED verify_file_create_failed; return 1; }
     expected=$(mktemp /tmp/rootpxe-layout-expected.XXXXXX) || { rm -f "$map" "$output" "$verify"; rootpxe_layout_apply_failed LAYOUT_READBACK_FAILED expected_file_create_failed; return 1; }
     actual=$(mktemp /tmp/rootpxe-layout-actual.XXXXXX) || { rm -f "$map" "$output" "$verify" "$expected"; rootpxe_layout_apply_failed LAYOUT_READBACK_FAILED actual_file_create_failed; return 1; }
     chmod 600 "$expected" "$actual"
-    dump_stderr=$(mktemp /tmp/rootpxe-layout-sfdisk-dump.XXXXXX.err) || { rm -f "$map" "$output" "$verify" "$expected" "$actual"; rootpxe_layout_apply_failed SFDISK_DUMP_FAILED dump_diagnostic_create_failed; return 1; }
+    rootpxe_log_raw_file || { rm -f "$map" "$output" "$verify" "$expected" "$actual"; rootpxe_layout_apply_failed SFDISK_DUMP_FAILED dump_diagnostic_create_failed; return 1; }
+    dump_stderr=$rootpxe_log_raw_path
     chmod 600 "$dump_stderr"
     flock "$disk" sfdisk -d "$disk" >"$verify" 2>"$dump_stderr" || { rm -f "$map" "$output" "$verify" "$expected" "$actual"; rootpxe_layout_apply_failed SFDISK_DUMP_FAILED sfdisk_dump_failed "$dump_stderr"; return 1; }
+    rootpxe_log_publish sfdisk-dump.log "$dump_stderr" sfdisk_dump || printf '[WARN]  Diagnostic log: unavailable.\n' >&2
     rm -f "$dump_stderr"
     awk -v disk="$disk" -v logical="$logical" -v is_gpt="$is_gpt" -v last_lba="$last_lba" '
       /^device:[[:space:]]*/ { devices++; if ($2 != disk) exit 1 }
@@ -2985,6 +3225,9 @@ rootpxe_error_response_reason() {
 rootpxe_error_wait_for_retry() {
     local message code="${2:-PXEOS_ERROR}" api="${pxeapi:-$web}" response raw_response http_status response_reason wait action deadline now status stage="" stage_count=0 stage_invalid=0 stage_match stage_remainder stage_value
     local -a error_args
+    if [[ ${3:-} != console_shown ]]; then
+        rootpxe_task_console_failure ERROR "$1"
+    fi
     rootpxe_require_task_context || return 1
     [[ -n $api ]] || return 1
     message=$(rootpxe_bound_callback_message "$1") || return 1
@@ -3069,6 +3312,7 @@ rootpxe_error_wait_for_retry() {
         if [[ ${mc:-no} != yes && $status == *'"status":"queued"'* ]]; then
             rootpxe_console_message INFO 'Retry requested. Resuming task.'
             rootpxe_reset_disk_permit_retry_state || return 1
+            rootpxe_task_log_release_pin || true
             exec /bin/pxeos
         fi
         if [[ $status == *'"status":"deleted"'* || $status == *'"status":"cancelled"'* || $status == *'"status":"superseded"'* ]]; then
@@ -3915,10 +4159,13 @@ expandPartition() {
     fi
     local fstype=""
     fsTypeSetting $part
+    local fs_raw1='' fs_raw2=''
     case $fstype in
         ntfs)
+            rootpxe_diagnostic_begin ntfsresize.log || { handleError "Could not collect raw filesystem diagnostic"; return 1; }
+            fs_raw1=$rootpxe_log_raw_path
             dots "Resizing $fstype volume ($part)"
-            yes | ntfsresize $part -fbP >/tmp/tmpoutput.txt 2>&1
+            yes | rootpxe_diagnostic_call ntfsresize.log "$fs_raw1" overwrite ntfsresize $part -fbP
             case $? in
                 0)
                     echo "Done"
@@ -3926,80 +4173,88 @@ expandPartition() {
                 *)
                     echo "Failed"
                     debugPause
-                    handleError "Could not resize $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/tmpoutput.txt)\n   Args Passed: $*"
+                    handleError "Could not resize $part (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
                     ;;
             esac
             debugPause
             resetFlag "$part"
             ;;
         extfs)
+            rootpxe_diagnostic_begin e2fsck.log || { handleError "Could not collect raw filesystem diagnostic"; return 1; }
+            fs_raw1=$rootpxe_log_raw_path
+            rootpxe_diagnostic_begin resize2fs.log || { handleError "Could not collect raw filesystem diagnostic"; return 1; }
+            fs_raw2=$rootpxe_log_raw_path
             dots "Resizing $fstype volume ($part)"
-            rootpxe_e2fsck_preflight "$part" /tmp/e2fsck.txt
+            rootpxe_diagnostic_call e2fsck.log "$fs_raw1" internal rootpxe_e2fsck_preflight "$part" "$fs_raw1"
             e2fsck_status=$?
             if [[ $e2fsck_status -ne 0 ]]; then
                 echo "Failed"
                 debugPause
-                handleError "Could not check before resize (${FUNCNAME[0]})\n   Exit code: $e2fsck_status\n   Info: $(cat /tmp/e2fsck.txt)\n   Args Passed: $*"
+                handleError "Could not check before resize (${FUNCNAME[0]})\n   Exit code: $e2fsck_status\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
             fi
-            resize2fs "$part" >/tmp/resize2fs.txt 2>&1
+            rootpxe_diagnostic_call resize2fs.log "$fs_raw2" overwrite resize2fs "$part"
             case $? in
                 0)
                     ;;
                 *)
                     echo "Failed"
                     debugPause
-                    handleError "Could not resize $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/resize2fs.txt)\n   Args Passed: $*"
+                    handleError "Could not resize $part (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw2")\n   Args Passed: $*"
                     ;;
             esac
-            rootpxe_e2fsck_preflight "$part" /tmp/e2fsck.txt
+            rootpxe_diagnostic_call e2fsck.log "$fs_raw1" internal rootpxe_e2fsck_preflight "$part" "$fs_raw1"
             e2fsck_status=$?
             if [[ $e2fsck_status -ne 0 ]]; then
                 echo "Failed"
                 debugPause
-                handleError "Could not check after resize (${FUNCNAME[0]})\n   Exit code: $e2fsck_status\n   Info: $(cat /tmp/e2fsck.txt)\n   Args Passed: $*"
+                handleError "Could not check after resize (${FUNCNAME[0]})\n   Exit code: $e2fsck_status\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
             fi
             echo "Done"
             ;;
         btrfs)
+            rootpxe_diagnostic_begin btrfs.log || { handleError "Could not collect raw filesystem diagnostic"; return 1; }
+            fs_raw1=$rootpxe_log_raw_path
             # Based on community discussion from @mstabrin
             dots "Resizing $fstype volume ($part)"
             if [[ ! -d /tmp/btrfs ]]; then
-                mkdir /tmp/btrfs >>/tmp/btfrslog.txt 2>&1
+                rootpxe_diagnostic_call btrfs.log "$fs_raw1" append mkdir /tmp/btrfs
                 if [[ $? -gt 0 ]]; then
                     echo "Failed"
                     debugPause
-                    handleError "Could not create /tmp/btrfs (${FUNCNAME[0]})\n   Info: $(cat /tmp/btrfslog.txt)\n   Args Passed: $*"
+                    handleError "Could not create /tmp/btrfs (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
                 fi
             fi
-            mount -t btrfs $part /tmp/btrfs >>/tmp/btrfslog.txt 2>&1
+            rootpxe_diagnostic_call btrfs.log "$fs_raw1" append mount -t btrfs $part /tmp/btrfs
             if [[ $? -gt 0 ]]; then
                 echo "Failed"
                 debugPause
-                handleError "Could not mount $part to /tmp/btrfs (${FUNCNAME[0]})\n   Info: $(cat /tmp/btrfslog.txt)\n   Args Passed: $*"
+                handleError "Could not mount $part to /tmp/btrfs (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
             fi
-            btrfs filesystem resize max /tmp/btrfs >>/tmp/btrfslog.txt 2>&1
+            rootpxe_diagnostic_call btrfs.log "$fs_raw1" append btrfs filesystem resize max /tmp/btrfs
             if [[ $? -gt 0 ]]; then
-                umount /tmp/btrfs >>/tmp/btrfslog.txt 2>&1 || true
+                rootpxe_diagnostic_call btrfs.log "$fs_raw1" append umount /tmp/btrfs || true
                 echo "Failed"
                 debugPause
-                handleError "Could not resize btrfs partition (${FUNCNAME[0]})\n   Info: $(cat /tmp/btrfslog.txt)\n   Args Passed: $*"
+                handleError "Could not resize btrfs partition (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
             fi
-            umount /tmp/btrfs >>/tmp/btrfslog.txt 2>&1
+            rootpxe_diagnostic_call btrfs.log "$fs_raw1" append umount /tmp/btrfs
             if [[ $? -gt 0 ]]; then
                 echo "Failed"
                 debugPause
-                handleError "Could not unmount $part from /tmp/btrfs (${FUNCNAME[0]}\n   Info: $(cat /tmp/btrfslog.txt)\n   Args Passed: $*)"
+                handleError "Could not unmount $part from /tmp/btrfs (${FUNCNAME[0]}\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*)"
             fi
             echo "Done"
             ;;
         f2fs)
             if [[ $type == "down" ]]; then
+                rootpxe_diagnostic_begin f2fs-resize.log || { handleError "Could not collect raw filesystem diagnostic"; return 1; }
+                fs_raw1=$rootpxe_log_raw_path
                 dots "Resizing $fstype volume ($part)"
-                resize.f2fs $part >>/tmp/resize.f2fs.txt 2>&1
+                rootpxe_diagnostic_call f2fs-resize.log "$fs_raw1" append resize.f2fs $part
                 if [[ $? -gt 0 ]]; then
                     echo "Failed"
                     debugPause
-                    handleError "Could not expand f2fs partition (${FUNCNAME[0]})\n   Info: $(cat /tmp/resize.f2fs.txt)\n  Args Passed: $*"
+                    handleError "Could not expand f2fs partition (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n  Args Passed: $*"
                 fi
                 echo "Done"
             fi
@@ -4009,18 +4264,24 @@ expandPartition() {
             # geometry.  pxeosfatgrow only expands the FAT filesystem inside
             # the already-expanded partition and never edits its table entry.
             if [[ $type == "down" ]]; then
+                rootpxe_diagnostic_begin fat-fsck.log || { handleError "Could not collect raw filesystem diagnostic"; return 1; }
+                fs_raw1=$rootpxe_log_raw_path
+                rootpxe_diagnostic_begin fat-grow.log || { handleError "Could not collect raw filesystem diagnostic"; return 1; }
+                fs_raw2=$rootpxe_log_raw_path
                 dots "Resizing $fstype volume ($part)"
                 command -v fsck.fat >/dev/null 2>&1 || { echo "Failed"; debugPause; handleError "FAT filesystem check tool is unavailable for $part (${FUNCNAME[0]})"; }
                 command -v pxeosfatgrow >/dev/null 2>&1 || { echo "Failed"; debugPause; handleError "FAT grow tool is unavailable for $part (${FUNCNAME[0]})"; }
-                rootpxe_fat_growth_preflight "$part" /tmp/pxeosfatgrow-fsck.txt || { echo "Failed"; debugPause; handleError "FAT filesystem check failed before growth for $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/pxeosfatgrow-fsck.txt)\n   Args Passed: $*"; }
-                pxeosfatgrow "$part" >/tmp/pxeosfatgrow.txt 2>&1 || { echo "Failed"; debugPause; handleError "Could not grow FAT filesystem on $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/pxeosfatgrow.txt)\n   Args Passed: $*"; }
-                rootpxe_fat_require_unmounted "$part" >/tmp/pxeosfatgrow-fsck.txt 2>&1 || { echo "Failed"; debugPause; handleError "FAT mount state check failed after growth for $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/pxeosfatgrow-fsck.txt)\n   Args Passed: $*"; }
-                LC_ALL=C fsck.fat -n "$part" >/tmp/pxeosfatgrow-fsck.txt 2>&1 || { echo "Failed"; debugPause; handleError "FAT filesystem check failed after growth for $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/pxeosfatgrow-fsck.txt)\n   Args Passed: $*"; }
+                rootpxe_diagnostic_call fat-fsck.log "$fs_raw1" internal rootpxe_fat_growth_preflight "$part" "$fs_raw1" || { echo "Failed"; debugPause; handleError "FAT filesystem check failed before growth for $part (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"; }
+                rootpxe_diagnostic_call fat-grow.log "$fs_raw2" overwrite pxeosfatgrow "$part" || { echo "Failed"; debugPause; handleError "Could not grow FAT filesystem on $part (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw2")\n   Args Passed: $*"; }
+                rootpxe_diagnostic_call fat-fsck.log "$fs_raw1" overwrite rootpxe_fat_require_unmounted "$part" || { echo "Failed"; debugPause; handleError "FAT mount state check failed after growth for $part (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"; }
+                LC_ALL=C rootpxe_diagnostic_call fat-fsck.log "$fs_raw1" overwrite fsck.fat -n "$part" || { echo "Failed"; debugPause; handleError "FAT filesystem check failed after growth for $part (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"; }
                 echo "Done"
             fi
             ;;
         xfs)
             if [[ $type == "down" ]]; then
+                rootpxe_diagnostic_begin xfs-grow.log || { handleError "Could not collect raw filesystem diagnostic"; return 1; }
+                fs_raw1=$rootpxe_log_raw_path
                 local xfs_mount=""
                 dots "Attempting to resize $fstype volume ($part)"
 
@@ -4032,27 +4293,27 @@ expandPartition() {
                         debugPause
                         handleError "Could not create XFS grow mountpoint (${FUNCNAME[0]})\n   Args Passed: $*"
                     }
-                    mount -t xfs -o rw,nouuid "$part" "$xfs_mount" >>/tmp/xfslog.txt 2>&1
+                    rootpxe_diagnostic_call xfs-grow.log "$fs_raw1" append mount -t xfs -o rw,nouuid "$part" "$xfs_mount"
                     if [[ $? -gt 0 ]]; then
                         rmdir "$xfs_mount" >/dev/null 2>&1 || true
                         echo "Failed"
                         debugPause
-                        handleError "Could not mount $part for XFS growth (${FUNCNAME[0]})\n   Info: $(cat /tmp/xfslog.txt)\n   Args Passed: $*"
+                        handleError "Could not mount $part for XFS growth (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
                     fi
-                    xfs_growfs "$xfs_mount" >>/tmp/xfslog.txt 2>&1
+                    rootpxe_diagnostic_call xfs-grow.log "$fs_raw1" append xfs_growfs "$xfs_mount"
                     if [[ $? -gt 0 ]]; then
-                        umount "$xfs_mount" >>/tmp/xfslog.txt 2>&1 || true
+                        rootpxe_diagnostic_call xfs-grow.log "$fs_raw1" append umount "$xfs_mount" || true
                         rmdir "$xfs_mount" >/dev/null 2>&1 || true
                         echo "Failed"
                         debugPause
-                        handleError "Could not grow XFS partition $part (${FUNCNAME[0]})\n   Info: $(cat /tmp/xfslog.txt)\n   Args Passed: $*"
+                        handleError "Could not grow XFS partition $part (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
                     fi
-                    umount "$xfs_mount" >>/tmp/xfslog.txt 2>&1
+                    rootpxe_diagnostic_call xfs-grow.log "$fs_raw1" append umount "$xfs_mount"
                     if [[ $? -gt 0 ]]; then
-                        umount "$xfs_mount" >>/tmp/xfslog.txt 2>&1 || true
+                        rootpxe_diagnostic_call xfs-grow.log "$fs_raw1" append umount "$xfs_mount" || true
                         echo Failed
                         debugPause
-                        handleError "Could not unmount $part from $xfs_mount (${FUNCNAME[0]})\n   Info: $(cat /tmp/xfslog.txt)\n   Args Passed: $*"
+                        handleError "Could not unmount $part from $xfs_mount (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
                     fi
                     rmdir "$xfs_mount" >/dev/null 2>&1 || { echo Failed; debugPause; handleError "Could not clean XFS grow mountpoint (${FUNCNAME[0]})\n   Args Passed: $*"; }
                     echo "Done"
@@ -4071,6 +4332,7 @@ expandPartition() {
     esac
     debugPause
     runPartprobe "$disk"
+    rootpxe_diagnostic_cleanup
 }
 # Check if partition is bitlocked
 #
@@ -4321,19 +4583,23 @@ shrinkPartition() {
     local adjustedfdsize=0
     local part_block_size=0
     local e2fsck_status=0
+    local fs_raw1='' fs_raw2=''
     case $fstype in
         ntfs)
-            ntfsresize -fivP $part >/tmp/tmpoutput.txt 2>&1
+            rootpxe_diagnostic_begin ntfsresize.log || { handleError "Could not collect raw filesystem diagnostic"; return 1; }
+            fs_raw1=$rootpxe_log_raw_path
+            rootpxe_diagnostic_call ntfsresize.log "$fs_raw1" overwrite ntfsresize -fivP $part
             if [[ ! $? -eq 0 ]]; then
                 rootpxe_console_message INFO "Not shrinking $part: trying fixed size."
                 debugPause
                 echo "$(cat "$imagePath/d1.fixed_size_partitions" | tr -d \\0):${part_number}" > "$imagePath/d1.fixed_size_partitions"
+                rootpxe_diagnostic_cleanup
                 return
                 #handleError " * (${FUNCNAME[0]})\n    Args Passed: $*\n\nFatal Error, unable to find size data out on $part. Cmd: ntfsresize -f -i -v -P $part"
             fi
-            tmpoutput=$(cat /tmp/tmpoutput.txt | tr -d \\0)
-            size=$(cat /tmp/tmpoutput.txt | tr -d \\0 | sed -n 's/.*you might resize at\s\+\([0-9]\+\).*$/\1/pi')
-[[ -z $size ]] && handleError "${FUNCNAME[0]}\n   Args Passed: $*\n\nFatal error: unable to determine possible NTFS size.\nRunning ntfsresize again with full output; please wait.\n$(cat /tmp/tmpoutput.txt | tr -d \\0)"
+            tmpoutput=$(cat "$fs_raw1" | tr -d \\0)
+            size=$(cat "$fs_raw1" | tr -d \\0 | sed -n 's/.*you might resize at\s\+\([0-9]\+\).*$/\1/pi')
+[[ -z $size ]] && handleError "${FUNCNAME[0]}\n   Args Passed: $*\n\nFatal error: unable to determine possible NTFS size.\nRunning ntfsresize again with full output; please wait.\n$(cat "$fs_raw1" | tr -d \\0)"
             local min_slack_bytes=$((500 * 1024 * 1024))
 
             # percent-based slack, in bytes (integer math)
@@ -4350,20 +4616,20 @@ shrinkPartition() {
 
             # target size in KiB for ntfsresize
             # (bytes -> KiB), and add slack (also bytes -> KiB)
-            rm /tmp/tmpoutput.txt >/dev/null 2>&1
+            # Keep the private raw buffer until this operation has finished.
             sizentfsresize=$(calculate "(${size}+${slack_bytes})/1024")
 [[ -z $sizentfsresize || $sizentfsresize -lt 1 ]] && handleError "${FUNCNAME[0]}\n   Args Passed: $*\n\nFatal error: unable to determine NTFS target size with 500MB minimum slack."
 
             rootpxe_console_message INFO "Possible resize partition size with slack: ${sizentfsresize}k."
             rootpxe_console_message INFO "Possible resize partition size: ${sizentfsresize}k."
             dots "Running resize test $part"
-            yes | ntfsresize -fns ${sizentfsresize}k ${part} >/tmp/tmpoutput.txt 2>&1
+            yes | rootpxe_diagnostic_call ntfsresize.log "$fs_raw1" overwrite ntfsresize -fns ${sizentfsresize}k ${part}
             local ntfsstatus="$?"
-            tmpoutput=$(cat /tmp/tmpoutput.txt | tr -d \\0)
-            test_string=$(cat /tmp/tmpoutput.txt | egrep -io "(ended successfully|bigger than the device size|volume size is already OK)" | tr -d '[[:space:]]' | tr -d \\0)
+            tmpoutput=$(cat "$fs_raw1" | tr -d \\0)
+            test_string=$(cat "$fs_raw1" | egrep -io "(ended successfully|bigger than the device size|volume size is already OK)" | tr -d '[[:space:]]' | tr -d \\0)
             echo "Done"
             debugPause
-            rm /tmp/tmpoutput.txt >/dev/null 2>&1
+            # Keep the private raw buffer until this operation has finished.
             case $test_string in
                 endedsuccessfully)
                     rootpxe_console_message INFO 'Resize test completed successfully.'
@@ -4386,7 +4652,7 @@ shrinkPartition() {
             if [[ $do_resizefs -eq 1 ]]; then
                 debugPause
                 dots "Resizing filesystem"
-                yes | ntfsresize -fs ${sizentfsresize}k ${part} >/tmp/output.txt 2>&1
+                yes | rootpxe_diagnostic_call ntfsresize.log "$fs_raw1" overwrite ntfsresize -fs ${sizentfsresize}k ${part}
                 case $? in
                     0)
                         echo "Done"
@@ -4395,7 +4661,7 @@ shrinkPartition() {
                     *)
                         echo "Failed"
                         debugPause
-                        handleError "Could not resize disk (${FUNCNAME[0]})\n   Info: $(cat /tmp/output.txt)\n   Args Passed: $*"
+                        handleError "Could not resize disk (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
                         ;;
                 esac
             fi
@@ -4426,13 +4692,17 @@ shrinkPartition() {
             resetFlag "$part"
             ;;
         extfs)
+            rootpxe_diagnostic_begin e2fsck.log || { handleError "Could not collect raw filesystem diagnostic"; return 1; }
+            fs_raw1=$rootpxe_log_raw_path
+            rootpxe_diagnostic_begin resize2fs.log || { handleError "Could not collect raw filesystem diagnostic"; return 1; }
+            fs_raw2=$rootpxe_log_raw_path
             dots "Checking $fstype volume ($part)"
-            rootpxe_e2fsck_preflight "$part" /tmp/e2fsck.txt
+            rootpxe_diagnostic_call e2fsck.log "$fs_raw1" internal rootpxe_e2fsck_preflight "$part" "$fs_raw1"
             e2fsck_status=$?
             if [[ $e2fsck_status -ne 0 ]]; then
                 echo "Failed"
                 debugPause
-                handleError "e2fsck failed to check $part (${FUNCNAME[0]})\n   Exit code: $e2fsck_status\n   Info: $(cat /tmp/e2fsck.txt)\n   Args Passed: $*"
+                handleError "e2fsck failed to check $part (${FUNCNAME[0]})\n   Exit code: $e2fsck_status\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
             fi
             echo "Done"
             debugPause
@@ -4443,7 +4713,7 @@ shrinkPartition() {
             sizeextresize=$(calculate "${size}+${sizeadd}")
             [[ -z $sizeextresize || $sizeextresize -lt 1 ]] && handleError "Error calculating the new size of extfs ($part) (${FUNCNAME[0]})\n   Args Passed: $*"
             dots "Shrinking $fstype volume ($part)"
-            resize2fs "$part" -M >/tmp/resize2fs.txt 2>&1
+            rootpxe_diagnostic_call resize2fs.log "$fs_raw2" overwrite resize2fs "$part" -M
             case $? in
                 0)
                     echo "Done"
@@ -4452,7 +4722,7 @@ shrinkPartition() {
                 *)
                     echo "Failed"
                     debugPause
-                    handleError "Could not shrink $fstype volume ($part) (${FUNCNAME[0]})\n   Info: $(cat /tmp/resize2fs.txt)\n   Args Passed: $*"
+                    handleError "Could not shrink $fstype volume ($part) (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw2")\n   Args Passed: $*"
                     ;;
             esac
             debugPause
@@ -4462,32 +4732,34 @@ shrinkPartition() {
             echo "Done"
             debugPause
             dots "Checking $fstype volume ($part)"
-            rootpxe_e2fsck_preflight "$part" /tmp/e2fsck.txt
+            rootpxe_diagnostic_call e2fsck.log "$fs_raw1" internal rootpxe_e2fsck_preflight "$part" "$fs_raw1"
             e2fsck_status=$?
             if [[ $e2fsck_status -ne 0 ]]; then
                 echo "Failed"
                 debugPause
-                handleError "Could not check expanded volume ($part) (${FUNCNAME[0]})\n   Exit code: $e2fsck_status\n   Info: $(cat /tmp/e2fsck.txt)\n   Args Passed: $*"
+                handleError "Could not check expanded volume ($part) (${FUNCNAME[0]})\n   Exit code: $e2fsck_status\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
             fi
             echo "Done"
             ;;
         btrfs)
+            rootpxe_diagnostic_begin btrfs.log || { handleError "Could not collect raw filesystem diagnostic"; return 1; }
+            fs_raw1=$rootpxe_log_raw_path
             # Based on community discussion from @mstabrin
             # btrfs deployment completion script notes
             dots "Shrinking $part partition"
             if [[ ! -d /tmp/btrfs ]]; then
-                mkdir /tmp/btrfs >>/tmp/btfrslog.txt 2>&1
+                rootpxe_diagnostic_call btrfs.log "$fs_raw1" append mkdir /tmp/btrfs
                 if [[ $? -gt 0 ]]; then
                     echo "Failed"
                     debugPause
-                    handleError "Could not create /tmp/btrfs (${FUNCNAME[0]})\n   Info: $(cat /tmp/btrfslog.txt)\n   Args Passed: $*"
+                    handleError "Could not create /tmp/btrfs (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
                 fi
             fi
-            mount -t btrfs $part /tmp/btrfs >>/tmp/btrfslog.txt 2>&1
+            rootpxe_diagnostic_call btrfs.log "$fs_raw1" append mount -t btrfs $part /tmp/btrfs
             if [[ $? -gt 0 ]]; then
                 echo "Failed"
                 debugPause
-                handleError "Could not mount $part to /tmp/btrfs (${FUNCNAME[0]})\n   Info: $(cat /tmp/btrfslog.txt)\n   Args Passed: $*"
+                handleError "Could not mount $part to /tmp/btrfs (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
             fi
             local free_size_original=$(btrfs filesystem usage -b /tmp/btrfs | grep unallocated | grep -Eo '[0-9]+')
             local fsize_pct=$(calculate_float "${percent}/100")
@@ -4495,7 +4767,7 @@ shrinkPartition() {
             local free_size=$(calculate "${mult_val}*${free_size_original}")
             local btrfs_resize_status=1
             while :; do
-                if btrfs filesystem resize -${free_size} /tmp/btrfs >>/tmp/btrfslog.txt 2>&1; then
+                if rootpxe_diagnostic_call btrfs.log "$fs_raw1" append btrfs filesystem resize -${free_size} /tmp/btrfs; then
                     btrfs_resize_status=0
                     break
                 fi
@@ -4508,14 +4780,14 @@ shrinkPartition() {
             if [[ $btrfs_resize_status -ne 0 ]]; then
                 echo "Failed"
                 debugPause
-                handleError "Could not shrink btrfs volume ($part) (${FUNCNAME[0]})\n   Info: $(cat /tmp/btrfslog.txt)\n   Args Passed: $*"
+                handleError "Could not shrink btrfs volume ($part) (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
             fi
             rootpxe_capture_note_partition_shrunk "$part" "$fstype"
-            umount /tmp/btrfs >>/tmp/btrfslog.txt 2>&1
+            rootpxe_diagnostic_call btrfs.log "$fs_raw1" append umount /tmp/btrfs
             if [[ $? -gt 0 ]]; then
                 echo "Failed"
                 debugPause
-                handleError "Could not unmount $part from /tmp/btrfs (${FUNCNAME[0]}\n   Info: $(cat /tmp/btrfslog.txt)\n   Args Passed: $*)"
+                handleError "Could not unmount $part from /tmp/btrfs (${FUNCNAME[0]}\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*)"
             fi
             echo "Done"
             ;;
@@ -4530,6 +4802,7 @@ shrinkPartition() {
             ;;
     esac
     debugPause
+    rootpxe_diagnostic_cleanup
 }
 # Resets the dirty bits on a partition
 #
@@ -4884,7 +5157,7 @@ rootpxe_find_windows_system_partition() {
         fsTypeSetting "$part"
         [[ $fstype == ntfs ]] || continue
         umount /ntfs >/dev/null 2>&1 || true
-        ntfs-3g -o ro "$part" /ntfs >/tmp/ntfs-probe-output 2>&1 || continue
+        rootpxe_run_logged_typed_native ntfs-mount.log "$part" ntfs-3g -o ro "$part" /ntfs || continue
         if [[ -f /ntfs/Windows/System32/config/SYSTEM ]]; then
             candidate="$part"
             ((candidate_count++))
@@ -4927,7 +5200,7 @@ rootpxe_linux_btrfs_subvolume_ids() {
         umount "$mountpoint" >/dev/null 2>&1 || return 2
     fi
     options=$(rootpxe_linux_mount_options ro btrfs) || return 3
-    mount -t btrfs -o "$options" "$device" "$mountpoint" >/tmp/rootpxe-linux-btrfs-list-output 2>&1 || return 3
+    rootpxe_run_logged_typed_native linux-probe.log "$device" mount -t btrfs -o "$options" "$device" "$mountpoint" || return 3
     rows=$(mktemp /tmp/rootpxe-linux-btrfs-subvolumes.XXXXXX) || { umount "$mountpoint" >/dev/null 2>&1 || return 2; return 3; }
     btrfs subvolume list "$mountpoint" >"$rows" 2>/dev/null || { rm -f -- "$rows"; umount "$mountpoint" >/dev/null 2>&1 || return 2; return 3; }
     parsed=$(mktemp /tmp/rootpxe-linux-btrfs-subvolumes-parsed.XXXXXX) || { rm -f -- "$rows"; umount "$mountpoint" >/dev/null 2>&1 || return 2; return 3; }
@@ -4997,7 +5270,7 @@ rootpxe_linux_probe_root_candidate() {
         umount "$mountpoint" >/dev/null 2>&1 || return 2
     fi
     options=$(rootpxe_linux_mount_options ro "$fstype" "$subvolid") || { [[ $fstype == btrfs ]] && return 3; return 1; }
-    mount -t "$fstype" -o "$options" "$device" "$mountpoint" >/tmp/rootpxe-linux-probe-output 2>&1 || { [[ $fstype == btrfs ]] && return 3; return 1; }
+    rootpxe_run_logged_typed_native linux-probe.log "$device" mount -t "$fstype" -o "$options" "$device" "$mountpoint" || { [[ $fstype == btrfs ]] && return 3; return 1; }
     if [[ -d "$mountpoint/etc" && ! -L "$mountpoint/etc" ]] && rootpxe_linux_has_safe_os_release "$mountpoint"; then
         if [[ $fstype == btrfs && -z $subvolid ]]; then
             subvolid=$(rootpxe_linux_btrfs_default_subvolid "$mountpoint") || { umount "$mountpoint" >/dev/null 2>&1 || return 2; return 3; }
@@ -5056,7 +5329,7 @@ rootpxe_linux_activate_vg_if_needed() {
     done <"$rows"
     [[ $count -gt 0 ]] || { rm -f -- "$rows"; return 1; }
     if [[ $inactive -eq $count ]]; then
-        if ! vgchange -ay --select "vg_uuid=$vg_uuid" "$vg_name" >/tmp/rootpxe-linux-vgchange-output 2>&1; then
+        if ! rootpxe_run_logged_typed_native linux-lvm.log "$vg_name" vgchange -ay --select "vg_uuid=$vg_uuid" "$vg_name"; then
             vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true
             rm -f -- "$rows"
             return 1
@@ -5271,7 +5544,7 @@ rootpxe_apply_linux_hostname_for_disk() {
         umount "$mountpoint" >/dev/null 2>&1 || { rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"; }
     fi
     options=$(rootpxe_linux_mount_options rw "$root_fs" "$root_subvolid") || handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"
-    mount -t "$root_fs" -o "$options" "$root_device" "$mountpoint" >/tmp/rootpxe-linux-mount-output 2>&1 || { rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_MOUNT_FAILED"; }
+    rootpxe_run_logged_typed_native linux-mount.log "$root_device" mount -t "$root_fs" -o "$options" "$root_device" "$mountpoint" || { rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_MOUNT_FAILED"; }
     rootpxe_linux_paths_safe_for_write "$mountpoint" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_PATH_UNSAFE"; }
     if rootpxe_deployment_identity_linux_policy_enabled; then
         rootpxe_deployment_identity_linux_system_preflight "$mountpoint" || { preflight_rc=$?; preflight_reason="${rootpxe_deployment_identity_preflight_failure_reason:-unknown}"; umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_SYSTEM_IDENTITY_PRECHECK_FAILED REASON=${preflight_reason} RC=${preflight_rc}"; }
@@ -5460,7 +5733,7 @@ rootpxe_apply_windows_hostname() {
     mkdir -p /ntfs || return 1
     [[ -d /ntfs && ! -L /ntfs ]] || return 1
     umount /ntfs >/dev/null 2>&1 || true
-    ntfs-3g -o remove_hiberfile,rw "$part" /ntfs >/tmp/ntfs-mount-output 2>&1 || return 1
+    rootpxe_run_logged_typed_native ntfs-mount.log "$part" ntfs-3g -o remove_hiberfile,rw "$part" /ntfs || return 1
     if [[ ${changeHostname:-false} == true && $sysprep -eq 0 ]]; then
         rootpxe_change_hostname_registry "$part" || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
         rootpxe_deployment_identity_hostname_result=true
@@ -5527,7 +5800,7 @@ fixWin7boot() {
                 ;;
         esac
     fi
-    ntfs-3g -o remove_hiberfile,rw $part /bcdstore >/tmp/ntfs-mount-output 2>&1
+    rootpxe_run_logged_typed_native ntfs-mount.log "$part" ntfs-3g -o remove_hiberfile,rw $part /bcdstore
     case $? in
         0)
             echo "Done"
@@ -5536,7 +5809,7 @@ fixWin7boot() {
         *)
             echo "Failed"
             debugPause
-                    handleError "Could not mount $part (${FUNCNAME[0]})\n    Args Passed: $*\n    Reason: $(cat /tmp/ntfs-mount-output | tr -d \\0)"
+                    handleError "Could not mount $part (${FUNCNAME[0]})\n    Args Passed: $*"
             ;;
     esac
     if [[ ! -f /bcdstore/Boot/BCD ]]; then
@@ -5594,7 +5867,7 @@ removePageFile() {
                         esac
                     fi
                     umount /ntfs >/dev/null 2>&1
-                    ntfs-3g -o remove_hiberfile,rw $part /ntfs >/tmp/ntfs-mount-output 2>&1
+                    rootpxe_run_logged_typed_native ntfs-mount.log "$part" ntfs-3g -o remove_hiberfile,rw $part /ntfs
                     case $? in
                         0)
                             echo "Done"
@@ -5603,7 +5876,7 @@ removePageFile() {
                         *)
                             echo "Failed"
                             debugPause
-                                handleError "Could not mount $part (${FUNCNAME[0]})\n    Args Passed: $*\n    Reason: $(cat /tmp/ntfs-mount-output | tr -d \\0)"
+                                handleError "Could not mount $part (${FUNCNAME[0]})\n    Args Passed: $*"
                             ;;
                     esac
                     if [[ -f /ntfs/pagefile.sys ]]; then
@@ -6119,25 +6392,20 @@ handleError() {
     local str="$1" safe_str
     local parts=""
     local part=""
+    safe_str=$(rootpxe_redact_diagnostic "$str")
+    rootpxe_diagnostic_cleanup
     # A fetched initialization payload may contain an XML credential or a
     # password hash.  Remove it before any retry wait, diagnostics, or reboot.
     declare -F rootpxe_deployment_identity_cleanup_private >/dev/null 2>&1 && rootpxe_deployment_identity_cleanup_private
-    printf '\n[ERROR] Operation failed.\n'
-    printf '[INFO]  Init version: %s\n' "$initversion"
-    printf '\n[INFO]  Error details:\n'
-    safe_str=$(rootpxe_redact_diagnostic "$str")
     [[ ${mc:-no} == yes ]] && rootpxe_multicast_local_failure=yes
-    printf '%b\n' "$safe_str" | sed 's/^/        /'
-    printf '\n[INFO]  Kernel variables and settings:\n'
-    rootpxe_redact_diagnostic "$*" | sed 's/^/        /'
-    printf '\n'
+    rootpxe_task_console_failure ERROR "$safe_str"
     #
     # expand the file systems in the restored partitions
     #
     # Windows 7, 8, 8.1:
     # Windows 2000/XP, Vista:
     # Linux:
-    if [[ -n $2 ]]; then
+    if [[ -n ${2:-} ]]; then
         case $osid in
             [1-2]|4|[5-7]|9|10|11|50|51)
                 if [[ -n "$hd" ]]; then
@@ -6150,7 +6418,7 @@ handleError() {
         esac
     fi
     if rootpxe_require_task_context; then
-        rootpxe_error_wait_for_retry "$safe_str" "PXEOS_ERROR"
+        rootpxe_error_wait_for_retry "$safe_str" "PXEOS_ERROR" console_shown
         return_code=$?
         exit "$return_code"
     fi
@@ -6167,9 +6435,8 @@ handleError() {
 # $1 The string to inform the user what the problem is
 handleWarning() {
     local str="$1"
-    printf '\n[WARN]  Operation warning.\n'
-    printf '[INFO]  Warning details:\n'
-    printf '%b\n' "$str" | sed 's/^/        /'
+    rootpxe_task_console_failure WARN "$str"
+    rootpxe_diagnostic_cleanup
     printf '\n[INFO]  Continuing in 60s.\n'
     usleep 60000000
     debugPause
@@ -6192,7 +6459,10 @@ debugCommand() {
     local str="$1"
     case $isdebug in
         [Yy][Ee][Ss]|[Yy])
-            echo -e "$str" >> /tmp/cmdlist
+            # Keep the API, never retain the original command arguments.
+            local command=${str%%[[:space:]]*}
+            [[ $command =~ ^[A-Za-z0-9_./+-]+$ && ${#command} -le 128 ]] || command=unknown
+            rootpxe_task_log_append "OP=debug_command COMMAND=$command ARGS=omitted" || rootpxe_task_log_notice
             ;;
     esac
 }
@@ -6675,20 +6945,20 @@ restorePartitionTablesAndBootLoaders() {
     majorDebugEcho "Trying to restore to $table_type partition table."
     if [[ $table_type == GPT ]]; then
         dots "Restoring Partition Tables (GPT)"
+        rootpxe_diagnostic_begin sgdisk-restore.log || { handleError "Could not collect raw GPT restore diagnostic"; return 1; }
+        local sgdisk_raw=$rootpxe_log_raw_path
         restoreGRUB "$disk" "$disk_number" "$imagePath" "true"
         rootpxe_require_unused_target_disks "$disk" || return 1
         sgdisk -z $disk >/dev/null 2>&1
         rootpxe_require_unused_target_disks "$disk" || return 1
-        sgdisk -gl $tmpMBR $disk >/tmp/sgdisk-gl.err 2>&1
+        rootpxe_diagnostic_call sgdisk-restore.log "$sgdisk_raw" overwrite sgdisk -gl $tmpMBR $disk
         sgdiskexit="$?"
         if [[ ! $sgdiskexit -eq 0 ]]; then
             echo "Failed"
             debugPause
-            [[ -r /tmp/sgdisk-gl.err ]] && cat /tmp/sgdisk-gl.err
-            rootpxe_console_message INFO 'Review the detailed error above. Use Shift-PageUp to scroll.'
-            handleError "Error trying to restore GPT partition tables (${FUNCNAME[0]})\n   Args Passed: $*\n    CMD Tried: sgdisk -gl $tmpMBR $disk\n    Exit returned code: $sgdiskexit"
+            handleError "Error trying to restore GPT partition tables (${FUNCNAME[0]})\n    Exit returned code: $sgdiskexit\n    Info: $(cat "$sgdisk_raw")"
         fi
-        rm -f /tmp/sgdisk-gl.err
+        rootpxe_diagnostic_cleanup
         global_gptcheck="yes"
         echo "Done"
     else
@@ -7047,10 +7317,8 @@ runFixparts() {
 }
 killStatusReporter() {
     [[ -z ${statusReporter:-} ]] && return
-    dots "Stopping RootPXE status reporter"
     kill "$statusReporter" >/dev/null 2>&1 || true
     wait "$statusReporter" >/dev/null 2>&1 || true
-    echo "Done"
     debugPause
 }
 prepareResizeDownloadPartitions() {

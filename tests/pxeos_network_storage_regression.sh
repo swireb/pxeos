@@ -13,6 +13,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 mkdir -p "$tmp/mock" "$tmp/etc/network" "$tmp/lib"
+{ printf '. "%s/tests/task-log-test-support.sh"\n' "$root"; sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh"; } >"$tmp/log-paths.sh"
 printf 'export initversion=20990101\n' >"$tmp/lib/funcs.sh"
 
 cat >"$tmp/mock/ip" <<'EOF'
@@ -47,6 +48,7 @@ sed \
   -e "s|</proc/cmdline|<\"$tmp/cmdline\"|" \
   -e "s|/etc/network/interfaces|$tmp/etc/network/interfaces|g" \
   -e "s|/usr/share/pxeos/lib/funcs.sh|$tmp/lib/funcs.sh|" \
+  -e "s|/usr/share/pxeos/lib/log-paths.sh|$tmp/log-paths.sh|" \
   -e "s|/sbin/ip|$tmp/mock/ip|g" \
   -e "s|/sbin/udhcpc|$tmp/mock/udhcpc|g" \
   -e 's|read p_ifaces <<< .*|p_ifaces=eth0|' \
@@ -173,6 +175,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 mkdir -p "$tmp/mock" "$tmp/etc/network" "$tmp/ssh"
+{ printf '. "%s/tests/task-log-test-support.sh"\n' "$root"; sed "s|/tmp/log|$tmp/log|g" "$overlay/usr/share/pxeos/lib/log-paths.sh"; } >"$tmp/log-paths.sh"
 
 cat >"$tmp/mock/ip" <<'EOF'
 #!/usr/bin/env bash
@@ -213,7 +216,8 @@ sed \
   -e "s|/etc/network/interfaces|$tmp/etc/network/interfaces|g" \
   -e "s|/sbin/ip|$tmp/mock/ip|g" \
   -e "s|/sbin/udhcpc|$tmp/mock/udhcpc|g" \
-  -e "s|/tmp/pxeos-dhcp-|$tmp/dhcp-|g" \
+  -e "s|/tmp/log|$tmp/log|g" \
+  -e "s|/usr/share/pxeos/lib/log-paths.sh|$tmp/log-paths.sh|" \
   -e 's|read p_ifaces <<< .*|p_ifaces=eth0|' \
   -e 's|read o_ifaces <<< .*|o_ifaces=|' \
   -e 's|linkstate=$(/bin/cat /sys/class/net/$iface/carrier)|linkstate=1|' \
@@ -227,7 +231,7 @@ grep -Eq '^\[INFO\]  Acquiring DHCP lease on eth0\.+Done$' "$tmp/network-success
 grep -Fqx '[INFO]  IPv4 address: 192.0.2.10/24.' "$tmp/network-success.out" || fail 'DHCP 缺少 IPv4 结果行'
 ! grep -Fq 'udhcpc: started' "$tmp/network-success.out" || fail '控制台泄露原始 udhcpc 输出'
 ! grep -Fq 'broadcasting discover' "$tmp/network-success.out" || fail '控制台泄露 DHCP 协商噪声'
-grep -Fq 'udhcpc: started' "$tmp/dhcp-eth0.log" || fail 'DHCP 原始日志未保存'
+grep -Fq 'udhcpc: started' "$tmp/log/dhcp.log" || fail 'DHCP 原始日志未保存'
 
 set +e
 PXEOS_DHCP_RC=42 PATH="$tmp/mock:$PATH" bash "$tmp/S40network" >"$tmp/network-failure.out" 2>&1
@@ -236,7 +240,7 @@ set -e
 [[ $rc -eq 1 ]] || fail "DHCP 失败路径退出码: $rc"
 grep -Eq '^\[INFO\]  Acquiring DHCP lease on eth0\.+Failed \(exit 42\)$' "$tmp/network-failure.out" || fail 'DHCP 失败未保留原始返回码'
 grep -Fq 'Details: ' "$tmp/network-failure.out" || fail 'DHCP 失败未指向诊断日志'
-grep -Fq 'udhcpc: started' "$tmp/dhcp-eth0.log" || fail 'DHCP 失败日志未保存'
+grep -Fq 'udhcpc: started' "$tmp/log/dhcp.log" || fail 'DHCP 失败日志未保存'
 
 for script in "$cron" "$sshd"; do
     [[ -f $script ]] || fail "缺少启动服务覆盖脚本: $script"
@@ -245,11 +249,13 @@ sed \
   -e "s|/usr/bin/ssh-keygen|$tmp/mock/ssh-keygen|g" \
   -e "s|/etc/ssh|$tmp/ssh|g" \
   -e "s|/var/run|$tmp/run|g" \
-  -e "s|/tmp/pxeos-sshd-|$tmp/sshd-|g" \
+  -e "s|/tmp/log|$tmp/log|g" \
+  -e "s|/usr/share/pxeos/lib/log-paths.sh|$tmp/log-paths.sh|" \
   "$sshd" >"$tmp/S50sshd"
 sed \
   -e "s|/var/run|$tmp/run|g" \
-  -e "s|/tmp/pxeos-crond-|$tmp/crond-|g" \
+  -e "s|/tmp/log|$tmp/log|g" \
+  -e "s|/usr/share/pxeos/lib/log-paths.sh|$tmp/log-paths.sh|" \
   "$cron" >"$tmp/S50crond"
 chmod +x "$tmp/S50sshd" "$tmp/S50crond"
 mkdir -p "$tmp/run"
@@ -257,15 +263,17 @@ mkdir -p "$tmp/run"
 PATH="$tmp/mock:$PATH" bash "$tmp/S50crond" start >"$tmp/cron-success.out" 2>&1
 grep -Eq '^\[INFO\]  Starting cron service\.+Done$' "$tmp/cron-success.out" || fail 'Cron 缺少统一完成状态行'
 ! grep -Fq 'Starting service: raw daemon output' "$tmp/cron-success.out" || fail 'Cron 控制台泄露服务原始输出'
-grep -Fq 'Starting service: raw daemon output' "$tmp/crond-start.log" || fail 'Cron 服务日志未保存'
+for _ in {1..30}; do grep -Fq 'Starting service: raw daemon output' "$tmp/log/cron.log" && break; sleep .1; done
+grep -Fq 'Starting service: raw daemon output' "$tmp/log/cron.log" || fail 'Cron 服务日志未保存'
 
 PATH="$tmp/mock:$PATH" bash "$tmp/S50sshd" start >"$tmp/sshd-success.out" 2>&1
 grep -Eq '^\[INFO\]  Generating SSH host keys\.+Done$' "$tmp/sshd-success.out" || fail 'SSH 缺少统一密钥生成状态行'
 grep -Eq '^\[INFO\]  Starting SSH service\.+Done$' "$tmp/sshd-success.out" || fail 'SSH 缺少统一服务完成状态行'
 ! grep -Fq 'ssh-keygen: generating' "$tmp/sshd-success.out" || fail 'SSH 控制台泄露密钥生成原始输出'
 ! grep -Fq 'Starting service: raw daemon output' "$tmp/sshd-success.out" || fail 'SSH 控制台泄露服务原始输出'
-grep -Fq 'ssh-keygen: generating' "$tmp/sshd-keygen.log" || fail 'SSH 密钥生成日志未保存'
-grep -Fq 'Starting service: raw daemon output' "$tmp/sshd-start.log" || fail 'SSH 服务日志未保存'
+grep -Fq 'ssh-keygen: generating' "$tmp/log/ssh-keygen.log" || fail 'SSH 密钥生成日志未保存'
+for _ in {1..30}; do grep -Fq 'Starting service: raw daemon output' "$tmp/log/ssh-service.log" && break; sleep .1; done
+grep -Fq 'Starting service: raw daemon output' "$tmp/log/ssh-service.log" || fail 'SSH 服务日志未保存'
 
 PXEOS_KEYGEN_SILENT=1 PATH="$tmp/mock:$PATH" bash "$tmp/S50sshd" start >"$tmp/sshd-existing-keys.out" 2>&1
 ! grep -Fq 'Generating SSH host keys' "$tmp/sshd-existing-keys.out" || fail '已有 SSH 主机密钥仍显示生成状态'

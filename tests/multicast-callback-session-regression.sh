@@ -5,8 +5,10 @@ root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
 multicast="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/multicast.sh"
 imgcomplete="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.imgcomplete"
+. "$root/tests/task-log-test-support.sh"
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
+task_log_test_load_helpers "$funcs"
 
 awk '/^rootpxe_request_disk_permit_for_target\(\)/ { copy = 1 } /^rootpxe_record_disk_permit_binding\(\)/ { exit } copy' "$funcs" >"$tmp/permit.sh"
 awk '/^rootpxe_error_response_reason\(\)/ { copy = 1 } /^rootpxe_directory_size_bytes\(\)/ { exit } copy' "$funcs" >"$tmp/error.sh"
@@ -54,10 +56,12 @@ curl() {
     esac
 }
 set +e
-rootpxe_error_wait_for_retry 'local multicast receiver failed' PXEOS_ERROR
+rootpxe_error_wait_for_retry 'local multicast receiver failed' PXEOS_ERROR >"$tmp/error-console" 2>&1
 error_rc=$?
 set -e
 [[ $error_rc == 2 ]]
+! grep -Fq 'command not found' "$tmp/error-console"
+grep -Fq "Task log: $tmp/log/pxeos-task.log" "$tmp/error-console"
 grep -Fqx 'sessionId=manual-session-callback' "$error_log"
 grep -Fqx 'progressAttempt=4' "$error_log"
 

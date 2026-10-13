@@ -7,6 +7,11 @@ tmp="$(mktemp -d /tmp/pxeos-btrfs-cleanup.XXXXXX)"
 case "$tmp" in /tmp/pxeos-btrfs-cleanup.*) ;; *) exit 2 ;; esac
 trap 'rm -rf -- "$tmp"' EXIT
 mkdir "$tmp/btrfs"
+. "$root/tests/task-log-test-support.sh"
+task_log_test_load_helpers "$funcs"
+for helper in rootpxe_diagnostic_begin rootpxe_diagnostic_call rootpxe_diagnostic_cleanup; do
+    eval "$(sed -n "/^${helper}() {/,/^}/p" "$funcs" | sed "s|/tmp/log|$tmp/log|g")"
+done
 eval "$(sed -n '/^expandPartition() {/,/^}/p' "$funcs" | sed "s#/tmp/btrfs#$tmp/btrfs#g")"
 failures=0
 for scenario in resize_failed resize_and_unmount_failed success; do
@@ -22,7 +27,7 @@ for scenario in resize_failed resize_and_unmount_failed success; do
         mount() { printf 'mount:%s\n' "$*" >>"$trace"; }
         btrfs() { printf 'resize:%s\n' "$*" >>"$trace"; [[ $scenario == success ]]; }
         umount() { printf 'umount:%s\n' "$*" >>"$trace"; [[ $scenario != resize_and_unmount_failed ]]; }
-        handleError() { printf 'error:%s\n' "$*" >>"$trace"; exit 91; }
+        handleError() { printf 'error:%s\n' "$*" >>"$trace"; rootpxe_diagnostic_cleanup; exit 91; }
         runPartprobe() { printf 'partprobe:%s\n' "$*" >>"$trace"; }
         type=down
         expandPartition /dev/mockbtrfs ''

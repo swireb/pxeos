@@ -6,6 +6,8 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+. "$root/tests/task-log-test-support.sh"
+. <(sed "s|/tmp/log|$tmp/log|g" "$(dirname "$lib")/log-paths.sh")
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass() { printf 'PASS: %s\n' "$*"; }
@@ -105,5 +107,45 @@ rootpxe_partclone_progress_decode "$console_fifo" 2>/dev/full || fail 'decoder m
 wait "$console_writer" || fail 'console-failure fixture writer was back-pressured'
 assert_eq "$(rootpxe_partclone_progress_next_pct "$ROOTPXE_PROGRESS_STATUS_FILE" "$console_run" 0)" 42 'decoder must retain samples after console failure'
 pass 'console failure remains a non-blocking telemetry fault'
+
+# Text statistics stay private, while a failed sink cannot stop FIFO drainage.
+rootpxe_task_log_append() { printf '%s\n' "$*" >>"$tmp/diagnostic"; return "${LOG_SINK_RC:-0}"; }
+eval "$(sed -n '/^rootpxe_utf8_safe_prefix() {/,/^}/p' "${lib%/*}/funcs.sh")"
+eval "$(sed -n '/^rootpxe_utf8_safe_tail() {/,/^}/p' "${lib%/*}/funcs.sh")"
+eval "$(sed -n '/^rootpxe_redact_diagnostic() {/,/^}/p' "${lib%/*}/funcs.sh")"
+mkfifo "$tmp/log-failure.fifo"
+( printf 'Filesystem statistics: blocks files UUID\nFatal native detail\nElapsed: 00:00:01, Remaining: 00:00:00, Completed:  61.00%%, Rate: 1.00MB/s,\r' >"$tmp/log-failure.fifo" ) &
+log_writer=$!
+LOG_SINK_RC=1 rootpxe_partclone_progress_decode "$tmp/log-failure.fifo" 2>"$tmp/text-console" || fail failed-log-sink-changed-decoder-status
+wait "$log_writer" || fail failed-log-sink-backpressured-writer
+grep -Fq 'Copy progress: 61%' "$tmp/text-console" || fail concise-progress-missing
+! grep -Eq 'Filesystem statistics|Fatal native detail|Rate:|Elapsed:' "$tmp/text-console" || fail text-console-noise-leaked
+grep -Fq 'Fatal native detail' "$tmp/diagnostic" || fail text-diagnostic-not-retained
+grep -Fq 'Task log: unavailable' "$tmp/text-console" || fail failed-log-sink-location-missing
+pass 'text is concise and a failed log sink still drains diagnostics'
+mkfifo "$tmp/tail.fifo"
+( for ((i=0;i<70;i++)); do printf '%01000d\n' 0; done; printf 'LAST_PARTCLONE_ERROR\n' ) >"$tmp/tail.fifo" &
+tail_writer=$!
+rootpxe_partclone_progress_decode "$tmp/tail.fifo" 2>"$tmp/tail-console" || fail tail-decoder-status
+wait "$tail_writer" || fail tail-writer-status
+grep -Fq LAST_PARTCLONE_ERROR "$tmp/diagnostic" || fail tail-error-not-retained
+grep -Fq TRUNCATED "$tmp/diagnostic" || fail tail-truncation-marker-missing
+pass 'bounded Partclone diagnostics retain the last failure'
+mkfifo "$tmp/secret.fifo"
+( printf 'token="'; printf '%070000d' 0; printf 'SECRET_TAIL"\nLAST_SECRET_ERROR\n'; ) >"$tmp/secret.fifo" &
+secret_writer=$!
+rootpxe_partclone_progress_decode "$tmp/secret.fifo" 2>"$tmp/secret-console" || fail secret-decoder-status
+wait "$secret_writer" || fail secret-writer-status
+! grep -q SECRET_TAIL "$tmp/diagnostic" || fail sliced-secret-leaked
+grep -q LAST_SECRET_ERROR "$tmp/diagnostic" || fail last-secret-error-lost
+mkfifo "$tmp/utf8.fifo"
+( printf '中%.0s' {1..2000}; printf '\nLAST_UTF8_ERROR\n' ) >"$tmp/utf8.fifo" &
+utf8_writer=$!
+rootpxe_partclone_progress_decode "$tmp/utf8.fifo" 2>"$tmp/utf8-console" || fail utf8-decoder-status
+wait "$utf8_writer" || fail utf8-writer-status
+! grep -q '^中' "$tmp/diagnostic" || fail overlong-utf8-line-not-omitted
+grep -Fq 'overlong Partclone diagnostic omitted' "$tmp/diagnostic" || fail utf8-omission-marker-missing
+grep -Fq LAST_UTF8_ERROR "$tmp/diagnostic" || fail last-utf8-error-missing
+pass 'overlong UTF-8 text lines are safely omitted and the last error remains'
 
 printf 'PASS: Partclone official progress regression\n'

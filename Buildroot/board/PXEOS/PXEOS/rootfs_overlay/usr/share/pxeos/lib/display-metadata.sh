@@ -2,6 +2,12 @@
 # Read-only capture display metadata.  This is deliberately separate from the
 # deployable schema: it must never participate in a schema hash or geometry.
 
+if ! declare -F rootpxe_run_logged_typed_native >/dev/null; then
+    rootpxe_display_log_paths_lib=/usr/share/pxeos/lib/log-paths.sh
+    [[ -r $rootpxe_display_log_paths_lib ]] || rootpxe_display_log_paths_lib="$(dirname "${BASH_SOURCE[0]}")/log-paths.sh"
+    . "$rootpxe_display_log_paths_lib"
+fi
+
 rootpxe_display_metadata_safe_mountpoint() {
     [[ $1 == /* ]] || return 1
     command -v jq >/dev/null 2>&1 || return 1
@@ -70,7 +76,7 @@ rootpxe_display_metadata_collect_fstab() {
     local device="$1" fstype="$2" identities="$3" source_identity="$4" mountpoint spec path identity options rows root_identity="" root_count=0
     mountpoint=$(mktemp -d /tmp/rootpxe-display-mount.XXXXXX) || return 1
     options=$(rootpxe_linux_mount_options ro "$fstype") || { rmdir -- "$mountpoint"; return 1; }
-    if ! mount -t "$fstype" -o "$options" "$device" "$mountpoint" >/tmp/rootpxe-display-mount-output 2>&1; then
+    if ! rootpxe_run_logged_typed_native metadata-discovery.log "$device" mount -t "$fstype" -o "$options" "$device" "$mountpoint"; then
         rmdir -- "$mountpoint" || return 2
         return 1
     fi
@@ -273,7 +279,7 @@ rootpxe_display_metadata_collect_windows() {
         device=${identity#*|}; fs=$(blkid -s TYPE -o value "$device" 2>/dev/null | tr -d '\r\n')
         [[ $fs == ntfs ]] || continue
         mountpoint=$(mktemp -d /tmp/rootpxe-display-windows.XXXXXX) || return 1
-        if ntfs-3g -o ro "$device" "$mountpoint" >/tmp/rootpxe-display-ntfs-output 2>&1; then
+        if rootpxe_run_logged_typed_native metadata-discovery.log "$device" ntfs-3g -o ro "$device" "$mountpoint"; then
             hive=$(rootpxe_display_metadata_windows_hive "$mountpoint") || hive=""
             if [[ -n $hive ]]; then
                 candidate=$identity; candidates=$((candidates + 1))
@@ -291,12 +297,12 @@ rootpxe_display_metadata_collect_windows() {
     command -v reged >/dev/null 2>&1 && declare -F rootpxe_display_windows_parse_reg >/dev/null 2>&1 || return 1
     device=${candidate#*|}
     mountpoint=$(mktemp -d /tmp/rootpxe-display-windows.XXXXXX) || return 1
-    ntfs-3g -o ro "$device" "$mountpoint" >/tmp/rootpxe-display-ntfs-output 2>&1 || { rmdir -- "$mountpoint" || return 2; return 1; }
+    rootpxe_run_logged_typed_native metadata-discovery.log "$device" ntfs-3g -o ro "$device" "$mountpoint" || { rmdir -- "$mountpoint" || return 2; return 1; }
     hive=$(rootpxe_display_metadata_windows_hive "$mountpoint") || hive=""
     [[ -n $hive ]] || { rootpxe_display_metadata_cleanup_mount "$mountpoint" || return 2; return 1; }
     export_file=$(mktemp /tmp/rootpxe-display-mounted-devices.XXXXXX) || { rootpxe_display_metadata_cleanup_mount "$mountpoint"; return 2; }
     chmod 600 "$export_file" || { rm -f -- "$export_file"; rootpxe_display_metadata_cleanup_mount "$mountpoint"; return 2; }
-    if ! reged -x "$hive" 'HKEY_LOCAL_MACHINE\SYSTEM' MountedDevices "$export_file" >/tmp/rootpxe-display-reged-output 2>&1; then
+    if ! rootpxe_run_logged_typed_native metadata-discovery.log "$device" reged -x "$hive" 'HKEY_LOCAL_MACHINE\SYSTEM' MountedDevices "$export_file"; then
         rm -f -- "$export_file"
         rootpxe_display_metadata_cleanup_mount "$mountpoint" || return 2
         return 1

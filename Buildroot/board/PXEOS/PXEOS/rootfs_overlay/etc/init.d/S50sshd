@@ -1,9 +1,10 @@
 #!/bin/bash
+. /usr/share/pxeos/lib/log-paths.sh
 
 DAEMON="sshd"
 PIDFILE="/var/run/$DAEMON.pid"
-KEY_LOGFILE="/tmp/pxeos-sshd-keygen.log"
-START_LOGFILE="/tmp/pxeos-sshd-start.log"
+KEY_LOGFILE="/tmp/log/ssh-keygen.log"
+START_LOGFILE="/tmp/log/ssh-service.log"
 
 # Keep Buildroot's behavior: when the key utility is not installed, SSH is
 # unavailable and this optional init script must not make startup fail.
@@ -36,13 +37,13 @@ pxeos_service_status_finish() {
 
 start() {
     local status
-    if /usr/bin/ssh-keygen -A >"$KEY_LOGFILE" 2>&1; then
+    if rootpxe_log_boot_run ssh-keygen.log keygen foreground /usr/bin/ssh-keygen -A; then
         :
     else
         status=$?
         pxeos_service_status_begin 'Generating SSH host keys'
         pxeos_service_status_finish "Failed (exit $status)"
-        pxeos_service_message INFO "Details: $KEY_LOGFILE"
+        rootpxe_log_notice ssh-keygen.log
         return "$status"
     fi
     if [[ -s $KEY_LOGFILE ]]; then
@@ -50,23 +51,23 @@ start() {
         pxeos_service_status_finish 'Done'
     fi
     pxeos_service_status_begin 'Starting SSH service'
-    if start-stop-daemon --start --pidfile "$PIDFILE" \
-        --exec "/usr/sbin/$DAEMON" >"$START_LOGFILE" 2>&1; then
+    if rootpxe_log_boot_run ssh-service.log start background start-stop-daemon --start --pidfile "$PIDFILE" \
+        --exec "/usr/sbin/$DAEMON"; then
         pxeos_service_status_finish 'Done'
         return 0
     else
         status=$?
     fi
     pxeos_service_status_finish "Failed (exit $status)"
-    pxeos_service_message INFO "Details: $START_LOGFILE"
+    rootpxe_log_notice ssh-service.log
     return "$status"
 }
 
 stop() {
     local status
     pxeos_service_status_begin 'Stopping SSH service'
-    start-stop-daemon --stop --pidfile "$PIDFILE" \
-        --exec "/usr/sbin/$DAEMON" >"$START_LOGFILE" 2>&1
+    rootpxe_log_boot_run ssh-service.log stop foreground start-stop-daemon --stop --pidfile "$PIDFILE" \
+        --exec "/usr/sbin/$DAEMON"
     status=$?
     while [[ -f $PIDFILE ]]; do
         sleep 0.1
@@ -76,7 +77,7 @@ stop() {
         return 0
     fi
     pxeos_service_status_finish "Failed (exit $status)"
-    pxeos_service_message INFO "Details: $START_LOGFILE"
+    rootpxe_log_notice ssh-service.log
     return "$status"
 }
 
@@ -88,15 +89,15 @@ restart() {
 reload() {
     local status
     pxeos_service_status_begin 'Reloading SSH service'
-    if start-stop-daemon --stop --signal HUP --quiet --pidfile "$PIDFILE" \
-        --exec "/usr/sbin/$DAEMON" >"$START_LOGFILE" 2>&1; then
+    if rootpxe_log_boot_run ssh-service.log reload foreground start-stop-daemon --stop --signal HUP --quiet --pidfile "$PIDFILE" \
+        --exec "/usr/sbin/$DAEMON"; then
         pxeos_service_status_finish 'Done'
         return 0
     else
         status=$?
     fi
     pxeos_service_status_finish "Failed (exit $status)"
-    pxeos_service_message INFO "Details: $START_LOGFILE"
+    rootpxe_log_notice ssh-service.log
     return "$status"
 }
 

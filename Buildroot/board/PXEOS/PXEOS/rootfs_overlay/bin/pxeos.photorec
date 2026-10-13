@@ -18,7 +18,7 @@ fi
 echo "Done"
 debugPause
 dots "Mounting file system"
-mount -o nolock $storage /storage >/tmp/mount-output 2>&1
+rootpxe_run_logged_typed_native storage-mount.log "$storage" mount -o nolock $storage /storage
 case $? in
     0)
         echo "Done"
@@ -27,7 +27,7 @@ case $? in
     *)
         echo "Failed"
         debugPause
-        handleError "Could not mount $storage ($0)\n    Args Passed: $*\n     Reason: $(cat /tmp/mount-output | tr -d \\0)"
+        handleError "Could not mount $storage ($0)"
         ;;
 esac
 debugPause

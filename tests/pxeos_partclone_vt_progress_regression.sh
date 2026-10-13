@@ -6,6 +6,8 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+. "$root/tests/task-log-test-support.sh"
+. <(sed "s|/tmp/log|$tmp/log|g" "$(dirname "$lib")/log-paths.sh")
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 assert_eq() { [[ $1 == "$2" ]] || fail "$3 (got=$1 expected=$2)"; }
 
@@ -46,6 +48,22 @@ bitmap_snapshot() {
 : >"$ROOTPXE_PARTCLONE_VT_DEV_ROOT/tty7"
 # shellcheck source=/dev/null
 . "$lib"
+printf SENTINEL >"$tmp/not-a-log"
+rootpxe_partclone_native_log="$tmp/not-a-log"; export rootpxe_partclone_native_log
+rootpxe_partclone_progress_abort
+[[ -f $tmp/not-a-log && $(cat "$tmp/not-a-log") == SENTINEL ]] || fail inherited-native-log-path-was-used
+unset rootpxe_partclone_native_log
+rootpxe_partclone_progress_initialize
+rootpxe_partclone_progress_prepare "$tmp/old-raw.fifo"
+first_raw=$rootpxe_partclone_native_log
+rootpxe_partclone_progress_prepare "$tmp/second-raw.fifo"
+[[ ! -e $first_raw ]] || fail repeated-prepare-leaked-raw
+second_raw=$rootpxe_partclone_native_log
+mv "$second_raw" "$tmp/owned-raw-evidence"
+printf REPLACEMENT >"$second_raw"
+rootpxe_partclone_progress_abort
+[[ -f $second_raw && $(cat "$second_raw") == REPLACEMENT ]] || fail replacement-native-raw-was-deleted
+rm "$second_raw" "$tmp/owned-raw-evidence"
 
 clear_called=no
 rootpxe_partclone_vt_clear_target() {
@@ -78,7 +96,9 @@ rootpxe_partclone_progress_initialize
 run=$rootpxe_partclone_progress_run_id
 rootpxe_partclone_progress_prepare "$tmp/progress.fifo" || fail 'VT prepare failed'
 assert_eq "$rootpxe_partclone_progress_mode" gui 'numeric VT must choose official GUI mode'
-assert_eq "${rootpxe_partclone_progress_args[*]}" -N 'GUI call must receive official -N'
+assert_eq "${rootpxe_partclone_progress_args[0]}" -N 'GUI call must receive official -N'
+assert_eq "${rootpxe_partclone_progress_args[1]}" -L 'GUI call must bind its private native log'
+[[ -f ${rootpxe_partclone_progress_args[2]} ]] || fail missing-gui-native-log
 assert_eq "$rootpxe_partclone_progress_stderr_target" "$ROOTPXE_PARTCLONE_VT_DEV_ROOT/tty7" 'GUI stderr must remain bound to fd2 VT'
 assert_eq "$rootpxe_partclone_progress_term" linux 'GUI must force TERM=linux'
 assert_eq "$clear_called" yes 'GUI prepare must clear its selected VT before sampling'
@@ -185,7 +205,8 @@ snapshot '' ''
 export ROOTPXE_PARTCLONE_FD2_TARGET=/dev/pts/7
 rootpxe_partclone_progress_prepare "$tmp/text.fifo" || fail 'text fallback prepare failed'
 assert_eq "$rootpxe_partclone_progress_mode" text 'pts must fall back to text mode'
-assert_eq "${#rootpxe_partclone_progress_args[@]}" 0 'text fallback must not pass -N'
+assert_eq "${#rootpxe_partclone_progress_args[@]}" 2 'text fallback only adds the private native log'
+assert_eq "${rootpxe_partclone_progress_args[0]}" -L 'text fallback must not pass -N'
 assert_eq "$rootpxe_partclone_progress_stderr_target" "$tmp/text.fifo" 'text fallback must feed its existing decoder FIFO'
 rootpxe_partclone_progress_abort || fail 'text fallback cleanup failed'
 

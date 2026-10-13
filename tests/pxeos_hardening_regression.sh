@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/tests/task-log-test-support.sh"
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
 progress_lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh"
 restore_preflight="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/restore-preflight.sh"
@@ -8,12 +9,17 @@ capture_recovery="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxe
 upload="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.upload"
 imgcomplete="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.imgcomplete"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/rootpxe-hardening.XXXXXX")
-trap 'rm -rf -- "$tmp"; [[ -n ${rootpxe_last_diagnostic_file:-} ]] && rm -f -- "$rootpxe_last_diagnostic_file"' EXIT
+trap 'rm -rf -- "$tmp"; [[ -z ${task_log:-} ]] || rm -f -- "$task_log"' EXIT
 test_funcs="$tmp/funcs.sh"
 # The production library imports an absolute Buildroot companion.  These
 # ordinary-file tests do not call that companion, so remove only this import.
 sed -e '/partition-funcs\.sh/d' -e '/restore-preflight\.sh/d' -e '/capture-recovery\.sh/d' -e '/deployment-identity\.sh/d' "$funcs" >"$test_funcs"
 cp "$progress_lib" "$tmp/partclone-progress.sh"
+sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
+for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
+    [[ ! -f $rootpxe_test_funcs_copy ]] || sed -i -e "s|/tmp/log|$tmp/log|g" -e "s|^rootpxe_log_paths_lib=.*|rootpxe_log_paths_lib=$tmp/log-paths.sh|" "$rootpxe_test_funcs_copy"
+done
+. "$root/tests/task-log-test-support.sh"
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 must_have(){ grep -Fq -- "$2" "$1" || fail "missing $2 in $1"; }
 must_not_have(){ if grep -Fq -- "$2" "$1"; then fail "forbidden $2 in $1"; fi; }
@@ -54,7 +60,7 @@ set -e
 [[ ! -e $tmp/mbr-order.log ]] || fail missing-mbr-started-destructive-path
 
 # A/G: known secret values with shell and sed metacharacters never reach the
-# diagnostic, and an over-limit callback is visibly truncated and saved 0600.
+# diagnostic, and an over-limit callback names its bounded shared 0600 log.
 set +eu; source "$test_funcs"; set -euo pipefail
 task_token='tok/ab&\[]*?$'
 smb_password='pwd/ab&\[]*?$'
@@ -68,10 +74,12 @@ rootpxe_bound_callback_message "$large" >"$tmp/bounded-message"
 bounded=$(<"$tmp/bounded-message")
 bytes=$(LC_ALL=C printf '%s' "$bounded" | wc -c)
 [[ $bytes -le 262144 ]] || fail "callback-message-too-large:$bytes"
-[[ $bounded == *'[TRUNCATED: full diagnostic retained locally]' ]] || fail callback-truncation-marker
-[[ -f ${rootpxe_last_diagnostic_file:-} ]] || fail callback-private-log-missing
-[[ $(stat -c %a "$rootpxe_last_diagnostic_file") == 600 ]] || fail callback-private-log-mode
-! grep -Fq -- "$smb_password" "$rootpxe_last_diagnostic_file" || fail callback-private-log-secret
+task_log=$(rootpxe_task_log_path) || fail callback-private-log-missing
+[[ $bounded == *"[TRUNCATED: Task log: $task_log]" ]] || fail callback-truncation-marker
+[[ -f $task_log && ! -L $task_log ]] || fail callback-private-log-missing
+[[ $(stat -c %a "$task_log") == 600 ]] || fail callback-private-log-mode
+[[ $(wc -c <"$task_log") -le 4194304 ]] || fail callback-private-log-too-large
+! grep -Fq -- "$smb_password" "$task_log" || fail callback-private-log-secret
 utf8_complete(){
     local expected=0 byte
     while read -r byte; do
@@ -96,7 +104,7 @@ LC_ALL=C rootpxe_bound_callback_message "$utf8_large" >"$tmp/callback-c-locale"
 utf8_bounded=$(<"$tmp/callback-c-locale")
 utf8_complete "$utf8_bounded" || fail callback-c-locale-invalid-utf8
 [[ $(LC_ALL=C printf '%s' "$utf8_bounded" | wc -c) -le 262144 ]] || fail callback-c-locale-too-large
-[[ $utf8_bounded == *'[TRUNCATED: full diagnostic retained locally]' ]] || fail callback-c-locale-no-marker
+[[ $utf8_bounded == *"[TRUNCATED: Task log: $task_log]" ]] || fail callback-c-locale-no-marker
 
 # F: metadata-free partitions and FAT variants without an explicit capture
 # capability must never grow.  FAT32 requires both the recorded capability

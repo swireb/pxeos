@@ -28,6 +28,11 @@ sed \
     -e 's|/storage|${ROOTPXE_TEST_STORAGE}|g' \
     "$funcs" >"$tmp/funcs.sh"
 cp "$progress_lib" "$tmp/partclone-progress.sh"
+sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
+for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
+    [[ ! -f $rootpxe_test_funcs_copy ]] || sed -i -e "s|/tmp/log|$tmp/log|g" -e "s|^rootpxe_log_paths_lib=.*|rootpxe_log_paths_lib=$tmp/log-paths.sh|" "$rootpxe_test_funcs_copy"
+done
+. "$root/tests/task-log-test-support.sh"
 
 setup_fixture() {
     ROOTPXE_TEST_STORAGE="$tmp/storage"
@@ -481,6 +486,11 @@ sed \
     -e 's|^\. /usr/share/pxeos/lib/deployment-identity.sh$|:|' \
     "$funcs" > "$tmp/funcs.sh"
 cp "$progress_lib" "$tmp/partclone-progress.sh"
+sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
+for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
+    [[ ! -f $rootpxe_test_funcs_copy ]] || sed -i -e "s|/tmp/log|$tmp/log|g" -e "s|^rootpxe_log_paths_lib=.*|rootpxe_log_paths_lib=$tmp/log-paths.sh|" "$rootpxe_test_funcs_copy"
+done
+. "$root/tests/task-log-test-support.sh"
 set +u
 PATH="$tmp/bin:$PATH"
 source "$tmp/funcs.sh" 2>/dev/null
@@ -718,6 +728,12 @@ set +e
     handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 94; }
     cat() {
         local source_file
+        # Diagnostic publication is a separate reader, not a split-image
+        # source. Preserve its real bytes without adding it to image order.
+        if [[ $# == 2 && $1 == -- && $2 == "$tmp/log/.raw."* ]]; then
+            "$RESTORE_SYSTEM_CAT" "$2"
+            return $?
+        fi
         for source_file in "$@"; do
             [[ $source_file == -- ]] && continue
             printf '%s\n' "$source_file" >> "$MOCK_CAT_ARGS"

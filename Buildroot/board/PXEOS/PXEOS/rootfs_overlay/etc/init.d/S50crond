@@ -1,9 +1,10 @@
 #!/bin/bash
+. /usr/share/pxeos/lib/log-paths.sh
 
 DAEMON="crond"
 PIDFILE="/var/run/$DAEMON.pid"
 CROND_ARGS=""
-LOGFILE="/tmp/pxeos-crond-start.log"
+LOGFILE="/tmp/log/cron.log"
 
 # shellcheck source=/dev/null
 [[ -r "/etc/default/$DAEMON" ]] && . "/etc/default/$DAEMON"
@@ -37,24 +38,23 @@ start() {
     # The daemon's own output is retained for SSH troubleshooting instead of
     # being interleaved with PXEOS status rows on the console.
     # shellcheck disable=SC2086 # CROND_ARGS intentionally supports word splitting.
-    if start-stop-daemon --start --background --make-pidfile \
+    if rootpxe_log_boot_run cron.log start background start-stop-daemon --start --background --make-pidfile \
         --pidfile "$PIDFILE" --exec "/usr/sbin/$DAEMON" \
-        -- -f $CROND_ARGS >"$LOGFILE" 2>&1; then
+        -- -f $CROND_ARGS; then
         pxeos_service_status_finish 'Done'
         return 0
     else
         status=$?
     fi
     pxeos_service_status_finish "Failed (exit $status)"
-    pxeos_service_message INFO "Details: $LOGFILE"
+    rootpxe_log_notice cron.log
     return "$status"
 }
 
 stop() {
     local status
     pxeos_service_status_begin 'Stopping cron service'
-    start-stop-daemon --stop --pidfile "$PIDFILE" --exec "/usr/sbin/$DAEMON" \
-        >"$LOGFILE" 2>&1
+    rootpxe_log_boot_run cron.log stop foreground start-stop-daemon --stop --pidfile "$PIDFILE" --exec "/usr/sbin/$DAEMON"
     status=$?
     while start-stop-daemon --stop --test --quiet --pidfile "$PIDFILE" \
         --exec "/usr/sbin/$DAEMON" >/dev/null 2>&1; do
@@ -66,7 +66,7 @@ stop() {
         return 0
     fi
     pxeos_service_status_finish "Failed (exit $status)"
-    pxeos_service_message INFO "Details: $LOGFILE"
+    rootpxe_log_notice cron.log
     return "$status"
 }
 

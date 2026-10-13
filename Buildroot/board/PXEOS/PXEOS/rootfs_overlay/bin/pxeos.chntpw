@@ -17,8 +17,8 @@ getPartitions "$hd"
 for part in $parts; do
     while [[ $blCont -eq 0 && $blStop -eq 0 ]]; do
         umount /ntfs 2>/dev/null >/dev/null
-        mount -o rw "$part" /ntfs >/tmp/mount-output 2>&1
-        [[ ! $? -eq 0 ]] && handleError "Could not mount $part ($0)\n    Args Passed: $*\n     Reason: $(cat /tmp/mount-output | tr -d \\0)"
+        rootpxe_run_logged_typed_native ntfs-mount.log "$part" mount -o rw "$part" /ntfs
+        [[ ! $? -eq 0 ]] && handleError "Could not mount $part ($0)"
         getSAMLoc
         [[ -f $sam ]] && blCont=1 || blStop=1
     done
@@ -28,11 +28,11 @@ rootpxe_console_message WARN 'Unable to locate the SAM file.'
         continue
     fi
     dots "Mounting Windows file system"
-    mount -o rw "$part" /ntfs >/tmp/mount-output 2>&1
+    rootpxe_run_logged_typed_native ntfs-mount.log "$part" mount -o rw "$part" /ntfs
     if [[ ! $? -eq 0 ]]; then
         echo "Failed"
         debugPause
-        handleError "Could not mount $part ($0)\n    Args Passed: $*\n     Reason: $(cat /tmp/mount-output | tr -d \\0)"
+        handleError "Could not mount $part ($0)"
     fi
     echo "Done"
     debugPause

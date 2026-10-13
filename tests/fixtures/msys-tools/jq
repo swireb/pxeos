@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Test-only bridge to the installed Windows jq: convert MSYS file arguments
+# and normalize its CRLF output without changing the native exit status.
+task_log_jq_binary=${TASK_LOG_TEST_REAL_JQ:-$(command -v jq.exe)}
+[[ -n $task_log_jq_binary && -f $task_log_jq_binary ]] || { printf 'Missing installed jq.exe for MSYS test bridge.\n' >&2; exit 127; }
+env -u MSYS_NO_PATHCONV "$task_log_jq_binary" "$@" | tr -d '\r'
+exit "${PIPESTATUS[0]}"

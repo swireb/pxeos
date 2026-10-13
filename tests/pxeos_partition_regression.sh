@@ -259,6 +259,11 @@ sed -e "s|^\. /usr/share/pxeos/lib/partition-funcs.sh|. \"$partition_funcs\"|" \
 	-e "s|^\. /usr/share/pxeos/lib/deployment-identity.sh|. \"$overlay/usr/share/pxeos/lib/deployment-identity.sh\"|" \
     -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" "$funcs" >"$tmp/funcs.sh"
 cp "$progress_lib" "$tmp/partclone-progress.sh"
+sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
+for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
+    [[ ! -f $rootpxe_test_funcs_copy ]] || sed -i -e "s|/tmp/log|$tmp/log|g" -e "s|^rootpxe_log_paths_lib=.*|rootpxe_log_paths_lib=$tmp/log-paths.sh|" "$rootpxe_test_funcs_copy"
+done
+. "$root/tests/task-log-test-support.sh"
 export PATH="$tmp/mock:$PATH"
 export ismajordebug=0
 # shellcheck disable=SC1090
@@ -872,6 +877,11 @@ export PATH="$tmp/bin:$PATH"
 : >"$tmp/proc-cmdline"
 sed -e "s|/usr/share/pxeos|$overlay/usr/share/pxeos|g" -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" "$overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/funcs.sh"
 cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
+sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
+for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
+    [[ ! -f $rootpxe_test_funcs_copy ]] || sed -i -e "s|/tmp/log|$tmp/log|g" -e "s|^rootpxe_log_paths_lib=.*|rootpxe_log_paths_lib=$tmp/log-paths.sh|" "$rootpxe_test_funcs_copy"
+done
+. "$root/tests/task-log-test-support.sh"
 # shellcheck disable=SC1090
 ismajordebug=0; . "$tmp/funcs.sh"
 rootpxe_require_unused_target_disks() { :; }
@@ -1149,7 +1159,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
-real_jq=$(command -v jq) || fail 'host jq is required for production LVM schema coverage'
+real_jq=${TASK_LOG_TEST_REAL_JQ:-$(command -v jq)} || fail 'host jq is required for production LVM schema coverage'
 mkdir -p "$tmp/bin" "$tmp/image"; export PATH="$tmp/bin:$PATH" LVM_TRACE="$tmp/trace"; : >"$LVM_TRACE"
 cat >"$tmp/bin/pvs" <<'EOF'
 #!/usr/bin/env bash
@@ -1324,6 +1334,11 @@ sed -e "s|/usr/share/pxeos|$overlay/usr/share/pxeos|g" \
     -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" \
     "$overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/funcs.sh"
 cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
+sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
+for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
+    [[ ! -f $rootpxe_test_funcs_copy ]] || sed -i -e "s|/tmp/log|$tmp/log|g" -e "s|^rootpxe_log_paths_lib=.*|rootpxe_log_paths_lib=$tmp/log-paths.sh|" "$rootpxe_test_funcs_copy"
+done
+. "$root/tests/task-log-test-support.sh"
 # shellcheck disable=SC1090
 ismajordebug=0
 . "$tmp/funcs.sh"

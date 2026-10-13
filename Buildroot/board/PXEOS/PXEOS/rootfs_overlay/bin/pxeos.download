@@ -1,5 +1,6 @@
 #!/bin/bash
 . /usr/share/pxeos/lib/funcs.sh
+rootpxe_task_log_initialize || printf '[WARN]  Task log: unavailable.\n' >&2
 . /bin/pxeos.checkin
 rootpxe_download_cleanup_initialization_private() {
     rootpxe_deployment_identity_cleanup_private

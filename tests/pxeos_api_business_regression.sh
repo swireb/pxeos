@@ -247,6 +247,11 @@ sed -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' \
     -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" \
     "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/legacy-funcs.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
+sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
+for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
+    [[ ! -f $rootpxe_test_funcs_copy ]] || sed -i -e "s|/tmp/log|$tmp/log|g" -e "s|^rootpxe_log_paths_lib=.*|rootpxe_log_paths_lib=$tmp/log-paths.sh|" "$rootpxe_test_funcs_copy"
+done
+. "$root/tests/task-log-test-support.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/disk-health.sh" "$tmp/disk-health.sh"
 cat >"$tmp/legacy-runtime.sh" <<EOF
 ismajordebug=0
@@ -392,6 +397,8 @@ EOF
 awk '/^rootpxe_validate_smb_export\(\)/ { on=1 } /^rootpxe_storage_path\(\)/ { on=0 } on { print }' \
     "$funcs" >"$tmp/mount-smb-validation.sh"
 printf '. "%s"\n' "$tmp/mount-smb-validation.sh" >>"$tmp/mount-funcs.sh"
+{ printf '. "%s/tests/task-log-test-support.sh"\n' "$root"; sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh"; } >"$tmp/mount-log-paths.sh"
+printf '. "%s"\n' "$tmp/mount-log-paths.sh" >>"$tmp/mount-funcs.sh"
 sed -e "1c\\. \"$tmp/mount-funcs.sh\"" \
     -e "s|/tmp/mount-output|$tmp/mount-output|g" \
     -e "s|/storage|$tmp/storage|g" \
@@ -833,6 +840,10 @@ exec /bin/cat "$@"
 EOF
 cat >$tmp/mock/chmod <<'EOF'
 #!/usr/bin/env bash
+# This trace owns hostname metadata only; diagnostic buffer chmod is real.
+case "$*" in
+  *'/log/'*|*'/rootpxe-diagnostic.'*) exec /bin/chmod "$@" ;;
+esac
 printf 'chmod:%s\n' "$*" >>$HOSTMODE_TRACE
 EOF
 cat >$tmp/mock/chown <<'EOF'
@@ -857,6 +868,11 @@ EOF
 chmod +x $tmp/mock/*
 sed -e "s|^\. /usr/share/pxeos/lib/partition-funcs.sh|. \"$overlay/usr/share/pxeos/lib/partition-funcs.sh\"|" -e "s|^\. /usr/share/pxeos/lib/deployment-identity.sh|:|" -e "s|^\. /usr/share/pxeos/lib/restore-preflight.sh|. \"$overlay/usr/share/pxeos/lib/restore-preflight.sh\"|" -e "s|^\. /usr/share/pxeos/lib/capture-recovery.sh|. \"$overlay/usr/share/pxeos/lib/capture-recovery.sh\"|" -e "s|</proc/cmdline|<$tmp/cmdline|" -e "s|/ntfs/|$tmp/ntfs/|g" -e "s| /ntfs\([ ;)]\)| $tmp/ntfs\1|g" -e "s|mountpoint=/linuxroot|mountpoint=$tmp/linuxroot|g" -e "s|/linuxroot/|$tmp/linuxroot/|g" -e "s| /linuxroot\([ ;)]\)| $tmp/linuxroot\1|g" $funcs >$tmp/funcs.sh
 cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
+sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
+for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
+    [[ ! -f $rootpxe_test_funcs_copy ]] || sed -i -e "s|/tmp/log|$tmp/log|g" -e "s|^rootpxe_log_paths_lib=.*|rootpxe_log_paths_lib=$tmp/log-paths.sh|" "$rootpxe_test_funcs_copy"
+done
+. "$root/tests/task-log-test-support.sh"
 : >$tmp/cmdline
 : >$tmp/mount-trace
 MOUNT_TRACE=$tmp/mount-trace; export MOUNT_TRACE
@@ -876,7 +892,7 @@ rootpxe_deployment_identity_storage_enabled() { return 1; }
 declare -f fsTypeSetting >"$tmp/actual-fsTypeSetting.sh"
 rootpxe_require_task_context() { return 0; }
 rootpxe_require_identity() { return 0; }
-real_jq=${REAL_JQ:-}
+real_jq=${TASK_LOG_TEST_REAL_JQ:-${REAL_JQ:-}}
 [[ -x $real_jq || $real_jq == *.exe ]] || fail linux-lvm-real-jq-required
 rootpxe_linux_test_jq() {
     local arg converted=()
@@ -1827,6 +1843,8 @@ set -e
 # no PXEOS top-level code, disk command, network request, or real wait runs.
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+. "$root/tests/task-log-test-support.sh"
+task_log_test_load_helpers "$funcs"
 awk '/^rootpxe_console_message\(\)/ { copy = 1 } /^# Appends dots/ { exit } copy' "$funcs" >"$tmp/console.sh"
 awk '/^dots\(\)/ { copy = 1 } /^# Enables write caching/ { exit } copy' "$funcs" >"$tmp/dots.sh"
 awk '/^rootpxe_redact_diagnostic\(\)/ { copy = 1 } /^# Return at most/ { exit } copy' "$funcs" >"$tmp/redact.sh"
@@ -1900,22 +1918,12 @@ set +e
 error_status=$?
 set -e
 [[ $error_status -eq 1 ]] || fail "handleError exit policy changed: $error_status"
-[[ $(sed -n '2p' "$tmp/error.out") == '[ERROR] Operation failed.' ]] || fail 'handleError must start on a new ERROR line after dots'
-grep -Fqx '[INFO]  Init version: test-init' "$tmp/error.out" || fail 'handleError init version format'
-grep -Fqx '[INFO]  Error details:' "$tmp/error.out" || fail 'handleError error-details section'
-grep -Fqx '        Mock failure details token=[REDACTED]' "$tmp/error.out" || fail 'handleError must redact and indent error detail'
-grep -Fqx '        Mock failure detail line two' "$tmp/error.out" || fail 'handleError must preserve multiline error detail'
-awk '
-    $0 == "        Mock failure detail line two" {
-        getline
-        if ($0 != "") exit 1
-        getline
-        if ($0 != "[INFO]  Kernel variables and settings:") exit 1
-        found = 1
-    }
-    END { exit found ? 0 : 1 }
-' "$tmp/error.out" || fail 'handleError must separate error details from kernel diagnostics'
-grep -Fqx '[INFO]  Kernel variables and settings:' "$tmp/error.out" || fail 'handleError diagnostics section'
+[[ $(sed -n '2p' "$tmp/error.out") == '[ERROR] Mock failure details token=[REDACTED]' ]] || fail 'handleError must start on a new concise ERROR line after dots'
+! grep -Eq 'command not found|Error details:|Kernel variables|Mock failure detail line two' "$tmp/error.out" || fail 'handleError repeated details or missing dependency'
+error_log=$(sed -n 's/^\[INFO\]  Task log: //p' "$tmp/error.out")
+[[ -f $error_log && ! -L $error_log && $(stat -c %a "$error_log") == 600 ]] || fail 'handleError trusted log location'
+grep -Fq 'Mock failure detail line two' "$error_log" || fail 'handleError must retain native multiline detail'
+! grep -Fq 'mock-task-token' "$error_log" || fail 'handleError log must redact known secrets'
 grep -Fqx '[WARN]  System will reboot in 60s.' "$tmp/error.out" || fail 'handleError reboot notice'
 grep -Fqx 'usleep:60000000' "$tmp/error.out" || fail 'handleError retry wait changed'
 ! grep -Fq '###' "$tmp/error.out" || fail 'handleError must not render hash decoration'
@@ -1948,9 +1956,11 @@ grep -Fqx 'retry-callback:Mock task failure:PXEOS_ERROR' "$tmp/task-context.out"
     dots 'Mounting File System'
     handleWarning 'Mock warning details'
 ) >"$tmp/warning.out" 2>&1
-[[ $(sed -n '2p' "$tmp/warning.out") == '[WARN]  Operation warning.' ]] || fail 'handleWarning must start on a new WARN line after dots'
-grep -Fqx '[INFO]  Warning details:' "$tmp/warning.out" || fail 'handleWarning details section'
-grep -Fqx '        Mock warning details' "$tmp/warning.out" || fail 'handleWarning must preserve and indent warning detail'
+[[ $(sed -n '2p' "$tmp/warning.out") == '[WARN]  Mock warning details' ]] || fail 'handleWarning must start on a new concise WARN line after dots'
+! grep -Eq 'command not found|Warning details:' "$tmp/warning.out" || fail 'handleWarning repeated details or missing dependency'
+warning_log=$(sed -n 's/^\[INFO\]  Task log: //p' "$tmp/warning.out")
+[[ -f $warning_log && ! -L $warning_log ]] || fail 'handleWarning log location'
+grep -Fq 'Mock warning details' "$warning_log" || fail 'handleWarning private detail missing'
 grep -Fqx '[INFO]  Continuing in 60s.' "$tmp/warning.out" || fail 'handleWarning continuation notice'
 grep -Fqx 'usleep:60000000' "$tmp/warning.out" || fail 'handleWarning wait changed'
 grep -Fqx 'debug-pause' "$tmp/warning.out" || fail 'handleWarning debug pause changed'
@@ -2041,8 +2051,8 @@ must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message INFO 
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message WARN "Wait timed out. Timeout action: $action."'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" "rootpxe_console_message INFO 'Retry requested. Resuming task.'"
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" "rootpxe_console_message INFO 'Task deleted or aborted. Stopping PXEOS.'"
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[ERROR] Operation failed.'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  Operation warning.'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_task_console_failure ERROR "$safe_str"'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_task_console_failure WARN "$str"'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  System will reboot in 60s.'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[INFO]  Continuing in 60s.'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'Disk permit response is invalid. Check the server protocol and task binding.'
@@ -2119,8 +2129,8 @@ for line in \
     '[WARN]  Error report not confirmed (HTTP 500). Retrying in 5s.' \
     '[WARN]  Error report rejected (HTTP 409): server rejected. Retrying in 5s.' \
     '[ERROR] Task paused. Error reported to RootPXE.' \
-    '[ERROR] Operation failed.' \
-    '[WARN]  Operation warning.' \
+    '[ERROR] Mock failure details token=[REDACTED]' \
+    '[WARN]  Mock warning details' \
     '[INFO]  Init version: test-init' \
     '[WARN]  System will reboot in 60s.' \
     '[INFO]  Continuing in 60s.' \

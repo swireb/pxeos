@@ -8,7 +8,11 @@ tmp="$(mktemp -d /tmp/rootpxe-display-metadata.XXXXXX)"
 trap 'rm -rf -- "$tmp"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 run() { ( "$@" ); }
-load() { . "$parser"; . "$lib"; }
+load() {
+    . "$root/tests/task-log-test-support.sh"
+    . <(sed "s|/tmp/log|$tmp/log|g" "$(dirname "$lib")/log-paths.sh")
+    . "$parser"; . "$lib"
+}
 inventory() { printf '%s\n' '{"version":1,"disks":[{"number":1,"sourceDevice":"/dev/mockdisk","partitionTable":"gpt","originalDiskBytes":1048576,"logicalSectorBytes":512,"physicalSectorBytes":4096,"partitions":[{"number":1,"startSectors":2048,"originalSectors":4096,"typeGuid":"C12A7328-F81F-11D2-BA4B-00A0C93EC93B","fs":"ntfs","uuid":"keep","partuuid":"keep-part"},{"number":2,"startSectors":8192,"originalSectors":4096,"typeGuid":"0FC63DAF-8483-4772-8E79-3D69D8477DE4","fs":"ext4","uuid":"data","partuuid":"00112233-4455-6677-8899-aabbccddeeff"}]}]}'; }
 last_arg() { local value; for value; do :; done; printf '%s\n' "$value"; }
 penultimate_arg() { local previous="" result="" value; for value; do [[ -n $previous ]] && result=$previous; previous=$value; done; printf '%s\n' "$result"; }

@@ -1,6 +1,92 @@
 #!/bin/bash
 . /usr/share/pxeos/lib/funcs.sh
 . /bin/pxeos.checkin
+
+pxeos_av_diag_warn() {
+    printf '[WARN]  Diagnostic log: unavailable.\n' >&2
+}
+
+pxeos_av_diag_begin() {
+    unset rootpxe_log_raw_path
+    pxeos_av_diag_raw=''
+    if rootpxe_log_raw_file; then
+        pxeos_av_diag_raw=$rootpxe_log_raw_path
+        return 0
+    fi
+    pxeos_av_log_published=no
+    pxeos_av_diag_warn
+    return 1
+}
+
+pxeos_av_prepare_task_log() {
+    if rootpxe_log_new_file clamav.log; then
+        pxeos_av_log_ready=yes
+        pxeos_av_log_published=no
+        return 0
+    fi
+    pxeos_av_log_ready=no
+    pxeos_av_log_published=no
+    pxeos_av_diag_warn
+    return 1
+}
+
+pxeos_av_diag_reference() {
+    local dir file
+    [[ ${pxeos_av_log_ready:-no} == yes && ${pxeos_av_log_published:-no} == yes ]] || return 1
+    dir=$(rootpxe_log_directory) || return 1
+    file="$dir/clamav.log"
+    [[ -f $file && ! -L $file && -O $file ]] || return 1
+    [[ $(LC_ALL=C stat -c %a -- "$file" 2>/dev/null) == 600 ]] || return 1
+    printf ' Diagnostic log: %s' "$file"
+}
+
+pxeos_av_scan_prepare() {
+    pxeos_av_scan_log=''
+    if ! pxeos_av_diag_begin; then
+        handleError "Unable to prepare ClamAV diagnostic log. ($0)$(pxeos_av_diag_reference)"
+        return 1
+    fi
+    pxeos_av_scan_log=$pxeos_av_diag_raw
+}
+
+pxeos_av_diag_finish() {
+    local raw="$1" operation="$2" status=0 published=no
+    if [[ -n $raw ]]; then
+        if rootpxe_log_publish clamav.log "$raw" "$operation" yes; then
+            published=yes
+        else
+            pxeos_av_diag_warn
+            status=1
+        fi
+        if ! rm -f -- "$raw"; then
+            pxeos_av_diag_warn
+            status=1
+            published=no
+        fi
+    fi
+    pxeos_av_log_published=$published
+    return "$status"
+}
+
+pxeos_av_run_logged() {
+    local operation="$1" raw='' status=0
+    shift
+    if pxeos_av_diag_begin; then raw=$pxeos_av_diag_raw; fi
+    if [[ -n $raw ]]; then
+        "$@" >"$raw" 2>&1
+        status=$?
+    else
+        "$@" >/dev/null 2>&1
+        status=$?
+    fi
+    pxeos_av_diag_finish "$raw" "$operation" >/dev/null || true
+    return "$status"
+}
+
+pxeos_av_found_lines() {
+    grep 'FOUND' -- "$1" | tr -d '\000'
+}
+
 clearScreen
 displayBanner
 disks=""
@@ -10,13 +96,15 @@ parts=""
 part=""
 sysuuid=$(dmidecode -s system-uuid)
 sysuuid=${sysuuid,,}
+pxeos_av_prepare_task_log || true
 dots "Mounting Clamav"
 [[ ! -d /opt/pxeos/clamav ]] && mkdir -p /opt/pxeos/clamav >/dev/null 2>&1
-mount -o nolock,proto=tcp,rsize=32768,wsize=32768,intr,noatime $clamav /opt/pxeos/clamav >/tmp/mount-output 2>&1
-if [[ ! $? -eq 0 ]]; then
+pxeos_av_run_logged clamav_mount_remote mount -o nolock,proto=tcp,rsize=32768,wsize=32768,intr,noatime $clamav /opt/pxeos/clamav
+mount_rc=$?
+if [[ ! $mount_rc -eq 0 ]]; then
     echo "Failed"
     debugPause
-    handleError "Unable to mount location. ($0)\n    Args Passed: $*\n    Reason: $(cat /tmp/mount-output | tr -d \\0)"
+    handleError "Unable to mount location. ($0)$(pxeos_av_diag_reference)"
 fi
 echo "Done"
 debugPause
@@ -26,12 +114,12 @@ if [[ -d /opt/pxeos/clamav/bin && -d /opt/pxeos/clamav/sbin ]]; then
 else
     echo "Failed"
     debugPause
-    handleError "Cannot find clamav binaries to run task. ($0)\n   Args Passed: $*"
+    handleError "Cannot find clamav binaries to run task. ($0)"
 fi
 echo "Done"
 debugPause
 dots "Updating clamav"
-freshclam >/dev/null 2>&1
+pxeos_av_run_logged clamav_freshclam freshclam
 case $? in
     0)
         echo "Done"
@@ -39,7 +127,7 @@ case $? in
     *)
         echo "Failed"
         debugPause
-        handleError "Unable to update clamav definitions. ($0)\n   Args Passed: $*"
+        handleError "Unable to update clamav definitions. ($0)"
         ;;
 esac
 debugPause
@@ -50,7 +138,7 @@ getHardDisk 'true'
 if [[ -z $disks ]]; then
     echo "Failed"
     debugPause
-    handleError "Unable to find any disks. ($0)\n   Args Passed: $*"
+    handleError "Unable to find any disks. ($0)"
 fi
 echo "Done"
 debugPause
@@ -59,7 +147,7 @@ dots "Creating scan partition"
 if [[ ! -d /clamavscan ]]; then
     echo "Failed"
     debugPause
-    handleError "Unable to create scan folder. ($0)\n   Args Passed: $*"
+    handleError "Unable to create scan folder. ($0)"
 fi
 echo "Done"
 debugPause
@@ -73,7 +161,7 @@ case $avmode in
         modename="Scan and Quarantine"
         ;;
     *)
-        handleError "Unable to determine scanning mode! ($0)\n   Args Passed: $*"
+        handleError "Unable to determine scanning mode! ($0)"
         ;;
 esac
 for disk in $disks; do
@@ -87,11 +175,11 @@ for disk in $disks; do
         case $fstype in
             [Nn][Tt][Ff][Ss])
         rootpxe_console_message INFO "Mounting partition $part."
-                ntfs-3g -o remove_hiberfile,rw $part /clamavscan >/tmp/clamavscan-mount-output 2>&1
+                pxeos_av_run_logged clamav_partition_mount ntfs-3g -o remove_hiberfile,rw $part /clamavscan
                 ;;
             [Ee][Xx][Tt][Ff][Ss])
         rootpxe_console_message INFO "Mounting partition $part."
-                mount -o rw $part /clamavscan >/tmp/clamavscan-mount-output 2>&1
+                pxeos_av_run_logged clamav_partition_mount mount -o rw $part /clamavscan
                 ;;
             *)
                 dots "Not scanning partition"
@@ -100,10 +188,11 @@ for disk in $disks; do
                 continue
                 ;;
         esac
-        [[ ! $? -eq 0 ]] && handleError "Could not mount partition ($0)\n    Args Passed: $*\n    Reason: $(cat /tmp/clamavscan-mount-output | tr -d \\0)"
+        mount_rc=$?
+        [[ ! $mount_rc -eq 0 ]] && handleError "Could not mount partition ($0)$(pxeos_av_diag_reference)"
         debugPause
         dots "Creating working directories"
-        mkdir -p /clamavscan/pxeos/{tmp,infected,log} >/dev/null 2>&1
+        mkdir -p /clamavscan/pxeos/{tmp,infected} >/dev/null 2>&1
         case $? in
             0)
                 echo "Done"
@@ -116,7 +205,6 @@ for disk in $disks; do
                 ;;
         esac
         debugPause
-        echo -n > /clamavscan/pxeos/log/log.txt
 rootpxe_console_message INFO "Scanning partition $part."
         debugPause
         dots "Clam AV Mode"
@@ -124,7 +212,7 @@ rootpxe_console_message INFO "Scanning partition $part."
         debugPause
         dots "Starting AV scan"
         echo -e -n "\t"
-        clamscan -V >/dev/null 2&>1
+        pxeos_av_run_logged clamav_version clamscan -V
         case $? in
             0)
                 echo "Done"
@@ -140,8 +228,14 @@ rootpxe_console_message INFO "Scanning partition $part."
         cd /clamavscan
         dots "Scanning"
         start=$(date +%s)
-        clamscan -r --tempdir=/clamavscan/pxeos/tmp $action --log=/clamavscan/pxeos/log/log.txt --no-summary --exclude-dir=/clamavscan/pxeos/*
-        case $? in
+        if ! pxeos_av_scan_prepare; then
+            umount /clamavscan >/dev/null 2>&1
+            continue
+        fi
+        scan_log=$pxeos_av_scan_log
+        clamscan -r --tempdir=/clamavscan/pxeos/tmp $action --log=$scan_log --no-summary --exclude-dir=/clamavscan/pxeos/*
+        scan_rc=$?
+        case $scan_rc in
             0)
 rootpxe_console_message INFO 'Scan complete. Processing the log file.'
                 ;;
@@ -149,6 +243,7 @@ rootpxe_console_message INFO 'Scan complete. Processing the log file.'
                 echo "Failed"
                 debugPause
                 umount /clamavscan
+                pxeos_av_diag_finish "$pxeos_av_scan_log" "clamav_scan:exit=$scan_rc" >/dev/null || true
                 cur=$(date +%s)
                 diff=$((cur - start))
 rootpxe_console_message WARN 'ClamAV failed.'
@@ -159,7 +254,7 @@ rootpxe_console_message INFO 'Trying the next partition.'
                 ;;
         esac
         debugPause
-        output=$(cat /clamavscan/pxeos/log/log.txt | grep 'FOUND' | tr -d \\0)
+        output=$(pxeos_av_found_lines "$scan_log")
         oIFS=$IFS
         IFS=$'\n'
         cnt=0
@@ -184,6 +279,7 @@ rootpxe_console_message INFO "File ID: $cnt."
             cat /dev/null > /tmp/avstat
         done
         IFS=$oIFS
+        pxeos_av_diag_finish "$pxeos_av_scan_log" clamav_scan:exit=0 >/dev/null || true
         umount /clamavscan >/dev/null 2>&1
     done
 done

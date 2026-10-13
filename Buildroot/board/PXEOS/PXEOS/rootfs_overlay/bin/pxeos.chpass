@@ -35,8 +35,8 @@ for part in $parts; do
     case $fstype in
         [Nn][Tt][Ff][Ss])
 rootpxe_console_message INFO "Mounting partition $part."
-            ntfs-3g -o remove_hiberfile,rw "$part" /chntpw >/tmp/ntfs-mount-output 2>&1
-            [[ ! $? -eq 0 ]] && handleError "Could not mount $part ($0)\n    Args Passed: $*\n     Reason: $(cat /tmp/ntfs-mount-output | tr -d \\0)"
+            rootpxe_run_logged_typed_native ntfs-mount.log "$part" ntfs-3g -o remove_hiberfile,rw "$part" /chntpw
+            [[ ! $? -eq 0 ]] && handleError "Could not mount $part ($0)"
             if [[ ! -f $sam ]]; then
 rootpxe_console_message WARN 'Unable to locate the SAM file.'
                 debugPause
