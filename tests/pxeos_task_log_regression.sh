@@ -98,40 +98,25 @@ checks=$((checks+1))
 check grep -Fq 'native failure detail' "$log"
 native_rc=7; rc=0; rootpxe_run_logged_mutation lvextend /dev/vg/root native >"$tmp/native-fail.out" 2>&1 || rc=$?
 check test "$rc" -eq 7
-saved_stream=$(declare -f rootpxe_task_log_stream)
-eval "${saved_stream/rootpxe_task_log_stream/rootpxe_task_log_stream_real}"
-rootpxe_task_log_stream() {
-    rootpxe_task_log_stream_real "$@" || return $?
-    sleep 0.2
-    printf done >"$tmp/collector-done"
-}
-native_changes_job() { sleep 0.01 & local native_worker=$!; wait "$native_worker"; printf 'LAST_BACKGROUND_NATIVE_ERROR\n'; return 7; }
+native_changes_job() { native_parent_changed=yes; sleep 0.01 & local native_worker=$!; wait "$native_worker"; printf 'LAST_BACKGROUND_NATIVE_ERROR\n'; return 7; }
 rc=0; rootpxe_run_logged_mutation fake /dev/vg/root native_changes_job >"$tmp/native-job.out" 2>&1 || rc=$?
 check test "$rc" -eq 7
-check test -f "$tmp/collector-done"
+check test "$native_parent_changed" = yes
+check grep -q LAST_BACKGROUND_NATIVE_ERROR "$log"
 check bash -c '! grep -Eq "not a child|Task log: unavailable" "$1"' _ "$tmp/native-job.out"
-eval "$saved_stream"
-unset -f rootpxe_task_log_stream_real
-# Inject descriptor-control status failures without exhausting the host's FD
-# limits. Redirection itself opens/closes only the helper's private FD.
-exec_calls=0; descriptor_failure=open
-exec() {
-    exec_calls=$((exec_calls+1))
-    if [[ $descriptor_failure == open && $exec_calls == 1 ]]; then
-        builtin exec {rootpxe_task_log_native_fd}>&-
-        return 1
-    fi
-    if [[ $descriptor_failure == close && $exec_calls == 2 ]]; then return 1; fi
-    builtin exec "$@"
-}
+# Raw allocation/read failure is diagnostic-only; approved native still runs.
+saved_raw=$(declare -f rootpxe_log_raw_file)
+rootpxe_log_raw_file(){ return 1; }
 native_rc=7; rc=0; rootpxe_run_logged_mutation fake /dev/vg/root native >"$tmp/fd-open-failure" 2>&1 || rc=$?
 check test "$rc" -eq 7
 check grep -Fq 'Task log: unavailable' "$tmp/fd-open-failure"
-exec_calls=0; descriptor_failure=close
+eval "$saved_raw"
+saved_snapshot=$(declare -f rootpxe_log_snapshot)
+rootpxe_log_snapshot(){ return 1; }
 rc=0; rootpxe_run_logged_mutation fake /dev/vg/root native >"$tmp/fd-close-failure" 2>&1 || rc=$?
 check test "$rc" -eq 7
 check grep -Fq 'Task log: unavailable' "$tmp/fd-close-failure"
-unset -f exec
+eval "$saved_snapshot"
 native_rc=1; rc=0; rootpxe_run_logged_mutation e2fsck /dev/vg/root native >"$tmp/fsck.out" 2>&1 || rc=$?
 check test "$rc" -eq 1
 # 非包装查询与镜像字节不改变。

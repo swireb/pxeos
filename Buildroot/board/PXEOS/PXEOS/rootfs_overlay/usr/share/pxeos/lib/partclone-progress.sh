@@ -271,14 +271,22 @@ rootpxe_partclone_progress_prepare() {
     rootpxe_partclone_progress_generation=$((rootpxe_partclone_progress_generation + 1))
     rootpxe_partclone_progress_write 0 partclone_started || return 1
     rootpxe_partclone_log_finish
-    rootpxe_log_raw_file || { printf '[ERROR] Raw Partclone diagnostic is unavailable.\n' >&2; return 1; }
-    rootpxe_partclone_native_log=$rootpxe_log_raw_path
+    # Native -L is diagnostic-only. Never prevent cloning when its private
+    # output cannot be prepared; /dev/null is an explicit safe native fallback.
+    rootpxe_partclone_native_log=/dev/null
     export -n rootpxe_partclone_native_log
     unset rootpxe_partclone_native_log_state
     declare -gA rootpxe_partclone_native_log_state=()
-    rootpxe_partclone_native_log_state[raw]=$rootpxe_partclone_native_log
-    rootpxe_partclone_native_log_state[identity]=$(LC_ALL=C stat -c '%d:%i:%a' -- "$rootpxe_partclone_native_log") || { rm -f -- "$rootpxe_partclone_native_log"; unset rootpxe_partclone_native_log_state rootpxe_partclone_native_log; return 1; }
-    rootpxe_log_new_file partclone.log || printf '[WARN]  Diagnostic log: unavailable.\n' >&2
+    if rootpxe_log_raw_file && [[ -f $rootpxe_log_raw_path && ! -L $rootpxe_log_raw_path && -O $rootpxe_log_raw_path ]] \
+        && rootpxe_partclone_native_log_state[identity]=$(LC_ALL=C stat -c '%d:%i:%a' -- "$rootpxe_log_raw_path") \
+        && [[ ${rootpxe_partclone_native_log_state[identity]} == *:600 ]]; then
+        rootpxe_partclone_native_log=$rootpxe_log_raw_path
+        rootpxe_partclone_native_log_state[raw]=$rootpxe_partclone_native_log
+        rootpxe_log_new_file partclone.log || printf '[WARN]  Diagnostic log: unavailable.\n' >&2
+    else
+        unset rootpxe_partclone_native_log_state
+        printf '[WARN]  Diagnostic log: unavailable; Partclone uses /dev/null.\n' >&2
+    fi
     rootpxe_partclone_progress_args=(-L "$rootpxe_partclone_native_log")
     rootpxe_partclone_progress_mode=text
     rootpxe_partclone_progress_term="${TERM:-dumb}"

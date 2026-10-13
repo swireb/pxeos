@@ -31,28 +31,27 @@ grep -q unavailable "$tmp/failed-notice" || fail old-lifecycle-reference
 ! grep -q Details "$tmp/failed-notice" || fail stale-details
 TASK_LOG_TEST_LOCK_BUSY=no
 native(){ return 7; }
-saved_stream=$(declare -f rootpxe_log_boot_stream)
-rootpxe_log_boot_stream(){ return 0; }
-close_calls=0; held_fd=''; wait_calls=0
+wait_calls=0
 wait(){ wait_calls=$((wait_calls+1)); builtin wait "$@"; }
-saved_run=$(declare -f rootpxe_log_boot_run)
-# Inject only the close boundary in the exact current function. Mocking all
-# exec calls would also distort acquisition of the real dynamic descriptors.
-rootpxe_boot_test_close_failure(){ close_calls=$((close_calls+1)); held_fd=$rootpxe_boot_log_fd; return 1; }
-eval "$(printf '%s\n' "$saved_run" | sed 's/if exec {rootpxe_boot_log_fd}>&-; then/if rootpxe_boot_test_close_failure; then/')"
-rc=0; rootpxe_log_boot_run cron.log fd_close foreground native >"$tmp/close-failure" 2>&1 || rc=$?
-[[ $rc == 7 ]] || fail close-failure-native-rc
-[[ $close_calls == 1 ]] || fail close-failure-boundary-not-exercised
-[[ $wait_calls == 0 ]] || fail close-failure-waited-for-eof
-grep -q unavailable "$tmp/close-failure" || fail close-failure-notice
-exec {held_fd}>&-
-unset -f rootpxe_boot_test_close_failure wait
-eval "$saved_run"
-eval "$saved_stream"
+saved_snapshot=$(declare -f rootpxe_log_snapshot)
+rootpxe_log_snapshot(){ return 1; }
+rc=0; rootpxe_log_boot_run cron.log read_failure foreground native >"$tmp/read-failure" 2>&1 || rc=$?
+[[ $rc == 7 ]] || fail read-failure-native-rc
+[[ $wait_calls == 0 ]] || fail read-failure-waited-for-eof
+grep -q unavailable "$tmp/read-failure" || fail read-failure-notice
+rootpxe_log_notice cron.log >"$tmp/read-notice"
+grep -q unavailable "$tmp/read-notice" || fail read-failure-false-reference
+unset -f wait
+eval "$saved_snapshot"
+rootpxe_log_boot_run ssh-keygen.log quiet foreground true
+[[ ! -s $tmp/log/ssh-keygen.log ]] || fail quiet-success-noise
 native(){ ( sleep .4; printf 'BACKGROUND_OLD\n' ) & }
+wait_calls=0
+wait(){ wait_calls=$((wait_calls+1)); builtin wait "$@"; }
 start=$SECONDS
 rootpxe_log_boot_run cron.log start background native
-[[ $((SECONDS-start)) -lt 2 ]] || fail daemon-waited
+[[ $wait_calls == 0 && $((SECONDS-start)) -lt 10 ]] || fail daemon-waited
+unset -f wait
 rootpxe_log_boot_run cron.log restart foreground printf 'CURRENT\n'
 sleep .8
 grep -q CURRENT "$tmp/log/cron.log" || fail current

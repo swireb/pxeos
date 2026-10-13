@@ -101,7 +101,55 @@ rootpxe_log_raw_file() {
     rootpxe_log_raw_path="$file"
 }
 
+rootpxe_log_snapshot() {
+    local -x LC_ALL=C
+    local rootpxe_snapshot_raw="$1" rootpxe_snapshot_fd='' rootpxe_snapshot_identity rootpxe_snapshot_size rootpxe_snapshot_count rootpxe_snapshot_skip rootpxe_snapshot_text rootpxe_snapshot_marker=''
+    [[ -f $rootpxe_snapshot_raw && ! -L $rootpxe_snapshot_raw && -O $rootpxe_snapshot_raw ]] || return 1
+    rootpxe_snapshot_identity=$(stat -c '%d:%i:%a' -- "$rootpxe_snapshot_raw") || return 1
+    [[ $rootpxe_snapshot_identity == *:600 ]] || return 1
+    exec {rootpxe_snapshot_fd}<"$rootpxe_snapshot_raw" || return 1
+    if ! rootpxe_log_pin_valid "$rootpxe_snapshot_fd" "$rootpxe_snapshot_identity"; then exec {rootpxe_snapshot_fd}<&-; return 1; fi
+    rootpxe_snapshot_size=$(stat -L -c %s -- "/proc/self/fd/$rootpxe_snapshot_fd") || { exec {rootpxe_snapshot_fd}<&-; return 1; }
+    [[ $rootpxe_snapshot_size =~ ^[0-9]+$ && ${#rootpxe_snapshot_size} -le 15 ]] || { exec {rootpxe_snapshot_fd}<&-; return 1; }
+    rootpxe_snapshot_count=$rootpxe_snapshot_size
+    (( rootpxe_snapshot_count <= 131072 )) || rootpxe_snapshot_count=131072
+    rootpxe_snapshot_skip=$((rootpxe_snapshot_size-rootpxe_snapshot_count))
+    # Freeze the opened inode's byte count; no growing EOF or per-line fork.
+    if rootpxe_snapshot_text=$(set -o pipefail; dd if="/proc/self/fd/$rootpxe_snapshot_fd" iflag=skip_bytes,count_bytes skip="$rootpxe_snapshot_skip" count="$rootpxe_snapshot_count" status=none | tr -d '\000' || exit 1; printf '\001'); then
+        exec {rootpxe_snapshot_fd}<&- || return 1
+    else exec {rootpxe_snapshot_fd}<&-; return 1; fi
+    rootpxe_snapshot_text=${rootpxe_snapshot_text%$'\001'}
+    if (( rootpxe_snapshot_skip > 0 )); then
+        rootpxe_snapshot_marker='[TRUNCATED: earlier snapshot and incomplete first line omitted]'
+        if [[ $rootpxe_snapshot_text == *$'\n'* ]]; then rootpxe_snapshot_text=${rootpxe_snapshot_text#*$'\n'}; else rootpxe_snapshot_text=''; fi
+    fi
+    rootpxe_snapshot_text=$(printf '%s' "$rootpxe_snapshot_text" | awk 'length($0)>65000 {print "[TRUNCATED: overlong diagnostic omitted]"; next} {print}') || return 1
+    rootpxe_snapshot_text=$(rootpxe_log_redact "$rootpxe_snapshot_text") || return 1
+    if (( ${#rootpxe_snapshot_text} > 63000 )); then
+        rootpxe_snapshot_marker='[TRUNCATED: earlier snapshot diagnostics omitted]'
+        if declare -F rootpxe_utf8_safe_tail >/dev/null; then rootpxe_snapshot_text=$(rootpxe_utf8_safe_tail "$rootpxe_snapshot_text" 63000) || return 1
+        else
+            rootpxe_snapshot_text=${rootpxe_snapshot_text: -63000}
+            while [[ -n $rootpxe_snapshot_text && $(printf '%d' "'${rootpxe_snapshot_text:0:1}") -ge 128 && $(printf '%d' "'${rootpxe_snapshot_text:0:1}") -lt 192 ]]; do rootpxe_snapshot_text=${rootpxe_snapshot_text:1}; done
+        fi
+    fi
+    [[ -z $rootpxe_snapshot_marker ]] || printf '%s\n' "$rootpxe_snapshot_marker"
+    printf '%s' "$rootpxe_snapshot_text"
+}
+
+rootpxe_log_raw_cleanup() {
+    [[ -n ${2:-} && -f $1 && ! -L $1 && -O $1 ]] || return 1
+    [[ $(LC_ALL=C stat -c '%d:%i:%a' -- "$1") == "$2" ]] || return 1
+    rm -f -- "$1"
+}
+
 rootpxe_log_redact() {
+    local rootpxe_redaction_text
+    # A snapshot may end mid-field while a daemon continues writing.
+    rootpxe_redaction_text=$(LC_ALL=C printf '%s' "$1" | sed -E \
+      -e "s/((['\"]?)[[:alnum:]_.-]*(token|password|credential|secret)[[:alnum:]_.-]*\\2[[:space:]]*[:=][[:space:]]*)\"([^\"\\\\]|\\\\.)*(\\\\)?$/\\1\"[REDACTED: incomplete quoted field]\"/Ig" \
+      -e "s/((['\"]?)[[:alnum:]_.-]*(token|password|credential|secret)[[:alnum:]_.-]*\\2[[:space:]]*[:=][[:space:]]*)'[^']*$/\\1'[REDACTED: incomplete quoted field]'/Ig") || return 1
+    set -- "$rootpxe_redaction_text"
     if declare -F rootpxe_redact_diagnostic >/dev/null; then rootpxe_redact_diagnostic "$1"; return $?; fi
     # Boot has no task payload: redact common fields without loading funcs.
     LC_ALL=C printf '%s' "$1" | sed -E \
@@ -151,15 +199,7 @@ rootpxe_log_publish() {
     [[ -z $expected || $identity == "$expected" ]] || return 1
     [[ $operation =~ ^[A-Za-z0-9_./:+=-]+$ && ${#operation} -le 256 ]] || operation=diagnostic
     # Keep the tail of native text; the raw parser always saw the full file.
-    text=$(set -o pipefail; cat -- "$raw" | rootpxe_log_diagnostic_stream) || return 1
-    if declare -F rootpxe_utf8_safe_tail >/dev/null; then
-        text=$(rootpxe_utf8_safe_tail "$text" 63000) || return 1
-    elif (( ${#text} > 63000 )); then
-        text=${text: -63000}
-        # Drop UTF-8 continuation bytes at the start of a tail window.
-        while [[ -n $text && $(printf '%d' "'${text:0:1}") -ge 128 && $(printf '%d' "'${text:0:1}") -lt 192 ]]; do text=${text:1}; done
-    fi
-    [[ $(wc -c <"$raw") -le 64000 ]] || text="$marker"$'\n'"$text"
+    text=$(rootpxe_log_snapshot "$raw") || return 1
     (
         flock -n -x 8 2>/dev/null || exit 1
         [[ $(stat -L -c '%d:%i:%a' /proc/self/fd/8) == "$directory_identity" && $(stat -c '%d:%i:%a' -- "$dir") == "$directory_identity" && ! -L $dir ]] || exit 1
@@ -177,106 +217,47 @@ rootpxe_log_publish() {
     ) 8<"$dir" 2>/dev/null
 }
 
-rootpxe_log_boot_line() {
-    local name="$1" identity="$2" operation="$3" raw="$4" line="$5" dir current
-    dir=$(rootpxe_log_directory) || return 1
-    current=$(stat -c '%d:%i:%a' -- "$dir/$name" 2>/dev/null) || return 1
-    # A newer lifecycle owns this name. Drain, but do not publish old data.
-    [[ $current == "$identity" ]] || return 0
-    printf '%s\n' "$line" >"$raw" || return 1
-    if rootpxe_log_publish "$name" "$raw" "$operation" yes "$identity"; then return 0; fi
-    # Replacement can occur between the first identity check and publishing.
-    # A superseded stream is not a failure of the current service's sink.
-    current=$(stat -c '%d:%i:%a' -- "$dir/$name" 2>/dev/null) || return 1
-    [[ $current != "$identity" ]]
-}
 
-rootpxe_log_boot_stream() {
-    local -x LC_ALL=C
-    local name="$1" identity="$2" operation="$3" rootpxe_boot_collector_pin="${4:-}" char line='' overflow=no raw='' failed=no current dir
-    if rootpxe_log_pin_valid "$rootpxe_boot_collector_pin" "$identity" && rootpxe_log_raw_file; then raw=$rootpxe_log_raw_path; else
-        failed=yes; printf '[WARN]  Diagnostic log: unavailable.\n' >&2
-    fi
-    # Complete lines are redacted together: secret fields may cross reads.
-    # Overlong lines are omitted rather than exposing a fragment of a field.
-    while IFS= read -r -N 1 char; do
-        if [[ $char == $'\n' ]]; then
-            [[ $overflow != yes ]] || line='[TRUNCATED: overlong daemon diagnostic omitted]'
-            if [[ -n $raw ]]; then
-                if ! rootpxe_log_pin_valid "$rootpxe_boot_collector_pin" "$identity" || ! rootpxe_log_boot_line "$name" "$identity" "$operation" "$raw" "$line"; then
-                    [[ $failed == yes ]] || printf '[WARN]  Diagnostic log: unavailable.\n' >&2
-                    failed=yes
-                fi
-            fi
-            line=''; overflow=no
-        elif [[ $overflow != yes ]]; then
-            line+=$char
-            if (( ${#line} > 64000 )); then line=''; overflow=yes; fi
-        fi
-    done
-    [[ $overflow != yes ]] || line='[TRUNCATED: overlong daemon diagnostic omitted]'
-    if [[ -n $raw ]]; then
-        if [[ -n $line ]]; then
-            if ! rootpxe_log_pin_valid "$rootpxe_boot_collector_pin" "$identity" || ! rootpxe_log_boot_line "$name" "$identity" "$operation" "$raw" "$line"; then
-                [[ $failed == yes ]] || printf '[WARN]  Diagnostic log: unavailable.\n' >&2
-                failed=yes
-            fi
-        fi
-        rm -f -- "$raw"
-    fi
-    if ! rootpxe_log_pin_release "$rootpxe_boot_collector_pin" "$identity"; then
-        [[ $failed == yes ]] || printf '[WARN]  Diagnostic log: unavailable.\n' >&2
-        failed=yes
-    fi
-    [[ $failed != yes ]]
-}
 
 rootpxe_log_boot_run() {
-    local name="$1" operation="$2" lifecycle="$3" status=0 collector='' log_status=0 rootpxe_boot_log_fd rootpxe_boot_log_pin='' identity dir ready=no collector_warned=no rootpxe_boot_notice_declaration
+    local rootpxe_boot_name="$1" rootpxe_boot_operation="$2" rootpxe_boot_lifecycle="$3" rootpxe_boot_status=0 rootpxe_boot_log_status=0 rootpxe_boot_pin='' rootpxe_boot_identity='' rootpxe_boot_dir='' rootpxe_boot_ready=no rootpxe_boot_declaration rootpxe_boot_raw='' rootpxe_boot_raw_identity=''
     shift 3
-    rootpxe_boot_notice_declaration=$(declare -p rootpxe_boot_log_notice_state 2>/dev/null) || rootpxe_boot_notice_declaration=''
-    if [[ $rootpxe_boot_notice_declaration != 'declare -A '* ]]; then
-        unset rootpxe_boot_log_notice_state
-        declare -gA rootpxe_boot_log_notice_state=()
+    rootpxe_boot_declaration=$(declare -p rootpxe_boot_log_notice_state 2>/dev/null) || rootpxe_boot_declaration=''
+    if [[ $rootpxe_boot_declaration != 'declare -A '* ]]; then unset rootpxe_boot_log_notice_state; declare -gA rootpxe_boot_log_notice_state=(); fi
+    if rootpxe_log_type_valid "$rootpxe_boot_name"; then unset 'rootpxe_boot_log_notice_state[$rootpxe_boot_name]'; fi
+    if rootpxe_log_type_valid "$rootpxe_boot_name" && [[ $rootpxe_boot_lifecycle == foreground-append ]] && rootpxe_boot_dir=$(rootpxe_log_directory) && [[ -f $rootpxe_boot_dir/$rootpxe_boot_name && ! -L $rootpxe_boot_dir/$rootpxe_boot_name && -O $rootpxe_boot_dir/$rootpxe_boot_name ]]; then
+        rootpxe_boot_identity=$(stat -c '%d:%i:%a' -- "$rootpxe_boot_dir/$rootpxe_boot_name") || rootpxe_boot_identity=''
+        [[ $rootpxe_boot_identity != *:600 ]] || rootpxe_boot_ready=yes
+    elif rootpxe_log_new_file "$rootpxe_boot_name"; then rootpxe_boot_identity=$rootpxe_log_created_identity; rootpxe_boot_ready=yes; fi
+    if [[ $rootpxe_boot_ready == yes ]]; then
+        rootpxe_boot_dir=$(rootpxe_log_directory) || rootpxe_boot_ready=no
+        if [[ $rootpxe_boot_ready == yes ]] && exec {rootpxe_boot_pin}<"$rootpxe_boot_dir/$rootpxe_boot_name"; then
+            rootpxe_log_pin_valid "$rootpxe_boot_pin" "$rootpxe_boot_identity" || { exec {rootpxe_boot_pin}<&-; rootpxe_boot_pin=''; rootpxe_boot_ready=no; }
+        else rootpxe_boot_ready=no; fi
     fi
-    if rootpxe_log_type_valid "$name"; then unset 'rootpxe_boot_log_notice_state[$name]'; fi
-    if rootpxe_log_type_valid "$name" && [[ $lifecycle == foreground-append ]] && dir=$(rootpxe_log_directory) && [[ -f $dir/$name && ! -L $dir/$name && -O $dir/$name ]]; then
-        identity=$(LC_ALL=C stat -c '%d:%i:%a' -- "$dir/$name") || identity=''
-        [[ $identity != *:600 ]] || ready=yes
-    elif rootpxe_log_new_file "$name"; then identity=$rootpxe_log_created_identity; ready=yes; fi
-    if [[ $ready == yes ]]; then
-        dir=$(rootpxe_log_directory) || ready=no
-        if [[ $ready == yes ]] && exec {rootpxe_boot_log_pin}<"$dir/$name"; then
-            if ! rootpxe_log_pin_valid "$rootpxe_boot_log_pin" "$identity"; then
-                # The pathname changed before opening. Close only this FD,
-                # acquired in this scope, not an environment-supplied number.
-                exec {rootpxe_boot_log_pin}<&- || true
-                rootpxe_boot_log_pin=''; ready=no
-            fi
-        else ready=no; fi
+    if rootpxe_log_raw_file; then
+        rootpxe_boot_raw=$rootpxe_log_raw_path
+        rootpxe_boot_raw_identity=$(stat -c '%d:%i:%a' -- "$rootpxe_boot_raw") || rootpxe_boot_raw_identity=''
     fi
-    if [[ $ready == yes ]]; then
-        if exec {rootpxe_boot_log_fd}> >(rootpxe_log_boot_stream "$name" "$identity" "$operation" "$rootpxe_boot_log_pin"); then
-            collector=$!
-            rootpxe_log_pin_release "$rootpxe_boot_log_pin" "$identity" || log_status=1
-            rootpxe_boot_log_pin=''
-            if "$@" >&"$rootpxe_boot_log_fd" 2>&1; then status=0; else status=$?; fi
-            if exec {rootpxe_boot_log_fd}>&-; then
-                if [[ $lifecycle != background ]]; then wait "$collector" || { log_status=1; collector_warned=yes; }; fi
-            else log_status=1; fi
-        else
-            log_status=1
-            rootpxe_log_pin_release "$rootpxe_boot_log_pin" "$identity" || true
-            rootpxe_boot_log_pin=''
-            if "$@" >/dev/null 2>&1; then status=0; else status=$?; fi
-        fi
+    if [[ -n $rootpxe_boot_raw_identity ]]; then
+        # Only native stdio points to a regular file. No pipe writer FD, child
+        # collector or logger EOF wait is added to startup/daemon lifetimes.
+        if "$@" >"$rootpxe_boot_raw" 2>&1; then rootpxe_boot_status=0; else rootpxe_boot_status=$?; fi
+        if [[ $rootpxe_boot_ready == yes ]] && rootpxe_log_pin_valid "$rootpxe_boot_pin" "$rootpxe_boot_identity"; then
+            # Empty successful ssh-keygen output stays empty: an OP header
+            # must not pretend that new keys were generated.
+            if [[ $rootpxe_boot_status == 0 && ! -s $rootpxe_boot_raw ]]; then :
+            elif ! rootpxe_log_publish "$rootpxe_boot_name" "$rootpxe_boot_raw" "$rootpxe_boot_operation:exit=$rootpxe_boot_status" yes "$rootpxe_boot_identity"; then rootpxe_boot_log_status=1; fi
+        else rootpxe_boot_log_status=1; fi
+        rootpxe_log_raw_cleanup "$rootpxe_boot_raw" "$rootpxe_boot_raw_identity" || rootpxe_boot_log_status=1
     else
-        log_status=1
-        if "$@" >/dev/null 2>&1; then status=0; else status=$?; fi
+        rootpxe_boot_log_status=1
+        if "$@" >/dev/null 2>&1; then rootpxe_boot_status=0; else rootpxe_boot_status=$?; fi
     fi
-    if [[ $ready == yes && $log_status == 0 ]]; then rootpxe_boot_log_notice_state[$name]=$identity; fi
-    [[ $log_status == 0 || $collector_warned == yes ]] || printf '[WARN]  Diagnostic log: unavailable.\n' >&2
-    return "$status"
+    if [[ -n $rootpxe_boot_pin ]]; then rootpxe_log_pin_release "$rootpxe_boot_pin" "$rootpxe_boot_identity" || rootpxe_boot_log_status=1; fi
+    if [[ $rootpxe_boot_ready == yes && $rootpxe_boot_log_status == 0 ]]; then rootpxe_boot_log_notice_state[$rootpxe_boot_name]=$rootpxe_boot_identity; fi
+    [[ $rootpxe_boot_log_status == 0 ]] || printf '[WARN]  Diagnostic log: unavailable.\n' >&2
+    return "$rootpxe_boot_status"
 }
 
 rootpxe_log_notice() {

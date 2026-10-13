@@ -491,33 +491,45 @@ rootpxe_task_log_stream() {
 }
 
 rootpxe_run_logged_mutation() {
-    local label="$1" target="$2" status=0 collector log_status=0 rootpxe_task_log_native_fd
+    local rootpxe_mutation_label="$1" rootpxe_mutation_target="$2" rootpxe_mutation_status=0 rootpxe_mutation_log_status=0 rootpxe_mutation_raw='' rootpxe_mutation_identity='' rootpxe_mutation_text='' rootpxe_mutation_file='' rootpxe_mutation_attempt='' rootpxe_mutation_dir='' rootpxe_mutation_pin='' rootpxe_mutation_owner_pin='' rootpxe_mutation_same=no
     shift 2
-    [[ $label =~ ^[a-z][a-z0-9_-]{0,63}$ ]] || label=native_operation
-    [[ $target =~ ^[A-Za-z0-9_/.:+-]+$ && ${#target} -le 256 ]] || target=invalid_target
+    [[ $rootpxe_mutation_label =~ ^[a-z][a-z0-9_-]{0,63}$ ]] || rootpxe_mutation_label=native_operation
+    [[ $rootpxe_mutation_target =~ ^[A-Za-z0-9_/.:+-]+$ && ${#rootpxe_mutation_target} -le 256 ]] || rootpxe_mutation_target=invalid_target
     rootpxe_task_log_ensure || true
-    # Own only this extra FD, never global task stdio.  Save the collector
-    # before a native shell mock/helper can change the shell's last-job PID.
-    if exec {rootpxe_task_log_native_fd}> >(rootpxe_task_log_stream "$label" "$target"); then
-        collector=$!
-        if "$@" >&"$rootpxe_task_log_native_fd" 2>&1; then status=0; else status=$?; fi
-        if exec {rootpxe_task_log_native_fd}>&-; then
-            [[ -z $collector ]] || wait "$collector" || log_status=$?
-        else
-            log_status=1
-        fi
+    if rootpxe_task_log_valid; then
+        rootpxe_mutation_file=${rootpxe_task_log_state[file]}
+        rootpxe_mutation_attempt=${rootpxe_task_log_state[identity]}
+        rootpxe_mutation_dir=${rootpxe_task_log_state[directory_identity]}
+        rootpxe_mutation_pin=${rootpxe_task_log_state[pin]}
+        # Keep the original attempt inode alive even if a same-shell native
+        # mock/helper initializes multiple newer attempts before returning.
+        if exec {rootpxe_mutation_owner_pin}<"$rootpxe_mutation_file"; then
+            if ! rootpxe_log_pin_valid "$rootpxe_mutation_owner_pin" "$rootpxe_mutation_attempt"; then
+                exec {rootpxe_mutation_owner_pin}<&- || true
+                rootpxe_mutation_owner_pin=''; rootpxe_mutation_log_status=1
+            fi
+        else rootpxe_mutation_log_status=1; fi
+    else rootpxe_mutation_log_status=1; fi
+    if rootpxe_log_raw_file; then
+        rootpxe_mutation_raw=$rootpxe_log_raw_path
+        rootpxe_mutation_identity=$(stat -c '%d:%i:%a' -- "$rootpxe_mutation_raw") || rootpxe_mutation_identity=''
+    fi
+    if [[ -n $rootpxe_mutation_identity ]]; then
+        if "$@" >"$rootpxe_mutation_raw" 2>&1; then rootpxe_mutation_status=0; else rootpxe_mutation_status=$?; fi
+        rootpxe_mutation_text=$(rootpxe_log_snapshot "$rootpxe_mutation_raw") || rootpxe_mutation_log_status=1
+        rootpxe_log_raw_cleanup "$rootpxe_mutation_raw" "$rootpxe_mutation_identity" || rootpxe_mutation_log_status=1
     else
-        # A diagnostic FD failure is not an imaging failure.  This operation
-        # is approved native text, so discard it safely and retain its rc.
-        log_status=1
-        if "$@" >/dev/null 2>&1; then status=0; else status=$?; fi
+        rootpxe_mutation_log_status=1
+        if "$@" >/dev/null 2>&1; then rootpxe_mutation_status=0; else rootpxe_mutation_status=$?; fi
     fi
-    rootpxe_task_log_append "OP=$label TARGET=$target EXIT=$status" || log_status=1
-    if [[ $log_status -ne 0 ]]; then
-        rootpxe_task_log_state[unavailable]=yes
-        printf '[WARN]  Task log: unavailable.\n' >&2
-    fi
-    return "$status"
+    if [[ $(declare -p rootpxe_task_log_state 2>/dev/null) == 'declare -A '* && -n $rootpxe_mutation_attempt && ${rootpxe_task_log_state[file]:-} == "$rootpxe_mutation_file" && ${rootpxe_task_log_state[identity]:-} == "$rootpxe_mutation_attempt" && ${rootpxe_task_log_state[directory_identity]:-} == "$rootpxe_mutation_dir" && ${rootpxe_task_log_state[pin]:-} == "$rootpxe_mutation_pin" ]]; then rootpxe_mutation_same=yes; fi
+    if [[ $rootpxe_mutation_same == yes ]]; then
+        rootpxe_task_log_append "OP=$rootpxe_mutation_label TARGET=$rootpxe_mutation_target EXIT=$rootpxe_mutation_status"$'\n'"$rootpxe_mutation_text" || rootpxe_mutation_log_status=1
+    else rootpxe_mutation_log_status=1; fi
+    if [[ -n $rootpxe_mutation_owner_pin ]]; then rootpxe_log_pin_release "$rootpxe_mutation_owner_pin" "$rootpxe_mutation_attempt" || rootpxe_mutation_log_status=1; fi
+    if [[ $rootpxe_mutation_same == yes && $rootpxe_mutation_log_status != 0 ]]; then rootpxe_task_log_state[unavailable]=yes; fi
+    [[ $rootpxe_mutation_log_status == 0 ]] || printf '[WARN]  Task log: unavailable.\n' >&2
+    return "$rootpxe_mutation_status"
 }
 
 

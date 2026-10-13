@@ -77,11 +77,11 @@ printf 'release\n' >"$tmp/release-stale"
 rc=0; wait "$stale" || rc=$?
 check test "$rc" -ne 0
 check test "$(cat "$tmp/log/ntfsresize.log")" = CURRENT_TYPED
-real_cat=$(type -P cat)
-cat(){ [[ $* != "-- $raw" ]] || return 7; "$real_cat" "$@"; }
+saved_snapshot=$(declare -f rootpxe_log_snapshot)
+rootpxe_log_snapshot(){ [[ $1 != "$raw" ]] || return 7; }
 rc=0; rootpxe_log_publish ntfsresize.log "$raw" read_failed yes || rc=$?
 check test "$rc" -ne 0
-unset -f cat
+eval "$saved_snapshot"
 rm "$raw"
 # At rename time a directory target must not receive the staging file.
 real_mv=$(type -P mv)
