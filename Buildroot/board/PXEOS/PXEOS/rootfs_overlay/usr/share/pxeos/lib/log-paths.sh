@@ -9,7 +9,56 @@ rootpxe_log_pin_release() {
     # Only callers holding their non-exported ownership state may use this.
     local rootpxe_log_owned_pin="${1:-}"
     rootpxe_log_pin_valid "$rootpxe_log_owned_pin" "${2:-}" || return 1
-    exec {rootpxe_log_owned_pin}<&-
+    exec {rootpxe_log_owned_pin}<&- || return 1
+    if [[ $(declare -p rootpxe_log_owned_pin_state 2>/dev/null) == 'declare -A '* && ${rootpxe_log_owned_pin_state[$rootpxe_log_owned_pin]:-} == "${2:-}" ]]; then
+        unset 'rootpxe_log_owned_pin_state[$rootpxe_log_owned_pin]'
+    fi
+}
+
+rootpxe_log_pin_readonly() {
+    local rootpxe_pin_key rootpxe_pin_value rootpxe_pin_extra rootpxe_pin_flags='' rootpxe_pin_seen=0
+    rootpxe_log_pin_valid "${1:-}" "${2:-}" && [[ -O /proc/self/fd/$1 && -r /proc/self/fdinfo/$1 ]] || return 1
+    while read -r rootpxe_pin_key rootpxe_pin_value rootpxe_pin_extra; do
+        if [[ $rootpxe_pin_key == flags: ]]; then rootpxe_pin_flags=$rootpxe_pin_value; rootpxe_pin_seen=$((rootpxe_pin_seen+1)); fi
+    done <"/proc/self/fdinfo/$1"
+    [[ $rootpxe_pin_seen == 1 && $rootpxe_pin_flags =~ ^[0-7]{1,15}$ ]] || return 1
+    (( (8#$rootpxe_pin_flags & 3) == 0 ))
+}
+
+rootpxe_log_pin_register() {
+    rootpxe_log_pin_readonly "${1:-}" "${2:-}" || return 1
+    # An associative ownership record cannot be supplied by environment scalars.
+    if [[ $(declare -p rootpxe_log_owned_pin_state 2>/dev/null) != 'declare -A '* ]]; then
+        unset rootpxe_log_owned_pin_state
+        declare -gA rootpxe_log_owned_pin_state=()
+    fi
+    export -n rootpxe_log_owned_pin_state
+    rootpxe_log_owned_pin_state[$1]=$2
+}
+
+rootpxe_lvm_command_valid() {
+    case "${1:-}" in
+        pvs|vgs|lvs|pvdisplay|vgdisplay|lvdisplay|pvcreate|pvresize|vgcfgrestore|vgcfgbackup|vgchange|lvchange|lvextend) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+rootpxe_lvm_native() {
+    rootpxe_lvm_command_valid "${1:-}" || return 127
+    (
+        local rootpxe_lvm_pin rootpxe_lvm_pin_identity
+        if [[ $(declare -p rootpxe_log_owned_pin_state 2>/dev/null) == 'declare -A '* ]]; then
+            for rootpxe_lvm_pin in "${!rootpxe_log_owned_pin_state[@]}"; do
+                rootpxe_lvm_pin_identity=${rootpxe_log_owned_pin_state[$rootpxe_lvm_pin]}
+                # Close only this child's verified logger descriptors. Foreign
+                # descriptors and real native stderr remain visible to LVM.
+                if rootpxe_log_pin_readonly "$rootpxe_lvm_pin" "$rootpxe_lvm_pin_identity"; then
+                    rootpxe_log_pin_release "$rootpxe_lvm_pin" "$rootpxe_lvm_pin_identity" || true
+                fi
+            done
+        fi
+        "$@"
+    )
 }
 
 rootpxe_run_logged_typed_native() {
@@ -17,6 +66,7 @@ rootpxe_run_logged_typed_native() {
     # avoid Bash dynamic-scope collisions with the caller's native shell mock.
     local rootpxe_typed_native_type="$1" rootpxe_typed_native_target="$2" rootpxe_typed_native_raw='' rootpxe_typed_native_identity='' rootpxe_typed_native_status=0 rootpxe_typed_native_reference=unavailable
     shift 2
+    if rootpxe_lvm_command_valid "${1:-}"; then set -- rootpxe_lvm_native "$@"; fi
     [[ $rootpxe_typed_native_target =~ ^[A-Za-z0-9_./:+-]+$ && ${#rootpxe_typed_native_target} -le 200 ]] || rootpxe_typed_native_target=unknown
     if declare -F rootpxe_task_log_ensure >/dev/null; then
         rootpxe_task_log_ensure || printf '[WARN]  Task log: unavailable.\n' >&2
@@ -232,7 +282,7 @@ rootpxe_log_boot_run() {
     if [[ $rootpxe_boot_ready == yes ]]; then
         rootpxe_boot_dir=$(rootpxe_log_directory) || rootpxe_boot_ready=no
         if [[ $rootpxe_boot_ready == yes ]] && exec {rootpxe_boot_pin}<"$rootpxe_boot_dir/$rootpxe_boot_name"; then
-            rootpxe_log_pin_valid "$rootpxe_boot_pin" "$rootpxe_boot_identity" || { exec {rootpxe_boot_pin}<&-; rootpxe_boot_pin=''; rootpxe_boot_ready=no; }
+            rootpxe_log_pin_valid "$rootpxe_boot_pin" "$rootpxe_boot_identity" && rootpxe_log_pin_register "$rootpxe_boot_pin" "$rootpxe_boot_identity" || { exec {rootpxe_boot_pin}<&-; rootpxe_boot_pin=''; rootpxe_boot_ready=no; }
         else rootpxe_boot_ready=no; fi
     fi
     if rootpxe_log_raw_file; then

@@ -13,7 +13,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 mkdir -p "$tmp/mock" "$tmp/etc/network" "$tmp/lib"
-{ printf '. "%s/tests/task-log-test-support.sh"\n' "$root"; sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh"; } >"$tmp/log-paths.sh"
+{ printf '. "%s/tests/task-log-test-support.sh"\n' "$root"; sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh"; printf '\ntask_log_test_emulate_pin_flags\n'; } >"$tmp/log-paths.sh"
 printf 'export initversion=20990101\n' >"$tmp/lib/funcs.sh"
 
 cat >"$tmp/mock/ip" <<'EOF'
@@ -175,7 +175,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 mkdir -p "$tmp/mock" "$tmp/etc/network" "$tmp/ssh"
-{ printf '. "%s/tests/task-log-test-support.sh"\n' "$root"; sed "s|/tmp/log|$tmp/log|g" "$overlay/usr/share/pxeos/lib/log-paths.sh"; } >"$tmp/log-paths.sh"
+{ printf '. "%s/tests/task-log-test-support.sh"\n' "$root"; sed "s|/tmp/log|$tmp/log|g" "$overlay/usr/share/pxeos/lib/log-paths.sh"; printf '\ntask_log_test_emulate_pin_flags\n'; } >"$tmp/log-paths.sh"
 
 cat >"$tmp/mock/ip" <<'EOF'
 #!/usr/bin/env bash

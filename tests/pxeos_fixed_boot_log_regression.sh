@@ -10,6 +10,7 @@ for script in S40network S50crond S50sshd; do
     grep -q log-paths.sh "$overlay/etc/init.d/$script" || fail "$script missing-safe-log-helper"
 done
 . <(sed "s|/tmp/log|$tmp/log|g" "$overlay/usr/share/pxeos/lib/log-paths.sh")
+task_log_test_emulate_pin_flags
 native(){ printf 'OK token=boot-fake-secret\n'; return "${native_rc:-0}"; }
 rootpxe_log_boot_run ssh-service.log start foreground native
 grep -q 'token=\[REDACTED\]' "$tmp/log/ssh-service.log" || fail redact

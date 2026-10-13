@@ -366,7 +366,7 @@ rootpxe_task_log_initialize() {
     file=$rootpxe_log_created_file
     identity=$rootpxe_log_created_identity
     exec {rootpxe_task_new_pin}<"$file" || return 1
-    if ! rootpxe_log_pin_valid "$rootpxe_task_new_pin" "$identity"; then
+    if ! rootpxe_log_pin_valid "$rootpxe_task_new_pin" "$identity" || ! rootpxe_log_pin_register "$rootpxe_task_new_pin" "$identity"; then
         exec {rootpxe_task_new_pin}<&- || true
         return 1
     fi
@@ -493,6 +493,7 @@ rootpxe_task_log_stream() {
 rootpxe_run_logged_mutation() {
     local rootpxe_mutation_label="$1" rootpxe_mutation_target="$2" rootpxe_mutation_status=0 rootpxe_mutation_log_status=0 rootpxe_mutation_raw='' rootpxe_mutation_identity='' rootpxe_mutation_text='' rootpxe_mutation_file='' rootpxe_mutation_attempt='' rootpxe_mutation_dir='' rootpxe_mutation_pin='' rootpxe_mutation_owner_pin='' rootpxe_mutation_same=no
     shift 2
+    if rootpxe_lvm_command_valid "${1:-}"; then set -- rootpxe_lvm_native "$@"; fi
     [[ $rootpxe_mutation_label =~ ^[a-z][a-z0-9_-]{0,63}$ ]] || rootpxe_mutation_label=native_operation
     [[ $rootpxe_mutation_target =~ ^[A-Za-z0-9_/.:+-]+$ && ${#rootpxe_mutation_target} -le 256 ]] || rootpxe_mutation_target=invalid_target
     rootpxe_task_log_ensure || true
@@ -504,7 +505,7 @@ rootpxe_run_logged_mutation() {
         # Keep the original attempt inode alive even if a same-shell native
         # mock/helper initializes multiple newer attempts before returning.
         if exec {rootpxe_mutation_owner_pin}<"$rootpxe_mutation_file"; then
-            if ! rootpxe_log_pin_valid "$rootpxe_mutation_owner_pin" "$rootpxe_mutation_attempt"; then
+            if ! rootpxe_log_pin_valid "$rootpxe_mutation_owner_pin" "$rootpxe_mutation_attempt" || ! rootpxe_log_pin_register "$rootpxe_mutation_owner_pin" "$rootpxe_mutation_attempt"; then
                 exec {rootpxe_mutation_owner_pin}<&- || true
                 rootpxe_mutation_owner_pin=''; rootpxe_mutation_log_status=1
             fi
@@ -866,7 +867,7 @@ rootpxe_lvm_capture_report() {
     shift
     diagnostic=$(mktemp /tmp/rootpxe-lvm-report.XXXXXX) || return 1
     chmod 600 "$diagnostic" || { rm -f -- "$diagnostic"; return 1; }
-    LC_ALL=C "$@" >"$output" 2>"$diagnostic"; rc=$?
+    LC_ALL=C rootpxe_lvm_native "$@" >"$output" 2>"$diagnostic"; rc=$?
     [[ ! -s $diagnostic ]] || rc=1
     rm -f -- "$diagnostic"
     return "$rc"
@@ -979,7 +980,7 @@ rootpxe_lvm_prepare_capture_lv_facts_single() {
         rootpxe_lvm_prepare_run() {
             local description="$1" output rc
             shift
-            if output=$("$@" 2>&1); then
+            if output=$(rootpxe_lvm_native "$@" 2>&1); then
                 return 0
             else
                 rc=$?
@@ -1004,7 +1005,7 @@ rootpxe_lvm_prepare_capture_lv_facts_single() {
             exit 1
         }
         trap rootpxe_lvm_prepare_signal HUP INT TERM
-        if lvs_output=$(lvs --reportformat json -o lv_uuid,lv_path,lv_active --select "vg_uuid=$vg_uuid" "$vg" 2>&1); then
+        if lvs_output=$(rootpxe_lvm_native lvs --reportformat json -o lv_uuid,lv_path,lv_active --select "vg_uuid=$vg_uuid" "$vg" 2>&1); then
             printf '%s\n' "$lvs_output" >"$lvs_json" || prepare_rc=1
         else
             lvs_rc=$?
@@ -1172,7 +1173,7 @@ rootpxe_capture_lvm_volumes_single() {
     rootpxe_lvm_capture_status_file=$(mktemp /tmp/rootpxe-lvm-capture-status.XXXXXX) || return 1
     stage=$(mktemp -d "$image_path/.rootpxe-lvm.XXXXXX") || { rm -f -- "$rootpxe_lvm_capture_status_file"; return 1; }
     (
-    trap 'rm -f -- "$fifo"; [[ $vg_active == yes ]] && vgchange -an --select "vg_uuid=$rootpxe_lvm_vg_uuid" "$rootpxe_lvm_vg_name" >/dev/null 2>&1 || true; rm -rf -- "$stage"' EXIT
+    trap 'rm -f -- "$fifo"; [[ $vg_active == yes ]] && rootpxe_lvm_native vgchange -an --select "vg_uuid=$rootpxe_lvm_vg_uuid" "$rootpxe_lvm_vg_name" >/dev/null 2>&1 || true; rm -rf -- "$stage"' EXIT
     pv_artifact="d1p${rootpxe_lvm_pv_number}.lvm.pv.meta"; vg_artifact="d1p${rootpxe_lvm_pv_number}.lvm.vg.cfg"
     rootpxe_safe_relative_path "$pv_artifact" >/dev/null && rootpxe_safe_relative_path "$vg_artifact" >/dev/null || return 1
     if rootpxe_activate_lvm_vg "$rootpxe_lvm_vg_uuid" "$rootpxe_lvm_vg_name"; then
@@ -1195,8 +1196,8 @@ rootpxe_capture_lvm_volumes_single() {
             rootpxe_console_message WARN 'LVM capture display metadata was unavailable; continuing without optional source mappings.'
         fi
     fi
-    LC_ALL=C pvdisplay -m --units b "$rootpxe_lvm_pv_path" >"$stage/$pv_artifact" 2>/dev/null || return 1
-    vgcfgbackup -f "$stage/$vg_artifact" "$rootpxe_lvm_vg_name" >/dev/null 2>&1 || return 1
+    LC_ALL=C rootpxe_lvm_native pvdisplay -m --units b "$rootpxe_lvm_pv_path" >"$stage/$pv_artifact" 2>/dev/null || return 1
+    rootpxe_lvm_native vgcfgbackup -f "$stage/$vg_artifact" "$rootpxe_lvm_vg_name" >/dev/null 2>&1 || return 1
     : >"$stage/d1.lvm.capture.tsv" || return 1
     while IFS='|' read -r lv_name lv_uuid lv_path lv_size fs extra; do
         artifact=""; swap_uuid=""
@@ -2096,7 +2097,7 @@ rootpxe_restore_lvm_volumes_single() {
     }
     local image_path="$1" target_disk="$2" plan="${rootpxe_resolved_lvm_layout_file:-}" pv vg pv_part pv_path parent_progress_key pv_meta vg_cfg lv_name lv_uuid lv_fs lv_artifact lv_bytes swap_uuid target_id actual_size current_size pv_original pv_bytes vg_uuid extent lv_list expected_lvs prevalidated_lvs=0 restored_lvs=0 xfs_mount="" vg_active=no vgs_json pvs_json lvs_json vgs_diag pvs_diag
     local -A seen_lv_names=() seen_artifacts=()
-    trap '[[ -n $xfs_mount ]] && umount "$xfs_mount" >/dev/null 2>&1 || true; [[ -n $xfs_mount ]] && rmdir "$xfs_mount" >/dev/null 2>&1 || true; [[ $vg_active == yes && -n $vg && -n $vg_uuid ]] && vgchange -an --select "vg_uuid=$vg_uuid" "$vg" >/dev/null 2>&1 || true; rm -f -- "${lv_list:-}"' EXIT
+    trap '[[ -n $xfs_mount ]] && umount "$xfs_mount" >/dev/null 2>&1 || true; [[ -n $xfs_mount ]] && rmdir "$xfs_mount" >/dev/null 2>&1 || true; [[ $vg_active == yes && -n $vg && -n $vg_uuid ]] && rootpxe_lvm_native vgchange -an --select "vg_uuid=$vg_uuid" "$vg" >/dev/null 2>&1 || true; rm -f -- "${lv_list:-}"' EXIT
     [[ ${rootpxe_disk_permit_granted:-no} == yes && -r $plan ]] || { rootpxe_restore_lvm_fail LVM_RESTORE_PERMIT_FAILED permit_or_plan; return 1; }
     target_id=$(rootpxe_disk_stable_identity "$target_disk") || { rootpxe_restore_lvm_fail LVM_RESTORE_TARGET_IDENTITY_FAILED stable_identity; return 1; }
     [[ ${rootpxe_disk_permit_target_id:-} == "$target_id" && ${rootpxe_disk_permit_operation:-} =~ ^(deploy_write|nvme_format\+deploy_write)$ ]] || { rootpxe_restore_lvm_fail LVM_RESTORE_PERMIT_FAILED target_or_operation; return 1; }
@@ -2164,7 +2165,7 @@ rootpxe_restore_lvm_volumes_single() {
     # complete report with no matching row is the expected empty-disk case.
     vgs_diag=$(mktemp /tmp/rootpxe-lvm-vgs-query.XXXXXX) || { rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED vgs_diag_create; return 1; }
     chmod 600 "$vgs_diag" || { rm -f -- "$vgs_diag"; rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED vgs_diag_permissions; return 1; }
-    vgs_json=$(LC_ALL=C vgs --reportformat json -o vg_name,vg_uuid 2>"$vgs_diag") || { rm -f -- "$vgs_diag"; rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED vgs; return 1; }
+    vgs_json=$(LC_ALL=C rootpxe_lvm_native vgs --reportformat json -o vg_name,vg_uuid 2>"$vgs_diag") || { rm -f -- "$vgs_diag"; rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED vgs; return 1; }
     [[ ! -s $vgs_diag ]] || { rm -f -- "$vgs_diag"; rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED vgs_diagnostic; return 1; }
     rm -f -- "$vgs_diag"
     rootpxe_lvm_json_jq -e --arg name "$vg" --arg uuid "$vg_uuid" '
@@ -2177,7 +2178,7 @@ rootpxe_restore_lvm_volumes_single() {
     # are otherwise indistinguishable to vgcfgrestore and must fail closed.
     pvs_diag=$(mktemp /tmp/rootpxe-lvm-pvs-query.XXXXXX) || { rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED pvs_diag_create; return 1; }
     chmod 600 "$pvs_diag" || { rm -f -- "$pvs_diag"; rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED pvs_diag_permissions; return 1; }
-    pvs_json=$(LC_ALL=C pvs --reportformat json -o pv_name,pv_uuid,vg_name,vg_uuid 2>"$pvs_diag") || { rm -f -- "$pvs_diag"; rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED pvs; return 1; }
+    pvs_json=$(LC_ALL=C rootpxe_lvm_native pvs --reportformat json -o pv_name,pv_uuid,vg_name,vg_uuid 2>"$pvs_diag") || { rm -f -- "$pvs_diag"; rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED pvs; return 1; }
     [[ ! -s $pvs_diag ]] || { rm -f -- "$pvs_diag"; rootpxe_restore_lvm_fail LVM_RESTORE_EXISTING_VG_QUERY_FAILED pvs_diagnostic; return 1; }
     rm -f -- "$pvs_diag"
     rootpxe_lvm_json_jq -e --arg path "$pv_path" --arg pv "$pv" --arg vg "$vg" --arg vguuid "$vg_uuid" '
@@ -2203,13 +2204,13 @@ rootpxe_restore_lvm_volumes_single() {
     fi
     vg_active=yes
     rootpxe_partition_progress_item "$parent_progress_key" running - "正在恢复 LVM 逻辑卷"
-    vgs_json=$(vgs --reportformat json -o vg_name,vg_uuid "$vg" 2>/dev/null) || return 1
+    vgs_json=$(rootpxe_lvm_native vgs --reportformat json -o vg_name,vg_uuid "$vg" 2>/dev/null) || return 1
     rootpxe_lvm_json_jq -e --arg name "$vg" --arg uuid "$vg_uuid" '
       (.report | (type == "array" and length == 1)) and
       ((.report[0].vg? // []) | (type == "array" and length == 1)) and
       .report[0].vg[0].vg_name == $name and .report[0].vg[0].vg_uuid == $uuid
     ' <<<"$vgs_json" >/dev/null || return 1
-    pvs_json=$(pvs --reportformat json -o pv_name,pv_uuid,vg_name,vg_uuid "$pv_path" 2>/dev/null) || return 1
+    pvs_json=$(rootpxe_lvm_native pvs --reportformat json -o pv_name,pv_uuid,vg_name,vg_uuid "$pv_path" 2>/dev/null) || return 1
     rootpxe_lvm_json_jq -e --arg path "$pv_path" --arg pv "$pv" --arg vg "$vg" --arg vguuid "$vg_uuid" '
       (.report | (type == "array" and length == 1)) and
       ((.report[0].pv? // []) | (type == "array" and length == 1)) and
@@ -2219,7 +2220,7 @@ rootpxe_restore_lvm_volumes_single() {
     # The list was fully validated before pvcreate.  Re-read its NUL framing
     # here only to bind each verified schema entry to the restored LV.
     while IFS= read -r -d '' lv_name && IFS= read -r -d '' lv_uuid && IFS= read -r -d '' lv_fs && IFS= read -r -d '' lv_artifact && IFS= read -r -d '' lv_bytes && IFS= read -r -d '' swap_uuid; do
-        lvs_json=$(lvs --reportformat json -o vg_name,vg_uuid,lv_name,lv_uuid,lv_path --select "vg_uuid=$vg_uuid" "$vg/$lv_name" 2>/dev/null) || { rootpxe_restore_lvm_fail LVM_LV_IDENTITY_QUERY_FAILED "lv_${lv_name}"; return 1; }
+        lvs_json=$(rootpxe_lvm_native lvs --reportformat json -o vg_name,vg_uuid,lv_name,lv_uuid,lv_path --select "vg_uuid=$vg_uuid" "$vg/$lv_name" 2>/dev/null) || { rootpxe_restore_lvm_fail LVM_LV_IDENTITY_QUERY_FAILED "lv_${lv_name}"; return 1; }
         rootpxe_lvm_json_jq -e --arg name "$vg" --arg uuid "$vg_uuid" --arg lv "$lv_name" --arg lvuuid "$lv_uuid" '(.report|type=="array" and length==1 and ((.[0].lv? // [])|type=="array") and ((.[0].lv? // [])|length==1) and .[0].lv[0].vg_name==$name and .[0].lv[0].vg_uuid==$uuid and .[0].lv[0].lv_name==$lv and .[0].lv[0].lv_uuid==$lvuuid and .[0].lv[0].lv_path==("/dev/"+$name+"/"+$lv))' <<<"$lvs_json" >/dev/null || { rootpxe_restore_lvm_fail LVM_LV_IDENTITY_FAILED "lv_${lv_name}"; return 1; }
         current_size=$(blockdev --getsize64 "/dev/$vg/$lv_name" 2>/dev/null) || { rootpxe_restore_lvm_fail LVM_LV_SIZE_READ_FAILED "lv_${lv_name}"; return 1; }
         [[ $current_size =~ ^[1-9][0-9]*$ && $lv_bytes -ge $current_size ]] || { rootpxe_restore_lvm_fail LVM_LV_SIZE_INVALID "lv_${lv_name}"; return 1; }
@@ -2478,8 +2479,8 @@ rootpxe_lvm_preflight_restore_groups() {
     group_count=$index
     [[ $group_count -eq $count ]] || return 1
     pvs_diag="$work/pvs.err"; vgs_diag="$work/vgs.err"
-    pvs_json=$(LC_ALL=C pvs --reportformat json -o pv_name,pv_uuid,vg_name,vg_uuid 2>"$pvs_diag") || return 1
-    vgs_json=$(LC_ALL=C vgs --reportformat json -o vg_name,vg_uuid 2>"$vgs_diag") || return 1
+    pvs_json=$(LC_ALL=C rootpxe_lvm_native pvs --reportformat json -o pv_name,pv_uuid,vg_name,vg_uuid 2>"$pvs_diag") || return 1
+    vgs_json=$(LC_ALL=C rootpxe_lvm_native vgs --reportformat json -o vg_name,vg_uuid 2>"$vgs_diag") || return 1
     [[ ! -s $pvs_diag && ! -s $vgs_diag ]] || return 1
     rootpxe_lvm_json_jq -e 'type == "object" and (.report | type == "array" and length == 1) and
       (.report[0] | type == "object" and (.pv | type == "array") and
@@ -5299,7 +5300,7 @@ rootpxe_linux_validate_vg_target_pvs() {
     getPartitions "$disk"
     [[ -n ${parts:-} ]] || return 1
     rootpxe_lvm_safe_identifier "$vg_uuid" || return 1
-    pvs_json=$(pvs --reportformat json -o pv_name,vg_uuid 2>/dev/null) || return 1
+    pvs_json=$(rootpxe_lvm_native pvs --reportformat json -o pv_name,vg_uuid 2>/dev/null) || return 1
     rootpxe_lvm_json_jq -e '(.report|type == "array" and length == 1 and ((.[0].pv? // [])|type == "array") and all((.[0].pv? // [])[]; (.pv_name|type == "string") and (.vg_uuid|type == "string")))' <<<"$pvs_json" >/dev/null || return 1
     all_pvs=$(rootpxe_lvm_json_jq -r --arg uuid "$vg_uuid" '.report[0].pv[] | select(.vg_uuid == $uuid) | .pv_name' <<<"$pvs_json") || return 1
     [[ -n $all_pvs ]] || return 1
@@ -5320,7 +5321,7 @@ rootpxe_linux_lvm_path_readable() { [[ -b $1 && -r $1 ]]; }
 rootpxe_linux_lvs_for_vg_json() {
     local vg_name="$1" vg_uuid="$2" output="$3" lvs_json
     rootpxe_lvm_validate_vg_name "$vg_name" && rootpxe_lvm_safe_identifier "$vg_uuid" || return 1
-    lvs_json=$(lvs --reportformat json -o vg_name,vg_uuid,lv_name,lv_path,lv_active --select "vg_uuid=$vg_uuid" "$vg_name" 2>/dev/null) || return 1
+    lvs_json=$(rootpxe_lvm_native lvs --reportformat json -o vg_name,vg_uuid,lv_name,lv_path,lv_active --select "vg_uuid=$vg_uuid" "$vg_name" 2>/dev/null) || return 1
     rootpxe_lvm_json_jq -e --arg name "$vg_name" --arg uuid "$vg_uuid" '(.report|type == "array" and length == 1 and ((.[0].lv? // [])|type == "array") and ((.[0].lv? // [])|length > 0) and all((.[0].lv? // [])[]; (.vg_name == $name) and (.vg_uuid == $uuid) and (.lv_name|type == "string") and (.lv_path|type == "string") and (.lv_active|type == "string")))' <<<"$lvs_json" >/dev/null || return 1
     rootpxe_lvm_json_jq -r '.report[0].lv[] | [.lv_name,.lv_path,.lv_active] | @tsv' <<<"$lvs_json" >"$output"
 }
@@ -5342,19 +5343,19 @@ rootpxe_linux_activate_vg_if_needed() {
     [[ $count -gt 0 ]] || { rm -f -- "$rows"; return 1; }
     if [[ $inactive -eq $count ]]; then
         if ! rootpxe_run_logged_typed_native linux-lvm.log "$vg_name" vgchange -ay --select "vg_uuid=$vg_uuid" "$vg_name"; then
-            vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true
+            rootpxe_lvm_native vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true
             rm -f -- "$rows"
             return 1
         fi
         : >"$rows"
-        rootpxe_linux_lvs_for_vg_json "$vg_name" "$vg_uuid" "$rows" || { vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true; rm -f -- "$rows"; return 1; }
+        rootpxe_linux_lvs_for_vg_json "$vg_name" "$vg_uuid" "$rows" || { rootpxe_lvm_native vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true; rm -f -- "$rows"; return 1; }
         count=0
         while IFS=$'\t' read -r lv_name lv_path state; do
             lv_name=$(rootpxe_lvm_trim "$lv_name"); lv_path=$(rootpxe_lvm_trim "$lv_path"); state=$(rootpxe_lvm_trim "$state")
-            [[ $state == active ]] && rootpxe_linux_lvm_path_readable "$lv_path" || { vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true; rm -f -- "$rows"; return 1; }
+            [[ $state == active ]] && rootpxe_linux_lvm_path_readable "$lv_path" || { rootpxe_lvm_native vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true; rm -f -- "$rows"; return 1; }
             count=$((count + 1))
         done <"$rows"
-        [[ $count -gt 0 ]] || { vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true; rm -f -- "$rows"; return 1; }
+        [[ $count -gt 0 ]] || { rootpxe_lvm_native vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true; rm -f -- "$rows"; return 1; }
         rm -f -- "$rows"
         printf '%s\n' yes
     elif [[ $active -eq $count ]]; then
@@ -5369,7 +5370,7 @@ rootpxe_linux_activate_vg_if_needed() {
 rootpxe_linux_cleanup_selected_vg() {
     local vg_name="$1" vg_uuid="$2" activated="$3"
     [[ $activated == yes && -n $vg_name && -n $vg_uuid ]] || return 0
-    vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true
+    rootpxe_lvm_native vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true
 }
 
 # Finds exactly one Linux root filesystem belonging to the target disk.  For
@@ -5425,7 +5426,7 @@ rootpxe_find_linux_root_filesystem() {
         esac
     done
     for part in $lvm_parts; do
-        pvs_json=$(pvs --reportformat json -o pv_name,vg_name,vg_uuid "$part" 2>/dev/null) || { lvm_activation_failed=1; continue; }
+        pvs_json=$(rootpxe_lvm_native pvs --reportformat json -o pv_name,vg_name,vg_uuid "$part" 2>/dev/null) || { lvm_activation_failed=1; continue; }
         rootpxe_lvm_json_jq -e '(.report|type == "array" and length == 1 and ((.[0].pv? // [])|type == "array") and all((.[0].pv? // [])[]; (.pv_name|type == "string") and (.vg_name|type == "string") and (.vg_uuid|type == "string")))' <<<"$pvs_json" >/dev/null || { lvm_activation_failed=1; continue; }
         pv_rows=$(mktemp /tmp/rootpxe-linux-pvs.XXXXXX) || { lvm_activation_failed=1; continue; }
         if ! rootpxe_lvm_json_jq -r --arg part "$part" '.report[0].pv[] | select(.pv_name == $part) | [.pv_name,.vg_name,.vg_uuid] | @tsv' <<<"$pvs_json" >"$pv_rows"; then
@@ -5504,7 +5505,7 @@ rootpxe_find_linux_root_filesystem() {
     for activation in $activated_vgs; do
         vg_name=${activation%%|*}
         vg_uuid=${activation#*|}
-        vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true
+        rootpxe_lvm_native vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true
     done
     [[ $rc -eq 0 ]] && printf '%s\n' "$final_candidate"
     return $rc

@@ -9,6 +9,7 @@ trap 'rm -rf -- "$tmp"' EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 [[ -f $lib/log-paths.sh ]] || fail missing-log-path-helper
 sed "s|/tmp/log|$tmp/log|g" "$lib/log-paths.sh" >"$tmp/paths"
+printf '\ntask_log_test_emulate_pin_flags\n' >>"$tmp/paths"
 . "$tmp/paths"
 task_log_test_load_helpers "$lib/funcs.sh"
 checks=0

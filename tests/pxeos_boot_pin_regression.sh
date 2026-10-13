@@ -6,6 +6,7 @@ tmp=$(mktemp -d /tmp/pxeos-boot-pin-test.XXXXXX)
 trap 'rm -rf -- "$tmp"' EXIT
 . "$root/tests/task-log-test-support.sh"
 . <(sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh")
+task_log_test_emulate_pin_flags
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 native_pin(){
     captured_pin=$rootpxe_boot_pin
