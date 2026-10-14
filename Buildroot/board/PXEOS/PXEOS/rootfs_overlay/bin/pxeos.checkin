@@ -73,9 +73,39 @@ rootpxe_json_assign_text() {
     printf -v "$name" '%s' "$value"
 }
 
+rootpxe_deploy_script_identity() { stat -c '%d:%i:%u:%a:%h' -- "$1"; }
+rootpxe_deploy_script_path_valid() { [[ $1 =~ ^/tmp/rootpxe-(pre|post)-deploy\.[A-Za-z0-9]{6}$ ]]; }
+rootpxe_register_deploy_script_file() {
+    local path="$1" identity device inode owner mode links
+    rootpxe_deploy_script_path_valid "$path" && [[ -f $path && ! -L $path && -O $path ]] || return 1
+    identity=$(rootpxe_deploy_script_identity "$path") || return 1
+    IFS=: read -r device inode owner mode links <<<"$identity"
+    [[ $device =~ ^[0-9]+$ && $inode =~ ^[0-9]+$ && $owner == "$EUID" && $mode == 700 && $links == 1 ]] || return 1
+    if [[ $(declare -p rootpxe_deploy_script_files 2>/dev/null) != 'declare -A '* || ${rootpxe_deploy_script_owner_pid:-} != "$BASHPID" ]]; then
+        unset rootpxe_deploy_script_files
+        declare -gA rootpxe_deploy_script_files=()
+        rootpxe_deploy_script_owner_pid=$BASHPID
+    fi
+    export -n rootpxe_deploy_script_files rootpxe_deploy_script_owner_pid
+    rootpxe_deploy_script_files[$path]=$identity
+}
+rootpxe_deploy_script_file_owned() {
+    local path="$1"
+    rootpxe_deploy_script_path_valid "$path" &&
+        [[ $(declare -p rootpxe_deploy_script_files 2>/dev/null) == 'declare -A '* && ${rootpxe_deploy_script_owner_pid:-} == "$BASHPID" ]] || return 1
+    [[ -f $path && ! -L $path && -O $path && -n ${rootpxe_deploy_script_files[$path]:-} ]] || return 1
+    [[ $(rootpxe_deploy_script_identity "$path") == "${rootpxe_deploy_script_files[$path]}" ]]
+}
+rootpxe_release_deploy_script_file() {
+    local path="$1"
+    rootpxe_deploy_script_file_owned "$path" || return 0
+    rm -f -- "$path" || return 1
+    unset 'rootpxe_deploy_script_files[$path]'
+}
 rootpxe_clear_json_deploy_scripts() {
-    rm -f -- "${preDeployScriptFile:-}" "${postDeployScriptFile:-}"
-    unset preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256
+    rootpxe_release_deploy_script_file "${preDeployScriptFile:-}"
+    rootpxe_release_deploy_script_file "${postDeployScriptFile:-}"
+    unset preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 postDeployScriptExecution
 }
 
 # v1 身份策略只接受服务端冻结后的 JSON；不从内核参数或环境读取。策略
@@ -151,7 +181,7 @@ rootpxe_write_checkin_json_payload() {
         --arg sysuuid "${sysuuid_local:-}" \
         --argjson versions "$identity_versions" \
         --argjson capabilities "$capabilities" \
-		'{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities}' >"$output_file"
+		'{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",postDeployScriptCapability:"linux-systemd-v1",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities}' >"$output_file"
 	result=$?
 	: >"$token_file"
 	rm -f -- "$token_file"
@@ -192,6 +222,7 @@ rootpxe_apply_json_deploy_script() {
         rm -f -- "$script_file"
         return 1
     fi
+    rootpxe_register_deploy_script_file "$script_file" || { rm -f -- "$script_file"; return 1; }
     printf -v "$file_var" '%s' "$script_file"
     printf -v "$hash_var" '%s' "$script_hash"
 }
@@ -199,14 +230,28 @@ rootpxe_apply_json_deploy_script() {
 rootpxe_apply_json_deploy_scripts() {
     local document="$1"
     rootpxe_clear_json_deploy_scripts
+    if [[ ${taskType:-} != deploy ]]; then
+        jq -e 'has("preDeployScript") or has("preDeployScriptSha256") or has("postDeployScript") or has("postDeployScriptSha256") or has("postDeployScriptExecution")' >/dev/null 2>&1 <<<"$document" && return 1
+        return 0
+    fi
+    if [[ ${osid:-} == 50 ]]; then
+        jq -e '.type=="deploy" and (.osid|type=="number") and .osid==50 and has("postDeployScript") and has("postDeployScriptSha256") and .postDeployScriptExecution=="linux-systemd-v1"' >/dev/null 2>&1 <<<"$document" || return 1
+    else
+        jq -e 'has("postDeployScript") or has("postDeployScriptSha256") or has("postDeployScriptExecution")' >/dev/null 2>&1 <<<"$document" && return 1
+    fi
     rootpxe_apply_json_deploy_script "$document" preDeployScript preDeployScriptSha256 preDeployScriptFile preDeployScriptSha256 pre-deploy || {
         rootpxe_clear_json_deploy_scripts
         return 1
     }
-    rootpxe_apply_json_deploy_script "$document" postDeployScript postDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 post-deploy || {
-        rootpxe_clear_json_deploy_scripts
-        return 1
-    }
+    if [[ ${osid:-} == 50 ]]; then
+        rootpxe_apply_json_deploy_script "$document" postDeployScript postDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 post-deploy || {
+            rootpxe_clear_json_deploy_scripts
+            return 1
+        }
+        postDeployScriptExecution=linux-systemd-v1
+        export postDeployScriptExecution
+    fi
+    return 0
 }
 
 rootpxe_apply_json_capture_backup_name() {
@@ -278,6 +323,7 @@ rootpxe_validate_pigz_compression() {
 # JSON checkin uses an explicit whitelist.  Never eval/source response content.
 rootpxe_apply_json_checkin() {
     local document="$1" value
+    rootpxe_clear_json_deploy_scripts
     command -v jq >/dev/null 2>&1 || return 1
     jq -e 'type == "object"' >/dev/null 2>&1 <<<"$document" || return 1
     rootpxe_json_assign "$document" waitFlag '.wait' || return 1
@@ -369,9 +415,9 @@ rootpxe_apply_json_checkin() {
         rootpxe_apply_json_deploy_scripts "$document" || return 1
     else
         rootpxe_clear_json_deploy_scripts
-        jq -e 'has("preDeployScript") or has("preDeployScriptSha256") or has("postDeployScript") or has("postDeployScriptSha256")' >/dev/null 2>&1 <<<"$document" && return 1
+        jq -e 'has("preDeployScript") or has("preDeployScriptSha256") or has("postDeployScript") or has("postDeployScriptSha256") or has("postDeployScriptExecution")' >/dev/null 2>&1 <<<"$document" && return 1
     fi
-    export taskid execution_token taskType pxe_type img img_type img_partition_type osid img_format pigz_comp shutdown protocol storage_server storage_export hostName changeHostname resumeStage schemaRevision schemaHash captureBackupName preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash deploymentIdentityPolicyFile multicastTransportMode multicastSessionId multicastWaitTimeoutSec mc
+    export taskid execution_token taskType pxe_type img img_type img_partition_type osid img_format pigz_comp shutdown protocol storage_server storage_export hostName changeHostname resumeStage schemaRevision schemaHash captureBackupName preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 postDeployScriptExecution deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash deploymentIdentityPolicyFile multicastTransportMode multicastSessionId multicastWaitTimeoutSec mc
 }
 
 checkin_rootpxe() {

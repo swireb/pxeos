@@ -42,12 +42,35 @@ test_smb_umask_traps() {
 test_download_session_cleanup() {
     local protocol signal status expected marker
     load rootpxe_download_cleanup_initialization_private "$overlay/bin/pxeos.download"
+    for helper in rootpxe_deploy_script_identity rootpxe_deploy_script_path_valid rootpxe_register_deploy_script_file rootpxe_deploy_script_file_owned rootpxe_release_deploy_script_file; do
+        load "$helper" "$overlay/bin/pxeos.checkin" || return 1
+    done
+    case $(uname -s) in
+        MINGW*|MSYS*)
+            # Only 0700 is modeled; device/inode/owner/link count stay native.
+            rootpxe_deploy_script_identity() {
+                local device inode owner links
+                IFS=: read -r device inode owner links < <(stat -c '%d:%i:%u:%h' -- "$1")
+                printf '%s:%s:%s:700:%s\n' "$device" "$inode" "$owner" "$links"
+            }
+            printf 'NOTE: session cleanup private-script 0700 mocked on Windows\n';;
+    esac
     for protocol in nfs smb; do for signal in EXIT INT TERM; do
         marker="$tmp/$protocol-$signal"
         mkdir -p "$marker"; : >"$marker/layout"; : >"$marker/script"; : >"$marker/private"
         status=0
         (
-            deploymentLayoutFile="$marker/layout" preDeployScriptFile="$marker/script"
+            deploymentLayoutFile="$marker/layout" postDeployScriptFile="$marker/script"
+            preDeployScriptFile=$(mktemp /tmp/rootpxe-pre-deploy.XXXXXX) || exit 9
+            rootpxe_deploy_script_path_valid "$preDeployScriptFile" && [[ ! -L $preDeployScriptFile ]] || exit 9
+            printf '%s\n' '# fixture-owned script' >"$preDeployScriptFile"
+            chmod 700 "$preDeployScriptFile" || exit 9
+            expected_hash=$(printf '%s\n' '# fixture-owned script' | sha256sum); expected_hash=${expected_hash%% *}
+            preDeployScriptSha256=$(sha256sum "$preDeployScriptFile") || exit 9
+            preDeployScriptSha256=${preDeployScriptSha256%% *}
+            [[ $preDeployScriptSha256 == "$expected_hash" ]] || exit 9
+            rootpxe_register_deploy_script_file "$preDeployScriptFile" || exit 9
+            printf '%s\n' "$preDeployScriptFile" >"$marker/owned-script-path"
             rootpxe_resolved_layout_file=$(mktemp /tmp/rootpxe-resolved-layout.XXXXXX)
             rootpxe_resolved_lvm_layout_file=$(mktemp /tmp/rootpxe-resolved-lvm.XXXXXX)
             printf '%s\n' "$rootpxe_resolved_layout_file" "$rootpxe_resolved_lvm_layout_file" >"$marker/owned-derived-paths"
@@ -65,7 +88,8 @@ test_download_session_cleanup() {
         ) || status=$?
         case $signal in EXIT) expected=0 ;; INT) expected=130 ;; TERM) expected=143 ;; esac
         [[ $status == "$expected" ]] || fail "$protocol $signal exit=$status expected=$expected" || return 1
-        [[ ! -e $marker/layout && ! -e $marker/script && ! -e $marker/private && ! -e $marker/continued-after-signal && -e $marker/multicast-cleaned ]] || fail "$protocol $signal omitted session cleanup" || return 1
+        [[ ! -e $marker/layout && -e $marker/script && ! -e $marker/private && ! -e $marker/continued-after-signal && -e $marker/multicast-cleaned ]] || fail "$protocol $signal omitted session cleanup or removed foreign script" || return 1
+        while IFS= read -r owned_script; do [[ ! -e $owned_script ]] || fail "$protocol $signal retained registered private script" || return 1; done <"$marker/owned-script-path"
         while IFS= read -r owned_path; do [[ ! -e $owned_path ]] || fail "$protocol $signal retained owned derived layout" || return 1; done <"$marker/owned-derived-paths"
     done; done
 }
@@ -98,8 +122,8 @@ test_core_libraries_fail_closed() {
     # Only the definition/import prefix is sourced; never the kernel args or
     # PXEOS entry point. Every companion is an ordinary fixture script.
     sed -n '1,/^rootpxe_partition_progress_initialize_runtime()/p' "$funcs" | sed '$d' | sed "s|/usr/share/pxeos/lib|$tmp/missing-installed|g" >"$tmp/core/funcs.sh"
-    for library in log-paths.sh partition-funcs.sh restore-preflight.sh capture-recovery.sh deployment-identity.sh partclone-progress.sh task-http.sh; do printf ':\n' >"$tmp/core/$library"; done
-    for library in partition-funcs.sh restore-preflight.sh capture-recovery.sh deployment-identity.sh partclone-progress.sh task-http.sh; do
+    for library in log-paths.sh partition-funcs.sh restore-preflight.sh capture-recovery.sh deployment-identity.sh linux-startup.sh partclone-progress.sh task-http.sh; do printf ':\n' >"$tmp/core/$library"; done
+    for library in partition-funcs.sh restore-preflight.sh capture-recovery.sh deployment-identity.sh linux-startup.sh partclone-progress.sh task-http.sh; do
         mv "$tmp/core/$library" "$tmp/core/$library.saved"
         status=0; ( . "$tmp/core/funcs.sh"; ) >"$tmp/core/out" 2>&1 || status=$?
         mv "$tmp/core/$library.saved" "$tmp/core/$library"

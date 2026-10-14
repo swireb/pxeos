@@ -13,6 +13,7 @@ rootpxe_source_core_library partition-funcs.sh || return 1
 rootpxe_source_core_library restore-preflight.sh || return 1
 rootpxe_source_core_library capture-recovery.sh || return 1
 rootpxe_source_core_library deployment-identity.sh || return 1
+rootpxe_source_core_library linux-startup.sh || return 1
 rootpxe_source_core_library task-http.sh || return 1
 rootpxe_multicast_lib=/usr/share/pxeos/lib/multicast.sh
 [[ -r $rootpxe_multicast_lib ]] || rootpxe_multicast_lib="$(dirname "${BASH_SOURCE[0]}")/multicast.sh"
@@ -718,9 +719,9 @@ rootpxe_run_deploy_script() {
     expected_hash="${!hash_var:-}"
     rootpxe_deploy_script_error=""
     [[ -z $script && -z $expected_hash ]] && return 0
-    if [[ -z $script || -z $expected_hash || ! -f $script || -L $script ]]; then
+    if [[ -z $script || -z $expected_hash ]] || ! declare -F rootpxe_deploy_script_file_owned >/dev/null || ! rootpxe_deploy_script_file_owned "$script"; then
         rootpxe_deploy_script_error=script_file_invalid
-        rm -f -- "$script"
+        if declare -F rootpxe_release_deploy_script_file >/dev/null; then rootpxe_release_deploy_script_file "$script"; fi
         unset "$file_var" "$hash_var"
         return 1
     fi
@@ -728,7 +729,7 @@ rootpxe_run_deploy_script() {
     actual_hash=${actual_hash%%[[:space:]]*}
     if [[ ! $expected_hash =~ ^[0-9a-f]{64}$ || $actual_hash != "$expected_hash" ]]; then
         rootpxe_deploy_script_error=script_hash_mismatch
-        rm -f -- "$script"
+        rootpxe_release_deploy_script_file "$script"
         unset "$file_var" "$hash_var"
         return 1
     fi
@@ -742,7 +743,7 @@ rootpxe_run_deploy_script() {
         ROOTPXE_HOSTNAME="${hostName:-}" \
         ROOTPXE_OS_ID="${osid:-}" \
         /bin/bash "$script" || script_rc=$?
-    rm -f -- "$script"
+    rootpxe_release_deploy_script_file "$script"
     unset "$file_var" "$hash_var"
     if [[ $script_rc -ne 0 ]]; then
         rootpxe_deploy_script_error=script_execution_failed
@@ -753,11 +754,47 @@ rootpxe_run_deploy_script() {
 }
 
 rootpxe_run_pre_deploy_script() {
+    if [[ ${taskType:-} != deploy ]]; then
+        if [[ -z ${preDeployScriptFile:-} && -z ${preDeployScriptSha256:-} ]]; then return 0; fi
+        if declare -F rootpxe_release_deploy_script_file >/dev/null; then rootpxe_release_deploy_script_file "${preDeployScriptFile:-}"; fi
+        unset preDeployScriptFile preDeployScriptSha256
+        rootpxe_deploy_script_error=script_task_invalid
+        return 1
+    fi
     rootpxe_run_deploy_script pre_deploy_script preDeployScriptFile preDeployScriptSha256 'pre-deploy script'
 }
 
 rootpxe_run_post_deploy_script() {
-    rootpxe_run_deploy_script post_deploy_script postDeployScriptFile postDeployScriptSha256 'post-deploy script'
+    local script="${postDeployScriptFile:-}" hash="${postDeployScriptSha256:-}" disk result=0
+    local -a startup_targets=()
+    rootpxe_deploy_script_error=""
+    if [[ ${taskType:-} != deploy || ${osid:-} != 50 ]]; then
+        [[ -z $script && -z $hash && -z ${postDeployScriptExecution:-} ]] && return 0
+        rootpxe_deploy_script_error=startup_protocol_invalid
+        result=1
+    elif [[ ${postDeployScriptExecution:-} != linux-systemd-v1 ]]; then
+        rootpxe_deploy_script_error=startup_protocol_invalid
+        result=1
+    else
+        if [[ -n $script ]] && { ! declare -F rootpxe_deploy_script_file_owned >/dev/null || ! rootpxe_deploy_script_file_owned "$script"; }; then
+            rootpxe_deploy_script_error=script_file_invalid
+            unset postDeployScriptFile postDeployScriptSha256 postDeployScriptExecution
+            return 1
+        fi
+        rootpxe_stage post_deploy_script 'installing Linux startup script' || true
+        rootpxe_console_message INFO 'Installing Linux startup script (not executing it in PXEOS).'
+        [[ -n ${disks:-${hd:-}} ]] || result=1
+        for disk in ${disks:-${hd:-}}; do
+            startup_targets+=("$disk")
+        done
+        if [[ $result -eq 0 ]]; then rootpxe_install_linux_startup_for_targets "$script" "$hash" "${startup_targets[@]}" || result=1; fi
+        if [[ $result -ne 0 ]]; then
+            rootpxe_deploy_script_error="${rootpxe_startup_error:-startup_install_failed}"
+        fi
+    fi
+    if declare -F rootpxe_release_deploy_script_file >/dev/null; then rootpxe_release_deploy_script_file "$script"; fi
+    unset postDeployScriptFile postDeployScriptSha256 postDeployScriptExecution
+    return "$result"
 }
 
 # LVM is deliberately narrow.  It is not a fallback for arbitrary device
@@ -1789,8 +1826,12 @@ rootpxe_cleanup_derived_layout_files() {
 rootpxe_cleanup_task_json() {
     rootpxe_cleanup_derived_layout_files
     rootpxe_cleanup_deployment_partition_file
-    rm -f -- "${deploymentLayoutFile:-}" "${originalSchemaFile:-}" "${partitionInventoryFile:-}" "${preDeployScriptFile:-}" "${postDeployScriptFile:-}" "${rootpxe_original_schema_file:-}" "${rootpxe_partition_inventory_file:-}" "${rootpxe_display_metadata_file:-}"
-    unset deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 rootpxe_original_schema_file rootpxe_partition_inventory_file rootpxe_display_metadata_file rootpxe_display_metadata_identities
+    rm -f -- "${deploymentLayoutFile:-}" "${originalSchemaFile:-}" "${partitionInventoryFile:-}" "${rootpxe_original_schema_file:-}" "${rootpxe_partition_inventory_file:-}" "${rootpxe_display_metadata_file:-}"
+    if declare -F rootpxe_release_deploy_script_file >/dev/null; then
+        rootpxe_release_deploy_script_file "${preDeployScriptFile:-}"
+        rootpxe_release_deploy_script_file "${postDeployScriptFile:-}"
+    fi
+    unset deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 postDeployScriptExecution rootpxe_original_schema_file rootpxe_partition_inventory_file rootpxe_display_metadata_file rootpxe_display_metadata_identities
     unset rootpxe_resolved_layout_file rootpxe_resolved_lvm_layout_file
 }
 
@@ -3013,7 +3054,7 @@ rootpxe_request_disk_permit_for_target() {
     response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 \
         --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
         --data-urlencode "mac=$mac" --data-urlencode "targetId=$target_id" \
-        --data-urlencode "operation=$operation" "${rootpxe_permit_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
+        --data-urlencode "operation=$operation" --data-urlencode "postDeployScriptCapability=linux-systemd-v1" "${rootpxe_permit_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
     http_code=${response##*$'\n'}
     body=${response%$'\n'*}
     [[ $http_code =~ ^[0-9]{3}$ ]] || { rootpxe_set_disk_permit_protocol_error unknown; return 12; }
@@ -3137,7 +3178,7 @@ rootpxe_request_disk_permit_batch() {
             --data-urlencode "sessionId=$multicastSessionId"
         )
     fi
-    response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "targets=$request" "${rootpxe_permit_batch_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
+    response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "targets=$request" --data-urlencode "postDeployScriptCapability=linux-systemd-v1" "${rootpxe_permit_batch_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
     http_code=${response##*$'\n'}; body=${response%$'\n'*}
     [[ $http_code =~ ^[0-9]{3}$ ]] || { rootpxe_set_disk_permit_protocol_error unknown; return 12; }
     [[ $http_code =~ ^5[0-9][0-9]$ ]] && return 11
@@ -5279,8 +5320,10 @@ rootpxe_linux_btrfs_default_subvolid() {
 
 rootpxe_linux_btrfs_subvolume_ids() {
     local device="$1" mountpoint=/linuxroot options rows parsed subvolids
+    [[ -z ${rootpxe_linux_probe_mountpoint:-} ]] || mountpoint="$rootpxe_linux_probe_mountpoint"
     mkdir -p "$mountpoint" || return 3
     if mountpoint -q "$mountpoint" 2>/dev/null; then
+        [[ -z ${rootpxe_linux_probe_mountpoint:-} ]] || return 2
         umount "$mountpoint" >/dev/null 2>&1 || return 2
     fi
     options=$(rootpxe_linux_mount_options ro btrfs) || return 3
@@ -5348,14 +5391,28 @@ rootpxe_linux_paths_safe_for_write() {
 
 rootpxe_linux_probe_root_candidate() {
     local device="$1" fstype="$2" vg_name="${3:-}" vg_uuid="${4:-}" subvolid="${5:-}" mountpoint=/linuxroot options candidate=""
+    [[ -z ${rootpxe_linux_probe_mountpoint:-} ]] || mountpoint="$rootpxe_linux_probe_mountpoint"
     rootpxe_linux_root_fstype_supported "$fstype" || return 1
-    mkdir -p "$mountpoint" || return 1
+    mkdir -p "$mountpoint" || { [[ -z ${rootpxe_linux_probe_mountpoint:-} ]] && return 1; return 3; }
     if mountpoint -q "$mountpoint" 2>/dev/null; then
+        [[ -z ${rootpxe_linux_probe_mountpoint:-} ]] || return 2
         umount "$mountpoint" >/dev/null 2>&1 || return 2
     fi
-    options=$(rootpxe_linux_mount_options ro "$fstype" "$subvolid") || { [[ $fstype == btrfs ]] && return 3; return 1; }
-    rootpxe_run_logged_typed_native linux-probe.log "$device" mount -t "$fstype" -o "$options" "$device" "$mountpoint" || { [[ $fstype == btrfs ]] && return 3; return 1; }
-    if [[ -d "$mountpoint/etc" && ! -L "$mountpoint/etc" ]] && rootpxe_linux_has_safe_os_release "$mountpoint"; then
+    options=$(rootpxe_linux_mount_options ro "$fstype" "$subvolid") || { [[ $fstype == btrfs || -n ${rootpxe_linux_probe_mountpoint:-} ]] && return 3; return 1; }
+    rootpxe_run_logged_typed_native linux-probe.log "$device" mount -t "$fstype" -o "$options" "$device" "$mountpoint" || { [[ $fstype == btrfs || -n ${rootpxe_linux_probe_mountpoint:-} ]] && return 3; return 1; }
+    local marker_result=1 marker_rc=0
+    if [[ -d "$mountpoint/etc" && ! -L "$mountpoint/etc" ]]; then
+        if [[ -n ${rootpxe_linux_probe_mountpoint:-} && -n ${rootpxe_startup_probe_disk:-} ]]; then
+            if rootpxe_startup_probe_root_marker "$mountpoint"; then marker_result=0
+            else
+                marker_rc=$?
+                if [[ $marker_rc -ne 1 ]]; then umount "$mountpoint" >/dev/null 2>&1 || return 2; return 3; fi
+            fi
+        else
+            rootpxe_linux_has_safe_os_release "$mountpoint" && marker_result=0
+        fi
+    fi
+    if [[ $marker_result -eq 0 ]]; then
         if [[ $fstype == btrfs && -z $subvolid ]]; then
             subvolid=$(rootpxe_linux_btrfs_default_subvolid "$mountpoint") || { umount "$mountpoint" >/dev/null 2>&1 || return 2; return 3; }
         fi
@@ -5441,7 +5498,7 @@ rootpxe_linux_activate_vg_if_needed() {
 rootpxe_linux_cleanup_selected_vg() {
     local vg_name="$1" vg_uuid="$2" activated="$3"
     [[ $activated == yes && -n $vg_name && -n $vg_uuid ]] || return 0
-    rootpxe_lvm_native vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true
+    rootpxe_lvm_native vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1
 }
 
 # Finds exactly one Linux root filesystem belonging to the target disk.  For
@@ -5452,6 +5509,7 @@ rootpxe_linux_cleanup_selected_vg() {
 # report an activation failure as a cross-disk topology violation.
 rootpxe_find_linux_root_filesystem() {
     local disk="$1" part fs candidate pv vg_name vg_uuid activation lvs_output lv pvs_json lvs_rows pv_rows subvolid probe_rc enum_rc subvolids
+    local rootpxe_linux_probe_mountpoint="${2:-}"
     local target_parts="" lvm_parts="" seen_vgs="" activated_vgs="" candidates="" cross_disk_lvm=0 lvm_activation_failed=0 probe_failed=0 rc=20
     [[ -n $disk ]] || return 20
     getPartitions "$disk"
@@ -5576,7 +5634,9 @@ rootpxe_find_linux_root_filesystem() {
     for activation in $activated_vgs; do
         vg_name=${activation%%|*}
         vg_uuid=${activation#*|}
-        rootpxe_lvm_native vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1 || true
+        if ! rootpxe_lvm_native vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" >/dev/null 2>&1; then
+            [[ -z $rootpxe_linux_probe_mountpoint ]] || rc=23
+        fi
     done
     [[ $rc -eq 0 ]] && printf '%s\n' "$final_candidate"
     return $rc

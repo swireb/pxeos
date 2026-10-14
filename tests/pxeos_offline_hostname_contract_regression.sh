@@ -3,8 +3,12 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
-tmp=$(mktemp -d)
-trap 'rm -rf -- "$tmp"' EXIT
+tmp=$(mktemp -d /tmp/rootpxe-offline-hostname.XXXXXX)
+cleanup_fixture() {
+    [[ $tmp =~ ^/tmp/rootpxe-offline-hostname\.[[:alnum:]]{6}$ && -d $tmp && ! -L $tmp ]] || return 1
+    rm -rf -- "$tmp"
+}
+trap cleanup_fixture EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 mkdir -p "$tmp/ntfs/Windows/System32/config"
 touch "$tmp/ntfs/Windows/System32/config/SYSTEM"
@@ -74,10 +78,18 @@ for name in rootpxe_validate_windows_hostname rootpxe_apply_windows_hostname; do
 done
 source "$tmp/initialization.sh"
 rootpxe_stage(){ :; }
+rootpxe_run_logged_typed_native(){
+    [[ $# -ge 3 ]] || return 1
+    printf '%s\0' "$@" >>"$tmp/logged-native-argv"
+    shift 2
+    "$@"
+}
 umount(){ return 0; }
 ntfs-3g(){ return 1; }
 if rootpxe_apply_windows_hostname /dev/fake; then fail mount-failure-accepted; fi
 [[ $rootpxe_initialization_failure_reason == windows_system_mount_failed ]] || fail mount-reason
+mapfile -d '' -t logged_native_argv <"$tmp/logged-native-argv"
+[[ ${#logged_native_argv[@]} -eq 7 && ${logged_native_argv[0]} == ntfs-mount.log && ${logged_native_argv[1]} == /dev/fake && ${logged_native_argv[2]} == ntfs-3g && ${logged_native_argv[3]} == -o && ${logged_native_argv[4]} == remove_hiberfile,rw && ${logged_native_argv[5]} == /dev/fake && ${logged_native_argv[6]} == "$tmp/ntfs" ]] || fail native-argv-not-preserved
 ntfs-3g(){ return 0; }
 reged(){ cat >/dev/null; return 0; }
 umount(){ return 1; }

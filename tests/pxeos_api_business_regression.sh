@@ -49,6 +49,14 @@ rootpxe_multicast_apply_transport_mode() { rootpxe_multicast_reset() { :; }; mc=
 rootpxe_multicast_runtime_ready() { return 1; }
 # shellcheck source=/dev/null
 . "$tmp/checkin-json.sh"
+case $(uname -s) in
+    MINGW*|MSYS*)
+        rootpxe_deploy_script_identity() {
+            local device inode owner links
+            IFS=: read -r device inode owner links < <(stat -c '%d:%i:%u:%h' -- "$1")
+            printf '%s:%s:%s:700:%s\n' "$device" "$inode" "$owner" "$links"
+        };;
+esac
 
 flat_smb='{"taskId":42,"type":"capture","pxeType":"up","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"changeHostname":false,"captureBackupName":"demo-backup-20260830T104527123Z","storage":"192.0.2.10:share/images","protocol":"smb","storageip":"192.0.2.10","exportPath":"share/images","smbUsername":"test-user","smbPassword":"pa%ss\\word","smbDomain":"WORKGROUP"}'
 rootpxe_apply_json_checkin "$flat_smb" || fail '平铺 SMB JSON 被拒绝'
@@ -88,7 +96,7 @@ jq -nj --arg script "$pre_script" '$script' >"$pre_expected_file"
 jq -nj --arg script "$post_script" '$script' >"$post_expected_file"
 pre_hash=$(sha256sum "$pre_expected_file" | awk '{print $1}')
 post_hash=$(sha256sum "$post_expected_file" | awk '{print $1}')
-deploy_with_scripts=$(jq -cn --arg pre "$pre_script" --arg pre_hash "$pre_hash" --arg post "$post_script" --arg post_hash "$post_hash" '{taskId:45,type:"deploy",pxeType:"down",img:"images/demo",imgType:"raw",imgPartitionType:"all",osid:50,imgFormat:5,compressionLevel:6,shutdown:false,protocol:"nfs",storageip:"192.0.2.13",exportPath:"/dept/images",preDeployScript:$pre,preDeployScriptSha256:$pre_hash,postDeployScript:$post,postDeployScriptSha256:$post_hash}')
+deploy_with_scripts=$(jq -cn --arg pre "$pre_script" --arg pre_hash "$pre_hash" --arg post "$post_script" --arg post_hash "$post_hash" '{taskId:45,type:"deploy",pxeType:"down",img:"images/demo",imgType:"raw",imgPartitionType:"all",osid:50,imgFormat:5,compressionLevel:6,shutdown:false,protocol:"nfs",storageip:"192.0.2.13",exportPath:"/dept/images",preDeployScript:$pre,preDeployScriptSha256:$pre_hash,postDeployScript:$post,postDeployScriptSha256:$post_hash,postDeployScriptExecution:"linux-systemd-v1"}')
 rootpxe_apply_json_checkin "$deploy_with_scripts" || fail '认证部署双脚本 JSON 被拒绝'
 [[ -f ${preDeployScriptFile:-} && ! -L $preDeployScriptFile && -f ${postDeployScriptFile:-} && ! -L $postDeployScriptFile ]] || fail '部署脚本未保存到独立临时文件'
 cmp -s "$pre_expected_file" "$preDeployScriptFile" && [[ $preDeployScriptSha256 == "$pre_hash" ]] || fail '部署前脚本正文或 SHA256 被改变'
@@ -127,13 +135,12 @@ capture_with_script=$(jq '.postDeployScript="echo unsafe" | .postDeployScriptSha
 rootpxe_apply_json_checkin "$capture_with_script" && fail 'capture JSON 部署后脚本字段被接受'
 unset pre_expected_file post_expected_file missing_pre_hash missing_post_hash nonstring_pre nonstring_post_hash empty_both bad_hash bad_pre_hash bad_post_hash capture_with_script
 
-# Both scripts run only in clean child environments and always delete their
-# independent temporary files.
+# 前置保留PXEOS干净Bash；后置只交给离线安装器，不即时执行。
 (
 awk '/^rootpxe_run_deploy_script\(\)/ { on=1 } /^# LVM is deliberately narrow/ { on=0 } on { print }' "$funcs" >"$tmp/deploy-scripts-run.sh"
 . "$tmp/deploy-scripts-run.sh"
 mkdir -p "$tmp/deploy-script-image"
-pre_exec="$tmp/pre-exec.sh"; post_exec="$tmp/post-exec.sh"
+pre_exec=$(mktemp /tmp/rootpxe-pre-deploy.XXXXXX); post_exec=$(mktemp /tmp/rootpxe-post-deploy.XXXXXX)
 cat >"$pre_exec" <<'EOF'
 printf '%s|%s|%s|%s|%s\n' "$ROOTPXE_TASK_ID" "$ROOTPXE_IMAGE_PATH" "$ROOTPXE_TARGET_DISK" "$ROOTPXE_HOSTNAME" "$ROOTPXE_OS_ID" >"$ROOTPXE_IMAGE_PATH/pre.trace"
 [[ -z ${task_token+x} ]]
@@ -142,21 +149,32 @@ cat >"$post_exec" <<'EOF'
 printf '%s|%s|%s|%s|%s\n' "$ROOTPXE_TASK_ID" "$ROOTPXE_IMAGE_PATH" "$ROOTPXE_TARGET_DISK" "$ROOTPXE_HOSTNAME" "$ROOTPXE_OS_ID" >"$ROOTPXE_IMAGE_PATH/post.trace"
 [[ -z ${task_token+x} ]]
 EOF
-taskid=45; task_token=must-not-reach-script; imagePath="$tmp/deploy-script-image"; hd=/dev/mockdisk; hostName=demo-host; osid=50
+taskid=45; taskType=deploy; task_token=must-not-reach-script; imagePath="$tmp/deploy-script-image"; hd=/dev/mockdisk; hostName=demo-host; osid=50
 preDeployScriptFile="$pre_exec"; preDeployScriptSha256=$(sha256sum "$pre_exec" | awk '{print $1}')
 postDeployScriptFile="$post_exec"; postDeployScriptSha256=$(sha256sum "$post_exec" | awk '{print $1}')
+chmod 700 "$pre_exec" "$post_exec"
+rootpxe_register_deploy_script_file "$pre_exec"; rootpxe_register_deploy_script_file "$post_exec"
+postDeployScriptExecution=linux-systemd-v1
 rootpxe_stage() { :; }
 rootpxe_console_message() { :; }
+rootpxe_install_linux_startup_for_disk() {
+    [[ $1 == /dev/mockdisk && $3 == "$postDeployScriptSha256" ]] || return 1
+    cp "$2" "$tmp/deploy-script-image/post.injected"
+}
+rootpxe_install_linux_startup_for_targets() { rootpxe_install_linux_startup_for_disk "$3" "$1" "$2"; }
 rootpxe_run_pre_deploy_script || fail '部署前脚本执行失败'
 rootpxe_run_post_deploy_script || fail '部署后脚本执行失败'
 [[ $(<"$tmp/deploy-script-image/pre.trace") == "45|$tmp/deploy-script-image|/dev/mockdisk|demo-host|50" ]] || fail '部署前脚本未获得受限环境变量'
-[[ $(<"$tmp/deploy-script-image/post.trace") == "45|$tmp/deploy-script-image|/dev/mockdisk|demo-host|50" ]] || fail '部署后脚本未获得受限环境变量'
+[[ ! -e $tmp/deploy-script-image/post.trace && -f $tmp/deploy-script-image/post.injected ]] || fail '部署后脚本应离线注入而非PXEOS运行'
 [[ ! -e $pre_exec && ! -e $post_exec && -z ${preDeployScriptFile:-} && -z ${postDeployScriptFile:-} ]] || fail '部署脚本成功后未清理临时文件'
-post_fail="$tmp/post-fail.sh"
+post_fail=$(mktemp /tmp/rootpxe-post-deploy.XXXXXX)
 printf 'exit 7\n' >"$post_fail"
 postDeployScriptFile="$post_fail"; postDeployScriptSha256=$(sha256sum "$post_fail" | awk '{print $1}')
-rootpxe_run_post_deploy_script && fail '失败的部署后脚本被误报成功'
-[[ ${rootpxe_deploy_script_error:-} == script_execution_failed && ! -e $post_fail ]] || fail '失败的部署后脚本未清理或未标记失败'
+chmod 700 "$post_fail"; rootpxe_register_deploy_script_file "$post_fail"
+postDeployScriptExecution=linux-systemd-v1
+rootpxe_install_linux_startup_for_disk() { rootpxe_startup_error=fixture_install_failed; return 1; }
+rootpxe_run_post_deploy_script && fail '失败的离线注入被误报成功'
+[[ ${rootpxe_deploy_script_error:-} == fixture_install_failed && ! -e $post_fail ]] || fail '失败的注入未清理或未标记失败'
 unset pre_exec post_exec post_fail
 )
 
@@ -250,6 +268,7 @@ sed -e 's|^rootpxe_source_core_library partition-funcs.sh.*|:|' \
     "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/legacy-funcs.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-startup.sh" "$tmp/linux-startup.sh"
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
 printf '\nif declare -F task_log_test_emulate_pin_flags >/dev/null; then task_log_test_emulate_pin_flags; fi\n' >>"$tmp/log-paths.sh"
 for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
@@ -874,6 +893,7 @@ chmod +x $tmp/mock/*
 sed -e "s|^rootpxe_source_core_library partition-funcs.sh|. \"$overlay/usr/share/pxeos/lib/partition-funcs.sh\"|" -e "s|^rootpxe_source_core_library deployment-identity.sh|:|" -e "s|^rootpxe_source_core_library restore-preflight.sh|. \"$overlay/usr/share/pxeos/lib/restore-preflight.sh\"|" -e "s|^rootpxe_source_core_library capture-recovery.sh|. \"$overlay/usr/share/pxeos/lib/capture-recovery.sh\"|" -e "s|</proc/cmdline|<$tmp/cmdline|" -e "s|/ntfs/|$tmp/ntfs/|g" -e "s| /ntfs\([ ;)]\)| $tmp/ntfs\1|g" -e "s|mountpoint=/linuxroot|mountpoint=$tmp/linuxroot|g" -e "s|/linuxroot/|$tmp/linuxroot/|g" -e "s| /linuxroot\([ ;)]\)| $tmp/linuxroot\1|g" $funcs >$tmp/funcs.sh
 cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-startup.sh" "$tmp/linux-startup.sh"
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
 printf '\nif declare -F task_log_test_emulate_pin_flags >/dev/null; then task_log_test_emulate_pin_flags; fi\n' >>"$tmp/log-paths.sh"
 for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
@@ -1774,6 +1794,12 @@ mapfile -d '' -t runtime_candidates < <(
 )
 runtime_files=()
 for runtime_candidate in "${runtime_candidates[@]}"; do
+    # These two exact assets run in the restored target OS, not on the PXEOS
+    # console.  Do not exclude other templates or the PXEOS installer library.
+    case $runtime_candidate in
+        "$overlay/usr/share/pxeos/lib/linux-startup-templates/startup-runner.sh"|\
+        "$overlay/usr/share/pxeos/lib/linux-startup-templates/startup-result.sh") continue ;;
+    esac
     IFS= read -r runtime_shebang <"$runtime_candidate" || true
     case $runtime_shebang in
         '#!'*bash*|'#!'*'/sh'*)
@@ -1788,9 +1814,15 @@ for runtime_candidate in "${runtime_candidates[@]}"; do
     esac
 done
 [[ ${#runtime_files[@]} -gt 0 ]] || { printf 'FAIL: no PXEOS runtime scripts found\n' >&2; exit 1; }
-for required_runtime in pxeos.upload pxeos.av pxeos.man.reg pxeos.debug S99pxeos funcs.sh; do
+for required_runtime in pxeos.upload pxeos.av pxeos.man.reg pxeos.debug S99pxeos funcs.sh linux-startup.sh; do
     printf '%s\n' "${runtime_files[@]}" | grep -Eq "/${required_runtime}$" \
         || { printf 'FAIL: runtime shebang scan missed %s\n' "$required_runtime" >&2; exit 1; }
+done
+for target_asset in startup-runner.sh startup-result.sh; do
+    if printf '%s\n' "${runtime_files[@]}" | grep -Fx "$overlay/usr/share/pxeos/lib/linux-startup-templates/$target_asset" >/dev/null; then
+        printf 'FAIL: target OS asset included as PXEOS console source: %s\n' "$target_asset" >&2
+        exit 1
+    fi
 done
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }

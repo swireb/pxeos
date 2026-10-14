@@ -1,6 +1,10 @@
 fssource*/
 kernelsource*/
 linux-*/
+!Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-startup-templates/
+!Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-startup-templates/rootpxe-startup.service
+!Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-startup-templates/startup-runner.sh
+!Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-startup-templates/startup-result.sh
 dist/
 buildroot*.tar.xz
 linux-*.tar.xz
