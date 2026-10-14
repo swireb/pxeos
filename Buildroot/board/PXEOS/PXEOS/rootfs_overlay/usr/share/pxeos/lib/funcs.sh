@@ -1,12 +1,19 @@
 #!/bin/bash
-export initversion=19800101
+export initversion=unbuilt
+rootpxe_source_core_library() {
+    local library="$1" path="/usr/share/pxeos/lib/$1"
+    [[ -r $path ]] || path="$(dirname "${BASH_SOURCE[0]}")/$library"
+    [[ -r $path ]] || { printf '[ERROR] Required PXEOS library unavailable: %s\n' "$library" >&2; return 1; }
+    . "$path" || { printf '[ERROR] Required PXEOS library failed: %s\n' "$library" >&2; return 1; }
+}
 rootpxe_log_paths_lib=/usr/share/pxeos/lib/log-paths.sh
 [[ -r $rootpxe_log_paths_lib ]] || rootpxe_log_paths_lib="$(dirname "${BASH_SOURCE[0]}")/log-paths.sh"
-. "$rootpxe_log_paths_lib"
-. /usr/share/pxeos/lib/partition-funcs.sh
-. /usr/share/pxeos/lib/restore-preflight.sh
-. /usr/share/pxeos/lib/capture-recovery.sh
-. /usr/share/pxeos/lib/deployment-identity.sh
+. "$rootpxe_log_paths_lib" || { printf '[ERROR] Required PXEOS library failed: log-paths.sh\n' >&2; return 1; }
+rootpxe_source_core_library partition-funcs.sh || return 1
+rootpxe_source_core_library restore-preflight.sh || return 1
+rootpxe_source_core_library capture-recovery.sh || return 1
+rootpxe_source_core_library deployment-identity.sh || return 1
+rootpxe_source_core_library task-http.sh || return 1
 rootpxe_multicast_lib=/usr/share/pxeos/lib/multicast.sh
 [[ -r $rootpxe_multicast_lib ]] || rootpxe_multicast_lib="$(dirname "${BASH_SOURCE[0]}")/multicast.sh"
 [[ -r $rootpxe_multicast_lib ]] && . "$rootpxe_multicast_lib"
@@ -18,7 +25,7 @@ rootpxe_windows_display_registry_lib=/usr/share/pxeos/lib/windows-display-regist
 [[ -r $rootpxe_windows_display_registry_lib ]] && . "$rootpxe_windows_display_registry_lib"
 rootpxe_progress_lib=/usr/share/pxeos/lib/partclone-progress.sh
 [[ -r $rootpxe_progress_lib ]] || rootpxe_progress_lib="$(dirname "${BASH_SOURCE[0]}")/partclone-progress.sh"
-. "$rootpxe_progress_lib"
+. "$rootpxe_progress_lib" || { printf '[ERROR] Required PXEOS library failed: partclone-progress.sh\n' >&2; return 1; }
 # 分区进度是旁路遥测；业务流程仅追加状态事件，statusreporter 是快照唯一写者。
 # 这样采样不会并发覆盖完成状态，缺少 jq、队列写入或上报失败也不影响成像。
 rootpxe_partition_progress_initialize_runtime() {
@@ -210,7 +217,7 @@ rootpxe_partition_progress_send_snapshot() {
     stage=capture; [[ ${type:-} =~ ^([Dd][Oo][Ww][Nn]|down)$ ]] && stage=restore
     api_base="${pxeapi:-${web:-}}"
     [[ -n $api_base ]] || return 0
-    curl -Lks --connect-timeout 3 --max-time "$max_time" --data-urlencode "taskid=$taskid" --data-urlencode "token=${task_token:-${execution_token:-}}" --data-urlencode "mac=$mac" --data-urlencode "progressProtocol=2" --data-urlencode "stage=$stage" --data-urlencode "snapshot=$payload" "${api_base}progress" >/dev/null 2>&1 || true
+    rootpxe_task_curl -ks --connect-timeout 3 --max-time "$max_time" --data-urlencode "taskid=$taskid" --data-urlencode "token=${task_token:-${execution_token:-}}" --data-urlencode "mac=$mac" --data-urlencode "progressProtocol=2" --data-urlencode "stage=$stage" --data-urlencode "snapshot=$payload" "${api_base}progress" >/dev/null 2>&1 || true
     return 0
 }
 rootpxe_partition_progress_flush() {
@@ -336,9 +343,14 @@ rootpxe_validate_image_contract() {
 # The checkin payload is untrusted.  Keep image-format acceptance in one
 # runtime helper so restore code rejects an invalid value before allocating a
 # FIFO or starting an image reader.
-rootpxe_validate_runtime_img_format() {
+rootpxe_effective_img_format() {
     local format="${imgLegacy:-${imgFormat:-}}"
     [[ $format =~ ^[0-6]$ ]] || return 1
+    printf '%s\n' "$format"
+}
+rootpxe_validate_runtime_img_format() {
+    local format
+    format=$(rootpxe_effective_img_format) || return 1
     [[ ${type:-} != up || $format != 1 ]]
 }
 
@@ -549,7 +561,8 @@ rootpxe_task_console_failure() {
     rootpxe_task_log_append "LEVEL=$level CODE=${code:-unspecified} SUMMARY=$summary" || log_status=1
     # A later successful summary append does not make a lost detail complete.
     (( log_status == 0 )) || rootpxe_task_log_state[unavailable]=yes
-    printf '\n%-7s %s%s\n' "[$level]" "$summary" "${code:+ CODE=$code}"
+    printf '\n'
+    rootpxe_console_message "$level" "$summary${code:+ CODE=$code}"
     rootpxe_task_log_notice
 }
 
@@ -656,6 +669,8 @@ rootpxe_disk_has_lvm_pv() {
 # explicit raw whole-disk exception and never calls this helper.
 rootpxe_safe_relative_path() {
     local value=${1#/} segment
+    local -a _rootpxe_parts=()
+    [[ $value != *[[:cntrl:]]* ]] || return 1
     [[ -n $value && $value != */ && $value != *\\* && $value != *//* ]] || return 1
     IFS=/ read -r -a _rootpxe_parts <<< "$value"
     for segment in "${_rootpxe_parts[@]}"; do
@@ -944,7 +959,7 @@ rootpxe_lvm_capture_preflight_single() {
     while IFS=$'\t' read -r lv_name lv_uuid lv_path lv_size lv_attr segtype origin pool data metadata; do
         lv_name=$(rootpxe_lvm_trim "$lv_name"); lv_uuid=$(rootpxe_lvm_trim "$lv_uuid"); lv_path=$(rootpxe_lvm_trim "$lv_path"); lv_size=$(rootpxe_lvm_trim "$lv_size"); segtype=$(rootpxe_lvm_trim "$segtype"); origin=$(rootpxe_lvm_trim "$origin"); pool=$(rootpxe_lvm_trim "$pool"); data=$(rootpxe_lvm_trim "$data"); metadata=$(rootpxe_lvm_trim "$metadata")
         [[ -n $lv_name ]] || continue
-        rootpxe_lvm_validate_mapper_name "$rootpxe_lvm_vg_name" "$lv_name" && rootpxe_lvm_safe_identifier "$lv_uuid" && [[ $lv_path == /dev/* && $lv_size =~ ^[1-9][0-9]*$ && $segtype == linear && -z $origin && -z $pool && -z $data && -z $metadata ]] || { rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
+        rootpxe_lvm_validate_mapper_name "$rootpxe_lvm_vg_name" "$lv_name" && rootpxe_lvm_safe_identifier "$lv_uuid" && [[ $lv_path == /dev/* && $lv_size =~ ^[1-9][0-9]*$ && $segtype == linear && -z $origin && -z $pool && -z $data && -z $metadata ]] || { rootpxe_lvm_remove_probe_files "$pvs_json" "$vgs_json" "$lvs_json" "$pvs_rows" "$vgs_rows" "$lvs_rows"; rootpxe_lvm_reset_capture_facts; return 1; }
         # Asking for segtype switches LVM reporting to segment rows.  A
         # multi-segment linear LV is still one LV, but every segment must
         # agree on its identity; do not silently collapse conflicting rows.
@@ -1619,7 +1634,7 @@ rootpxe_build_original_schema() {
         ([.partitions[].number] as $numbers | ($numbers | unique | length) == ($numbers | length)) and
         ([.partitions[] | select(.startSectors < 0 or .originalSectors <= 0 or .minSectors != .originalSectors or (.startSectors + .originalSectors) * $logicalSectorBytes > $originalDiskBytes)] | length == 0);
       if .version == 1 then
-        (.partitionTable == "gpt" or .partitionTable == "dos" or .partitionTable == "mbr") and base
+        (.partitionTable == "gpt" or .partitionTable == "mbr") and base
       elif .version == 2 then
         base and
         (if .partitionTable == "gpt" then
@@ -1747,10 +1762,36 @@ rootpxe_cleanup_deployment_partition_file() {
     unset rootpxe_deployment_partition_file
 }
 
+rootpxe_register_derived_layout_file() {
+    local path="$1" identity
+    [[ $path == /tmp/rootpxe-resolved-layout.* || $path == /tmp/rootpxe-resolved-lvm.* ]] || return 1
+    [[ -f $path && ! -L $path && -O $path ]] || return 1
+    identity=$(stat -c '%d:%i' -- "$path") || return 1
+    [[ $identity =~ ^[0-9]+:[0-9]+$ ]] || return 1
+    if [[ $(declare -p rootpxe_derived_layout_files 2>/dev/null) != 'declare -A '* || ${rootpxe_derived_layout_owner_pid:-} != "$BASHPID" ]]; then
+        unset rootpxe_derived_layout_files
+        declare -gA rootpxe_derived_layout_files=()
+        rootpxe_derived_layout_owner_pid=$BASHPID
+    fi
+    export -n rootpxe_derived_layout_files rootpxe_derived_layout_owner_pid
+    rootpxe_derived_layout_files[$path]=$identity
+}
+rootpxe_cleanup_derived_layout_files() {
+    local path identity
+    [[ $(declare -p rootpxe_derived_layout_files 2>/dev/null) == 'declare -A '* && ${rootpxe_derived_layout_owner_pid:-} == "$BASHPID" ]] || return 0
+    for path in "${!rootpxe_derived_layout_files[@]}"; do
+        identity=${rootpxe_derived_layout_files[$path]}
+        [[ -f $path && ! -L $path && -O $path && $(stat -c '%d:%i' -- "$path" 2>/dev/null) == "$identity" ]] || continue
+        rm -f -- "$path"
+    done
+    unset rootpxe_derived_layout_files rootpxe_derived_layout_owner_pid
+}
 rootpxe_cleanup_task_json() {
+    rootpxe_cleanup_derived_layout_files
     rootpxe_cleanup_deployment_partition_file
     rm -f -- "${deploymentLayoutFile:-}" "${originalSchemaFile:-}" "${partitionInventoryFile:-}" "${preDeployScriptFile:-}" "${postDeployScriptFile:-}" "${rootpxe_original_schema_file:-}" "${rootpxe_partition_inventory_file:-}" "${rootpxe_display_metadata_file:-}"
     unset deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 rootpxe_original_schema_file rootpxe_partition_inventory_file rootpxe_display_metadata_file rootpxe_display_metadata_identities
+    unset rootpxe_resolved_layout_file rootpxe_resolved_lvm_layout_file
 }
 
 rootpxe_cleanup_session() {
@@ -1833,6 +1874,9 @@ rootpxe_validate_partition_lba_contract() {
 rootpxe_validate_deployment_layout() {
     local disk="$1" schema_file="$2" layout_file="$3" schema_logical original_disk_bytes target_bytes target_sectors source_hash layout_hash
     [[ -r $schema_file && -r $layout_file ]] || return 1
+    [[ ${schemaHash:-} =~ ^[a-fA-F0-9]{64}$ ]] || return 1
+    source_hash=$(rootpxe_canonical_json_hash "$schema_file") || return 1
+    [[ $schemaHash == "$source_hash" ]] || return 1
     command -v jq >/dev/null 2>&1 || return 1
     local schema_table
     schema_table=$(jq -er '.partitionTable' "$schema_file" 2>/dev/null) || return 1
@@ -1852,13 +1896,11 @@ rootpxe_validate_deployment_layout() {
     (( target_bytes >= original_disk_bytes )) || return 1
     (( target_bytes % schema_logical == 0 )) || return 1
     target_sectors=$(( target_bytes / schema_logical ))
-    source_hash=$(rootpxe_canonical_json_hash "$schema_file") || return 1
-    [[ -z ${schemaHash:-} || $schemaHash == "$source_hash" ]] || return 1
     [[ ${schemaRevision:-} =~ ^[1-9][0-9]*$ ]] || return 1
     layout_hash=$(jq -er '.schemaHash // empty' "$layout_file" 2>/dev/null) || return 1
     [[ $layout_hash == "$schemaHash" ]] || return 1
     rootpxe_resolved_layout_file=$(mktemp /tmp/rootpxe-resolved-layout.XXXXXX) || return 1
-    chmod 600 "$rootpxe_resolved_layout_file"
+    chmod 600 "$rootpxe_resolved_layout_file" && rootpxe_register_derived_layout_file "$rootpxe_resolved_layout_file" || { rm -f -- "$rootpxe_resolved_layout_file"; unset rootpxe_resolved_layout_file; return 1; }
     jq -n --slurpfile schema "$schema_file" --slurpfile layout "$layout_file" \
         --argjson target "$target_sectors" --argjson logical "$schema_logical" '
           def align_up($n;$a): ((($n + $a - 1) / $a)|floor) * $a;
@@ -2013,7 +2055,7 @@ rootpxe_validate_lvm_deployment_layout_single() {
         return
     fi
     rootpxe_resolved_lvm_layout_file=$(mktemp /tmp/rootpxe-resolved-lvm.XXXXXX) || return 1
-    chmod 600 "$rootpxe_resolved_lvm_layout_file"
+    chmod 600 "$rootpxe_resolved_lvm_layout_file" && rootpxe_register_derived_layout_file "$rootpxe_resolved_lvm_layout_file" || { rm -f -- "$rootpxe_resolved_lvm_layout_file"; unset rootpxe_resolved_lvm_layout_file; return 1; }
     jq -n --slurpfile schema "$schema_file" --slurpfile layout "$layout_file" --slurpfile partitions "$partition_plan" '
       def bynum($n): (.[] | select(.number == $n));
       def safe_nonnegative: type == "number" and floor == . and . >= 0 and . <= 9007199254740991;
@@ -2698,7 +2740,7 @@ rootpxe_restore_deployment_boot_code() {
 }
 
 rootpxe_apply_deployment_layout() {
-    local disk="$1" template="$2" map output output_dir verify expected actual expected_numbers actual_numbers logical disk_bytes total_sectors table template_sector first_lba= last_lba= is_gpt=0 write_stderr partprobe_stderr dump_stderr reread_attempt reread_max=5 reread_ok=0
+    local disk="$1" template="$2" map output output_dir verify expected actual expected_numbers actual_numbers logical disk_bytes total_sectors table template_sector first_lba= last_lba= is_gpt=0 write_stderr partprobe_stderr dump_stderr reread_attempt reread_max=5 reread_ok=0 number start size extra
     rootpxe_layout_apply_code=""
     rootpxe_layout_apply_reason=""
     rootpxe_layout_diagnostics_file=""
@@ -2755,8 +2797,8 @@ rootpxe_apply_deployment_layout() {
       /^last-lba:[[:space:]]*/ { lasts++; if (is_gpt) { print "last-lba: " last_lba; next } print; next }
       /start=/ { line=$0; dev=$1; n=dev; sub(/^.*[^0-9]/,"",n); if (!(n in starts) || seen[n]++) exit 20;
         sub(/^[^[:space:]]+/, partition_path(n), line);
-        sub(/start=[[:space:]]*[0-9]+/, "start=" sprintf("%12d", starts[n]), line);
-        sub(/size=[[:space:]]*[0-9]+/, "size=" sprintf("%12d", sizes[n]), line); print line; parts++; next }
+        sub(/start=[[:space:]]*[0-9]+/, "start=" sprintf("%12.0f", starts[n]), line);
+        sub(/size=[[:space:]]*[0-9]+/, "size=" sprintf("%12.0f", sizes[n]), line); print line; parts++; next }
       { print }
       END { if (devices != 1 || sectors != 1 || parts != expected || (is_gpt && (firsts != 1 || lasts != 1))) exit 21 }' "$template" >"$output" || { rm -f "$map" "$output"; rootpxe_layout_apply_failed LAYOUT_TEMPLATE_REWRITE_FAILED sfdisk_template_rewrite_failed; return 1; }
     rootpxe_log_raw_file || { rm -f "$map" "$output"; rootpxe_layout_apply_failed SFDISK_WRITE_FAILED write_diagnostic_create_failed; return 1; }
@@ -2777,7 +2819,7 @@ rootpxe_apply_deployment_layout() {
     # new GPT; retry a short, fixed number of times without weakening the
     # later dump and semantic readback checks.
     for ((reread_attempt = 1; reread_attempt <= reread_max; reread_attempt++)); do
-        udevadm settle >/dev/null 2>>"$partprobe_stderr" || :
+        udevadm settle --timeout=5 >/dev/null 2>>"$partprobe_stderr" || :
         if blockdev --rereadpt "$disk" >/dev/null 2>>"$partprobe_stderr"; then
             reread_ok=1
             break
@@ -2829,11 +2871,10 @@ rootpxe_prepare_smb_credentials() {
     local file="/tmp/pxeos.smb.credentials.$$"
     local username="$smb_username" password="$smb_password" domain="${smb_domain:-}"
     [[ $username != *$'\n'* && $username != *$'\r'* && $password != *$'\n'* && $password != *$'\r'* && $domain != *$'\n'* && $domain != *$'\r'* ]] || { rootpxe_clear_smb_plaintext; return 1; }
-    umask 077
-    if ! {
+    if ! ( umask 077; {
         printf 'username=%s\npassword=%s\n' "$username" "$password"
         [[ -z $domain ]] || printf 'domain=%s\n' "$domain"
-    } > "$file"; then
+    } > "$file" ); then
         rm -f "$file"
         rootpxe_clear_smb_plaintext; return 1
     fi
@@ -2841,9 +2882,6 @@ rootpxe_prepare_smb_credentials() {
     smb_credentials_file="$file"
     export smb_credentials_file
     rootpxe_clear_smb_plaintext
-    trap rootpxe_cleanup_session EXIT
-    trap 'rootpxe_cleanup_session; exit 130' INT
-    trap 'rootpxe_cleanup_session; exit 143' TERM
 }
 
 # The server owns the cancellation fence. This must run before any image
@@ -2942,7 +2980,7 @@ rootpxe_set_disk_permit_protocol_error() {
 rootpxe_task_status_confirms_disk_permit_cancellation() {
     local api="${pxeapi:-${web:-}}" response body http_code status
     [[ -n $api ]] || return 1
-    response=$(curl -Lks --connect-timeout 10 --max-time 30 \
+    response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 \
         --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
         --data-urlencode "mac=$mac" -w $'\n%{http_code}' "${api}task-status" 2>/dev/null) || return 1
     http_code=${response##*$'\n'}
@@ -2972,7 +3010,7 @@ rootpxe_request_disk_permit_for_target() {
             --data-urlencode "sessionId=$multicastSessionId"
         )
     fi
-    response=$(curl -Lks --connect-timeout 10 --max-time 30 \
+    response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 \
         --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
         --data-urlencode "mac=$mac" --data-urlencode "targetId=$target_id" \
         --data-urlencode "operation=$operation" "${rootpxe_permit_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
@@ -3099,7 +3137,7 @@ rootpxe_request_disk_permit_batch() {
             --data-urlencode "sessionId=$multicastSessionId"
         )
     fi
-    response=$(curl -Lks --connect-timeout 10 --max-time 30 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "targets=$request" "${rootpxe_permit_batch_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
+    response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "targets=$request" "${rootpxe_permit_batch_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
     http_code=${response##*$'\n'}; body=${response%$'\n'*}
     [[ $http_code =~ ^[0-9]{3}$ ]] || { rootpxe_set_disk_permit_protocol_error unknown; return 12; }
     [[ $http_code =~ ^5[0-9][0-9]$ ]] && return 11
@@ -3275,7 +3313,7 @@ rootpxe_error_wait_for_retry() {
     [[ $stage_count -eq 1 && $stage_invalid -eq 0 ]] && error_args+=(--data-urlencode "stage=$stage")
     # Do not arm the local timeout until the service confirms persistence.
     while :; do
-        raw_response=$(curl -Lks --connect-timeout 10 --max-time 30 -w '\n%{http_code}' \
+        raw_response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 -w '\n%{http_code}' \
             "${error_args[@]}" "${api}error" 2>/dev/null) || {
                 printf '%s\n' \
                     "[WARN]  Error report failed. Retrying in 5s." \
@@ -3286,7 +3324,7 @@ rootpxe_error_wait_for_retry() {
         http_status=${raw_response##*$'\n'}
         response=${raw_response%$'\n'*}
         [[ $http_status =~ ^[0-9]{3}$ ]] || { http_status=000; response=$raw_response; }
-        [[ $http_status =~ ^2 && $response == *'"accepted":true'* ]] && break
+        [[ $http_status =~ ^2 ]] && jq -e 'type == "object" and .accepted == true' >/dev/null 2>&1 <<<"$response" && break
         response_reason=$(rootpxe_error_response_reason "$response")
         if [[ -n $response_reason ]]; then
             printf '%s\n' \
@@ -3299,10 +3337,8 @@ rootpxe_error_wait_for_retry() {
         fi
         sleep 5
     done
-    wait=$(printf '%s' "$response" | sed -n 's/.*"waitSec":\([0-9][0-9]*\).*/\1/p')
-    action=$(printf '%s' "$response" | sed -n 's/.*"failureAction":"\([a-z]*\)".*/\1/p')
-    [[ $wait =~ ^[0-9]+$ && $wait -ge 60 && $wait -le 3600 ]] || wait=600
-    [[ $action == shutdown ]] || action=reboot
+    wait=$(jq -r 'if (.waitSec | type) == "number" and (.waitSec | floor) == .waitSec and .waitSec >= 60 and .waitSec <= 3600 then .waitSec else 600 end' <<<"$response") || wait=600
+    action=$(jq -r 'if .failureAction == "shutdown" then "shutdown" else "reboot" end' <<<"$response") || action=reboot
     printf '%s\n' "$action" > /tmp/pxeos.failure_action
     deadline=$(( $(date +%s) + wait ))
     rootpxe_console_message ERROR 'Task paused. Error reported to RootPXE.'
@@ -3319,16 +3355,17 @@ rootpxe_error_wait_for_retry() {
             rootpxe_console_message WARN "Wait timed out. Timeout action: $action."
             return 2
         fi
-        status=$(curl -Lks --connect-timeout 10 --max-time 20 \
+        status=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 20 \
             --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
-            --data-urlencode "mac=$mac" "${api}task-status" 2>/dev/null)
-        if [[ ${mc:-no} != yes && $status == *'"status":"queued"'* ]]; then
+            --data-urlencode "mac=$mac" "${api}task-status" 2>/dev/null) || { sleep 5; continue; }
+        status=$(jq -er 'if type == "object" and (.status | type) == "string" then .status else empty end' <<<"$status" 2>/dev/null) || status=''
+        if [[ ${mc:-no} != yes && $status == queued ]]; then
             rootpxe_console_message INFO 'Retry requested. Resuming task.'
             rootpxe_reset_disk_permit_retry_state || return 1
             rootpxe_task_log_release_pin || true
             exec /bin/pxeos
         fi
-        if [[ $status == *'"status":"deleted"'* || $status == *'"status":"cancelled"'* || $status == *'"status":"superseded"'* ]]; then
+        if [[ $status == deleted || $status == cancelled || $status == superseded ]]; then
             rootpxe_console_message INFO 'Task deleted or aborted. Stopping PXEOS.'
             return 2
         fi
@@ -3505,14 +3542,14 @@ rootpxe_clear_capture_marker() {
     fi
     rmdir "$lock" 2>/dev/null || { rootpxe_capture_marker_clear_error_reason=finalize_lock_release_failed; return 1; }
 }
-# RootPXE 任务阶段上报（无 taskid 或未设置 web/pxeapi 时静默跳过）
+# RootPXE 任务阶段上报：缺少任务上下文失败；无 web/pxeapi 时跳过。
 rootpxe_stage() {
     local st="$1"
     local msg="${2:-}"
     rootpxe_require_task_context || return 1
     local api="${pxeapi:-$web}"
     [[ -z $api ]] && return 0
-    curl -Lks --max-time 20 \
+    rootpxe_task_curl -ks --max-time 20 \
         --data-urlencode "taskid=$taskid" \
         --data-urlencode "token=$task_token" \
         --data-urlencode "mac=$mac" \
@@ -3697,15 +3734,18 @@ rootpxe_nvme_find_metadata_free_lbaf() {
 }
 
 rootpxe_nvme_wait_for_cancel() {
-    local seconds="${PXEOS_NVME_FORMAT_COUNTDOWN_SEC:-60}" reply="" remaining
+    local seconds="${PXEOS_NVME_FORMAT_COUNTDOWN_SEC:-60}" reply="" started=$SECONDS tick_started
     [[ $seconds =~ ^[0-9]+$ && $seconds -le 60 ]] || seconds=60
     rootpxe_console_message WARN "NVMe logical-sector alignment will erase the namespace in ${seconds}s; press c to cancel."
-    for ((remaining=seconds; remaining>0; remaining--)); do
+    while (( SECONDS - started < seconds )); do
+        tick_started=$SECONDS
         if read -r -t 1 -n 1 reply; then
             case $reply in
                 [Cc]) rootpxe_stage nvme_format_cancelled 'code=NVME_FORMAT_CANCELLED reason=operator_cancelled' || true ; return 1 ;;
             esac
         fi
+        # EOF 与快速非取消输入不能消耗尚未实际经过的一秒。
+        if (( SECONDS == tick_started )); then sleep 1 || return 1; fi
     done
     return 0
 }
@@ -3876,9 +3916,18 @@ clearScreen() {
 }
 # Displays the nice banner along with the running version
 displayBanner() {
-    # 动态获取版本号（RootPXE: /service/pxeos/health）
-    version=$(curl -Lks "${pxeapi:-$web}health" 2>/dev/null | sed -n 's/.*"version"[^"]*"\([^"]*\)".*/\1/p')
-    [[ -z $version ]] && version=$(curl -Lks "${pxeapi:-$web}health" 2>/dev/null)
+    local api_response api_version image_version="${initversion:-unavailable}"
+    # health 的 version 是 API 协议号，镜像发布号始终来自构建时嵌入的值。
+    api_response=$(curl -Lks --connect-timeout 3 --max-time 5 "${pxeapi:-${web:-}}health" 2>/dev/null) || api_response=''
+    if [[ $api_response =~ ^[0-9]+$ ]]; then
+        api_version=$api_response
+    else
+        api_version=$(sed -nE 's/.*"version"[[:space:]]*:[[:space:]]*"?([0-9]+)"?[[:space:]]*[,}].*/\1/p' <<<"$api_response")
+    fi
+    [[ ${#api_version} -le 16 && $api_version =~ ^[0-9]+$ ]] || api_version=unavailable
+    if [[ $image_version != unbuilt ]] && ! [[ ${#image_version} -le 64 && $image_version =~ ^(Release|Beta|Local)-[0-9]{2}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])-([01][0-9]|2[0-3])[0-5][0-9](-[0-9]+-[0-9]+)?$ ]]; then
+        image_version=unavailable
+    fi
 
     cat << 'EOF'
    ========================================================
@@ -3894,8 +3943,8 @@ displayBanner() {
    ========================================================
 EOF
 
-    rootpxe_console_message INFO "Version: $version"
-    rootpxe_console_message INFO "Init version: $initversion"
+    rootpxe_console_message INFO "PXEOS version: $image_version"
+    rootpxe_console_message INFO "API version: $api_version"
     printf '\n'
 }
 # Gets all system mac addresses except for loopback
@@ -3933,7 +3982,8 @@ validResizeOS() {
 }
 # Gets the graphics information from the system
 getGraphics() {
-    local graphics_info=$(lshw -json -C display | jq -r '.[] | select(.vendor != null) | "\(.vendor),\(.product)"')
+    local graphics_info vendor product
+    graphics_info=$(lshw -json -C display | jq -r '(if type == "array" then .[] elif type == "object" then . else empty end) | select(.vendor != null) | "\(.vendor),\(.product)"')
 
     graphics_vendors_array=()
     graphics_products_array=()
@@ -3945,8 +3995,8 @@ getGraphics() {
     inventory_graphics_vendor=$(IFS=,; echo "${graphics_vendors_array[*]}")
     inventory_graphics_product=$(IFS=,; echo "${graphics_products_array[*]}")
 
-    inventory_graphics_vendor64=$(echo "$inventory_graphics_vendor" | base64)
-    inventory_graphics_product64=$(echo "$inventory_graphics_product" | base64)
+    inventory_graphics_vendor64=$(printf '%s' "$inventory_graphics_vendor" | base64 -w0)
+    inventory_graphics_product64=$(printf '%s' "$inventory_graphics_product" | base64 -w0)
 }
 # Gets the information from the system for inventory
 doInventory() {
@@ -3976,30 +4026,30 @@ doInventory() {
     casever=$(dmidecode -s chassis-version)
     caseserial=$(dmidecode -s chassis-serial-number)
     caseasset=$(dmidecode -s chassis-asset-tag)
-    sysman64=$(echo $sysman | base64)
-    sysproduct64=$(echo $sysproduct | base64)
-    sysversion64=$(echo $sysversion | base64)
-    sysserial64=$(echo $sysserial | base64)
-    sysuuid64=$(echo $sysuuid | base64)
-    systype64=$(echo $systype | base64)
-    biosversion64=$(echo $biosversion | base64)
-    biosvendor64=$(echo $biosvendor | base64)
-    biosdate64=$(echo $biosdate | base64)
-    mbman64=$(echo $mbman | base64)
-    mbproductname64=$(echo $mbproductname | base64)
-    mbversion64=$(echo $mbversion | base64)
-    mbserial64=$(echo $mbserial | base64)
-    mbasset64=$(echo $mbasset | base64)
-    cpuman64=$(echo $cpuman | base64)
-    cpuversion64=$(echo $cpuversion | base64)
-    cpucurrent64=$(echo $cpucurrent | base64)
-    cpumax64=$(echo $cpumax | base64)
-    mem64=$(echo $mem | base64)
-    hdinfo64=$(echo $hdinfo | base64)
-    caseman64=$(echo $caseman | base64)
-    casever64=$(echo $casever | base64)
-    caseserial64=$(echo $caseserial | base64)
-    caseasset64=$(echo $caseasset | base64)
+    sysman64=$(printf '%s' "$sysman" | base64 -w0)
+    sysproduct64=$(printf '%s' "$sysproduct" | base64 -w0)
+    sysversion64=$(printf '%s' "$sysversion" | base64 -w0)
+    sysserial64=$(printf '%s' "$sysserial" | base64 -w0)
+    sysuuid64=$(printf '%s' "$sysuuid" | base64 -w0)
+    systype64=$(printf '%s' "$systype" | base64 -w0)
+    biosversion64=$(printf '%s' "$biosversion" | base64 -w0)
+    biosvendor64=$(printf '%s' "$biosvendor" | base64 -w0)
+    biosdate64=$(printf '%s' "$biosdate" | base64 -w0)
+    mbman64=$(printf '%s' "$mbman" | base64 -w0)
+    mbproductname64=$(printf '%s' "$mbproductname" | base64 -w0)
+    mbversion64=$(printf '%s' "$mbversion" | base64 -w0)
+    mbserial64=$(printf '%s' "$mbserial" | base64 -w0)
+    mbasset64=$(printf '%s' "$mbasset" | base64 -w0)
+    cpuman64=$(printf '%s' "$cpuman" | base64 -w0)
+    cpuversion64=$(printf '%s' "$cpuversion" | base64 -w0)
+    cpucurrent64=$(printf '%s' "$cpucurrent" | base64 -w0)
+    cpumax64=$(printf '%s' "$cpumax" | base64 -w0)
+    mem64=$(printf '%s' "$mem" | base64 -w0)
+    hdinfo64=$(printf '%s' "$hdinfo" | base64 -w0)
+    caseman64=$(printf '%s' "$caseman" | base64 -w0)
+    casever64=$(printf '%s' "$casever" | base64 -w0)
+    caseserial64=$(printf '%s' "$caseserial" | base64 -w0)
+    caseasset64=$(printf '%s' "$caseasset" | base64 -w0)
 }
 # Gets the location of the SAM registry if found
 getSAMLoc() {
@@ -4441,13 +4491,13 @@ partitionIsDosExtended() {
     debugEcho "scheme = $scheme" 1>&2
     case $scheme in
         dos)
-            echo "no"
-            ;;
-        *)
             local parttype=""
             getPartType "$part"
             debugEcho "parttype = $parttype" 1>&2
             [[ ${parttype,,} == +(5|f|85|0x5|0xf|0x85) ]] && echo "yes" || echo "no"
+            ;;
+        *)
+            echo "no"
             ;;
     esac
     debugPause
@@ -4461,12 +4511,17 @@ getPartBlockSize() {
     local varVar="$2"
     [[ -z $part ]] && handleError "No partition passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $varVar ]] && handleError "No variable to set passed (${FUNCNAME[0]})\n   Args Passed: $*"
-    printf -v "$varVar" $(blockdev --getpbsz $part)
+    local block_size_value
+    block_size_value=$(blockdev --getpbsz "$part") || return 1
+    printf -v "$varVar" '%s' "$block_size_value"
 }
 # Retrieve available space from NFS share
 # Should only be used when the share is mounted to `/storage`
 getServerDiskSpaceSvailable() {
-    local space=$(df -h | grep "/storage" | sed -n '/dev/{s/  */ /gp}' | cut -d ' ' -f4)
+    local space output
+    output=$(df -h --output=avail -- /storage) || return 1
+    space=$(awk 'NR == 2 { print $1 }' <<<"$output")
+    [[ -n $space ]] || return 1
     [[ $space == "0" ]] && local space="0M"
     echo $space
 }
@@ -4534,19 +4589,33 @@ movePartition() {
     # Skip if we don't know about the previous partition, e.g. call on the very first partition
     [[ -z $prevPart ]] && return
     local disk=""
-    getDiskFromPartition "$part"
+    local prevPartStart prevPartSize currPartStart currPartSize newStart row
+    getDiskFromPartition "$part" || return 1
     local tmp_file1="/tmp/move1.$$"
     local tmp_file2="/tmp/move2.$$"
     rm -f /tmp/move{1,2}.*
-    saveSfdiskPartitions "$disk" "$tmp_file1"
-    prevPartStart=$(grep "$prevPart" $tmp_file1 | cut -d',' -f1 | awk -F'=' '{print $2}' | tr -d ' ')
-    prevPartSize=$(grep "$prevPart" $tmp_file1 | cut -d',' -f2 | awk -F'=' '{print $2}' | tr -d ' ')
+    saveSfdiskPartitions "$disk" "$tmp_file1" || return 1
+    row=$(awk -v part="$prevPart" '$1 == part {
+        count++; split($0, fields, ","); start=fields[1]; size=fields[2]
+        sub(/.*start=[[:space:]]*/, "", start); sub(/.*size=[[:space:]]*/, "", size)
+        gsub(/[[:space:]]/, "", start); gsub(/[[:space:]]/, "", size)
+        if (start !~ /^[0-9]+$/ || size !~ /^[1-9][0-9]*$/) bad=1
+      } END { if (count != 1 || bad) exit 1; print start, size }' "$tmp_file1") || return 1
+    read -r prevPartStart prevPartSize <<<"$row"
+    row=$(awk -v part="$part" '$1 == part {
+        count++; split($0, fields, ","); start=fields[1]; size=fields[2]
+        sub(/.*start=[[:space:]]*/, "", start); sub(/.*size=[[:space:]]*/, "", size)
+        gsub(/[[:space:]]/, "", start); gsub(/[[:space:]]/, "", size)
+        if (start !~ /^[0-9]+$/ || size !~ /^[1-9][0-9]*$/) bad=1
+      } END { if (count != 1 || bad) exit 1; print start, size }' "$tmp_file1") || return 1
+    read -r currPartStart currPartSize <<<"$row"
     newStart=$(calculate "${prevPartStart}+${prevPartSize}")
-    currPartStart=$(grep "$part" $tmp_file1 | cut -d',' -f1 | awk -F'=' '{print $2}' | tr -d ' ')
+    [[ $newStart =~ ^[1-9][0-9]*$ ]] || return 1
     if [[ $currPartStart -gt $newStart ]]; then
         rootpxe_console_message INFO "Moving $part to close the gap after $prevPart."
         debugPause
-        processSfdisk "$tmp_file1" move "$part" "$newStart" > "$tmp_file2"
+        processSfdisk "$tmp_file1" move "$part" "$newStart" > "$tmp_file2" || return 1
+        [[ -s $tmp_file2 ]] || return 1
         if [[ $ismajordebug -gt 0 ]]; then
             majorDebugEcho "Partition table *before* moving $part:"
             cat $tmp_file1
@@ -4884,8 +4953,8 @@ writeImage()  {
     local multicast_monitor_pid="" multicast_key="" multicast_monitor_failed=no restore_pid="" decompressor_pid="" decoder_fifo=""
     [[ -z $target ]] && handleError "No target to place image passed (${FUNCNAME[0]})"
     rootpxe_validate_runtime_img_format || handleError "PXEOS_STAGE=restore CODE=IMAGE_FORMAT_INVALID REASON=unsupported_or_missing_format"
-    local format=$imgLegacy
-    [[ -z $format ]] && format=$imgFormat
+    local format
+    format=$(rootpxe_effective_img_format) || return 1
     local exitcode=0 progress_decoder=0 progress_enabled=no
     rootpxe_write_image_stop_local() {
         local p
@@ -5082,12 +5151,14 @@ getValidRestorePartitions() {
     local part=""
     local imgpart=""
     local part_number=0
-    local split=''
-    if [[ $imgFormat -eq 6 || $imgFormat -eq 4 || $imgFormat -eq 2 ]]; then
+    local split='' format
+    format=$(rootpxe_effective_img_format) || return 1
+    if [[ $format -eq 6 || $format -eq 4 || $format -eq 2 ]]; then
         split='*'
     fi
     getPartitions "$disk"
     for part in $parts; do
+        imgpart=""
         getPartitionNumber "$part"
         [[ $imgPartitionType != all && $imgPartitionType != $part_number ]] && continue
         case $osid in
@@ -5689,7 +5760,7 @@ rootpxe_change_hostname_registry() {
 
 rootpxe_validate_windows_hostname() {
     local value="$1"
-    [[ $value =~ ^[A-Za-z0-9-]{1,15}$ && ! $value =~ ^[0-9]+$ ]]
+    [[ $value =~ ^[A-Za-z0-9-]{1,15}$ && $value != -* && $value != *- && ! $value =~ ^[0-9]+$ ]]
 }
 
 rootpxe_resolve_casefold_directory() {
@@ -6013,16 +6084,10 @@ sec2string() {
     local H=$((T/60/60%24))
     local i=$((T/60%60))
     local s=$((T%60))
-    local dayspace=''
-    local hourspace=''
-    local minspace=''
-    [[ $H > 0 ]] && dayspace=' '
-    [[ $i > 0 ]] && hourspace=':'
-    [[ $s > 0 ]] && minspace=':'
-    (($d > 0)) && printf '%d day%s' "$d" "$dayspace"
-    (($H > 0)) && printf '%d%s' "$H" "$hourspace"
-    (($i > 0)) && printf '%d%s' "$i" "$minspace"
-    (($s > 0)) && printf '%d' "$s"
+    if (( d > 0 )); then
+        printf '%d day%s ' "$d" "$( (( d == 1 )) || printf s )"
+    fi
+    printf '%02d:%02d:%02d' "$H" "$i" "$s"
 }
 # Returns the disk based off the partition passed
 #
@@ -6226,9 +6291,9 @@ findHDDInfo() {
         [Nn]|mps|dd)
             case $type in
                 down)
-                    diskSize=$(lsblk --bytes -dplno SIZE -I 3,8,9,179,259 $hd)
+                    diskSize=$(lsblk --bytes -dplno SIZE "$hd") || { handleError "Could not read disk size (${FUNCNAME[0]})"; return 1; }
+                    [[ $diskSize =~ ^[1-9][0-9]*$ && ${#diskSize} -le 19 ]] || { handleError "Invalid disk size (${FUNCNAME[0]})"; return 1; }
                     [[ $diskSize -gt 2199023255552 ]] && layPartSize="2tB"
-                    rootpxe_console_message INFO "Using disk device: $hd."
                     [[ $imgType == +([nN]) ]] && validResizeOS
                     ;;
                 up)
@@ -6459,11 +6524,16 @@ handleWarning() {
 # $1 is the disk
 runPartprobe() {
     local disk="$1"
+    local attempt
     [[ -z $disk ]] && handleError "No disk passed (${FUNCNAME[0]})\n   Args Passed: $*"
     umount /ntfs /bcdstore >/dev/null 2>&1
-    udevadm settle
-    blockdev --rereadpt $disk >/dev/null 2>&1
-    [[ ! $? -eq 0 ]] && handleError "Failed to read back partitions (${FUNCNAME[0]})\n   Args Passed: $*"
+    for ((attempt=1; attempt<=5; attempt++)); do
+        udevadm settle --timeout=5
+        if blockdev --rereadpt "$disk" >/dev/null 2>&1; then return 0; fi
+        (( attempt == 5 )) || sleep 1
+    done
+    handleError "Failed to read back partitions (${FUNCNAME[0]})\n   Args Passed: $*"
+    return 1
 }
 # Sends a command list to a file for use when debugging
 #
@@ -6523,6 +6593,16 @@ uploadFormat() {
     local file="$2"
     [[ -z $fifo ]] && handleError "Missing file in file out (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $file ]] && handleError "Missing file name to store (${FUNCNAME[0]})\n   Args Passed: $*"
+    local -a compression_args=()
+    [[ ${imgFormat:-} =~ ^[0-6]$ && $imgFormat != 1 ]] || { handleError "PXEOS_STAGE=capture CODE=IMAGE_FORMAT_INVALID REASON=unsupported_or_missing_format"; return 1; }
+    if [[ -n ${PIGZ_COMP:-} ]]; then
+        case $imgFormat in
+            0|2) [[ $PIGZ_COMP =~ ^-[1-9]$ ]] ;;
+            3|4|5|6) [[ $PIGZ_COMP =~ ^-([1-9]|1[0-9]|2[0-2])$ ]] ;;
+            *) false ;;
+        esac || { handleError "PXEOS_STAGE=capture CODE=COMPRESSION_LEVEL_INVALID REASON=unsupported_level_for_format"; return 1; }
+        [[ $imgFormat == 3 || $imgFormat == 4 ]] || compression_args=("$PIGZ_COMP")
+    fi
     # Only whole-disk dd uses a server-provided nested image name.  Partition
     # captures retain their existing prepared-directory contract.
     if [[ ${imgType:-} == dd && -n ${imagePath:-} ]]; then
@@ -6538,11 +6618,11 @@ uploadFormat() {
     case $imgFormat in
         6)
             # ZSTD Split files compressed.
-            ( set -o pipefail; zstdmt --rsyncable --ultra "$PIGZ_COMP" < "$fifo" | split -a 3 -d -b 200m - "${file}." ) &
+            ( set -o pipefail; zstdmt --rsyncable --ultra "${compression_args[@]}" < "$fifo" | split -a 3 -d -b 200m - "${file}." ) &
             ;;
         5)
             # ZSTD compressed.
-            zstdmt --rsyncable --ultra "$PIGZ_COMP" < "$fifo" > "${file}.000" &
+            zstdmt --rsyncable --ultra "${compression_args[@]}" < "$fifo" > "${file}.000" &
             ;;
         4)
             # Split files uncompressed.
@@ -6554,11 +6634,11 @@ uploadFormat() {
             ;;
         2)
             # GZip/piGZ Split file compressed.
-            ( set -o pipefail; pigz "$PIGZ_COMP" < "$fifo" | split -a 3 -d -b 200m - "${file}." ) &
+            ( set -o pipefail; pigz "${compression_args[@]}" < "$fifo" | split -a 3 -d -b 200m - "${file}." ) &
             ;;
         *)
             # GZip/piGZ Compressed.
-            pigz "$PIGZ_COMP" < "$fifo" > "${file}.000" &
+            pigz "${compression_args[@]}" < "$fifo" > "${file}.000" &
         ;;
     esac
     rootpxe_last_writer_pid="$!"
@@ -6684,11 +6764,19 @@ restoreGRUB() {
     [[ -z $disk_number ]] && handleError "No drive number passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $imagePath ]] && handleError "No image path passed (${FUNCNAME[0]})\n   Args Passed: $*"
     local tmpMBR=""
-    MBRFileName "$imagePath" "$disk_number" "tmpMBR" "$sgdisk"
-    local count=$(du -B 512 $tmpMBR | awk '{print $1}')
-    [[ $count -eq 8 || $count -eq 63 ]] && count=1
+    if [[ -n $sgdisk ]]; then
+        local hasGRUB=0
+        hasGRUB "$disk_number" "$imagePath" "$sgdisk"
+        # GPT 的 dN.mbr 是结构化 sgdisk backup，绝不能当作 raw boot。
+        (( hasGRUB == 1 )) || return 0
+        tmpMBR="$imagePath/d${disk_number}.grub.mbr"
+    else
+        MBRFileName "$imagePath" "$disk_number" "tmpMBR" "$sgdisk"
+    fi
+    local count
+    count=$(rootpxe_preflight_raw_boot_sector_count "$tmpMBR") || return 1
     rootpxe_require_unused_target_disks "$disk" || return 1
-    dd if=$tmpMBR of=$disk bs=512 count=$count >/dev/null 2>&1
+    dd "if=$tmpMBR" "of=$disk" bs=512 "count=$count" >/dev/null 2>&1 || return 1
     runPartprobe "$disk"
 }
 # Waits for enter if system is debug type
@@ -6795,12 +6883,12 @@ MBRFileName() {
     case $type in
         down)
             [[ ! -f $mbr && -n $mbrfile ]] && mbr="$mbrfile"
-            printf -v "$varVar" "$mbr"
+            printf -v "$varVar" '%s' "$mbr"
             [[ -z $mbr ]] && handleError "Image store corrupt, unable to locate MBR, no default file specified (${FUNCNAME[0]})\n    Args Passed: $*\n    $varVar Variable set to: ${!varVar}"
             [[ ! -f $mbr ]] && handleError "Image store corrupt, unable to locate MBR, no file found (${FUNCNAME[0]})\n    Args Passed: $*\n    Variable set to: ${!varVar}\n    $varVar Variable set to: ${!varVar}"
             ;;
         up)
-            printf -v "$varVar" "$mbr"
+            printf -v "$varVar" '%s' "$mbr"
             ;;
     esac
 }
@@ -6869,7 +6957,6 @@ savePartitionTablesAndBootLoaders() {
             echo "Done"
             debugPause
             [[ $have_extended_partition -ge 1 ]] && saveAllEBRs "$disk" "$disk_number" "$imagePath"
-            echo "Done"
             ;;
         1)
             dots "Saving Partition Tables (GPT)"
@@ -6948,19 +7035,26 @@ restorePartitionTablesAndBootLoaders() {
     # paths and must never clear a target first and discover a missing MBR.
     MBRFileName "$imagePath" "$disk_number" "tmpMBR"
     [[ -r $tmpMBR && -s $tmpMBR ]] || handleError "Image Store Corrupt: Unable to locate readable MBR (${FUNCNAME[0]})\n   Args Passed: $*"
+    local table_type="" boot_count
+    getDesiredPartitionTableType "$imagePath" "$disk_number"
+    if [[ $table_type == GPT ]]; then
+        if [[ -e $imagePath/d${disk_number}.grub.mbr || -L $imagePath/d${disk_number}.grub.mbr ]]; then
+            boot_count=$(rootpxe_preflight_raw_boot_sector_count "$imagePath/d${disk_number}.grub.mbr") || { handleError "Invalid raw GPT boot artifact (${FUNCNAME[0]})"; return 1; }
+        fi
+    else
+        boot_count=$(rootpxe_preflight_raw_boot_sector_count "$tmpMBR") || { handleError "Invalid raw MBR boot artifact (${FUNCNAME[0]})"; return 1; }
+    fi
     validateImageSectorSize "$disk" "$sector_partition_file"
     clearPartitionTables "$disk"
     majorDebugEcho "Partition table should be empty now."
     majorDebugShowCurrentPartitionTable "$disk" "$disk_number"
     majorDebugPause
-    local table_type=""
-    getDesiredPartitionTableType "$imagePath" "$disk_number"
     majorDebugEcho "Trying to restore to $table_type partition table."
     if [[ $table_type == GPT ]]; then
         dots "Restoring Partition Tables (GPT)"
         rootpxe_diagnostic_begin sgdisk-restore.log || { handleError "Could not collect raw GPT restore diagnostic"; return 1; }
         local sgdisk_raw=$rootpxe_log_raw_path
-        restoreGRUB "$disk" "$disk_number" "$imagePath" "true"
+        restoreGRUB "$disk" "$disk_number" "$imagePath" "true" || { handleError "Failed to restore raw GPT boot artifact (${FUNCNAME[0]})"; return 1; }
         rootpxe_require_unused_target_disks "$disk" || return 1
         sgdisk -z $disk >/dev/null 2>&1
         rootpxe_require_unused_target_disks "$disk" || return 1
@@ -6984,7 +7078,7 @@ restorePartitionTablesAndBootLoaders() {
                 ;;
         esac
         dots "$strdots"
-        restoreGRUB "$disk" "$disk_number" "$imagePath"
+        restoreGRUB "$disk" "$disk_number" "$imagePath" || { handleError "Failed to restore raw MBR boot artifact (${FUNCNAME[0]})"; return 1; }
         echo "Done"
         debugPause
         majorDebugShowCurrentPartitionTable "$disk" "$disk_number"
@@ -7187,13 +7281,16 @@ restorePartition() {
     local disk_number="$2"
     local imagePath="$3"
     local mc="$4"
-    local split=''
-    if [[ $imgFormat -eq 6 || $imgFormat -eq 4 || $imgFormat -eq 2 ]]; then
+    local split='' format
+    format=$(rootpxe_effective_img_format) || return 1
+    if [[ $format -eq 6 || $format -eq 4 || $format -eq 2 ]]; then
         split='*'
     fi
     [[ -z $part ]] && handleError "No partition passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $disk_number ]] && handleError "No disk number passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $imagePath ]] && handleError "No image path passed (${FUNCNAME[0]})\n   Args Passed: $*"
+    local part_number=0
+    [[ $imgType == dd ]] || getPartitionNumber "$part"
     if [[ $imgPartitionType != all && $imgPartitionType != $part_number ]]; then
         rootpxe_console_message INFO "Skipping partition: $part ($part_number)."
         debugPause
@@ -7202,7 +7299,6 @@ restorePartition() {
     local imgpart=""
     local ebrfilename=""
     local disk=""
-    local part_number=0
     local parttype=""
     local progress_key=""
     local israw=0
@@ -7214,7 +7310,6 @@ restorePartition() {
         part_number=0
         progress_key="d${disk_number}:disk"
     else
-        getPartitionNumber "$part"
         progress_key="d${disk_number}:p${part_number}"
     fi
     getPartType "$part"
@@ -7586,9 +7681,18 @@ performRestore() {
 getFSID() {
     local part="$1"
     [[ -z $part ]] && handleError "No partition passed (${FUNCNAME[0]})\n   Args Passed: $*"
-    local disk
-    getDiskFromPartition "$part"
-    fsid="$(flock $disk sfdisk -d "$disk" |  grep "$part" | sed -n 's/.*Id=\([0-9]\+\).*\(,\|\).*/\1/p')"
+    local disk dump
+    fsid=""
+    getDiskFromPartition "$part" || return 1
+    dump=$(flock "$disk" sfdisk -d "$disk") || return 1
+    fsid=$(awk -v part="$part" '$1 == part {
+        count++; fields=split($0, row, ",")
+        for (i=1; i<=fields; i++) if (row[i] ~ /^[[:space:]]*Id=/) {
+            value=row[i]; sub(/^[[:space:]]*Id=/, "", value)
+            gsub(/[[:space:]]/, "", value)
+            if (value !~ /^[0-9]+$/ || found++) bad=1
+        }
+      } END { if (count != 1 || found != 1 || bad) exit 1; print value }' <<<"$dump") || { fsid=""; return 1; }
 }
 # Trims character from string
 # $1 The variable to trim
@@ -7600,9 +7704,13 @@ trim() {
 }
 # Calculates information
 calculate() {
-    echo $(awk 'BEGIN{printf "%.0f\n", '$*'}')
+    local expression="$*"
+    [[ -n $expression && ${#expression} -le 4096 && $expression =~ ^[0-9[:space:]()+*/.-]+$ && $expression != *[[:cntrl:]]* ]] || return 1
+    awk "BEGIN{printf \"%.0f\\n\", ($expression)}"
 }
 # Calculates information and returns full float
 calculate_float() {
-    echo $(awk 'BEGIN{printf "%f\n", '$*'}');
+    local expression="$*"
+    [[ -n $expression && ${#expression} -le 4096 && $expression =~ ^[0-9[:space:]()+*/.-]+$ && $expression != *[[:cntrl:]]* ]] || return 1
+    awk "BEGIN{printf \"%f\\n\", ($expression)}"
 }

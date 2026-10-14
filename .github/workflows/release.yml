@@ -11,8 +11,36 @@ defaults:
     shell: bash
 
 jobs:
-  download_filesystem_packages:
+  release_metadata:
     runs-on: ubuntu-24.04
+    outputs:
+      release_name: ${{ steps.naming.outputs.release_name }}
+      tag_name: ${{ steps.naming.outputs.tag_name }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Select canonical release metadata
+        id: naming
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source ./build_version.sh
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]] || { echo 'Invalid GitHub run marker.' >&2; exit 1; }
+          release_stamp=$(TZ=Asia/Shanghai date '+%y%m%d-%H%M')
+          release_name="Release-${release_stamp}"
+          fallback_tag="${release_name}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rootpxe_build_validate_version "$release_name"
+          rootpxe_build_validate_version "$fallback_tag"
+          tag_name=$(bash scripts/check-release-tag.sh --repo "$GITHUB_REPOSITORY" --tag "$release_name" --fallback-tag "$fallback_tag")
+          rootpxe_build_validate_version "$tag_name"
+          printf 'release_name=%s\ntag_name=%s\n' "$release_name" "$tag_name" >> "$GITHUB_OUTPUT"
+
+  download_filesystem_packages:
+    needs: release_metadata
+    runs-on: ubuntu-24.04
+    env:
+      PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -27,7 +55,10 @@ jobs:
         run: ./build.sh -i --fs-download-only
 
   build_kernel_arm64:
+    needs: release_metadata
     runs-on: ubuntu-24.04
+    env:
+      PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -45,7 +76,10 @@ jobs:
           retention-days: 1
 
   build_kernel_x86:
+    needs: release_metadata
     runs-on: ubuntu-24.04
+    env:
+      PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -63,7 +97,10 @@ jobs:
           retention-days: 1
 
   build_kernel_x64:
+    needs: release_metadata
     runs-on: ubuntu-24.04
+    env:
+      PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -81,8 +118,10 @@ jobs:
           retention-days: 1
 
   build_initrd_arm64:
-    needs: download_filesystem_packages
+    needs: [release_metadata, download_filesystem_packages]
     runs-on: ubuntu-24.04
+    env:
+      PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -121,8 +160,10 @@ jobs:
           retention-days: 30
 
   build_initrd_x86:
-    needs: download_filesystem_packages
+    needs: [release_metadata, download_filesystem_packages]
     runs-on: ubuntu-24.04
+    env:
+      PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -161,8 +202,10 @@ jobs:
           retention-days: 30
 
   build_initrd_x64:
-    needs: download_filesystem_packages
+    needs: [release_metadata, download_filesystem_packages]
     runs-on: ubuntu-24.04
+    env:
+      PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -203,6 +246,7 @@ jobs:
   release:
     needs:
       [
+        release_metadata,
         build_kernel_arm64,
         build_kernel_x86,
         build_kernel_x64,
@@ -211,6 +255,9 @@ jobs:
         build_initrd_x64,
       ]
     runs-on: ubuntu-24.04
+    env:
+      RELEASE_NAME: ${{ needs.release_metadata.outputs.release_name }}
+      TAG_NAME: ${{ needs.release_metadata.outputs.tag_name }}
     permissions:
       contents: write
     concurrency:
@@ -225,23 +272,10 @@ jobs:
           pattern: distribution-files-*
           merge-multiple: true
           path: distribution-files
-      - name: Set release and tag names
-        run: |
-          release_stamp=$(TZ=Asia/Shanghai date '+%y%m%d-%H%M')
-          echo "RELEASE_NAME=Release-${release_stamp}" >> "$GITHUB_ENV"
-          echo "TAG_NAME=Release-${release_stamp}" >> "$GITHUB_ENV"
       - name: Get versions from build.sh
         run: |
           echo "LINUX_KERNEL_VER=$(sed -n -e 's/^.*KERNEL_VERSION=//p' build.sh | cut -d\' -f 2)" >> "$GITHUB_ENV"
           echo "BUILDROOT_VER=$(sed -n -e 's/^.*BUILDROOT_VERSION=//p' build.sh | cut -d\' -f 2)" >> "$GITHUB_ENV"
-      - name: Validate historical release tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]] || { echo 'Invalid GitHub run marker.' >&2; exit 1; }
-          fallback_tag="${TAG_NAME}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          TAG_NAME=$(bash scripts/check-release-tag.sh --repo "$GITHUB_REPOSITORY" --tag "$TAG_NAME" --fallback-tag "$fallback_tag")
-          echo "TAG_NAME=$TAG_NAME" >> "$GITHUB_ENV"
       - name: Generate release download manifest
         env:
           RELEASE_TAG: ${{ env.TAG_NAME }}
@@ -251,6 +285,14 @@ jobs:
         run: |
           cd distribution-files
           sha256sum -c ./*.sha256
+      - name: Validate historical release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source ./build_version.sh
+          rootpxe_build_validate_version "$TAG_NAME"
+          [[ $TAG_NAME == Release-* ]] || exit 1
+          bash scripts/check-release-tag.sh --repo "$GITHUB_REPOSITORY" --tag "$TAG_NAME"
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:

@@ -176,8 +176,8 @@ cat >"$mpa/.rootpxe-partition-inventory.json" <<'JSON'
 JSON
 table "$mpa/d1.partitions" dos 83
 table "$mpa/d2.partitions" gpt 0FC63DAF
-file "$mpa/d1.mbr"
-file "$mpa/d2.mbr"
+bootfile "$mpa/d1.mbr" 512
+bootfile "$mpa/d2.mbr" 512
 file "$mpa/d1p1.img"
 file "$mpa/d2p1.img"
 file "$mpa/d1.has_grub"
@@ -206,7 +206,7 @@ legacy="$tmp/legacy"
 mkdir "$legacy"
 printf '1:1000\n' >"$legacy/d1.size"
 table "$legacy/d1.partitions" dos 83
-file "$legacy/d1.mbr"
+bootfile "$legacy/d1.mbr" 512
 file "$legacy/d1p1.img"
 expect_ok rootpxe_validate_restore_artifacts "$legacy" mpa all
 [[ $(rootpxe_fixed_restore_disk_facts "$legacy") == '1|1000' ]] || fail 'legacy mpa facts mismatch'
@@ -232,7 +232,7 @@ winlegacy="$tmp/winlegacy"
 mkdir "$winlegacy"
 printf '1:1000\n' >"$winlegacy/d1.size"
 table "$winlegacy/d1.partitions" gpt C12A7328-F81F-11D2-BA4B-00A0C93EC93B
-file "$winlegacy/d1.mbr"
+bootfile "$winlegacy/d1.mbr" 512
 file "$winlegacy/d1p1.img"
 imgType=mpa
 expect_ok rootpxe_validate_fixed_image_lvm_inventory "$winlegacy"

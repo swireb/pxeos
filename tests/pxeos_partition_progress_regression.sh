@@ -3,6 +3,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+. "$root/tests/task-http-test-support.sh"
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
 reporter="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.statusreporter"
 tmp="$(mktemp -d)"
@@ -175,7 +176,7 @@ assert_eq "$(jq -r '.percent == null' "$tmp/events/event-0000000002.json")" true
 # Flush only consumes queued state after the reporter has stopped.  curl is a
 # test stub; telemetry delivery failure/success is never allowed to gate work.
 test_curl_args="$tmp/curl.args"
-curl() { printf '%s\n' "$*" >>"$test_curl_args"; return 0; }
+curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"; printf '%s\n' "$*" >>"$test_curl_args"; return 0; }
 task_token=0123456789abcdef
 mac=00:11:22:33:44:55
 pxeapi=https://server/service/pxeos/
@@ -304,6 +305,9 @@ assert_eq "$lvm_pv_lifecycle" $'preparing\tnull\nrunning\tnull\ncompleted\tnull'
 # LVM filesystem facts must be collected in a short, reversible activation
 # window before planning.  These source LVs begin inactive; both are activated,
 # probed, deactivated, and only then published with an FS column.
+# Use the production native wrapper with the command mocks below; do not
+# replace it with a bypass or suppress real native diagnostics.
+. "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh"
 awk '/^rootpxe_lvm_prepare_capture_lv_facts_single\(\)/ { copy=1 } /^rootpxe_capture_lvm_volumes_single\(\)/ { exit } copy { print }' "$funcs" >"$tmp/lvm-fs-prepare.sh"
 # shellcheck source=/dev/null
 . "$tmp/lvm-fs-prepare.sh"

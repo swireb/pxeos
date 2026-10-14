@@ -2,6 +2,7 @@
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+. "$root/tests/task-http-test-support.sh"
 lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/multicast.sh"
 jq_bin=${JQ_BIN:-jq}
 if [[ $jq_bin != */* && $jq_bin != *\\* ]]; then
@@ -12,7 +13,7 @@ monitor_dir=''
 trap 'rm -rf -- "$tmp" "${monitor_dir:-}"' EXIT
 jq() { "$jq_bin" "$@"; }
 
-curl() {
+curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
     local output=''
     printf '%s\n' "$@" >"$tmp/curl.args"
     while (( $# )); do

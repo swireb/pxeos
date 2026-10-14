@@ -2,6 +2,8 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/tests/task-http-test-support.sh"
+export TASK_HTTP_TEST_EXPAND_JSON=yes
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -57,6 +59,7 @@ rootpxe_deployment_identity_policy_enabled || fail 'computer-name-only policy wa
 mkdir -p "$tmp/bin"
 cat >"$tmp/bin/curl" <<'EOF'
 #!/usr/bin/env bash
+task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"
 printf '%s' '{"plan":{"version":1,"planId":"plan-1"},"planHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","attempt":3}'
 printf '\n200'
 EOF
@@ -71,7 +74,7 @@ rootpxe_deployment_identity_request_plan
 jq -e '.plan | (has("topology") | not) and (has("disks") | not) and (has("systemIdentity") | not)' "$rootpxe_deployment_identity_plan_file" >/dev/null || fail 'plan included generated system identity data'
 
 captured="$tmp/result.json"
-curl() {
+curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
     local data
     while (($#)); do
         if [[ $1 == --data-binary ]]; then data=$2; shift 2; continue; fi
@@ -109,7 +112,7 @@ IFS= read -r secret || true
 printf '%s\n' '$6$fixedsalt$fixedhash'
 EOF
 chmod +x "$tmp/bin/mkpasswd"
-curl() {
+curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
     printf '%s' '{"version":1,"sshLoginPublicKeys":["ssh-ed25519 AAAA test"],"rootPassword":"eight-char-password","unattendXml":""}'
     printf '\n200'
 }
@@ -135,7 +138,7 @@ while IFS= read -r path; do [[ ! -e $path && ! -L $path ]] || fail "private temp
 printf '%s\n' '{"version":1,"systemIdentity":{"sshLoginPublicKeys":true}}' >"$private_policy"
 deploymentIdentityPolicyFile="$private_policy"
 rm -f -- "$mkpasswd_args"
-curl() {
+curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
     printf '%s' '{"version":1,"sshLoginPublicKeys":["ssh-ed25519 AAAA test"],"rootPassword":"","unattendXml":""}'
     printf '\n200'
 }
@@ -155,7 +158,7 @@ chmod +x "$tmp/bin/mkpasswd"
 printf '%s\n' '{"version":1,"systemIdentity":{"rootPassword":true}}' >"$private_policy"
 deploymentIdentityPolicyFile="$private_policy"
 rootpxe_deployment_initialization_private_file=''
-curl() {
+curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
     printf '%s' '{"version":1,"sshLoginPublicKeys":[],"rootPassword":"eight-char-password","unattendXml":""}'
     printf '\n200'
 }

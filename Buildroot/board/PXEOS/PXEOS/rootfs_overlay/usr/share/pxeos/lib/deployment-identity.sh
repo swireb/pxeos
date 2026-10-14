@@ -1,6 +1,7 @@
 #!/bin/bash
 # Deployment identity v1.  This library deliberately consumes only the
 # server-frozen plan; it never generates disk IDs, filesystem UUIDs or keys.
+. "$(dirname "${BASH_SOURCE[0]}")/task-http.sh" || return 1
 
 rootpxe_deployment_identity_policy_enabled() {
     [[ -r ${deploymentIdentityPolicyFile:-} ]] || return 1
@@ -18,7 +19,7 @@ rootpxe_deployment_identity_request_private() {
     [[ -n $api && ${taskid:-} =~ ^[1-9][0-9]*$ && -n ${task_token:-} && -n ${mac:-} && ${progress_attempt:-} =~ ^[1-9][0-9]*$ ]] || return 1
     api="${api%/}/"
     request=$(jq -cn --argjson taskId "$taskid" --arg token "$task_token" --arg mac "$mac" --argjson attempt "$progress_attempt" '{taskId:$taskId,token:$token,mac:$mac,attempt:$attempt}') || return 1
-    response=$(curl -Lks --connect-timeout 10 --max-time 30 -H 'Content-Type: application/json' --data-binary "$request" -w $'\n%{http_code}' "${api}deployment-initialization" 2>/dev/null) || return 1
+    response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 -H 'Content-Type: application/json' --data-binary "$request" -w $'\n%{http_code}' "${api}deployment-initialization" 2>/dev/null) || return 1
     code=${response##*$'\n'}; body=${response%$'\n'*}
     [[ $code == 200 ]] || return 1
     printf '%s' "$body" | jq -e '.version == 1 and ((.sshLoginPublicKeys|type) == "array") and ((.rootPassword|type) == "string") and ((.unattendXml|type) == "string")' >/dev/null 2>&1 || return 1
@@ -92,7 +93,7 @@ rootpxe_deployment_identity_request_plan() {
     [[ -n $api && ${taskid:-} =~ ^[1-9][0-9]*$ && -n ${task_token:-} && -n ${mac:-} && ${progress_attempt:-} =~ ^[1-9][0-9]*$ ]] || return 1
     api="${api%/}/"
     request=$(jq -cn --argjson taskId "$taskid" --arg token "$task_token" --arg mac "$mac" --argjson attempt "$progress_attempt" '{taskId:$taskId,token:$token,mac:$mac,attempt:$attempt}') || return 1
-    response=$(curl -Lks --connect-timeout 10 --max-time 30 -H 'Content-Type: application/json' --data-binary "$request" -w $'\n%{http_code}' "${api}deployment-identity-plan" 2>/dev/null) || return 1
+    response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 -H 'Content-Type: application/json' --data-binary "$request" -w $'\n%{http_code}' "${api}deployment-identity-plan" 2>/dev/null) || return 1
     code=${response##*$'\n'}; body=${response%$'\n'*}
     [[ $code == 200 ]] || return 1
     file=$(mktemp /tmp/rootpxe-deployment-identity-plan.XXXXXX) || return 1
@@ -213,7 +214,7 @@ rootpxe_deployment_identity_report_result() {
     [[ -r ${rootpxe_deployment_identity_plan_file:-} ]] || return 1
     api="${pxeapi:-${web:-}}"; [[ -n $api ]] || return 1
     request=$(jq -cn --argjson taskId "$taskid" --arg token "$task_token" --arg mac "$mac" --arg planId "$(jq -r '.plan.planId' "$rootpxe_deployment_identity_plan_file")" --arg planHash "$(jq -r '.planHash' "$rootpxe_deployment_identity_plan_file")" --argjson attempt "$progress_attempt" --argjson hostname "$hostname" --argjson machineId "$machine_id" --argjson sshHostKeys "$ssh_host_keys" --argjson sshLoginPublicKeys "$ssh_login_public_keys" --argjson rootPassword "$root_password" --argjson sysprep "$sysprep" '{taskId:$taskId,token:$token,mac:$mac,planId:$planId,planHash:$planHash,attempt:$attempt,result:{hostname:$hostname,machineId:$machineId,sshHostKeys:$sshHostKeys,sshLoginPublicKeys:$sshLoginPublicKeys,rootPassword:$rootPassword,sysprep:$sysprep}}') || return 1
-    response=$(curl -Lks --connect-timeout 10 --max-time 30 -H 'Content-Type: application/json' --data-binary "$request" -w $'\n%{http_code}' "${api}deployment-identity-result" 2>/dev/null) || return 1
+    response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 -H 'Content-Type: application/json' --data-binary "$request" -w $'\n%{http_code}' "${api}deployment-identity-result" 2>/dev/null) || return 1
     http_code=${response##*$'\n'}
     [[ $http_code =~ ^2[0-9][0-9]$ ]]
 }

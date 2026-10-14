@@ -14,7 +14,7 @@ trap 'rm -rf "$tmp"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 mkdir -p "$tmp/mock" "$tmp/etc/network" "$tmp/lib"
 { printf '. "%s/tests/task-log-test-support.sh"\n' "$root"; sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh"; printf '\ntask_log_test_emulate_pin_flags\n'; } >"$tmp/log-paths.sh"
-printf 'export initversion=20990101\n' >"$tmp/lib/funcs.sh"
+printf 'export initversion=Release-261014-0101-1234-2\n' >"$tmp/lib/funcs.sh"
 
 cat >"$tmp/mock/ip" <<'EOF'
 #!/usr/bin/env bash
@@ -65,7 +65,7 @@ set -e
 [[ $rc -eq 1 ]] || fail "failure path exit code: $rc"
 grep -Fq 'PXEOS network diagnostics' "$tmp/output" || fail missing-diagnostic-banner
 grep -Fq 'Kernel: test-kernel-9.9' "$tmp/output" || fail missing-kernel-version
-grep -Fq 'PXEOS init version: 20990101' "$tmp/output" || fail missing-init-version
+grep -Fq 'PXEOS version: Release-261014-0101-1234-2' "$tmp/output" || fail missing-pxeos-version
 grep -Fq 'Ethernet/network PCI devices:' "$tmp/output" || fail missing-pci-section
 grep -Fq 'Interfaces:' "$tmp/output" || fail missing-interface-section
 grep -Fq 'Test NIC' "$tmp/output" || fail missing-pci-fact

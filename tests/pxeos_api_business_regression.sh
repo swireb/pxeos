@@ -10,6 +10,7 @@ set -euo pipefail
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+. "$root/tests/task-http-test-support.sh"
 checkin="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.checkin"
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
 jq_bin="${JQ_BIN:-jq}"
@@ -232,6 +233,7 @@ rootpxe_apply_json_checkin "$unknown_protocol" && fail '未知协议的 JSON 不
 mkdir -p "$tmp/legacy-bin"
 cat >"$tmp/legacy-bin/curl" <<'EOF'
 #!/bin/bash
+task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"
 printf '%s\n200\n' "${MOCK_CHECKIN_BODY:?}"
 EOF
 cat >"$tmp/legacy-bin/dmidecode" <<'EOF'
@@ -240,13 +242,14 @@ printf '%s\n' '00000000-0000-0000-0000-000000000000'
 EOF
 chmod +x "$tmp/legacy-bin/curl" "$tmp/legacy-bin/dmidecode"
 : >"$tmp/proc-cmdline"
-sed -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' \
-    -e 's|^\. /usr/share/pxeos/lib/deployment-identity.sh$|:|' \
-    -e 's|^\. /usr/share/pxeos/lib/restore-preflight.sh$|:|' \
-    -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' \
+sed -e 's|^rootpxe_source_core_library partition-funcs.sh.*|:|' \
+    -e 's|^rootpxe_source_core_library deployment-identity.sh.*|:|' \
+    -e 's|^rootpxe_source_core_library restore-preflight.sh.*|:|' \
+    -e 's|^rootpxe_source_core_library capture-recovery.sh.*|:|' \
     -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" \
     "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/legacy-funcs.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
 printf '\nif declare -F task_log_test_emulate_pin_flags >/dev/null; then task_log_test_emulate_pin_flags; fi\n' >>"$tmp/log-paths.sh"
 for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
@@ -268,7 +271,7 @@ rootpxe_deployment_identity_linux_capabilities_installed() { return 1; }
 rootpxe_deployment_identity_windows_hostname_capability_installed() { return 1; }
 rootpxe_deployment_identity_windows_sysprep_capability_installed() { return 1; }
 EOF
-sed -e "s|^\. /usr/share/pxeos/lib/funcs.sh$|. \"$tmp/legacy-runtime.sh\"|" \
+sed -e "s|^\. /usr/share/pxeos/lib/funcs.sh|. \"$tmp/legacy-runtime.sh\"|" \
     -e "s|^\. /usr/share/pxeos/lib/disk-health.sh$|. \"$tmp/disk-health.sh\"|" \
     -e "s|/tmp/pxeos.shutdown|$tmp/pxeos.shutdown|g" \
     -e "s|/proc/cmdline|$tmp/proc-cmdline|g" \
@@ -463,7 +466,7 @@ test_error_stage_field() {
     local message="$1" expected_stage="${2:-}" trace="$tmp/error-stage.trace" calls_file="$tmp/error-stage.calls" calls
     : >"$trace"
     printf '0\n' >"$calls_file"
-    curl() {
+    curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
         calls=$(<"$calls_file")
         calls=$((calls + 1))
         printf '%s\n' "$calls" >"$calls_file"
@@ -497,7 +500,7 @@ error_report_output="$tmp/error-report-diagnostic.out"
 error_report_calls="$tmp/error-report-diagnostic.calls"
 printf '0\n' >"$error_report_calls"
 rootpxe_console_message() { printf '[%s]  %s\n' "$1" "$2" >>"$error_report_output"; }
-curl() {
+curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
     calls=$(<"$error_report_calls")
     calls=$((calls + 1))
     printf '%s\n' "$calls" >"$error_report_calls"
@@ -529,6 +532,7 @@ printf 'PASS: PXEOS real-jq JSON checkin regression\n'
 # Only temporary mocks are used; no host disk or network is touched.
 set -euo pipefail
 root=$(cd $(dirname $0)/.. && pwd)
+. "$root/tests/task-http-test-support.sh"
 overlay=$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay
 funcs=$overlay/usr/share/pxeos/lib/funcs.sh
 checkin=$overlay/bin/pxeos.checkin
@@ -867,8 +871,9 @@ case " $* " in
 esac
 EOF
 chmod +x $tmp/mock/*
-sed -e "s|^\. /usr/share/pxeos/lib/partition-funcs.sh|. \"$overlay/usr/share/pxeos/lib/partition-funcs.sh\"|" -e "s|^\. /usr/share/pxeos/lib/deployment-identity.sh|:|" -e "s|^\. /usr/share/pxeos/lib/restore-preflight.sh|. \"$overlay/usr/share/pxeos/lib/restore-preflight.sh\"|" -e "s|^\. /usr/share/pxeos/lib/capture-recovery.sh|. \"$overlay/usr/share/pxeos/lib/capture-recovery.sh\"|" -e "s|</proc/cmdline|<$tmp/cmdline|" -e "s|/ntfs/|$tmp/ntfs/|g" -e "s| /ntfs\([ ;)]\)| $tmp/ntfs\1|g" -e "s|mountpoint=/linuxroot|mountpoint=$tmp/linuxroot|g" -e "s|/linuxroot/|$tmp/linuxroot/|g" -e "s| /linuxroot\([ ;)]\)| $tmp/linuxroot\1|g" $funcs >$tmp/funcs.sh
+sed -e "s|^rootpxe_source_core_library partition-funcs.sh|. \"$overlay/usr/share/pxeos/lib/partition-funcs.sh\"|" -e "s|^rootpxe_source_core_library deployment-identity.sh|:|" -e "s|^rootpxe_source_core_library restore-preflight.sh|. \"$overlay/usr/share/pxeos/lib/restore-preflight.sh\"|" -e "s|^rootpxe_source_core_library capture-recovery.sh|. \"$overlay/usr/share/pxeos/lib/capture-recovery.sh\"|" -e "s|</proc/cmdline|<$tmp/cmdline|" -e "s|/ntfs/|$tmp/ntfs/|g" -e "s| /ntfs\([ ;)]\)| $tmp/ntfs\1|g" -e "s|mountpoint=/linuxroot|mountpoint=$tmp/linuxroot|g" -e "s|/linuxroot/|$tmp/linuxroot/|g" -e "s| /linuxroot\([ ;)]\)| $tmp/linuxroot\1|g" $funcs >$tmp/funcs.sh
 cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
 printf '\nif declare -F task_log_test_emulate_pin_flags >/dev/null; then task_log_test_emulate_pin_flags; fi\n' >>"$tmp/log-paths.sh"
 for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
@@ -1757,6 +1762,7 @@ echo 'PASS: PXEOS business regression contract'
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+. "$root/tests/task-http-test-support.sh"
 overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
 funcs="$overlay/usr/share/pxeos/lib/funcs.sh"
 # PXEOS uses extensionless runtime scripts in bin and init.d.  Collect only
@@ -1885,9 +1891,9 @@ grep -Fqx '[INFO]  Server response: registered' "$tmp/auto-registration-response
 must_fit "$(cat "$tmp/prompt.out")"
 
 (
-    initversion=test-init
+    initversion=Release-261014-0101-1234-2
     pxeapi=https://example.invalid/service/
-    curl() { printf 'test-version\n'; }
+    curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"; printf '{"version":"1"}\n'; }
     . "$tmp/console.sh"
     . "$tmp/banner.sh"
     displayBanner
@@ -1899,8 +1905,8 @@ grep -Fqx '   ==================== PXEOS Runtime =====================' "$tmp/ba
 while IFS= read -r line; do
     must_fit "$line"
 done <"$tmp/banner.out"
-grep -Fqx '[INFO]  Version: test-version' "$tmp/banner.out" || fail 'normal banner version must use INFO layout'
-grep -Fqx '[INFO]  Init version: test-init' "$tmp/banner.out" || fail 'normal banner init version must use INFO layout'
+grep -Fqx '[INFO]  PXEOS version: Release-261014-0101-1234-2' "$tmp/banner.out" || fail 'normal banner PXEOS version must use the embedded historical tag'
+grep -Fqx '[INFO]  API version: 1' "$tmp/banner.out" || fail 'normal banner API version must use a separate INFO row'
 
 set +e
 (
@@ -2133,7 +2139,7 @@ for line in \
     '[ERROR] Task paused. Error reported to RootPXE.' \
     '[ERROR] Mock failure details token=[REDACTED]' \
     '[WARN]  Mock warning details' \
-    '[INFO]  Init version: test-init' \
+    '[INFO]  PXEOS version: Release-261014-0101-1234-2' \
     '[WARN]  System will reboot in 60s.' \
     '[INFO]  Continuing in 60s.' \
     '[INFO]  Select Retry in the web UI to resume.' \

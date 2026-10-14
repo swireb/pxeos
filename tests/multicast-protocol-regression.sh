@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+. "$root/tests/task-http-test-support.sh"
 lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/multicast.sh"
 JQ=/c/Windows/System32/jq.exe
 [[ -x $JQ && -r $lib ]] || { echo 'FAIL: real jq or multicast library missing' >&2; exit 1; }
@@ -11,7 +12,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 session=manual-session-aaaaaaaaaaaaaaaa
 stream=cccccccccccccccccccccccccccccccc
-curl() {
+curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
   local out='' url='' arg body=''
   while (( $# )); do
     case $1 in

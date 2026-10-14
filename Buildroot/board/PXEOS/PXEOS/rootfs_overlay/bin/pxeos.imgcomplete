@@ -57,7 +57,7 @@ fi
 dots "Notifying RootPXE (finish)"
 while true; do
     # 在 bash -e 环境中，临时网络错误不能让命令替换提前终止重试循环。
-    if res=$(curl -Lks --connect-timeout 10 --max-time 30 "${finish_args[@]}" "${rootpxe_api}finish" 2>/dev/null); then
+    if res=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 "${finish_args[@]}" "${rootpxe_api}finish" 2>/dev/null); then
         :
     else
         res=""

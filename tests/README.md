@@ -14,11 +14,12 @@
 bash tests/pxeos_os_type_regression.sh
 ```
 
-Windows 上运行两个 Python 发布测试可使用：
+Windows 上运行 Python 发布测试可使用（显式 UTF-8 避免系统默认编码影响源码读取）：
 
 ```powershell
-py -3 tests/release_naming_test.py
-py -3 tests/pxeos_release_manifest_test.py
+py -3 -X utf8 -B tests/release_naming_test.py
+py -3 -X utf8 -B tests/pxeos_release_manifest_test.py
+py -3 -X utf8 -B tests/pxeos_build_version_test.py
 ```
 
 Linux 上可使用对应的 Python 3 命令：
@@ -26,12 +27,16 @@ Linux 上可使用对应的 Python 3 命令：
 ```bash
 python3 tests/release_naming_test.py
 python3 tests/pxeos_release_manifest_test.py
+python3 tests/pxeos_build_version_test.py
 ```
 
-## 发布与清单（2）
+## 发布与清单（3）
 
 - `release_naming_test.py`：离线核对发布命名和选定 beta 架构契约。
 - `pxeos_release_manifest_test.py`：离线核对发布清单和固定发布频道。
+- `pxeos_build_version_test.py`：以只读 GitHub 查询替身、时间 fixture 和临时 overlay，核对构建前一次选定 Release/Beta 最终 tag、同一分钟重名后缀、全部架构传播、历史/频道清单与镜像同值、跨时区/跨日及不重采样、本地 `Local`、CI 缺号/非法号拒绝、复制失败不写号、控制台 API/PXEOS 分列、网络诊断安全读取，以及已选 tag 被占用时发布前失败停止。
+
+统一版本测试只提取或调用版本函数、构建入口的依赖检查前缀及带命令替身的局部函数，不启动真实 PXEOS、内核或 initramfs 构建，不安装依赖、下载制品或访问 GitHub。Windows 的 Git Bash 可能缺少 IANA 时区数据，时间 fixture 会模拟北京时间转换并检查生产代码传入的 `Asia/Shanghai`；符号链接测试在平台不允许创建时明确跳过。通过这些测试不能推断真实 Actions、Linux 构建、设备启动或发布已验证；运行时的新版本显示仍须重新构建和发布 initramfs 才会生效。
 
 ## 构建与运行时（3）
 
@@ -105,6 +110,24 @@ bash tests/pxeos_windows_initialization_regression.sh
 - `pxeos_manual_registration_regression.sh`：以 endpoint、控制台和重启 mock 覆盖手工注册客户端。
 - `pxeos_mpa_permit_regression.sh`：以临时文件覆盖 MPA 下载许可的本地分派。
 - `pxeos_usb_console_regression.sh`：核对 USB 镜像控制台菜单与显示参数。
+
+## 脚本审计回归（3）
+
+- `pxeos_script_audit_regression.sh`：提取局部函数，以命令替身覆盖扩展分区、SATA/NVMe 名称碰撞、坏分区 dump、旧 Windows 分片、printf、控制字符及数组作用域、恢复格式与选择、时间显示、hash 前置门禁、磁盘容量、假钟倒计时、压缩参数、主机名、库存与 LVM probe 清理、算术错误传播和存储空间列。
+- `pxeos_script_io_regression.sh`：以临时普通文件核对 NFS/SMB 的 EXIT/INT/TERM 清理及自有派生计划清理、umask/trap 保留、缺库及 source 失败、入口停止、有限设备重读、raw 引导区逻辑字节、GPT backup 与 raw 区分及坏 raw 在清表前拒绝、日志折行、严格 JSON 响应、任务库存/磁盘健康/非镜像完成的 HTTP 失败门禁，以及大于 2^31 和接近 GPT 安全整数上界的 LBA 精确读回。设备重读和写入只调用函数替身，不执行真实 `sfdisk`、`nvme` 或 LVM。
+- `pxeos_task_http_regression.sh`：以 curl 替身核对私有 form/JSON 文件原始字节、无附加换行、curl 参数和 stdin、EOF、真实返回码、重定向拒绝及成功/失败/信号/临时目录失败后的清理。多播真实 mock curl PID 和取消继续由 `pxeos_https_control_regression.sh` 等现有回归覆盖。
+
+Git Bash 可显式补齐工具路径及设备字符串转换边界，例如：
+
+```bash
+export PATH="/usr/bin:/bin:$PWD/tests/fixtures/msys-tools:$PATH"
+export MSYS2_ARG_CONV_EXCL=/dev/
+bash tests/pxeos_script_audit_regression.sh
+bash tests/pxeos_script_io_regression.sh
+bash tests/pxeos_task_http_regression.sh
+```
+
+`task-http-test-support.sh` 只在测试中读取真实包装器生成的私有请求文件并提供模拟 HTTP header，再交给原有 fixture 的精确字段断言。它不替代生产 curl；不会删去任务、许可或身份断言。MSYS 不能证明原生 Linux 的 0700/0600、FD flag、符号链接、锁与设备行为，相关替身/跳过必须单独列出。大 LBA 回归在当前 gawk 下核对读回和浮点格式契约，不声称实际运行了旧版 mawk。无需真实构建、安装、下载或网络连接。
 
 ## Fixtures（两类）
 

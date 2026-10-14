@@ -107,6 +107,31 @@ PXEOS 的协议、安全、硬件与故障处理说明已按主题拆分；本�
 
 修改 initramfs、内核或驱动配置后，必须按目标架构重新构建同批次的内核与 initramfs 产物；发布或回退不得只替换单个内核或 initramfs。完整硬件验证边界见[硬件兼容性](docs/硬件兼容性.md#构建与回退边界)。
 
+## 镜像发布号与本地构建
+
+Release/Beta 工作流在任何下载或构建 job 开始前，通过唯一的 `release_metadata` job 按北京时间生成一次 `Release-YYMMDD-HHmm` 或 `Beta-YYMMDD-HHmm`，并只读查询历史 tag/ref 是否已存在。同一分钟重名时，此时就选定带 `-<run-id>-<attempt>` 后缀的最终历史 tag。所有架构的构建、历史发布和 `pxeos.json` 的 `version` 都复用这个完整 tag；构建或发布阶段不再次采样时间。发布前重新只读检查已选定的 tag，发现被占用或查询失败即停止，不临时换号。
+
+`build.sh` 接收环境变量 `PXEOS_BUILD_VERSION`，一次校验后将同一值写入各架构构建目录中复制后的 overlay；源码 `funcs.sh` 的 `initversion` 保持 `unbuilt` 占位。普通本地构建未设置该变量时，一次生成北京时间的 `Local-YYMMDD-HHmm`，表示本地未发布构建。需要复现已知发布号时可显式传入完整值，例如：
+
+```sh
+PXEOS_BUILD_VERSION=Release-261014-0101-1234-2 ./build.sh -nf
+PXEOS_BUILD_VERSION=Local-261014-0101 ./build.sh -nfa x64
+```
+
+允许的值仅为 `Release`、`Beta` 或 `Local` 的上述日期时间格式，可选数字 run-id/attempt 后缀，总长度不超过 64 个 ASCII 字符；空值、空白、换行、旧纯日期号和其他内容会被拒绝。GitHub Actions 构建必须提供已选定的 `Release`/`Beta` 历史 tag；缺失、非法或 `Local` 值会在依赖安装、源码下载和构建前失败。
+
+运行时控制台与网络故障诊断统一显示镜像内的 `PXEOS version: <完整历史 tag>`；本地镜像显示 `Local-...`。控制台另外显示 `API version: 1`，它来自服务端 health 的协议号，不用来判断本机镜像版本。服务端内核配置页继续显示清单中的历史 `version`，因此只有使用同批次发布的内核/initramfs 和清单时才会一致。本修改须重新构建、发布并让客户端启动新 initramfs 后生效；已有制品和已启动的旧镜像不会因网页或 health 更新而自动改变版本号。
+
+## 脚本审计与运行边界
+
+脚本离线回归覆盖 DOS 扩展分区识别、分区设备名精确匹配与坏 dump 拒绝、旧 Windows 镜像路径逐轮重置、格式串与路径控制字符、统一恢复格式、时间显示、库存编码、压缩参数和会话清理。分区布局保留 MBR/GPT 原有编号及 LBA 门禁，并以浮点整数格式输出大 LBA 后做精确读回。GPT 的 `dN.mbr` 是 `sgdisk` backup；只有独立的 `dN.grub.mbr` 可作为 raw 引导区恢复，且必须是可读普通文件、512 字节整倍数、大小不超过捕获上界 1 MiB。核心库加载失败会停止入口；清理信号不会继续部署。
+
+带任务凭据的 HTTP 请求使用一次性私有目录和请求文件，保持 curl stdin、原有超时及错误码，禁止重定向，并拒绝缺失或非法 HTTP 状态。多播取消仍定位真实 curl PID。任务令牌不再直接出现在这些 curl 的参数中，但当前 iPXE 内核命令行仍可能包含执行令牌，其他进程参数也不因此获得完整保密保证。本次按用户选择保留既有 TLS 信任配置：普通私有 CA/IP 部署的 `-k` 及手工注册的 HTTPS/pin 约束均未改为新信任体系。部署脚本 SHA-256 只证明传输和冻结快照一致性，不能抵御已被控制的下发服务端；本次不引入签名协议或 PKI。
+
+以下仍是有意保留的边界：缺少稳定磁盘身份拒绝部署，同容量多盘匹配有歧义时拒绝恢复，可调整镜像不支持部署到更小的磁盘，固定镜像不支持 LVM。XFS 捕获预检允许在获得 `capture_read_write` 许可后读写挂载并回放日志。共享存储上的捕获发布锁不能按本机 PID 自动删除未知 owner，异常退出后的锁需在确认归属后处理。LVM 包装器只关闭本次子进程中已验证的自有日志 FD；外来 FD 和真实 native 错误继续触发原有失败门禁，不启用全局 FD warning 抑制。
+
+静态报告中的三参数 `awk match()` 在三种目标配置已启用的 gawk 环境中可用；NVMe 重枚举结果已有调用端消费；分区单选 1..10 与现行 API 一致；`sgdisk -z` 保留 MBR 的含义也不能推出它会擦掉刚恢复的 GRUB（见[上游手册](https://android.googlesource.com/platform/external/gptfdisk/+/0b5f4df3392ebae7b9a97e8f8d642ca81caa2b26/sgdisk.8)）。这些项不按报告推断改写运行策略。测试入口及 Git Bash 环境替身说明见 [tests/README.md](tests/README.md)；本轮验证只使用离线 mock 和普通临时文件，不代表 Buildroot 构建、真实设备、客户端启动或端到端部署已验证。
+
 ## 发布下载清单
 
 正式和测试发布均生成 `pxeos.json`。文件只包含 `kernels` 数组；每个完整架构 pair 记录其 `arch`、历史 `version`、内核和 initramfs 的 GitHub Release 下载 URL 及实际 SHA-256。x86、x64 与 arm64 的文件名遵循上表。正式历史发布附件中的清单 URL 固定指向该历史 tag；正式 `latest` 频道另有独立的频道清单，测试发布继续使用 `beta` 频道清单。

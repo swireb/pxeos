@@ -2,6 +2,7 @@
 # Synthetic lifecycle checks only; real Linux inode reuse is not exercised.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/tests/task-http-test-support.sh"
 lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib"
 tmp=$(mktemp -d /tmp/pxeos-log-pin-test.XXXXXX)
 trap 'rm -rf -- "$tmp"' EXIT
@@ -63,7 +64,7 @@ for release_failure in no yes; do
         rootpxe_require_task_context(){ return 0; }
         rootpxe_console_message(){ :; }
         rootpxe_reset_disk_permit_retry_state(){ printf RESET >"$tmp/retry-order"; }
-        curl(){ case "${*: -1}" in *task-status) printf '%s' '{"status":"queued"}' ;; *error) printf '%s\n200' '{"accepted":true,"waitSec":60}' ;; *) return 90 ;; esac; }
+        curl(){ task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"; case "${*: -1}" in *task-status) printf '%s' '{"status":"queued"}' ;; *error) printf '%s\n200' '{"accepted":true,"waitSec":60}' ;; *) return 90 ;; esac; }
         if [[ $release_failure == yes ]]; then rootpxe_task_log_release_pin(){ return 1; }; fi
         rootpxe_pin_test_exec(){
             [[ $* == /bin/pxeos && $(cat "$tmp/retry-order") == RESET && -r /proc/self/fd/$foreign ]] || exit 94

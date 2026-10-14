@@ -1,5 +1,5 @@
 #!/bin/bash
-. /usr/share/pxeos/lib/funcs.sh
+. /usr/share/pxeos/lib/funcs.sh || exit 1
 rootpxe_task_log_initialize || printf '[WARN]  Task log: unavailable.\n' >&2
 . /bin/pxeos.checkin
 rootpxe_partition_progress_initialize_runtime

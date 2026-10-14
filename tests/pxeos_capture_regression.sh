@@ -9,6 +9,7 @@ set -euo pipefail
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+. "$root/tests/task-http-test-support.sh"
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
 progress_lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh"
 tmp="$(mktemp -d)"
@@ -21,13 +22,14 @@ assert_file_text() { [[ -f $1 && $(<"$1") == "$2" ]] || fail "$3"; }
 # The production library has fixed /storage paths.  Substitute only in a
 # temporary test copy so the exercised functions use an isolated filesystem.
 sed \
-    -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' \
-    -e 's|^\. /usr/share/pxeos/lib/restore-preflight.sh$|:|' \
-    -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' \
-    -e 's|^\. /usr/share/pxeos/lib/deployment-identity.sh$|:|' \
+    -e 's|^rootpxe_source_core_library partition-funcs.sh.*|:|' \
+    -e 's|^rootpxe_source_core_library restore-preflight.sh.*|:|' \
+    -e 's|^rootpxe_source_core_library capture-recovery.sh.*|:|' \
+    -e 's|^rootpxe_source_core_library deployment-identity.sh.*|:|' \
     -e 's|/storage|${ROOTPXE_TEST_STORAGE}|g' \
     "$funcs" >"$tmp/funcs.sh"
 cp "$progress_lib" "$tmp/partclone-progress.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
 printf '\nif declare -F task_log_test_emulate_pin_flags >/dev/null; then task_log_test_emulate_pin_flags; fi\n' >>"$tmp/log-paths.sh"
 for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
@@ -341,6 +343,7 @@ printf 'PASS: PXEOS capture finalize regression\n'
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+. "$root/tests/task-http-test-support.sh"
 overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
 funcs="$overlay/usr/share/pxeos/lib/funcs.sh"
 progress_lib="$overlay/usr/share/pxeos/lib/partclone-progress.sh"
@@ -354,7 +357,8 @@ assert_eq() { [[ "$1" == "$2" ]] || fail "$3 (got=$1 want=$2)"; }
 
 mkdir -p "$tmp/bin"
 cat > "$tmp/bin/curl" <<'EOF'
-#!/bin/sh
+#!/usr/bin/env bash
+task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"
 count_file="${MOCK_CURL_COUNT:?}"
 count=0
 [ -f "$count_file" ] && count=$(cat "$count_file")
@@ -481,12 +485,13 @@ EOF
 chmod +x "$tmp/bin/nproc" "$tmp/bin/pigz" "$tmp/bin/split"
 
 sed \
-    -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' \
-    -e 's|^\. /usr/share/pxeos/lib/restore-preflight.sh$|:|' \
-    -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' \
-    -e 's|^\. /usr/share/pxeos/lib/deployment-identity.sh$|:|' \
+    -e 's|^rootpxe_source_core_library partition-funcs.sh.*|:|' \
+    -e 's|^rootpxe_source_core_library restore-preflight.sh.*|:|' \
+    -e 's|^rootpxe_source_core_library capture-recovery.sh.*|:|' \
+    -e 's|^rootpxe_source_core_library deployment-identity.sh.*|:|' \
     "$funcs" > "$tmp/funcs.sh"
 cp "$progress_lib" "$tmp/partclone-progress.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
 printf '\nif declare -F task_log_test_emulate_pin_flags >/dev/null; then task_log_test_emulate_pin_flags; fi\n' >>"$tmp/log-paths.sh"
 for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
@@ -847,6 +852,7 @@ printf 'PASS: PXEOS pipeline regression\n'
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+. "$root/tests/task-http-test-support.sh"
 overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
 funcs="$overlay/usr/share/pxeos/lib/funcs.sh"
 upload="$overlay/bin/pxeos.upload"

@@ -29,8 +29,10 @@ grep -Fq 'file -b --mime-type' "$usb" || fail 'USB asset validation missing'
 # Exercise the real selectors with regular-file paths and command mocks only.
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
-sed -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/restore-preflight.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/deployment-identity.sh$|:|' "$funcs" >"$tmp/funcs.sh"
+sed -e 's|^rootpxe_source_core_library partition-funcs.sh.*|:|' -e 's|^rootpxe_source_core_library restore-preflight.sh.*|:|' -e 's|^rootpxe_source_core_library capture-recovery.sh.*|:|' -e 's|^rootpxe_source_core_library deployment-identity.sh.*|:|' "$funcs" >"$tmp/funcs.sh"
 cp "$(dirname "$funcs")/partclone-progress.sh" "$tmp/partclone-progress.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" "$tmp/log-paths.sh"
 set +u; source "$tmp/funcs.sh"; set -u
 rootpxe_require_unused_target_disks(){ :; } # 本段仅使用恢复流程 mock。
 lsblk() { printf '%s\n' '/dev/mock-b 2G' '/dev/mock-a 1G'; }
@@ -133,8 +135,10 @@ printf 'old-lvm\n' >"$tmp/mixed-patch-tree/lvm"
 
 # BCD stage/copy/rename failures retain the original ordinary file.
 bcdroot="$tmp/bcdstore"; mkdir -p "$bcdroot/Boot"; printf 'old-bcd' >"$bcdroot/Boot/BCD"; printf 'new-bcd' >"$tmp/template-bcd"
-sed -e 's|^\. /usr/share/pxeos/lib/partition-funcs.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/restore-preflight.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/capture-recovery.sh$|:|' -e 's|^\. /usr/share/pxeos/lib/deployment-identity.sh$|:|' -e "s|/bcdstore|$bcdroot|g" -e "s|/usr/share/pxeos/BCD|$tmp/template-bcd|g" "$funcs" >"$tmp/bcd-funcs.sh"
+sed -e 's|^rootpxe_source_core_library partition-funcs.sh.*|:|' -e 's|^rootpxe_source_core_library restore-preflight.sh.*|:|' -e 's|^rootpxe_source_core_library capture-recovery.sh.*|:|' -e 's|^rootpxe_source_core_library deployment-identity.sh.*|:|' -e "s|/bcdstore|$bcdroot|g" -e "s|/usr/share/pxeos/BCD|$tmp/template-bcd|g" "$funcs" >"$tmp/bcd-funcs.sh"
 cp "$(dirname "$funcs")/partclone-progress.sh" "$tmp/partclone-progress.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" "$tmp/log-paths.sh"
 set +u; source "$tmp/bcd-funcs.sh"; set -u
 osid=7; fsTypeSetting() { fstype=ntfs; }; ntfs-3g() { :; }; umount() { :; }; dots() { :; }; debugPause() { :; }; handleError() { return 1; }
 cp() { return 1; }; fixWin7boot /dev/mock || :; [[ $(<"$bcdroot/Boot/BCD") == old-bcd ]] || fail 'BCD copy failure changed original'; unset -f cp
@@ -147,7 +151,12 @@ mv() { [[ $2 == "$bcdroot/Boot/BCD" ]] && return 1; command mv "$@"; }; fixWin7b
     eval "$(sed -n '/^function buildFilesystem()/,/^}/p' "$build")"
     PROJECT_DIRECTORY="$tmp/empty-project"; buildPath="$tmp/build-output"; mkdir -p "$PROJECT_DIRECTORY" "$buildPath/fssourcex64/package" "$buildPath/fssourcex64/output/images"; : >"$buildPath/fssourcex64/package/Config.in"; : >"$buildPath/fssourcex64/.config"; : >"$buildPath/fssourcex64/.packConfDone"
     dots() { :; }; rsync() { :; }; sed() { :; }; make() { :; }
-    BUILDROOT_VERSION=mock; verbose=y; confirm=n; fsDownloadOnly=n; cd "$buildPath"
+    BUILDROOT_VERSION=mock; PXEOS_BUILD_VERSION=unbuilt; verbose=y; confirm=n; fsDownloadOnly=n; cd "$buildPath"
+    rootpxe_build_stamp_version() { :; }
+    rootpxe_build_normalize_backup_site_config() { :; }
+    rootpxe_build_sync_glibc_gconv_config() { :; }
+    rootpxe_build_olddefconfig() { :; }
+    rootpxe_build_seed_verified_sources() { :; }
     if buildFilesystem x64; then exit 1; fi
     printf payload >"$buildPath/fssourcex64/output/images/rootfs.ext2.xz"
     sha256sum() { return 1; }

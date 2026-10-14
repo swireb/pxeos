@@ -6,6 +6,14 @@
 rootpxe_preflight_regular_file() {
     [[ -f $1 && ! -L $1 && -r $1 && -s $1 ]]
 }
+rootpxe_preflight_raw_boot_sector_count() {
+    local file="$1" bytes
+    rootpxe_preflight_regular_file "$file" || return 1
+    bytes=$(stat -c %s -- "$file") || return 1
+    [[ $bytes =~ ^[1-9][0-9]*$ && ${#bytes} -le 7 ]] || return 1
+    (( bytes <= 1048576 && bytes % 512 == 0 )) || return 1
+    printf '%s\n' "$((bytes / 512))"
+}
 
 rootpxe_preflight_safe_artifact() {
     local value="$1" segment
@@ -114,7 +122,12 @@ rootpxe_preflight_fixed_boot_artifact() {
     # and for DOS it is the saved MBR/boot region.  A DOS has_grub marker does
     # not switch that filename.  GPT may additionally carry a GRUB embedding.
     rootpxe_preflight_regular_file "$image_path/d${disk_number}.mbr" || return 1
-    [[ $table != gpt || ! -e $image_path/d${disk_number}.grub.mbr ]] || rootpxe_preflight_regular_file "$image_path/d${disk_number}.grub.mbr"
+    if [[ $table == mbr ]]; then
+        rootpxe_preflight_raw_boot_sector_count "$image_path/d${disk_number}.mbr" >/dev/null || return 1
+    elif [[ -e $image_path/d${disk_number}.grub.mbr || -L $image_path/d${disk_number}.grub.mbr ]]; then
+        rootpxe_preflight_raw_boot_sector_count "$image_path/d${disk_number}.grub.mbr" >/dev/null || return 1
+    fi
+    return 0
 }
 
 rootpxe_preflight_inventory_rows() {

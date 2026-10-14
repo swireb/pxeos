@@ -2,12 +2,13 @@
 set -euo pipefail
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+root=$repo_root; . "$root/tests/task-http-test-support.sh"
 lib="${MULTICAST_LIB:-$repo_root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/multicast.sh}"
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 messages=()
 rootpxe_console_message() { messages+=("$2"); }
-curl() {
+curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
     local output='' argument
     while (( $# )); do
         case $1 in

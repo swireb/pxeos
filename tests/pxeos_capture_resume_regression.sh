@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/tests/task-http-test-support.sh"
 lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/capture-recovery.sh"
 preflight="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/restore-preflight.sh"
 [[ -r $lib ]] || { echo 'FAIL: capture recovery library missing' >&2; exit 1; }
@@ -59,7 +60,7 @@ resume_events="$tmp/resume-events.log"
     dots() { :; }
     debugPause() { :; }
     dmidecode() { printf 'mock-uuid\n'; }
-    curl() { printf '{"success":true}\n'; }
+    curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"; printf '{"success":true}\n'; }
     . "$imgcomplete"
 ) >"$resume_events"
 ! grep -Fq 'FAIL: resumed imgcomplete' "$resume_events" || { cat "$resume_events" >&2; exit 1; }
@@ -74,7 +75,7 @@ mkdir -p "$storage/mps-one"
 printf '%s\n' "$taskid" >"$storage/mps-one/.rootpxe-capture-taskid"
 printf '%s\n' '{"version":1,"disks":[{"number":1,"sourceDevice":"/dev/mock","partitionTable":"mbr","originalDiskBytes":4096,"logicalSectorBytes":512,"physicalSectorBytes":512,"partitions":[{"number":1,"startSectors":1,"originalSectors":1,"typeGuid":"83","fs":"ext4"},{"number":2,"startSectors":2,"originalSectors":1,"typeGuid":"83","fs":"ext4"}]}]}' >"$storage/mps-one/.rootpxe-partition-inventory.json"
 printf 'label: dos\n/dev/mock1 : start=           1, size=           1, type=83\n/dev/mock2 : start=           2, size=           1, type=83\n' >"$storage/mps-one/d1.partitions"
-printf payload >"$storage/mps-one/d1.mbr"
+truncate -s 512 "$storage/mps-one/d1.mbr"
 printf payload >"$storage/mps-one/d1p1.img"
 rootpxe_capture_resume_published || { echo 'FAIL: selected mps payload must resume without uncaptured partitions' >&2; exit 1; }
 rootpxe_capture_resume_cleanup

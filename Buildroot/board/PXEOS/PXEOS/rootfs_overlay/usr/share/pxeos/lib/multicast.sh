@@ -1,6 +1,7 @@
 #!/bin/bash
 # Server-owned manual multicast sessions. PXEOS never creates a replacement
 # session and never falls back to unicast after accepting multicast mode.
+. "$(dirname "${BASH_SOURCE[0]}")/task-http.sh" || return 1
 
 rootpxe_multicast_receiver_capable() {
     local help_output rc
@@ -224,12 +225,12 @@ rootpxe_multicast_http_post() {
     chmod 600 "$response" || { rm -f -- "$response"; return 1; }
     rootpxe_multicast_control_curl_args -sS --connect-timeout "$connect_timeout" --max-time "$limit" -H 'Content-Type: application/json' --data-binary @"$request" -o "$response" -w '%{http_code}' "${rootpxe_api}multicast/$op"
     if [[ -n ${pid_file:-} ]]; then
-        curl "${rootpxe_multicast_curl_args[@]}" >"$response.status" 2>/dev/null &
-        rootpxe_multicast_http_pid=$!; printf '%s\n' "$rootpxe_multicast_http_pid" >"$pid_file"
+        rootpxe_task_curl_pid_file="$pid_file" rootpxe_task_curl "${rootpxe_multicast_curl_args[@]}" >"$response.status" 2>/dev/null &
+        rootpxe_multicast_http_pid=$!
         wait "$rootpxe_multicast_http_pid" || curl_rc=$?
         status=$(cat "$response.status" 2>/dev/null); rm -f -- "$pid_file" "$response.status"
     else
-        status=$(curl "${rootpxe_multicast_curl_args[@]}" 2>/dev/null) || curl_rc=$?
+        status=$(rootpxe_task_curl "${rootpxe_multicast_curl_args[@]}" 2>/dev/null) || curl_rc=$?
     fi
     if [[ $curl_rc != 0 || ! $status =~ ^2[0-9][0-9]$ ]] || ! jq -e 'type == "object"' "$response" >/dev/null 2>&1; then
         local kind=rejected

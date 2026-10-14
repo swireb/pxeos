@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/tests/task-http-test-support.sh"
 . "$root/tests/task-log-test-support.sh"
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
 progress_lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh"
@@ -205,14 +206,14 @@ pxeapi=https://test/
 taskid=1 task_token=0123456789abcdef mac=000c2958c550
 rootpxe_disk_stable_identity(){ case "$1" in /dev/alpha) printf '%s\n' ID_A;; /dev/beta) printf '%s\n' ID_B;; /dev/swapped) printf '%s\n' ID_B;; *) return 1;; esac; }
 rootpxe_require_task_context(){ return 0; }
-curl(){ printf '%s\n' '{"granted":true,"targets":[{"operation":"nvme_format+deploy_write","targetId":"ID_B"},{"operation":"deploy_write","targetId":"ID_A"}]}' 200; }
+curl(){ task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"; printf '%s\n' '{"granted":true,"targets":[{"operation":"nvme_format+deploy_write","targetId":"ID_B"},{"operation":"deploy_write","targetId":"ID_A"}]}' 200; }
 rootpxe_request_disk_permit_batch ID_A deploy_write ID_B nvme_format+deploy_write || fail batch-valid-server-response-rejected
 for batch_response in \
     '{"granted":true,"targets":[{"targetId":"ID_A","operation":"deploy_write"}]}' \
     '{"granted":true,"targets":[{"targetId":"ID_A","operation":"deploy_write"},{"targetId":"ID_B","operation":"nvme_format+deploy_write"},{"targetId":"ID_C","operation":"deploy_write"}]}' \
     '{"granted":true,"targets":[{"targetId":"ID_A","operation":"deploy_write"},{"targetId":"ID_A","operation":"deploy_write"}]}' \
     '{"granted":true,"targets":[{"targetId":1,"operation":"deploy_write"},{"targetId":"ID_B","operation":"nvme_format+deploy_write"}]}'; do
-    curl(){ printf '%s\n' "$batch_response" 200; }
+    curl(){ task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"; printf '%s\n' "$batch_response" 200; }
     if rootpxe_request_disk_permit_batch ID_A deploy_write ID_B nvme_format+deploy_write; then fail batch-invalid-response-accepted; fi
 done
 batch_calls=0

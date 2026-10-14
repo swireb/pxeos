@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+root=$repo_root; . "$root/tests/task-http-test-support.sh"
 lib="${MULTICAST_LIB:-$repo_root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/multicast.sh}"
 
 udp-receiver() {
@@ -9,7 +10,7 @@ udp-receiver() {
     printf '%s\n' "${MOCK_HELP_TEXT-udp-receiver --nokbd --portbase --ttl --mcast-rdv-address --start-timeout --receive-timeout}"
     return "${MOCK_HELP_EXIT:-0}"
 }
-curl() { return 0; }
+curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"; return 0; }
 
 jq() {
     case "$*" in

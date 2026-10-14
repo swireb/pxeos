@@ -10,6 +10,7 @@ PROJECT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 source "$PROJECT_DIRECTORY/dependencies.sh"
 source "$PROJECT_DIRECTORY/download_helpers.sh"
+source "$PROJECT_DIRECTORY/build_version.sh" || exit 1
 
 Usage() {
     echo -e "Usage: $0 [-knfvh?] [-a x64]"
@@ -95,6 +96,9 @@ done
 [[ -z $installDep ]] && installDep="n"
 [[ -z $verbose ]] && verbose="n"
 [[ -z $fsDownloadOnly ]] && fsDownloadOnly="n"
+
+# 一次确定版本，所有架构共用；CI 缺失或非法版本必须早于依赖/下载失败。
+rootpxe_build_resolve_version || exit 1
 
 if ! checkDependencies; then
     exit 1
@@ -358,8 +362,8 @@ function buildFilesystem() {
         cat "$PROJECT_DIRECTORY/Buildroot/package/newConf.in" >> package/Config.in
         touch .packConfDone
     fi
-    rsync -avPrI "$PROJECT_DIRECTORY/Buildroot/" . > /dev/null
-    sed -i "s/^export initversion=[0-9][0-9]*$/export initversion=$(date +%Y%m%d)/" board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh
+    rsync -avPrI "$PROJECT_DIRECTORY/Buildroot/" . > /dev/null || return 1
+    rootpxe_build_stamp_version board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh "$PXEOS_BUILD_VERSION" || return 1
     if [[ ! -f .config ]]; then
         cp "$filesystem_config" .config
     fi

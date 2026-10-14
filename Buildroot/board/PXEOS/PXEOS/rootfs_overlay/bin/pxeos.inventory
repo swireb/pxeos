@@ -1,6 +1,6 @@
 #!/bin/bash
 [[ $mode == +(*capone*) ]] && return
-. /usr/share/pxeos/lib/funcs.sh
+. /usr/share/pxeos/lib/funcs.sh || exit 1
 [[ $deployed -eq 1 ]] && . /bin/pxeos.checkin
 rootpxe_api="${pxeapi:-$web}"
 task_mode=0
@@ -65,6 +65,8 @@ if [[ -z $1 ]]; then
 fi
 poststring="mac=${mac}&sysman=${sysman64}&sysproduct=${sysproduct64}&sysversion=${sysversion64}&sysserial=${sysserial64}&sysuuid=${sysuuid64}&systype=${systype64}&biosversion=${biosversion64}&biosvendor=${biosvendor64}&biosdate=${biosdate64}&mbman=${mbman64}&mbproductname=${mbproductname64}&mbversion=${mbversion64}&mbserial=${mbserial64}&mbasset=${mbasset64}&cpuman=${cpuman64}&cpuversion=${cpuversion64}&cpucurrent=${cpucurrent64}&cpumax=${cpumax64}&mem=${mem64}&hdinfo=${hdinfo64}&caseman=${caseman64}&casever=${casever64}&caseserial=${caseserial64}&caseasset=${caseasset64}&gpuvendors=${inventory_graphics_vendor64}&gpuproducts=${inventory_graphics_product64}"
 count=0
+rootpxe_inventory_transport=(curl -Lksf)
+[[ $task_mode -ne 1 ]] || rootpxe_inventory_transport=(rootpxe_task_curl -ksf)
 res=""
 while [[ -z $res ]]; do
     dots "Attempting to send inventory"
@@ -72,9 +74,9 @@ while [[ -z $res ]]; do
     if [[ $task_mode -eq 1 ]]; then
         inventory_args+=(--data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac")
     fi
-    res=$(curl -Lksf \
+    res=$("${rootpxe_inventory_transport[@]}" \
         "${inventory_args[@]}" \
-        "${rootpxe_api}inventory" 2>/dev/null)
+        "${rootpxe_api}inventory" 2>/dev/null) || res=""
     if [[ $count -ge 10 ]]; then
         echo "Failed"
         debugPause

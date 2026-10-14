@@ -2,6 +2,7 @@
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+. "$root/tests/task-http-test-support.sh"
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
 multicast="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/multicast.sh"
 imgcomplete="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.imgcomplete"
@@ -30,7 +31,7 @@ rootpxe_set_disk_permit_reason() { return 1; }
 rootpxe_task_status_confirms_disk_permit_cancellation() { return 1; }
 
 permit_args="$tmp/permit.args"
-curl() {
+curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
     printf '%s\n' "$@" >"$permit_args"
     case " $* " in
         *' targets='*) printf '{"granted":true,"targets":[{"targetId":"disk-id","operation":"deploy_write"}]}\n200' ;;
@@ -47,7 +48,7 @@ grep -Fqx 'progressAttempt=4' "$permit_args"
 error_log="$tmp/error.args"
 rootpxe_bound_callback_message() { printf '%s\n' "$1"; }
 rootpxe_console_message() { :; }
-curl() {
+curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
     printf '%s\n' "$@" >>"$error_log"
     case " $* " in
         *'/error'*) printf '{"accepted":true,"waitSec":60,"failureAction":"reboot"}\n200' ;;
@@ -67,7 +68,7 @@ grep -Fqx 'progressAttempt=4' "$error_log"
 
 finish_log="$tmp/finish.args"
 dmidecode() { printf '11111111-2222-3333-4444-555555555555\n'; }
-curl() {
+curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
     printf '%s\n' "$@" >"$finish_log"
     printf '{"success":true}\n'
 }
@@ -86,7 +87,7 @@ grep -Fqx -- 'progressAttempt=4' "$finish_log"
 
 mc=no
 multicastSessionId=''
-curl() {
+curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
     printf '%s\n' "$@" >"$permit_args"
     printf '{"granted":true,"targetId":"disk-id","operation":"deploy_write"}\n200'
 }

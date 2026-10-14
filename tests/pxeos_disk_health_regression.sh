@@ -3,6 +3,7 @@ set -euo pipefail
 export MSYS2_ARG_CONV_EXCL='/dev/'
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+. "$root/tests/task-http-test-support.sh"
 library="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/disk-health.sh"
 checkin="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.checkin"
 tmp="$(mktemp -d)"
@@ -43,6 +44,8 @@ exit "${PXEOS_NVME_RC:-0}"
 EOF
 cat >"$tmp/bin/curl" <<'EOF'
 #!/usr/bin/env bash
+printf '%s\n' "$@" >"$PXEOS_CURL_ARGS.native"
+task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"
 printf '%s\n' "$@" >"$PXEOS_CURL_ARGS"
 [[ -z ${PXEOS_EVENT_TRACE:-} ]] || printf 'inventory\n' >>"$PXEOS_EVENT_TRACE"
 [[ ${PXEOS_CURL_RC:-0} == 0 ]] || exit "$PXEOS_CURL_RC"
@@ -197,6 +200,9 @@ EOF
     grep -Fqx -- 'diskHealth={"version":1,"disks"' "$tmp/curl-$task_type.args" && fail 'curl mock unexpectedly split JSON'
     grep -Fq -- 'diskHealth=' "$tmp/curl-$task_type.args" || fail "$task_type did not upload diskHealth"
     grep -Fqx -- 'mac=aa:bb:cc:dd:ee:ff' "$tmp/curl-$task_type.args" || fail "$task_type did not use task MAC"
+    grep -Fqx -- 'token=token' "$tmp/curl-$task_type.args" || fail "$task_type changed task token value"
+    ! grep -Fqx -- 'token=token' "$tmp/curl-$task_type.args.native" || fail "$task_type exposed native task token argv"
+    ! grep -Eq '(^-L|^--location)' "$tmp/curl-$task_type.args.native" || fail "$task_type followed task redirects"
     tail -n 1 "$tmp/curl-$task_type.args" | grep -Fq '/inventory' || fail "$task_type used wrong endpoint"
 done
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-. /usr/share/pxeos/lib/funcs.sh
+. /usr/share/pxeos/lib/funcs.sh || exit 1
 . /usr/share/pxeos/lib/disk-health.sh
 RUN_CHKDSK=""
 OS_ID_WIN7=5
@@ -398,7 +398,11 @@ checkin_rootpxe() {
     local waitMsg=""
     local retryAfterSec=5
     local checkin_response_format=""
-    local -a checkin_tls_args=(-Lks)
+    local -a checkin_tls_args=(-ks)
+    # 解析可能已生成私有任务文件，入口立即安装清理；信号必须停止任务。
+    trap rootpxe_cleanup_session EXIT
+    trap 'rootpxe_cleanup_session; exit 130' INT
+    trap 'rootpxe_cleanup_session; exit 143' TERM
     if [[ ${manual_direct_task:-} == yes ]]; then
         [[ ${manual_spki_pin:-} =~ ^sha256//[A-Za-z0-9+/]{43}=$ ]] || return 1
         # The direct handoff token was received over the manual flow's pinned
@@ -419,7 +423,7 @@ checkin_rootpxe() {
 			rm -f -- "$checkin_payload_file"
 			handleError "RootPXE checkin context is invalid ($0)"
 		fi
-        out=$(curl "${checkin_tls_args[@]}" \
+        out=$(rootpxe_task_curl "${checkin_tls_args[@]}" \
             --connect-timeout 10 --max-time 30 \
             -H 'Content-Type: application/json' \
 			--data-binary "@$checkin_payload_file" \
@@ -511,7 +515,6 @@ checkin_rootpxe() {
         fi
         break
     done
-    trap rootpxe_cleanup_session EXIT INT TERM
     # 将 checkin 下发的 shutdown（0/1）落盘，供 init 脚本在任务结束时读取。
     # 注意：S99pxeos 与 /bin/pxeos 不在同一进程环境，直接 export 无法回传变量。
     if [[ -n ${shutdown:-} ]]; then

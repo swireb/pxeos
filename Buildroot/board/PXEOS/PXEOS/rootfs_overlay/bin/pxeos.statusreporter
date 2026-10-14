@@ -1,5 +1,6 @@
 #!/bin/bash
-. /usr/share/pxeos/lib/partclone-progress.sh
+. /usr/share/pxeos/lib/partclone-progress.sh || exit 1
+. /usr/share/pxeos/lib/task-http.sh || exit 1
 sysuuid=$(dmidecode -s system-uuid)
 sysuuid=${sysuuid,,}
 oIFS=$IFS
@@ -84,7 +85,7 @@ rootpxe_progress_send_snapshot() {
     [[ -r $snapshot_file ]] || return 0
     snapshot=$(cat "$snapshot_file" 2>/dev/null) || return 0
     [[ -n $snapshot ]] || return 0
-    curl -Lks --connect-timeout 3 --max-time 8 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "progressProtocol=2" --data-urlencode "stage=$prog_stage" --data-urlencode "snapshot=$snapshot" "${api_base}progress" >/dev/null 2>&1 || true
+    rootpxe_task_curl -ks --connect-timeout 3 --max-time 8 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "progressProtocol=2" --data-urlencode "stage=$prog_stage" --data-urlencode "snapshot=$snapshot" "${api_base}progress" >/dev/null 2>&1 || true
     return 0
 }
 rootpxe_progress_sleep
@@ -112,7 +113,7 @@ while :; do
     else
         case $progress_mode in partclone) pct=$(rootpxe_partclone_progress_next_pct /tmp/status.pxeos "$progress_run_id" "$last_pct") || pct=$last_pct ;; partimage) pct=$(rootpxe_partimage_progress_next_pct /tmp/status.pxeos "$last_pct") || pct=$last_pct ;; esac
         last_pct=$pct; b64=$(printf '%s' "${message:-}" | base64)
-        curl -Lks --connect-timeout 3 --max-time 8 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "sysuuid=$sysuuid" --data-urlencode "progress=$pct" --data-urlencode "stage=$prog_stage" --data-urlencode "message=$b64" "${api_base}progress" >/dev/null 2>&1 || true
+        rootpxe_task_curl -ks --connect-timeout 3 --max-time 8 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "sysuuid=$sysuuid" --data-urlencode "progress=$pct" --data-urlencode "stage=$prog_stage" --data-urlencode "message=$b64" "${api_base}progress" >/dev/null 2>&1 || true
     fi
     rootpxe_progress_sleep
 done

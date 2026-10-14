@@ -21,6 +21,8 @@ test_funcs="$tmp/funcs.sh"
 sed -e '/partition-funcs\.sh/d' -e '/restore-preflight\.sh/d' -e '/capture-recovery\.sh/d' -e '/deployment-identity\.sh/d' -e "s|</proc/cmdline|<$cmdline|g" "$funcs" >"$test_funcs"
 ! grep -Fq '</proc/cmdline' "$test_funcs" || fail 'temporary funcs retained /proc/cmdline'
 cp "$progress_lib" "$tmp/partclone-progress.sh"
+cp "$(dirname "$funcs")/log-paths.sh" "$tmp/log-paths.sh"
+cp "$(dirname "$funcs")/task-http.sh" "$tmp/task-http.sh"
 download_functions="$tmp/download-functions.sh"
 awk '/^preparePartitions\(\)/,/^findHDDInfo$/{ if ($0 ~ /^findHDDInfo$/) exit; print }' "$download" >"$download_functions"
 set +u; source "$test_funcs"; set -u
@@ -85,7 +87,7 @@ completeTasking(){ printf 'complete\n' >>"$events"; }
 handleError(){ fail "entry-handleError:$1"; }
 EOF
 awk -v funcs="$test_funcs" -v stubs="$entry_stubs" '
-  /^\. \/usr\/share\/pxeos\/lib\/funcs\.sh$/ { print ". \"" funcs "\""; print ". \"" stubs "\""; next }
+  /^\. \/usr\/share\/pxeos\/lib\/funcs\.sh( \|\| exit 1)?$/ { print ". \"" funcs "\" || exit 1"; print ". \"" stubs "\""; next }
   /^\. \/bin\/pxeos\.(checkin|mount|checkmount|checkimgvar)$/ { print ":"; next }
   /^\. \/bin\/pxeos\.inventory / { print ":"; next }
   /^findHDDInfo$/ { print "hd=/dev/diskA; disks=\"/dev/diskA /dev/diskB\""; next }

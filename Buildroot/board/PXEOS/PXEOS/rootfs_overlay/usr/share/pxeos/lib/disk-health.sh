@@ -290,7 +290,7 @@ rootpxe_send_disk_health() {
     }
     jq -e '.version == 1 and (.disks | type) == "array" and (.disks | length) <= 64 and (tojson | utf8bytelength) <= 131072' <<<"$disk_health" >/dev/null 2>&1 || return 0
     jq -e '(.disks | length) == 0' <<<"$disk_health" >/dev/null 2>&1 && empty_report=1
-    curl -Lksf --connect-timeout 5 --max-time 20 \
+    rootpxe_task_curl -ksf --connect-timeout 5 --max-time 20 \
         --data-urlencode "taskid=$taskid" \
         --data-urlencode "token=$task_token" \
         --data-urlencode "mac=$mac" \

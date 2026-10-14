@@ -15,14 +15,14 @@ if [[ -z $taskid ]]; then
 fi
 rootpxe_require_task_context || handleError "RootPXE: invalid task context ($0)"
 while true; do
-    res=$(curl -Lks \
+    res=$(rootpxe_task_curl -ks \
         --data-urlencode "taskid=${taskid}" \
         --data-urlencode "token=$task_token" \
         --data-urlencode "sysuuid=${sysuuid}" \
         --data-urlencode "mac=$mactosend" \
         --data-urlencode "result=success" \
         --data-urlencode "message=pxeos non-image task complete" \
-        "${rootpxe_api}finish" 2>/dev/null)
+        "${rootpxe_api}finish" 2>/dev/null) || res=""
     if echo "$res" | grep -q '"success"[[:space:]]*:[[:space:]]*true'; then
         break
     fi

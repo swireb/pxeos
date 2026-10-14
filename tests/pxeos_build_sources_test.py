@@ -425,11 +425,11 @@ class CabextractDownloadTests(unittest.TestCase):
         self.assertIn("run: ./build.sh -i --fs-download-only", release)
         for arch in ("arm64", "x86", "x64"):
             self.assertIn(
-                f"  build_initrd_{arch}:\n    needs: download_filesystem_packages",
+                f"  build_initrd_{arch}:\n    needs: [release_metadata, download_filesystem_packages]",
                 release,
             )
             self.assertIn(
-                f"  build_initrd_{arch}:\n    needs: [input_checks, download_filesystem_packages]",
+                f"  build_initrd_{arch}:\n    needs: [input_checks, release_metadata, download_filesystem_packages]",
                 beta,
             )
 
@@ -837,7 +837,7 @@ class CabextractDownloadTests(unittest.TestCase):
         (source / "package").mkdir(parents=True)
         (source / "package" / "Config.in").write_text("")
         (source / "board" / "PXEOS" / "PXEOS" / "rootfs_overlay" / "usr" / "share" / "pxeos" / "lib").mkdir(parents=True)
-        (source / "board" / "PXEOS" / "PXEOS" / "rootfs_overlay" / "usr" / "share" / "pxeos" / "lib" / "funcs.sh").write_text("")
+        (source / "board" / "PXEOS" / "PXEOS" / "rootfs_overlay" / "usr" / "share" / "pxeos" / "lib" / "funcs.sh").write_text("export initversion=unbuilt\n")
         (source / ".config").write_text("")
         driver = self.workdir / "download-only-driver.sh"
         driver.write_text(
@@ -852,6 +852,8 @@ class CabextractDownloadTests(unittest.TestCase):
             "rootpxe_build_seed_verified_sources() { :; }\n"
             f"PROJECT_DIRECTORY={shlex.quote(git_bash_path(project))}\n"
             "BUILDROOT_VERSION=2026.02.1\n"
+            "PXEOS_BUILD_VERSION=Local-261014-0101\n"
+            f"source {shlex.quote(git_bash_path(ROOT / 'build_version.sh'))}\n"
             "fsDownloadOnly=y\n"
             f"source {shlex.quote(git_bash_path(function_file))}\n"
             "export MOCK_MAKE_SOURCE_MODE=fail\n"

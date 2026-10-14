@@ -11,6 +11,7 @@ import tempfile
 import textwrap
 import unittest
 from itertools import product
+from pxeos_build_version_test import job_block, step_run
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -110,7 +111,7 @@ class WorkflowNamingAndArchitectureTests(unittest.TestCase):
         release, _ = self.workflows()
         self.assertNotIn("workflow_dispatch:\n    inputs:", release)
         self.assertIn("name: Build Release", release)
-        self.assertIn("RELEASE_NAME=Release-${release_stamp}", release)
+        self.assertIn('release_name="Release-${release_stamp}"', release)
         self.assertIn("--channel latest", release)
         self.assertIn("prerelease: false", release)
         self.assertIn("make_latest: 'true'", release)
@@ -144,9 +145,7 @@ class WorkflowNamingAndArchitectureTests(unittest.TestCase):
 
     def test_beta_input_validation_covers_all_architecture_combinations(self) -> None:
         beta = self.workflows()[1]
-        validation = textwrap.dedent(
-            beta.split("        run: |\n", 1)[1].split("\n\n  download_filesystem_packages:", 1)[0]
-        )
+        validation = step_run(job_block(beta, "input_checks"), "Validate selected architectures")
         for arm64, x64, x86 in product((False, True), repeat=3):
             selected = {"arm64": arm64, "x64": x64, "x86": x86}
             with self.subTest(selected=selected):
@@ -165,10 +164,7 @@ class WorkflowNamingAndArchitectureTests(unittest.TestCase):
 
     def test_timestamp_run_blocks_sample_shanghai_time_once(self) -> None:
         for workflow, prefix in zip(self.workflows(), ("Release", "Beta")):
-            naming_step = textwrap.dedent(
-                workflow.split("      - name: Set release and tag names\n        run: |\n", 1)[1]
-                .split("      - name:", 1)[0]
-            )
+            naming_step = step_run(job_block(workflow, "release_metadata"), "Select canonical release metadata")
             with tempfile.TemporaryDirectory() as tempdir:
                 workdir = Path(tempdir)
                 env_file = workdir / "github-env"
@@ -178,13 +174,19 @@ class WorkflowNamingAndArchitectureTests(unittest.TestCase):
                         BASH,
                         "-c",
                         'date() { printf "%s\\n" "${TZ:-missing}" >> "$DATE_LOG"; printf "%s\\n" "261002-1530"; }; '
+                        'bash() { printf "%s\\n" "$MOCK_TAG"; }; '
                         + naming_step,
                     ],
                     text=True,
                     capture_output=True,
+                    cwd=ROOT,
                     env=os.environ | {
-                        "GITHUB_ENV": git_bash_path(env_file),
+                        "GITHUB_OUTPUT": git_bash_path(env_file),
                         "DATE_LOG": git_bash_path(date_log),
+                        "GITHUB_REPOSITORY": "swireb/pxeos",
+                        "GITHUB_RUN_ID": "1234",
+                        "GITHUB_RUN_ATTEMPT": "2",
+                        "MOCK_TAG": f"{prefix}-261002-1530",
                     },
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -192,8 +194,8 @@ class WorkflowNamingAndArchitectureTests(unittest.TestCase):
                 self.assertEqual(
                     env_file.read_text(encoding="utf-8").splitlines(),
                     [
-                        f"RELEASE_NAME={prefix}-261002-1530",
-                        f"TAG_NAME={prefix}-261002-1530",
+                        f"release_name={prefix}-261002-1530",
+                        f"tag_name={prefix}-261002-1530",
                     ],
                 )
                 self.assertIn("-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}", workflow)

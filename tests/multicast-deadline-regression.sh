@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+. "$root/tests/task-http-test-support.sh"
 lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/multicast.sh"
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
@@ -12,7 +13,7 @@ req="$tmp/request"
 printf '{}' >"$req"
 rootpxe_api=http://mock/
 rootpxe_multicast_operation_deadline=$((SECONDS+1))
-curl() {
+curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
   local out= next=0 arg
   printf '%s\n' "$*" >"$tmp/curl.args"
   for arg in "$@"; do

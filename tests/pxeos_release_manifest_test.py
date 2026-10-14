@@ -576,9 +576,9 @@ class WorkflowContractTests(unittest.TestCase):
             release,
         )
         release_order = [
-            "Validate historical release tag",
             "Generate release download manifest",
             "Run final sha256 checksum",
+            "Validate historical release tag",
             "Create GitHub Release",
             "Generate latest download manifest",
             "Publish latest download manifest",

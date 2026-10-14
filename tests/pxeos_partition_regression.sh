@@ -8,6 +8,7 @@ set -euo pipefail
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+. "$root/tests/task-http-test-support.sh"
 overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
 funcs="$overlay/usr/share/pxeos/lib/funcs.sh"
 progress_lib="$overlay/usr/share/pxeos/lib/partclone-progress.sh"
@@ -253,12 +254,13 @@ chmod +x "$tmp/mock"/*
 
 # funcs.sh 在设备端按绝对路径 source 分区库和读取 /proc/cmdline；测试时均改到临时路径。
 : >"$tmp/proc-cmdline"
-sed -e "s|^\. /usr/share/pxeos/lib/partition-funcs.sh|. \"$partition_funcs\"|" \
-    -e "s|^\. /usr/share/pxeos/lib/restore-preflight.sh|. \"$overlay/usr/share/pxeos/lib/restore-preflight.sh\"|" \
-    -e "s|^\. /usr/share/pxeos/lib/capture-recovery.sh|. \"$overlay/usr/share/pxeos/lib/capture-recovery.sh\"|" \
-	-e "s|^\. /usr/share/pxeos/lib/deployment-identity.sh|. \"$overlay/usr/share/pxeos/lib/deployment-identity.sh\"|" \
+sed -e "s|^rootpxe_source_core_library partition-funcs.sh|. \"$partition_funcs\"|" \
+    -e "s|^rootpxe_source_core_library restore-preflight.sh|. \"$overlay/usr/share/pxeos/lib/restore-preflight.sh\"|" \
+    -e "s|^rootpxe_source_core_library capture-recovery.sh|. \"$overlay/usr/share/pxeos/lib/capture-recovery.sh\"|" \
+	-e "s|^rootpxe_source_core_library deployment-identity.sh|. \"$overlay/usr/share/pxeos/lib/deployment-identity.sh\"|" \
     -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" "$funcs" >"$tmp/funcs.sh"
 cp "$progress_lib" "$tmp/partclone-progress.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
 for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
     [[ ! -f $rootpxe_test_funcs_copy ]] || sed -i -e "s|/tmp/log|$tmp/log|g" -e "s|^rootpxe_log_paths_lib=.*|rootpxe_log_paths_lib=$tmp/log-paths.sh|" "$rootpxe_test_funcs_copy"
@@ -835,6 +837,7 @@ printf 'PASS: PXEOS partition regression contract\n'
 # Uses the installed jq and only temporary command stubs; no host disk is read.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/tests/task-http-test-support.sh"
 overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -877,6 +880,7 @@ export PATH="$tmp/bin:$PATH"
 : >"$tmp/proc-cmdline"
 sed -e "s|/usr/share/pxeos|$overlay/usr/share/pxeos|g" -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" "$overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/funcs.sh"
 cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
 for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
     [[ ! -f $rootpxe_test_funcs_copy ]] || sed -i -e "s|/tmp/log|$tmp/log|g" -e "s|^rootpxe_log_paths_lib=.*|rootpxe_log_paths_lib=$tmp/log-paths.sh|" "$rootpxe_test_funcs_copy"
@@ -1083,7 +1087,7 @@ rootpxe_capture_publish_metadata() { :; }
 rootpxe_console_message() { :; }
 dots() { :; }
 debugPause() { :; }
-curl() { printf '%s\n' "$@" >"$callback"; printf '%s\n' '{"success":true}'; }
+curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"; printf '%s\n' "$@" >"$callback"; printf '%s\n' '{"success":true}'; }
 # shellcheck disable=SC1090
 . "$script"
 EOF
@@ -1156,6 +1160,7 @@ echo 'PASS: PXEOS partition inventory regression'
 # Temporary command stubs only: this suite never accesses host LVM or disks.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/tests/task-http-test-support.sh"
 overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -1334,6 +1339,7 @@ sed -e "s|/usr/share/pxeos|$overlay/usr/share/pxeos|g" \
     -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" \
     "$overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/funcs.sh"
 cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
 for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
     [[ ! -f $rootpxe_test_funcs_copy ]] || sed -i -e "s|/tmp/log|$tmp/log|g" -e "s|^rootpxe_log_paths_lib=.*|rootpxe_log_paths_lib=$tmp/log-paths.sh|" "$rootpxe_test_funcs_copy"
@@ -1987,6 +1993,7 @@ echo 'PASS: PXEOS LVM behavior regression'
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+. "$root/tests/task-http-test-support.sh"
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -2100,6 +2107,7 @@ echo 'PASS: disk IDs preserve valid values and hash incompatible values before s
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+. "$root/tests/task-http-test-support.sh"
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -2175,7 +2183,7 @@ run_request() {
     local request_log="$tmp/request.log"
     taskid=7 task_token='test-token-0123456789' mac='00:0c:29:ae:cc:4f'
     pxeapi='https://rootpxe.invalid/api/'
-    curl() {
+    curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
         case " $* " in
             *disk-permit*) printf '%s\n' "$*" >>"$request_log"; [[ $permit_response == __CURL_TRANSPORT_FAILURE__ ]] && return 7; printf '%s' "$permit_response" ;;
             *task-status*) [[ $status_response == __CURL_TRANSPORT_FAILURE__ ]] && return 7; printf '%s' "$status_response" ;;
@@ -2241,7 +2249,7 @@ for missing_mode in context api; do
         taskid=7 task_token='test-token-0123456789' mac='00:0c:29:ae:cc:4f'
         pxeapi='' web=''
         curl_marker="$tmp/missing-$missing_mode.curl"
-        curl() { : >"$curl_marker"; return 70; }
+        curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"; : >"$curl_marker"; return 70; }
         if [[ $missing_mode == context ]]; then
             rootpxe_require_task_context() { return 1; }
         else
@@ -2278,7 +2286,7 @@ set +e
 (
     taskid=7 task_token='test-token-0123456789' mac='00:0c:29:ae:cc:4f'
     pxeapi='https://rootpxe.invalid/api/'
-    curl() {
+    curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
         case " $* " in
             *disk-permit*) printf '%s' "$forbidden" ;;
             *task-status*) printf '%s' "$running" ;;
@@ -2313,7 +2321,7 @@ set +e
 (
     taskid=7 task_token='test-token-0123456789' mac='00:0c:29:ae:cc:4f'
     pxeapi='https://rootpxe.invalid/api/'
-    curl() {
+    curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
         case " $* " in
             *disk-permit*) printf '%s' "$unknown_code" ;;
             *task-status*) printf '%s' "$running" ;;
@@ -2345,7 +2353,7 @@ set +e
     pxeapi='https://rootpxe.invalid/api/'
     counter="$tmp/retry-count"
     : >"$counter"
-    curl() {
+    curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
         case " $* " in
             *disk-permit*)
                 count=$(wc -l <"$counter")

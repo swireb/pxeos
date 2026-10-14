@@ -5,7 +5,7 @@ funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/func
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"; rm -f -- "${rootpxe_resolved_layout_file:-}"' EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
-for name in rootpxe_validate_partition_lba_contract rootpxe_validate_deployment_layout rootpxe_canonical_json_hash; do
+for name in rootpxe_validate_partition_lba_contract rootpxe_validate_deployment_layout rootpxe_canonical_json_hash rootpxe_register_derived_layout_file; do
     eval "$(awk -v name="$name" '$0 ~ "^" name "\\(\\)" { found=1 } found {print} found && /^}/ {exit}' "$funcs")"
 done
 # Pin the current one-line production wrapper without letting the multiline

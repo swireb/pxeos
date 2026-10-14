@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Windows/MSYS cannot represent Linux chmod(0600), and ships no flock.
 # These substitutes are test-only; native Linux validates the real contract.
+if [[ -n ${root:-} && -n ${tmp:-} && -d $tmp ]]; then
+    cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
+fi
 task_log_real_flock=$(type -P flock || true)
 flock() {
     # Controlled sink failure is portable and is not proof of native lock

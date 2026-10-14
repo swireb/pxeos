@@ -1,15 +1,16 @@
 #!/bin/bash
-. /usr/share/pxeos/lib/funcs.sh
+. /usr/share/pxeos/lib/funcs.sh || exit 1
 rootpxe_task_log_initialize || printf '[WARN]  Task log: unavailable.\n' >&2
 . /bin/pxeos.checkin
 rootpxe_download_cleanup_initialization_private() {
-    rootpxe_deployment_identity_cleanup_private
+    rootpxe_cleanup_session
     rootpxe_multicast_cleanup
 }
 # The private initialization payload remains needed through finish reporting,
 # then must be removed on both normal completion and every task exit/signal.
 trap rootpxe_download_cleanup_initialization_private EXIT
-trap 'rootpxe_download_cleanup_initialization_private; exit 143' INT TERM
+trap 'rootpxe_download_cleanup_initialization_private; exit 130' INT
+trap 'rootpxe_download_cleanup_initialization_private; exit 143' TERM
 rootpxe_partition_progress_initialize_runtime
 . /bin/pxeos.mount
 . /bin/pxeos.checkmount

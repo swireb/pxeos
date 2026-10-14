@@ -10,6 +10,12 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 real_jq=$(command -v jq) || fail 'jq is required'
+# Native jq may receive converted MSYS operands, or literal /dev operands when
+# conversion is excluded. The mock must bind to what this real parser sees;
+# keep the production UUID/path checks and the exact assertions unchanged.
+msys_fixture_pv_prefix=$("$real_jq" -nr --arg path /dev/mock '$path') || fail fixture-device-prefix-probe
+msys_fixture_pv_prefix=${msys_fixture_pv_prefix//$'\r'/}
+[[ -n $msys_fixture_pv_prefix ]] || fail fixture-device-prefix-empty
 # Production entrypoint contract: the early barrier follows artifact checking
 # but precedes permit planning, hooks, partition layout, and Partclone work.
 artifact_line=$(grep -n '^rootpxe_validate_restore_artifacts ' "$download" | head -n1 | cut -d: -f1)
@@ -61,7 +67,7 @@ pvs() {
       local n selected
       for selected; do :; done
       if [[ ${EMPTY_TARGET:-no} == yes && $* == *'pv_name,pv_uuid,vg_name,vg_uuid'* && $* != *'/dev/mock'* ]]; then printf '%s\n' '{"report":[{"pv":[]}]}'; return 0; fi
-      if [[ $selected =~ ^/dev/mock([1-9][0-9]*)$ ]]; then n=${BASH_REMATCH[1]}; pv_path="/dev/mock${n}"; [[ ${RESTORE_MSYS_PATHS:-no} == yes ]] && pv_path="C:/Program Files/Git/dev/mock${n}"; printf '{"report":[{"pv":[{"pv_name":"%s","pv_uuid":"pv-%s","vg_name":"vg%s","vg_uuid":"vg-%s"}]}]}\n' "$pv_path" "$n" "$n" "$n"; return 0; fi
+      if [[ $selected =~ ^/dev/mock([1-9][0-9]*)$ ]]; then n=${BASH_REMATCH[1]}; pv_path="/dev/mock${n}"; [[ ${RESTORE_MSYS_PATHS:-no} == yes ]] && pv_path="${msys_fixture_pv_prefix}${n}"; printf '{"report":[{"pv":[{"pv_name":"%s","pv_uuid":"pv-%s","vg_name":"vg%s","vg_uuid":"vg-%s"}]}]}\n' "$pv_path" "$n" "$n" "$n"; return 0; fi
       if [[ ${MATRIX_REVERSE:-no} == yes ]]; then
         "$real_jq" -n --argjson count "$MATRIX_GROUP_COUNT" '[range(1;$count+1)|{pv_name:("/dev/mock"+tostring),pv_uuid:("pv-"+tostring),vg_name:("vg"+tostring),vg_uuid:("vg-"+tostring),pv_size:"268435456",pe_start:"1048576"}] | reverse | {report:[{pv:.}]}'
       else
@@ -69,7 +75,7 @@ pvs() {
       fi
       return 0
     fi
-    [[ ${RESTORE_MSYS_PATHS:-no} == yes ]] && { pv1='C:/Program Files/Git/dev/mock1'; pv2='C:/Program Files/Git/dev/mock2'; }
+    [[ ${RESTORE_MSYS_PATHS:-no} == yes ]] && { pv1="${msys_fixture_pv_prefix}1"; pv2="${msys_fixture_pv_prefix}2"; }
     all="[{\"pv_name\":\"$pv1\",\"pv_uuid\":\"pv-1\",\"vg_name\":\"vg0\",\"vg_uuid\":\"vg-1\",\"pv_size\":\"268435456\",\"pe_start\":\"1048576\"},{\"pv_name\":\"$pv2\",\"pv_uuid\":\"pv-2\",\"vg_name\":\"vg1\",\"vg_uuid\":\"vg-2\",\"pv_size\":\"268435456\",\"pe_start\":\"1048576\"}]"
     if [[ ${LIVE_DUPLICATE_SOURCE:-no} == yes && $* == *'pv_name,pv_uuid,vg_name,vg_uuid'* ]]; then
       printf '%s\n' '{"report":[{"pv":[{"pv_name":"/dev/source1","pv_uuid":"pv-1","vg_name":"vg0","vg_uuid":"vg-1"}]}]}'
