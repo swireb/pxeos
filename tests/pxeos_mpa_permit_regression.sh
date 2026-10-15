@@ -24,9 +24,11 @@ cp "$progress_lib" "$tmp/partclone-progress.sh"
 cp "$(dirname "$funcs")/log-paths.sh" "$tmp/log-paths.sh"
 cp "$(dirname "$funcs")/task-http.sh" "$tmp/task-http.sh"
 cp "$(dirname "$funcs")/cloud-init.sh" "$tmp/cloud-init.sh"
+cp "$(dirname "$funcs")/linux-hostname.sh" "$tmp/linux-hostname.sh"
 download_functions="$tmp/download-functions.sh"
 awk '/^preparePartitions\(\)/,/^findHDDInfo$/{ if ($0 ~ /^findHDDInfo$/) exit; print }' "$download" >"$download_functions"
 set +u; source "$test_funcs"; set -u
+source "$(dirname "$funcs")/deployment-identity.sh"
 source "$download_functions"
 
 events="$tmp/events"

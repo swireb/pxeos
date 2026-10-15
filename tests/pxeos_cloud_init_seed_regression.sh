@@ -29,8 +29,9 @@ fixture(){
     printf '#cloud-config\r\n# 私有内容\r\nruncmd: []\r\n\r\n' >"$tmp/user-data"
     cloudInitUserDataFile="$tmp/user-data"
     cloudInitUserDataSha256=$(rootpxe_ci_hash "$cloudInitUserDataFile")
-    cloudInitInstanceId=rootpxe-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-    cloudInitHostname=node-1
+    printf 'instance-id: manual-image-instance\r\nlocal-hostname: raw-image-name\r\n# 不自动生成或渲染\r\n' >"$tmp/meta-data"
+    cloudInitMetaDataFile="$tmp/meta-data"
+    cloudInitMetaDataSha256=$(rootpxe_ci_hash "$cloudInitMetaDataFile")
     cloudInitNetworkConfigFile='' cloudInitNetworkConfigSha256=''
 }
 network_fixture(){
@@ -44,7 +45,7 @@ rootpxe_cloud_init_install_at_root "$target" || fail "fresh install: ${rootpxe_c
 seed="$target/var/lib/cloud/seed/nocloud"
 [[ $(find "$seed" -maxdepth 1 -type f | wc -l) == 2 ]] || fail 'seed must contain exactly two files'
 cmp -s "$tmp/user-data" "$seed/user-data" || fail 'CRLF bytes changed'
-grep -Fxq 'instance-id: "rootpxe-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$seed/meta-data" || fail 'instance metadata changed'
+cmp -s "$tmp/meta-data" "$seed/meta-data" || fail 'manual meta-data raw bytes changed'
 before=$(stat -c '%d:%i' "$seed/user-data")
 rootpxe_cloud_init_install_at_root "$target" || fail 'same frozen seed rejected'
 [[ $(stat -c '%d:%i' "$seed/user-data") == "$before" ]] || fail 'idempotent seed was rewritten'
@@ -59,8 +60,27 @@ rootpxe_cloud_init_install_at_root "$target" || fail 'same three-file seed rejec
 cloudInitNetworkConfigFile='' cloudInitNetworkConfigSha256=''
 rootpxe_cloud_init_install_at_root "$target" && fail 'cleared network silently removed an existing network-config'
 [[ $rootpxe_cloud_init_error == cloud_init_foreign_seed && -f $seed/network-config ]] || fail 'cleared network conflict not preserved'
-cloudInitInstanceId=rootpxe-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+printf 'instance-id: different-manual-task\n' >"$cloudInitMetaDataFile"
+cloudInitMetaDataSha256=$(rootpxe_ci_hash "$cloudInitMetaDataFile")
 rootpxe_cloud_init_install_at_root "$target" && fail 'cross-task seed accepted'
+fixture empty-user
+: >"$cloudInitUserDataFile"
+cloudInitUserDataSha256=$(rootpxe_ci_hash "$cloudInitUserDataFile")
+rootpxe_cloud_init_install_at_root "$target" || fail 'empty user-data seed rejected'
+[[ -f $target/var/lib/cloud/seed/nocloud/user-data && ! -s $target/var/lib/cloud/seed/nocloud/user-data ]] || fail 'empty user-data seed missing'
+cmp -s "$tmp/meta-data" "$target/var/lib/cloud/seed/nocloud/meta-data" || fail 'empty-user manual metadata changed'
+for conflict in missing-meta tampered-meta hardlinked-meta; do
+    network_fixture "$conflict"
+    rootpxe_cloud_init_install_at_root "$target" || fail 'manual metadata conflict fixture'
+    seed="$target/var/lib/cloud/seed/nocloud"
+    case $conflict in
+        missing-meta) rm -- "$seed/meta-data";;
+        tampered-meta) printf 'changed' >>"$seed/meta-data";;
+        hardlinked-meta) ln "$seed/meta-data" "$tmp/meta-extra-link";;
+    esac
+    rootpxe_ci_readonly_preflight "$target" && fail "readonly accepted $conflict"
+    [[ $rootpxe_cloud_init_error == cloud_init_foreign_seed ]] || fail "$conflict reason"
+done
 for conflict in cache disabled foreign extra hardlink symlink; do
     fixture "$conflict"
     case $conflict in
@@ -170,6 +190,7 @@ cloudInitNetworkConfigFile="$tmp/network-config"
 cloudInitNetworkConfigSha256=$(rootpxe_ci_hash "$cloudInitNetworkConfigFile")
 rootpxe_cloud_init_install_at_root "$target" || fail 'target-policy label branch failed'
 grep -Fq 'user-data|system_u:object_r:cloud_var_lib_t:s0' "$tmp/labels" || fail 'user-data label not written/read'
+grep -Fq 'meta-data|system_u:object_r:cloud_var_lib_t:s0' "$tmp/labels" || fail 'manual meta-data label not written/read'
 grep -Fq 'network-config|system_u:object_r:cloud_var_lib_t:s0' "$tmp/labels" || fail 'network-config label not written/read'
 rootpxe_ci_read_label(){ if [[ $1 == */network-config ]]; then printf 'system_u:object_r:wrong_t:s0\n'; else printf 'system_u:object_r:cloud_var_lib_t:s0\n'; fi; }
 rootpxe_ci_readonly_preflight "$target" && fail 'readonly accepted wrong network-config label'

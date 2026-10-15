@@ -58,6 +58,15 @@ test_download_session_cleanup() {
             rootpxe_cloud_init_private_inode=$(rootpxe_ci_inode "$cloudInitUserDataFile") || exit 9
             rootpxe_cloud_init_private_pid=$BASHPID
             printf '%s\n' "$cloudInitUserDataFile" >"$marker/owned-data-path"
+            cloudInitMetaDataFile=$(mktemp /tmp/rootpxe-cloud-meta.XXXXXX) || exit 9
+            printf 'instance-id: manual-signal-fixture\n' >"$cloudInitMetaDataFile"
+            chmod 600 "$cloudInitMetaDataFile" || exit 9
+            cloudInitMetaDataSha256=$(rootpxe_ci_hash "$cloudInitMetaDataFile") || exit 9
+            rootpxe_cloud_init_meta_private_inode=$(rootpxe_ci_inode "$cloudInitMetaDataFile") || exit 9
+            rootpxe_cloud_init_meta_private_pid=$BASHPID
+            printf '%s\n' "$cloudInitMetaDataFile" >>"$marker/owned-data-path"
+            rootpxe_cloud_init_valid_pid=$BASHPID
+            export -n rootpxe_cloud_init_valid_pid rootpxe_cloud_init_meta_private_pid rootpxe_cloud_init_meta_private_inode
             rootpxe_resolved_layout_file=$(mktemp /tmp/rootpxe-resolved-layout.XXXXXX)
             rootpxe_resolved_lvm_layout_file=$(mktemp /tmp/rootpxe-resolved-lvm.XXXXXX)
             printf '%s\n' "$rootpxe_resolved_layout_file" "$rootpxe_resolved_lvm_layout_file" >"$marker/owned-derived-paths"
@@ -109,8 +118,8 @@ test_core_libraries_fail_closed() {
     # Only the definition/import prefix is sourced; never the kernel args or
     # PXEOS entry point. Every companion is an ordinary fixture script.
     sed -n '1,/^rootpxe_partition_progress_initialize_runtime()/p' "$funcs" | sed '$d' | sed "s|/usr/share/pxeos/lib|$tmp/missing-installed|g" >"$tmp/core/funcs.sh"
-    for library in log-paths.sh partition-funcs.sh restore-preflight.sh capture-recovery.sh deployment-identity.sh cloud-init.sh partclone-progress.sh task-http.sh; do printf ':\n' >"$tmp/core/$library"; done
-    for library in partition-funcs.sh restore-preflight.sh capture-recovery.sh deployment-identity.sh cloud-init.sh partclone-progress.sh task-http.sh; do
+    for library in log-paths.sh partition-funcs.sh restore-preflight.sh capture-recovery.sh deployment-identity.sh cloud-init.sh linux-hostname.sh partclone-progress.sh task-http.sh; do printf ':\n' >"$tmp/core/$library"; done
+    for library in partition-funcs.sh restore-preflight.sh capture-recovery.sh deployment-identity.sh cloud-init.sh linux-hostname.sh partclone-progress.sh task-http.sh; do
         mv "$tmp/core/$library" "$tmp/core/$library.saved"
         status=0; ( . "$tmp/core/funcs.sh"; ) >"$tmp/core/out" 2>&1 || status=$?
         mv "$tmp/core/$library.saved" "$tmp/core/$library"

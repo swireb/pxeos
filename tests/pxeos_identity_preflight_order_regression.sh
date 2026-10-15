@@ -11,6 +11,7 @@ before(){ local a b; a=$(grep -nF "$1" "$tmp/complete" | head -n1 | cut -d: -f1)
 before rootpxe_deployment_identity_request_private rootpxe_apply_hostname_for_disk || fail 'Windows XML follows initialization'
 before rootpxe_apply_cloud_init rootpxe_deployment_identity_report_result || fail 'receipt precedes NoCloud installation'
 grep -Fq 'rootpxe_verify_disk_permit_binding' "$lib/cloud-init.sh" || fail 'injection lacks permit guard'
-! grep -Eq 'preDeployScript|postDeployScript|rootpxe_run_.*deploy_script|rootpxe_apply_linux_hostname|machineId|sshHostKeys|sshLoginPublicKeys|rootPassword' "$lib/funcs.sh" "$lib/deployment-identity.sh" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.checkin" || fail 'retired runtime contract remains'
+! grep -Eq 'preDeployScript|postDeployScript|rootpxe_run_.*deploy_script|machineId|sshHostKeys|sshLoginPublicKeys|rootPassword' "$lib/funcs.sh" "$lib/deployment-identity.sh" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.checkin" || fail 'retired runtime contract remains'
+grep -Fq 'rootpxe_apply_linux_hostname_for_targets' "$lib/linux-hostname.sh" || fail 'offline Linux name-only helper missing'
 [[ ! -e $lib/linux-startup.sh && ! -d $lib/linux-startup-templates ]] || fail 'retired startup assets remain'
 printf 'PASS: identity/NoCloud ordering and obsolete runtime absence\n'

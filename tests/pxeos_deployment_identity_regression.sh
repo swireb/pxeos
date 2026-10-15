@@ -33,6 +33,14 @@ exit 0
 EOF
 chmod +x "$xml_capability_bin/xml"
 (PATH="$xml_capability_bin"; rootpxe_deployment_identity_windows_sysprep_capability_installed) || fail 'Sysprep capability rejected the Buildroot xml command'
+if (PATH="$xml_capability_bin"; rootpxe_deployment_identity_linux_hostname_capability_installed); then fail 'Linux capability accepted without installed helper/tools'; fi
+rootpxe_apply_linux_hostname_for_targets(){ :; }
+if (PATH="$xml_capability_bin"; rootpxe_deployment_identity_linux_hostname_capability_installed); then fail 'Linux capability accepted incomplete runtime tools'; fi
+for linux_tool in awk cp chmod chown stat readlink find mktemp mount umount mountpoint sha256sum tail od touch rmdir; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$xml_capability_bin/$linux_tool"
+    chmod +x "$xml_capability_bin/$linux_tool"
+done
+(PATH="$xml_capability_bin"; rootpxe_deployment_identity_linux_hostname_capability_installed) || fail 'Linux capability rejected complete declared runtime tools'
 
 for config in "$root/configs/fsx64.config" "$root/configs/fsx86.config" "$root/configs/fsarm64.config"; do
     grep -Fxq 'BR2_PACKAGE_XMLSTARLET=y' "$config" || fail "XMLStarlet package disabled in $config"

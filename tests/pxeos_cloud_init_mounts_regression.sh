@@ -36,7 +36,7 @@ rootpxe_lvm_native(){
 rootpxe_linux_activate_vg_if_needed(){ printf 'no\n'; }
 rootpxe_linux_cleanup_selected_vg(){ printf 'vg-clean:%s:%s\n' "$1" "$3" >>"$events"; }
 blkid(){ [[ ${@: -1} == /dev/Ap2 || ${@: -1} == /dev/vg/var ]] && printf ext4 || printf xfs; }
-mountpoint(){ [[ ${borrowed:-no} == yes && ${@: -1} == "$fixture_root/var" ]]; }
+mountpoint(){ [[ ( ${borrowed:-no} == yes && ${@: -1} == "$fixture_root/var" ) || ( ${cloud_shadow:-no} == yes && ${@: -1} == "$fixture_root/var/lib/cloud" ) ]]; }
 rootpxe_ci_mount_matches(){ [[ ${wrong_device:-no} != yes ]]; }
 mount(){ printf 'mount:%s\n' "$*" >>"$events"; }
 umount(){ printf 'umount:%s\n' "$1" >>"$events"; [[ ${cleanup_fail:-no} != yes ]]; }
@@ -52,6 +52,16 @@ printf '/dev/Ap2 /var ext4 defaults 0 2\n/dev/Ap1 /var xfs defaults 0 2\n' >"$ta
 rootpxe_ci_mount_fstab "$target" /var rw && fail 'duplicate /var accepted'
 printf '/dev/Ap2 /var/lib/cloud ext4 defaults 0 2\n' >"$target/etc/fstab"
 rootpxe_ci_mount_fstab "$target" /var rw && fail 'shadowing /var/lib/cloud accepted'
+mkdir -p "$target/var/lib/cloud/instances"
+cloud_shadow=yes
+printf '/dev/Ap2 /usr ext4 defaults 0 2\n/dev/FOREIGN /var/lib/cloud ext4 defaults 0 2\n/dev/FOREIGN /etc/cloud ext4 defaults 0 2\n' >"$target/etc/fstab"
+: >"$events"
+rootpxe_ci_mount_fstab "$target" /usr ro || fail 'independent /usr probe depended on unrelated Cloud-init mounts/cache'
+rootpxe_ci_cleanup_mounts || fail 'owned /usr cleanup failed'
+grep -Fq 'ro,noload' "$events" || fail '/usr probe not mounted readonly'
+rootpxe_ci_mount_fstab "$target" /var rw && fail '/var shadowing bypassed after /usr probe split'
+[[ ! -e $target/var/lib/cloud/seed ]] || fail '/usr probe or rejected /var wrote a seed'
+cloud_shadow=no
 printf '/dev/Ap2 /var ext4 defaults 0 2\n' >"$target/etc/fstab"
 borrowed=yes
 : >"$events"
@@ -68,4 +78,4 @@ rootpxe_linux_validate_vg_target_pvs /dev/A uuid-good && fail 'VG foreign PV acc
 ci_owned_mounts=("$target/var") cleanup_fail=yes
 rootpxe_ci_cleanup_mounts && fail 'unmount failure swallowed'
 [[ ${#ci_owned_mounts[@]} == 1 ]] || fail 'failed cleanup evidence discarded'
-printf 'PASS: /var permissions, all VG PVs, duplicate/shadowing fstab, borrowed/failed cleanup\n'
+printf 'PASS: independent readonly /usr probe, strict /var permissions, all VG PVs, shadowing fstab, borrowed/failed cleanup\n'

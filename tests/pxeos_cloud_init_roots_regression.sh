@@ -9,6 +9,7 @@ trap cleanup_fixture EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 case $(uname -s) in MINGW*|MSYS*) rootpxe_ci_fixture_jq=$(command -v jq.exe); jq(){ "$rootpxe_ci_fixture_jq" -b "$@"; };; esac
 . "$lib/cloud-init.sh"
+. "$lib/linux-hostname.sh"
 for fn in rootpxe_find_linux_root_filesystem rootpxe_linux_validate_vg_target_pvs rootpxe_linux_activate_vg_if_needed rootpxe_linux_lvs_for_vg_json rootpxe_linux_cleanup_selected_vg; do
     eval "$(sed -n "/^$fn() {\$/,/^}\$/p" "$lib/funcs.sh")"
 done
@@ -44,14 +45,25 @@ rootpxe_lvm_native(){
 }
 rootpxe_linux_probe_root_candidate(){ printf '%s|%s|%s|%s|\n' "$1" "$2" "$3" "$4"; }
 rootpxe_cloud_init_process_root(){ printf '%s\n' "$3" >>"$tmp/phases"; rootpxe_cloud_init_seed_verified=no; }
+rootpxe_linux_hostname_process_root(){ printf '%s\n' "$3" >>"$tmp/phases"; rootpxe_linux_hostname_verified=no; }
+rootpxe_stage(){ :; }
 mountpoint(){ return 1; }
 taskType=deploy osid=50
 scenario=same
 rootpxe_cloud_init_install_for_targets /dev/A /dev/B || fail "same LV twice: ${rootpxe_cloud_init_error:-}"
 [[ $(<"$tmp/phases") == $'ro\nrw' ]] || fail 'same LV was not installed exactly once'
-for scenario in distinct conflict foreign; do
+changeHostname=true hostName=node-new
+deploymentIdentityPolicyFile="$tmp/policy"
+printf '{"version":1,"systemIdentity":{"sysprep":false},"taskHostname":"node-new","cloudInit":false}\n' >"$deploymentIdentityPolicyFile"
+for entry in rootpxe_cloud_init_install_for_targets rootpxe_apply_linux_hostname_for_targets; do
+    scenario=same
     : >"$tmp/phases"
-    rootpxe_cloud_init_install_for_targets /dev/A /dev/B && fail "accepted $scenario roots"
-    [[ ! -s $tmp/phases ]] || fail "$scenario reached root write/preflight"
+    "$entry" /dev/A /dev/B || fail "$entry same permitted multi-PV LV rejected"
+    [[ $(<"$tmp/phases") == $'ro\nrw' ]] || fail "$entry did not install unique root exactly once"
+    for scenario in distinct conflict foreign; do
+        : >"$tmp/phases"
+        "$entry" /dev/A /dev/B && fail "$entry accepted $scenario roots"
+        [[ ! -s $tmp/phases ]] || fail "$entry $scenario reached root write/preflight"
+    done
 done
-printf 'PASS: real multi-PV root discovery dedupes same LV; distinct/conflicting/foreign roots reject\n'
+printf 'PASS: Cloud and offline-name real multi-PV discovery dedupe same LV; distinct/conflicting/foreign roots reject\n'

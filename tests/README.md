@@ -81,7 +81,7 @@ python3 tests/pxeos_build_version_test.py
 
 上述脚本均按单脚本独立运行；本目录仍不提供一键 full suite，也不因此宣称 CI、真实磁盘或实机部署已验证。
 
-## Windows、显示与部署身份（10）
+## Windows、Linux 名称、显示与部署身份（11）
 
 - `pxeos_xml_command_regression.sh`：以私有文件和命令 mock 覆盖 Sysprep XML 写入路径。
 - `pxeos_windows_initialization_regression.sh`：以真实 hivex/reged/XML 工具覆盖 Windows 主机名与 Sysprep 开关矩阵。
@@ -93,6 +93,7 @@ python3 tests/pxeos_build_version_test.py
 - `pxeos_display_metadata_regression.sh`：以临时库存和边界 stub 核对显示元数据。
 - `pxeos_identity_preflight_order_regression.sh`：核对部署入口中 Windows XML、NoCloud 注入、冻结回执的顺序及旧执行器缺失。
 - `pxeos_deployment_identity_regression.sh`：核对部署身份工具的 XML 能力门槛与身份契约。
+- `pxeos_linux_hostname_regression.sh`：真实普通文件事务覆盖 Linux 单标签校验、主机名/回环自身 hosts 更新、CRLF/注释/远端保留、旧名缺失与本机映射去重、路径/模式/硬链接拒绝、回读回滚、外来 inode 不覆盖、清理失败留证、标签工具分支、许可目标唯一根、只读重试和命名四态；不要求 Cloud-init 包或干净缓存/seed。
 
 `pxeos_windows_hostname_native_regression.sh` 与 `pxeos_windows_initialization_regression.sh` 都需要 `ROOTPXE_WINDOWS_HOSTNAME_TOOL`、`ROOTPXE_HIVEX_MINIMAL`、`ROOTPXE_REGED`，以及用于 fixture 的 C 编译器、`pkg-config` 和 hivex 开发头文件/库。后者还要求实际 `xml`、`jq`，并以 `/ntfs` **不存在**为隔离前提；不要在已挂载或真实目标盘环境中运行。满足隔离条件后可分别显式执行：
 
@@ -103,11 +104,11 @@ bash tests/pxeos_windows_initialization_regression.sh
 
 ## 原生 Cloud-init（5）
 
-- `pxeos_cloud_init_protocol_regression.sh`：真实 jq 二次验证六个私有字段、任务与系统限制、原始 UTF-8/CRLF 字节、网络空值对、散列、两个临时文件的 BASHPID/inode/权限证明、双向 unlink 失败后不可注入且可安全重试清理、新版能力、缺失或关闭策略拒绝，以及日志字段脱敏/无执行/无正文泄漏。
-- `pxeos_cloud_init_permit_regression.sh`：真实首次单盘和 MPA 单盘计划、许可响应、登记及校验，真实 source JSON checkin 后调用两文件或三文件 NoCloud 安装器，覆盖只填网络时冻结的最小用户配置、缺失/损坏映射、错误设备/操作及空配置和捕获绕过。
-- `pxeos_cloud_init_seed_regression.sh`：普通临时目录覆盖期望两文件或三文件、原字节、同任务只读幂等、清空网络不删除已有文件、额外/缺失/篡改、foreign seed/缓存/禁用、硬链接/符号链接、网络阶段发布回滚与外来内容保留、半份 seed 拒绝、固定脱敏理由和 SELinux 工具分支。
-- `pxeos_cloud_init_mounts_regression.sh`：设备边界替身覆盖独立变量数据分区许可、卷组全部物理卷、挂载表歧义/遮盖、借用挂载与清理失败证据。
-- `pxeos_cloud_init_roots_regression.sh`：真实根发现与许可目标循环对同一多物理卷根去重，拒绝两个不同根、候选身份冲突及未许可物理卷。
+- `pxeos_cloud_init_protocol_regression.sh`：真实 jq 二次验证 v3 六个私有字段、手工元数据、空用户正文及真实空字节散列、UTF-8/CRLF、网络空值对、三个私密文件的 BASHPID/inode/权限证明、三向及组合 unlink 故障后的整份失效与安全重试、旧键/缺失或关闭策略拒绝、三正文脱敏、能力异常不生成请求及注入/清理成功后才设置名称回执。
+- `pxeos_cloud_init_permit_regression.sh`：真实首次单盘和 MPA 单盘计划、许可响应、登记及校验，真实 source JSON checkin 后调用两文件或三文件安装器；覆盖手工 meta、空用户/网络配置、两 permit 的 JSON 数组能力声明、异常能力不发请求、缺失/损坏映射、错误设备/操作及普通部署/捕获绕过。
+- `pxeos_cloud_init_seed_regression.sh`：普通临时目录覆盖两文件或三文件原字节、空用户文件、手工 meta、内容完全一致时的只读幂等、清空网络不删除已有文件、额外/缺失/篡改、foreign seed/缓存/禁用、链接、网络阶段回滚与外来内容保留、半份 seed 拒绝和 SELinux 工具分支；内容相等不证明同一任务归属。
+- `pxeos_cloud_init_mounts_regression.sh`：设备边界替身覆盖独立只读程序分区探测不依赖 Cloud 路径、变量分区仍严格拒绝遮盖、全部物理卷许可、挂载歧义、借用与失败清理证据。
+- `pxeos_cloud_init_roots_regression.sh`：Cloud 注入与离线名称共用真实根发现/全部物理卷许可，对同一根去重，拒绝两个不同根、候选身份冲突及未许可物理卷。
 
 上述 fixture 不执行目标 Cloud-init、user-data、真实磁盘、真实 mount 或 LVM。MSYS 使用明确的 Unix 属主/模式替身，Windows 原生符号链接可能因权限拒绝而跳过；SELinux 工具分支使用替身，不代表工具包、目标策略或真实首启执行已验证。
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# 冻结部署身份 v1：Windows 计算机名/Sysprep 与原生 NoCloud 注入回执。
+# 冻结部署身份 v1：Linux离线主机名、Windows计算机名/Sysprep与原生NoCloud注入回执。
 . "$(dirname "${BASH_SOURCE[0]}")/task-http.sh" || return 1
 
 rootpxe_deployment_identity_policy_enabled() {
@@ -59,6 +59,26 @@ rootpxe_deployment_identity_windows_sysprep_capability_installed() {
     for tool in jq ntfs-3g xml; do
         command -v "$tool" >/dev/null 2>&1 || return 1
     done
+}
+
+rootpxe_deployment_identity_linux_hostname_capability_installed() {
+    local tool
+    declare -F rootpxe_apply_linux_hostname_for_targets >/dev/null || return 1
+    for tool in jq awk cp chmod chown stat readlink find mktemp mount umount mountpoint sha256sum tail od touch rmdir; do
+        command -v "$tool" >/dev/null 2>&1 || return 1
+    done
+}
+rootpxe_deployment_identity_capabilities_valid() {
+    jq -e 'type == "array" and length <= 16 and all(.[]; type == "string" and length > 0 and length <= 64 and test("^[a-z0-9-]+$")) and (length == (unique|length))' >/dev/null 2>&1 <<<"$1"
+}
+rootpxe_deployment_identity_capabilities_json() {
+    local capabilities='["hostname"]'
+    if rootpxe_deployment_identity_linux_hostname_capability_installed; then capabilities=$(jq -c '. + ["linux-hostname-offline-v1"]' <<<"$capabilities") || return 1; fi
+    if rootpxe_deployment_identity_windows_hostname_capability_installed; then capabilities=$(jq -c '. + ["windows-hostname-registry-v1"]' <<<"$capabilities") || return 1; fi
+    if rootpxe_deployment_identity_windows_sysprep_capability_installed; then capabilities=$(jq -c '. + ["windows-sysprep-v1"]' <<<"$capabilities") || return 1; fi
+    if declare -F rootpxe_multicast_runtime_ready >/dev/null && rootpxe_multicast_runtime_ready; then capabilities=$(jq -c '. + ["manual-multicast-session"]' <<<"$capabilities") || return 1; fi
+    rootpxe_deployment_identity_capabilities_valid "$capabilities" || return 1
+    printf '%s\n' "$capabilities"
 }
 
 rootpxe_deployment_identity_request_plan() {

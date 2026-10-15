@@ -80,7 +80,7 @@ rootpxe_apply_json_deployment_identity_policy() {
     rm -f -- "$policy_file"
     unset deploymentIdentityPolicyFile
     jq -e '
-      if has("deploymentIdentityPolicy") | not then ([has("cloudInitUserData"),has("cloudInitUserDataSha256"),has("cloudInitInstanceId"),has("cloudInitHostname"),has("cloudInitNetworkConfig"),has("cloudInitNetworkConfigSha256")] | any | not)
+      if has("deploymentIdentityPolicy") | not then ([has("cloudInitUserData"),has("cloudInitUserDataSha256"),has("cloudInitMetaData"),has("cloudInitMetaDataSha256"),has("cloudInitInstanceId"),has("cloudInitHostname"),has("cloudInitNetworkConfig"),has("cloudInitNetworkConfigSha256")] | any | not)
       else .deploymentIdentityPolicy as $p |
         ($p | type == "object") and $p.version == 1 and
         (($p | keys - ["version","systemIdentity","taskHostname","cloudInit"]) | length == 0) and
@@ -88,8 +88,8 @@ rootpxe_apply_json_deployment_identity_policy() {
         ($p.systemIdentity.sysprep | type == "boolean") and
         ($p.cloudInit | type == "boolean") and
         (if $p | has("taskHostname") then ($p.taskHostname | type == "string") else true end) and
-        (if $p.cloudInit then .type == "deploy" and .osid == 50 and has("cloudInitUserData") and has("cloudInitUserDataSha256") and has("cloudInitInstanceId") and has("cloudInitHostname") and has("cloudInitNetworkConfig") and has("cloudInitNetworkConfigSha256")
-         else ([has("cloudInitUserData"),has("cloudInitUserDataSha256"),has("cloudInitInstanceId"),has("cloudInitHostname"),has("cloudInitNetworkConfig"),has("cloudInitNetworkConfigSha256")] | any | not) end)
+        (if $p.cloudInit then .type == "deploy" and .osid == 50 and has("cloudInitUserData") and has("cloudInitUserDataSha256") and has("cloudInitMetaData") and has("cloudInitMetaDataSha256") and has("cloudInitNetworkConfig") and has("cloudInitNetworkConfigSha256") and (has("cloudInitInstanceId")|not) and (has("cloudInitHostname")|not)
+         else ([has("cloudInitUserData"),has("cloudInitUserDataSha256"),has("cloudInitMetaData"),has("cloudInitMetaDataSha256"),has("cloudInitInstanceId"),has("cloudInitHostname"),has("cloudInitNetworkConfig"),has("cloudInitNetworkConfigSha256")] | any | not) end)
       end' >/dev/null 2>&1 <<<"$document" || return 1
     if jq -e 'has("deploymentIdentityPolicy")' >/dev/null <<<"$document"; then
         (umask 077; jq -c '.deploymentIdentityPolicy' <<<"$document" >"$policy_file") || { rm -f -- "$policy_file"; return 1; }
@@ -114,9 +114,10 @@ rootpxe_apply_json_partition_inventory() {
 }
 
 rootpxe_write_checkin_json_payload() {
-    local output_file="$1" token_file capabilities='["hostname"]' identity_versions='[1]' old_umask result
+    local output_file="$1" token_file capabilities identity_versions='[1]' old_umask result
     [[ ${taskid:-} =~ ^[1-9][0-9]*$ && -n ${task_token:-} && -n ${lmac:-} ]] || return 1
     [[ -n $output_file && ! -L $output_file ]] || return 1
+    capabilities=$(rootpxe_deployment_identity_capabilities_json) && rootpxe_deployment_identity_capabilities_valid "$capabilities" || return 1
     # Never put the execution token in jq's argv. Keep it in a short-lived,
     # owner-only file while jq constructs the owner-only curl request body.
     old_umask=$(umask)
@@ -124,16 +125,6 @@ rootpxe_write_checkin_json_payload() {
     token_file=$(mktemp /tmp/rootpxe-checkin-token.XXXXXX) || { umask "$old_umask"; return 1; }
     chmod 600 "$token_file" || { rm -f -- "$token_file"; umask "$old_umask"; return 1; }
     printf '%s' "$task_token" >"$token_file" || { rm -f -- "$token_file"; umask "$old_umask"; return 1; }
-	# Capabilities describe the executable PXEOS image, not merely source code.
-	if rootpxe_deployment_identity_windows_hostname_capability_installed; then
-		capabilities=$(jq -c '. + ["windows-hostname-registry-v1"]' <<<"$capabilities") || { rm -f -- "$token_file"; umask "$old_umask"; return 1; }
-	fi
-	if rootpxe_deployment_identity_windows_sysprep_capability_installed; then
-		capabilities=$(jq -c '. + ["windows-sysprep-v1"]' <<<"$capabilities") || { rm -f -- "$token_file"; umask "$old_umask"; return 1; }
-	fi
-    if rootpxe_multicast_runtime_ready; then
-		capabilities=$(jq -c '. + ["manual-multicast-session"]' <<<"$capabilities") || { rm -f -- "$token_file"; umask "$old_umask"; return 1; }
-    fi
 	jq -cn \
         --argjson taskId "$taskid" \
 		--rawfile token "$token_file" \
@@ -141,7 +132,7 @@ rootpxe_write_checkin_json_payload() {
         --arg sysuuid "${sysuuid_local:-}" \
         --argjson versions "$identity_versions" \
         --argjson capabilities "$capabilities" \
-		'{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",cloudInitCapability:"linux-nocloud-v2",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities}' >"$output_file"
+		'{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",cloudInitCapability:"linux-nocloud-v3",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities}' >"$output_file"
 	result=$?
 	: >"$token_file"
 	rm -f -- "$token_file"
@@ -288,8 +279,10 @@ rootpxe_apply_json_checkin() {
     rootpxe_json_assign_text "$document" resumeStage '.resumeStage // .resume_stage' || return 1
     rootpxe_json_assign "$document" schemaRevision '.schemaRevision // .schema_revision' || return 1
     rootpxe_json_assign_text "$document" schemaHash '.schemaHash // .schema_hash' || return 1
-    [[ ${osid:-} != 50 || ${changeHostname:-false} != true ]] || return 1
     rootpxe_apply_json_deployment_identity_policy "$document" || return 1
+    if [[ ${osid:-} == 50 && ${changeHostname:-false} == true ]]; then
+        rootpxe_linux_hostname_task_valid || return 1
+    fi
     rootpxe_apply_json_partition_inventory "$document" || return 1
     rootpxe_apply_json_capture_backup_name "$document" || return 1
     rootpxe_multicast_apply_transport_mode "$document" || return 1
@@ -474,6 +467,9 @@ checkin_rootpxe() {
     imgType=${img_type:-${imgType:-}}; imgPartitionType=${img_partition_type:-${imgPartitionType:-}}
     imgFormat=${img_format:-${imgFormat:-}}; PIGZ_COMP=${pigz_comp:-${PIGZ_COMP:-}}; hostName=${hostName:-${host_name:-}}
     [[ -z ${changeHostname:-} || ${changeHostname:-} == true || ${changeHostname:-} == false ]] || handleError "Invalid changeHostname ($0)"
+    if [[ ${osid:-} == 50 && ${changeHostname:-false} == true ]]; then
+        rootpxe_linux_hostname_task_valid || { handleError 'PXEOS_STAGE=checkin CODE=LINUX_HOSTNAME_POLICY_INVALID'; return 1; }
+    fi
     export taskType type pxeType imgType imgPartitionType imgFormat PIGZ_COMP hostName changeHostname progress_attempt rootpxe_partition_progress_enabled resumeStage schemaRevision schemaHash captureBackupName partitionInventoryFile partitionInventoryHash deploymentIdentityPolicyFile
     protocol=${protocol,,}
     [[ $protocol == nfs || $protocol == smb ]] || handleError "Invalid storage protocol ($0)"

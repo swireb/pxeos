@@ -119,11 +119,16 @@ rootpxe_ci_label_path() {
 
 rootpxe_ci_inode() { stat -c '%d:%i' -- "$1"; }
 rootpxe_ci_move() { mv -n -- "$1" "$2"; }
-rootpxe_cloud_init_configured() { [[ -n ${cloudInitUserDataFile:-} || -n ${cloudInitNetworkConfigFile:-} ]]; }
+rootpxe_cloud_init_policy_enabled() {
+    [[ ${taskType:-} == deploy && ${osid:-} == 50 && -r ${deploymentIdentityPolicyFile:-} ]] &&
+        jq -e '.version == 1 and .cloudInit == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1
+}
+rootpxe_cloud_init_configured() { [[ -n ${cloudInitUserDataFile:-} || -n ${cloudInitMetaDataFile:-} || -n ${cloudInitNetworkConfigFile:-} ]]; }
 rootpxe_ci_private_file_valid() {
     local file="$1" hash="$2" inode="$3" pid="$4" kind="$5" info owner group mode links
     case $kind in
         user-data) [[ $file =~ ^/tmp/rootpxe-cloud-init\.[A-Za-z0-9]{6}$ ]];;
+        meta-data) [[ $file =~ ^/tmp/rootpxe-cloud-meta\.[A-Za-z0-9]{6}$ ]];;
         network-config) [[ $file =~ ^/tmp/rootpxe-cloud-network\.[A-Za-z0-9]{6}$ ]];;
         *) return 1;;
     esac || return 1
@@ -131,85 +136,88 @@ rootpxe_ci_private_file_valid() {
     info=$(rootpxe_ci_stat "$file") || return 1
     IFS=: read -r owner group mode links <<<"$info"
     [[ $owner == "$EUID" && $mode == 600 && $links == 1 && $pid == "$BASHPID" && $(rootpxe_ci_inode "$file") == "$inode" ]] || return 1
-    [[ $hash =~ ^[0-9a-f]{64}$ && $(rootpxe_ci_hash "$file") == "$hash" && $(wc -c <"$file") -gt 0 && $(wc -c <"$file") -le 65536 ]]
+    [[ $hash =~ ^[0-9a-f]{64}$ && $(rootpxe_ci_hash "$file") == "$hash" && $(wc -c <"$file") -le 65536 ]]
 }
 rootpxe_cloud_init_private_valid() {
-    [[ ${cloudInitInstanceId:-} =~ ^rootpxe-[0-9a-f]{32}$ ]] && rootpxe_ci_hostname_valid "${cloudInitHostname:-}" || return 1
+    [[ ${rootpxe_cloud_init_valid_pid:-} == "$BASHPID" ]] || return 1
     rootpxe_ci_private_file_valid "${cloudInitUserDataFile:-}" "${cloudInitUserDataSha256:-}" "${rootpxe_cloud_init_private_inode:-}" "${rootpxe_cloud_init_private_pid:-}" user-data || return 1
+    rootpxe_ci_private_file_valid "${cloudInitMetaDataFile:-}" "${cloudInitMetaDataSha256:-}" "${rootpxe_cloud_init_meta_private_inode:-}" "${rootpxe_cloud_init_meta_private_pid:-}" meta-data || return 1
+    [[ -s $cloudInitMetaDataFile ]] || return 1
     if [[ -n ${cloudInitNetworkConfigFile:-} || -n ${cloudInitNetworkConfigSha256:-} ]]; then
         rootpxe_ci_private_file_valid "${cloudInitNetworkConfigFile:-}" "${cloudInitNetworkConfigSha256:-}" "${rootpxe_cloud_init_network_private_inode:-}" "${rootpxe_cloud_init_network_private_pid:-}" network-config || return 1
+        [[ -s $cloudInitNetworkConfigFile ]] || return 1
     fi
     return 0
 }
+rootpxe_ci_private_names() {
+    case $1 in
+        user-data) ci_file_var=cloudInitUserDataFile; ci_hash_var=cloudInitUserDataSha256; ci_inode_var=rootpxe_cloud_init_private_inode; ci_pid_var=rootpxe_cloud_init_private_pid; ci_field=cloudInitUserData; ci_prefix=/tmp/rootpxe-cloud-init.XXXXXX;;
+        meta-data) ci_file_var=cloudInitMetaDataFile; ci_hash_var=cloudInitMetaDataSha256; ci_inode_var=rootpxe_cloud_init_meta_private_inode; ci_pid_var=rootpxe_cloud_init_meta_private_pid; ci_field=cloudInitMetaData; ci_prefix=/tmp/rootpxe-cloud-meta.XXXXXX;;
+        network-config) ci_file_var=cloudInitNetworkConfigFile; ci_hash_var=cloudInitNetworkConfigSha256; ci_inode_var=rootpxe_cloud_init_network_private_inode; ci_pid_var=rootpxe_cloud_init_network_private_pid; ci_field=cloudInitNetworkConfig; ci_prefix=/tmp/rootpxe-cloud-network.XXXXXX;;
+        *) return 1;;
+    esac
+}
 rootpxe_cloud_init_cleanup_private() {
-    local result=0
-    # 清理一开始即失效整份任务配置；部分unlink失败仍保留逐文件proof供重试。
-    unset cloudInitInstanceId cloudInitHostname
-    if [[ -n ${cloudInitUserDataFile:-} ]]; then
-        if rootpxe_ci_private_file_valid "$cloudInitUserDataFile" "${cloudInitUserDataSha256:-}" "${rootpxe_cloud_init_private_inode:-}" "${rootpxe_cloud_init_private_pid:-}" user-data && rm -f -- "$cloudInitUserDataFile"; then
-            unset cloudInitUserDataFile cloudInitUserDataSha256 rootpxe_cloud_init_private_inode rootpxe_cloud_init_private_pid
-        else result=1; fi
-    fi
-    if [[ -n ${cloudInitNetworkConfigFile:-} ]]; then
-        if rootpxe_ci_private_file_valid "$cloudInitNetworkConfigFile" "${cloudInitNetworkConfigSha256:-}" "${rootpxe_cloud_init_network_private_inode:-}" "${rootpxe_cloud_init_network_private_pid:-}" network-config && rm -f -- "$cloudInitNetworkConfigFile"; then
-            unset cloudInitNetworkConfigFile cloudInitNetworkConfigSha256 rootpxe_cloud_init_network_private_inode rootpxe_cloud_init_network_private_pid
-        else result=1; fi
-    fi
-    if [[ -z ${cloudInitUserDataFile:-} && -z ${cloudInitNetworkConfigFile:-} ]]; then
-        unset cloudInitUserDataFile cloudInitUserDataSha256 cloudInitInstanceId cloudInitHostname cloudInitNetworkConfigFile cloudInitNetworkConfigSha256 rootpxe_cloud_init_private_inode rootpxe_cloud_init_private_pid rootpxe_cloud_init_network_private_inode rootpxe_cloud_init_network_private_pid
-    fi
+    local result=0 kind file ci_file_var ci_hash_var ci_inode_var ci_pid_var ci_field ci_prefix
+    # 整份快照的有效标记不可继承；先失效，再独立清理各文件并保留失败proof。
+    unset rootpxe_cloud_init_valid_pid
+    for kind in user-data meta-data network-config; do
+        rootpxe_ci_private_names "$kind" || return 1
+        file=${!ci_file_var-}
+        if [[ -n $file ]]; then
+            if rootpxe_ci_private_file_valid "$file" "${!ci_hash_var-}" "${!ci_inode_var-}" "${!ci_pid_var-}" "$kind" && rm -f -- "$file"; then
+                unset "$ci_file_var" "$ci_hash_var" "$ci_inode_var" "$ci_pid_var"
+            else result=1; fi
+        else unset "$ci_hash_var" "$ci_inode_var" "$ci_pid_var"; fi
+    done
     return "$result"
 }
-rootpxe_ci_hostname_valid() {
-    local hostname="$1" label
-    [[ ${#hostname} -le 253 && $hostname =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ && $hostname != *..* && $hostname != *. ]] || return 1
-    for label in ${hostname//./ }; do
-        [[ ${#label} -le 63 && $label =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
-    done
+rootpxe_ci_capture_private_field() {
+    local document="$1" kind="$2" expected="$3" file inode actual result=0
+    local ci_file_var ci_hash_var ci_inode_var ci_pid_var ci_field ci_prefix
+    rootpxe_ci_private_names "$kind" || return 1
+    file=$(mktemp "$ci_prefix") || return 1
+    inode=$(rootpxe_ci_inode "$file") || { rm -f -- "$file"; return 1; }
+    printf -v "$ci_file_var" '%s' "$file"
+    printf -v "$ci_inode_var" '%s' "$inode"
+    printf -v "$ci_pid_var" '%s' "$BASHPID"
+    export -n "$ci_inode_var" "$ci_pid_var"
+    chmod 600 "$file" && jq -j --arg field "$ci_field" '.[$field]' <<<"$document" >"$file" || result=1
+    actual=$(rootpxe_ci_hash "$file") || return 1
+    # 解析失败也按实际字节保留可清理proof；只有全字段吻合后才设置有效标记。
+    printf -v "$ci_hash_var" '%s' "$actual"
+    rootpxe_ci_private_file_valid "$file" "$actual" "$inode" "$BASHPID" "$kind" || return 1
+    [[ $result -eq 0 && $actual == "$expected" ]]
 }
 rootpxe_apply_json_cloud_init() {
-    local document="$1" file network_file='' hash network_hash instance hostname inode network_inode=''
+    local document="$1" hash meta_hash network_hash
     rootpxe_cloud_init_cleanup_private || return 1
     jq -e 'type == "object"' >/dev/null 2>&1 <<<"$document" || return 1
-    jq -e 'has("cloudInitUserData") or has("cloudInitUserDataSha256") or has("cloudInitInstanceId") or has("cloudInitHostname") or has("cloudInitNetworkConfig") or has("cloudInitNetworkConfigSha256")' >/dev/null 2>&1 <<<"$document" || return 0
+    jq -e '[has("cloudInitUserData"),has("cloudInitUserDataSha256"),has("cloudInitMetaData"),has("cloudInitMetaDataSha256"),has("cloudInitNetworkConfig"),has("cloudInitNetworkConfigSha256"),has("cloudInitInstanceId"),has("cloudInitHostname")] | any' >/dev/null 2>&1 <<<"$document" || return 0
     [[ ${taskType:-} == deploy && ${osid:-} == 50 ]] || return 1
     jq -e '.type == "deploy" and (.osid | type == "number") and .osid == 50 and
-      (.cloudInitUserData | type == "string" and utf8bytelength > 0 and utf8bytelength <= 65536 and (contains("\u0000") | not) and test("^#cloud-config\\r?\\n")) and
+      (has("cloudInitInstanceId") | not) and (has("cloudInitHostname") | not) and
+      (.cloudInitUserData | type == "string" and utf8bytelength <= 65536 and (contains("\u0000") | not)) and
       (.cloudInitUserDataSha256 | type == "string" and test("^[0-9a-f]{64}$")) and
-      (.cloudInitInstanceId | type == "string" and test("^rootpxe-[0-9a-f]{32}$")) and
-      (.cloudInitHostname | type == "string") and
+      (.cloudInitMetaData | type == "string" and utf8bytelength > 0 and utf8bytelength <= 65536 and (contains("\u0000") | not)) and
+      (.cloudInitMetaDataSha256 | type == "string" and test("^[0-9a-f]{64}$")) and
       (.cloudInitNetworkConfig | type == "string" and utf8bytelength <= 65536 and (contains("\u0000") | not)) and
       (.cloudInitNetworkConfigSha256 | type == "string") and
       (if .cloudInitNetworkConfig == "" then .cloudInitNetworkConfigSha256 == "" else (.cloudInitNetworkConfigSha256 | test("^[0-9a-f]{64}$")) end)' >/dev/null 2>&1 <<<"$document" || return 1
+    [[ ${changeHostname:-false} != true ]] || jq -e '.cloudInitUserData | utf8bytelength > 0' >/dev/null 2>&1 <<<"$document" || return 1
     hash=$(jq -r '.cloudInitUserDataSha256' <<<"$document") || return 1
+    meta_hash=$(jq -r '.cloudInitMetaDataSha256' <<<"$document") || return 1
     network_hash=$(jq -r '.cloudInitNetworkConfigSha256' <<<"$document") || return 1
-    instance=$(jq -r '.cloudInitInstanceId' <<<"$document") || return 1
-    hostname=$(jq -r '.cloudInitHostname' <<<"$document") || return 1
-    rootpxe_ci_hostname_valid "$hostname" || return 1
-    file=$(mktemp /tmp/rootpxe-cloud-init.XXXXXX) || return 1
-    if ! chmod 600 "$file" || ! jq -j '.cloudInitUserData' <<<"$document" >"$file" || [[ $(rootpxe_ci_hash "$file") != "$hash" ]]; then
-        rm -f -- "$file" || return 1
+    if ! rootpxe_ci_capture_private_field "$document" user-data "$hash" ||
+       ! rootpxe_ci_capture_private_field "$document" meta-data "$meta_hash" ||
+       { [[ -n $network_hash ]] && ! rootpxe_ci_capture_private_field "$document" network-config "$network_hash"; }; then
+        rootpxe_cloud_init_cleanup_private || return 1
         return 1
     fi
-    inode=$(rootpxe_ci_inode "$file") || { rm -f -- "$file"; return 1; }
-    if [[ -n $network_hash ]]; then
-        network_file=$(mktemp /tmp/rootpxe-cloud-network.XXXXXX) || { rm -f -- "$file"; return 1; }
-        if ! chmod 600 "$network_file" || ! jq -j '.cloudInitNetworkConfig' <<<"$document" >"$network_file" || [[ $(rootpxe_ci_hash "$network_file") != "$network_hash" ]]; then
-            rm -f -- "$file" "$network_file" || return 1
-            return 1
-        fi
-        network_inode=$(rootpxe_ci_inode "$network_file") || { rm -f -- "$file" "$network_file"; return 1; }
-    fi
-    cloudInitUserDataFile="$file"; cloudInitUserDataSha256="$hash"
-    cloudInitInstanceId="$instance"; cloudInitHostname="$hostname"
-    cloudInitNetworkConfigFile="$network_file"; cloudInitNetworkConfigSha256="$network_hash"
-    rootpxe_cloud_init_private_inode="$inode"
-    rootpxe_cloud_init_private_pid=$BASHPID
-    rootpxe_cloud_init_network_private_inode="$network_inode"
-    rootpxe_cloud_init_network_private_pid=$BASHPID
-    export -n rootpxe_cloud_init_private_inode rootpxe_cloud_init_private_pid rootpxe_cloud_init_network_private_inode rootpxe_cloud_init_network_private_pid
-    export cloudInitUserDataFile cloudInitUserDataSha256 cloudInitInstanceId cloudInitHostname cloudInitNetworkConfigFile cloudInitNetworkConfigSha256
-    rootpxe_cloud_init_private_valid
+    rootpxe_cloud_init_valid_pid=$BASHPID
+    export -n rootpxe_cloud_init_valid_pid
+    export cloudInitUserDataFile cloudInitUserDataSha256 cloudInitMetaDataFile cloudInitMetaDataSha256 cloudInitNetworkConfigFile cloudInitNetworkConfigSha256
+    if ! rootpxe_cloud_init_private_valid; then rootpxe_cloud_init_cleanup_private || return 1; return 1; fi
 }
 
 rootpxe_ci_reject() { rootpxe_cloud_init_error="$2"; return "$1"; }
@@ -254,13 +262,6 @@ rootpxe_ci_validate_cloud_state() {
     fi
     return 0
 }
-rootpxe_ci_metadata_bytes() {
-    local instance="$1" hostname="$2" quoted_instance quoted_hostname
-    [[ $instance =~ ^rootpxe-[0-9a-f]{32}$ ]] && rootpxe_ci_hostname_valid "$hostname" || return 1
-    quoted_instance=$(jq -cn --arg value "$instance" '$value') || return 1
-    quoted_hostname=$(jq -cn --arg value "$hostname" '$value') || return 1
-    printf 'instance-id: %s\nlocal-hostname: %s\n' "$quoted_instance" "$quoted_hostname"
-}
 rootpxe_ci_verify_seed() {
     local seed="$1" data_hash="$2" metadata_hash="$3" network_hash="${4:-}" entry count=0 expected_count=2
     if [[ -n $network_hash ]]; then [[ $network_hash =~ ^[0-9a-f]{64}$ ]] || return 1; expected_count=3; fi
@@ -287,17 +288,15 @@ rootpxe_ci_verify_seed_labels() {
     for file in "${files[@]}"; do rootpxe_ci_verify_label "$seed/$file" "/var/lib/cloud/seed/nocloud/$file" || return 1; done
 }
 rootpxe_ci_readonly_preflight() {
-    local root="$1" metadata_hash seed="$1/var/lib/cloud/seed/nocloud"
+    local root="$1" seed="$1/var/lib/cloud/seed/nocloud"
     rootpxe_cloud_init_seed_verified=no
     rootpxe_ci_check_prerequisites "$root" || return $?
     rootpxe_ci_validate_cloud_state "$root" || return $?
     rootpxe_ci_target_selinux "$root" || { rootpxe_ci_reject 48 cloud_init_label_unverified; return $?; }
     if [[ -n ${rootpxe_ci_selinux_contexts:-} ]]; then rootpxe_ci_label_tools_ready || { rootpxe_ci_reject 47 cloud_init_label_tools_missing; return $?; }; fi
-    metadata_hash=$(set -o pipefail; rootpxe_ci_metadata_bytes "$cloudInitInstanceId" "$cloudInitHostname" | sha256sum) || { rootpxe_ci_reject 46 cloud_init_seed_hash_mismatch; return $?; }
-    metadata_hash=${metadata_hash%%[[:space:]]*}
     if [[ -d $seed ]]; then
         if [[ -n $(find "$seed" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
-            rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$metadata_hash" "${cloudInitNetworkConfigSha256:-}" || { rootpxe_ci_reject 45 cloud_init_foreign_seed; return $?; }
+            rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" || { rootpxe_ci_reject 45 cloud_init_foreign_seed; return $?; }
             rootpxe_ci_verify_seed_labels "$seed" || { rootpxe_ci_reject 48 cloud_init_label_unverified; return $?; }
             rootpxe_cloud_init_seed_verified=yes
         else rootpxe_ci_verify_label "$seed" /var/lib/cloud/seed/nocloud || { rootpxe_ci_reject 48 cloud_init_label_unverified; return $?; }; fi
@@ -375,14 +374,19 @@ rootpxe_ci_mount_fstab() {
     local root="$1" requested="$2" mode="$3" source target declared options rest count=0 selected_source="" selected_fs="" device fs mount_options path
     [[ $requested == /var || $requested == /usr ]] || return 1
     rootpxe_ci_safe_write_directory "$root" "$requested" || return 1
-    for path in /var/lib /var/lib/cloud /var/lib/cloud/seed /var/lib/cloud/seed/nocloud; do
-        mountpoint -q "$root$path" 2>/dev/null && return 1
-    done
+    if [[ $requested == /var ]]; then
+        for path in /var/lib /var/lib/cloud /var/lib/cloud/seed /var/lib/cloud/seed/nocloud; do
+            mountpoint -q "$root$path" 2>/dev/null && return 1
+        done
+    fi
     if [[ -e $root/etc/fstab || -L $root/etc/fstab ]]; then
         rootpxe_ci_safe_write_directory "$root" /etc && rootpxe_ci_metadata_safe "$root/etc/fstab" file || return 1
         while read -r source target declared options rest; do
             [[ -n $source && $source != \#* ]] || continue
-            case $target in /var/*|/usr/*|/etc/cloud|/etc/cloud/*) return 1;; esac
+            case $target in
+                /usr/*) return 1;;
+                /var/*|/etc/cloud|/etc/cloud/*) [[ $requested != /var ]] || return 1;;
+            esac
             [[ $target == "$requested" ]] || continue
             count=$((count + 1)); [[ $count -eq 1 && -n $declared && -n $options ]] || return 1
             selected_source="$source"; selected_fs="$declared"
@@ -484,7 +488,7 @@ rootpxe_ci_candidate_identity() {
     [[ $rdev =~ ^[1-9][0-9]*$ ]] || return 1
     printf '%s|%s|%s|%s|%s|%s\n' "$canonical" "$rdev" "$fs" "$vg" "$uuid" "$subvol"
 }
-rootpxe_cloud_init_install_for_targets() {
+rootpxe_linux_select_unique_root_for_targets() {
     local disk work candidate identity identity_device identity_rdev identity_rest key rc selected="" selected_candidate="" count=0
     local -A candidates_seen=()
     local rootpxe_cloud_init_allowed_disks="$*" rootpxe_cloud_init_probe_disk=""
@@ -510,19 +514,32 @@ rootpxe_cloud_init_install_for_targets() {
         esac
     done
     [[ $count -eq 1 ]] || { rootpxe_cloud_init_error=cloud_init_roots_not_unique; return 1; }
-    rootpxe_cloud_init_process_root "$selected" "$selected_candidate" ro || { [[ -n ${rootpxe_cloud_init_error:-} ]] || rootpxe_cloud_init_error=cloud_init_readonly_preflight_failed; return 1; }
+    rootpxe_linux_selected_disk="$selected"
+    rootpxe_linux_selected_candidate="$selected_candidate"
+}
+rootpxe_cloud_init_install_for_targets() {
+    local rootpxe_cloud_init_allowed_disks="$*" rootpxe_cloud_init_probe_disk='' rootpxe_linux_selected_disk='' rootpxe_linux_selected_candidate='' disk
+    rootpxe_linux_select_unique_root_for_targets "$@" || return 1
+    rootpxe_cloud_init_process_root "$rootpxe_linux_selected_disk" "$rootpxe_linux_selected_candidate" ro || { [[ -n ${rootpxe_cloud_init_error:-} ]] || rootpxe_cloud_init_error=cloud_init_readonly_preflight_failed; return 1; }
     [[ ${rootpxe_cloud_init_seed_verified:-no} != yes ]] || return 0
     for disk in "$@"; do rootpxe_verify_disk_permit_binding "$disk" deploy_write || return 1; done
-    rootpxe_cloud_init_process_root "$selected" "$selected_candidate" rw
+    rootpxe_cloud_init_process_root "$rootpxe_linux_selected_disk" "$rootpxe_linux_selected_candidate" rw
 }
 rootpxe_apply_cloud_init() {
     rootpxe_deployment_identity_cloud_init_result=false
-    rootpxe_cloud_init_configured || return 0
+    if ! rootpxe_cloud_init_configured; then
+        if rootpxe_cloud_init_policy_enabled; then rootpxe_deployment_identity_hostname_result=false; return 1; fi
+        return 0
+    fi
+    if [[ ${osid:-} == 50 ]]; then rootpxe_deployment_identity_hostname_result=false; fi
     [[ ${taskType:-} == deploy && ${osid:-} == 50 ]] && rootpxe_cloud_init_private_valid || return 1
+    [[ ${changeHostname:-false} != true || -s $cloudInitUserDataFile ]] || { rootpxe_cloud_init_error=cloud_init_hostname_user_data_empty; return 1; }
     rootpxe_stage cloud_init 'installing native NoCloud seed'
     rootpxe_cloud_init_install_for_targets ${disks:-${hd:-}} || return 1
+    rootpxe_cloud_init_cleanup_private || return 1
     rootpxe_deployment_identity_cloud_init_result=true
-    rootpxe_cloud_init_cleanup_private
+    [[ ${changeHostname:-false} != true ]] || rootpxe_deployment_identity_hostname_result=true
+    return 0
 }
 rootpxe_ci_create_directory() {
     local path="$1" target="$2" inode
@@ -538,7 +555,7 @@ rootpxe_cloud_init_install_at_root() {
     rootpxe_cloud_init_error=""
     if (
         set -o pipefail
-        local seed="$root/var/lib/cloud/seed/nocloud" stage="" file path final index metadata_hash root_device
+        local seed="$root/var/lib/cloud/seed/nocloud" stage="" file path final index root_device
         local -a ci_owned_files=() ci_owned_file_inodes=() ci_created_dirs=() ci_created_dir_inodes=() ci_seed_files=(user-data meta-data)
         trap 'ci_exit_status=$?; rootpxe_ci_transaction_cleanup || exit 50; exit "$ci_exit_status"' EXIT
         trap 'exit 130' INT
@@ -546,16 +563,15 @@ rootpxe_cloud_init_install_at_root() {
         umask 077
         rootpxe_ci_is_root && rootpxe_ci_metadata_safe "$root" directory || exit 43
         [[ -f ${cloudInitUserDataFile:-} && ! -L $cloudInitUserDataFile && ${cloudInitUserDataSha256:-} =~ ^[0-9a-f]{64}$ && $(rootpxe_ci_hash "$cloudInitUserDataFile") == "$cloudInitUserDataSha256" && $(wc -c <"$cloudInitUserDataFile") -le 65536 ]] || exit 46
+        [[ -f ${cloudInitMetaDataFile:-} && ! -L $cloudInitMetaDataFile && ${cloudInitMetaDataSha256:-} =~ ^[0-9a-f]{64}$ && $(rootpxe_ci_hash "$cloudInitMetaDataFile") == "$cloudInitMetaDataSha256" && $(wc -c <"$cloudInitMetaDataFile") -gt 0 && $(wc -c <"$cloudInitMetaDataFile") -le 65536 ]] || exit 46
         if [[ -n ${cloudInitNetworkConfigFile:-} || -n ${cloudInitNetworkConfigSha256:-} ]]; then
             [[ -f ${cloudInitNetworkConfigFile:-} && ! -L $cloudInitNetworkConfigFile && ${cloudInitNetworkConfigSha256:-} =~ ^[0-9a-f]{64}$ && $(rootpxe_ci_hash "$cloudInitNetworkConfigFile") == "$cloudInitNetworkConfigSha256" && $(wc -c <"$cloudInitNetworkConfigFile") -gt 0 && $(wc -c <"$cloudInitNetworkConfigFile") -le 65536 ]] || exit 46
             ci_seed_files+=(network-config)
         fi
         rootpxe_ci_readonly_preflight "$root" || exit $?
         [[ $rootpxe_cloud_init_seed_verified != yes ]] || exit 0
-        metadata_hash=$(rootpxe_ci_metadata_bytes "$cloudInitInstanceId" "$cloudInitHostname" | sha256sum) || exit 1
-        metadata_hash=${metadata_hash%%[[:space:]]*}
         if [[ -d $seed && -n $(find "$seed" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
-            rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$metadata_hash" "${cloudInitNetworkConfigSha256:-}" || exit 45
+            rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" || exit 45
             rootpxe_ci_verify_seed_labels "$seed" || exit 48
             exit 0
         fi
@@ -572,12 +588,12 @@ rootpxe_cloud_init_install_at_root() {
             chmod 600 "$path" && chown 0:0 "$path" || exit 1
             case $file in
                 user-data) cp -- "$cloudInitUserDataFile" "$path" || exit 1;;
-                meta-data) rootpxe_ci_metadata_bytes "$cloudInitInstanceId" "$cloudInitHostname" >"$path" || exit 1;;
+                meta-data) cp -- "$cloudInitMetaDataFile" "$path" || exit 1;;
                 network-config) cp -- "$cloudInitNetworkConfigFile" "$path" || exit 1;;
             esac
             rootpxe_ci_label_path "$path" "/var/lib/cloud/seed/nocloud/$file" || exit 48
         done
-        rootpxe_ci_verify_seed "$stage" "$cloudInitUserDataSha256" "$metadata_hash" "${cloudInitNetworkConfigSha256:-}" || exit 46
+        rootpxe_ci_verify_seed "$stage" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" || exit 46
         if [[ -d $seed ]]; then
             [[ -z $(find "$seed" -mindepth 1 -maxdepth 1 -print -quit) ]] || exit 45
             rootpxe_ci_verify_label "$seed" /var/lib/cloud/seed/nocloud || exit 48
@@ -595,7 +611,7 @@ rootpxe_cloud_init_install_at_root() {
             ci_created_dirs[${#ci_created_dirs[@]}-1]="$seed"
             for index in "${!ci_owned_files[@]}"; do ci_owned_files[$index]="$seed/${ci_owned_files[$index]##*/}"; done
         fi
-        rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$metadata_hash" "${cloudInitNetworkConfigSha256:-}" || exit 46
+        rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" || exit 46
         rootpxe_ci_verify_seed_labels "$seed" || exit 48
         ci_owned_files=(); ci_owned_file_inodes=(); ci_created_dirs=(); ci_created_dir_inodes=()
     ); then result=0; else

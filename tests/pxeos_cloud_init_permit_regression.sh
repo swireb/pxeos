@@ -14,14 +14,16 @@ trap cleanup_fixture EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 case $(uname -s) in MINGW*|MSYS*) rootpxe_ci_fixture_jq=$(command -v jq.exe); jq(){ "$rootpxe_ci_fixture_jq" -b "$@"; };; esac
 body(){ sed -n "/^$1() {\$/,/^}\$/p" "$funcs"; }
-for function in rootpxe_clear_disk_permit rootpxe_disk_stable_identity rootpxe_plan_deploy_disk_operation rootpxe_plan_mpa_disk_permits rootpxe_request_disk_permit_for_target rootpxe_wait_for_disk_permit rootpxe_record_disk_permit_binding rootpxe_verify_disk_permit_binding rootpxe_bind_granted_deploy_targets; do
+for function in rootpxe_clear_disk_permit rootpxe_disk_stable_identity rootpxe_plan_deploy_disk_operation rootpxe_plan_mpa_disk_permits rootpxe_request_disk_permit_for_target rootpxe_request_disk_permit_batch rootpxe_wait_for_disk_permit rootpxe_record_disk_permit_binding rootpxe_verify_disk_permit_binding rootpxe_bind_granted_deploy_targets; do
     eval "$(body "$function")"
 done
 declare -F rootpxe_bind_granted_deploy_targets >/dev/null || fail 'first-deploy binding entry is missing'
 . "${funcs%/*}/cloud-init.sh"
+. "${funcs%/*}/linux-hostname.sh"
+. "${funcs%/*}/deployment-identity.sh"
 case $(uname -s) in MINGW*|MSYS*)
     rootpxe_ci_is_root(){ return 0; }
-    rootpxe_ci_stat(){ local owner=0 mode=700; [[ -d $1 ]] || mode=600; case $1 in /tmp/rootpxe-cloud-init.*|/tmp/rootpxe-cloud-network.*) owner=$EUID;; esac; printf '%s:0:%s:%s\n' "$owner" "$mode" "$(command stat -c '%h' -- "$1")"; }
+    rootpxe_ci_stat(){ local owner=0 mode=700; [[ -d $1 ]] || mode=600; case $1 in /tmp/rootpxe-cloud-init.*|/tmp/rootpxe-cloud-meta.*|/tmp/rootpxe-cloud-network.*) owner=$EUID;; esac; printf '%s:0:%s:%s\n' "$owner" "$mode" "$(command stat -c '%h' -- "$1")"; }
 ;; esac
 rootpxe_require_task_context(){ return 0; }
 rootpxe_storage_path(){ printf '%s\n' "$tmp"; }
@@ -52,14 +54,17 @@ for mode in network-only single mpa; do
     userdata=$'#cloud-config\n# 不执行\nruncmd: []\n'
     network='' network_hash=''
     if [[ $mode == network-only ]]; then
-        userdata=$'#cloud-config\n{}\n'
+        userdata=''
         network=$'version: 2\r\nethernets:\r\n  enp1s0:\r\n    dhcp4: true\r\n'
         printf '%s' "$network" >"$tmp/network-$mode"
         network_hash=$(rootpxe_ci_hash "$tmp/network-$mode")
     fi
     printf '%s' "$userdata" >"$tmp/data-$mode"
     hash=$(rootpxe_ci_hash "$tmp/data-$mode")
-    payload=$(jq -cn --arg data "$userdata" --arg hash "$hash" --arg network "$network" --arg networkHash "$network_hash" '{type:"deploy",osid:50,cloudInitUserData:$data,cloudInitUserDataSha256:$hash,cloudInitInstanceId:("rootpxe-"+("c"*32)),cloudInitHostname:"frozen-node",cloudInitNetworkConfig:$network,cloudInitNetworkConfigSha256:$networkHash}')
+    metadata=$'instance-id: "manual-frozen-instance"\r\nlocal-hostname: image-name\r\n'
+    printf '%s' "$metadata" >"$tmp/meta-$mode"
+    meta_hash=$(rootpxe_ci_hash "$tmp/meta-$mode")
+    payload=$(jq -cn --arg data "$userdata" --arg hash "$hash" --arg meta "$metadata" --arg metaHash "$meta_hash" --arg network "$network" --arg networkHash "$network_hash" '{type:"deploy",osid:50,cloudInitUserData:$data,cloudInitUserDataSha256:$hash,cloudInitMetaData:$meta,cloudInitMetaDataSha256:$metaHash,cloudInitNetworkConfig:$network,cloudInitNetworkConfigSha256:$networkHash}')
     # source 真实 checkin 主流程，只替换绝对库位置、控制面与设备盘点边界。
     checkin_copy="$tmp/checkin-$mode"
     awk '/^\. \/usr\/share\// {print ":"; next} /^pxeos_checkin_runtime_setup$/ {print ":"; next} {print}' "${funcs%/usr/share/*}/bin/pxeos.checkin" >"$checkin_copy"
@@ -72,6 +77,7 @@ for mode in network-only single mpa; do
     rootpxe_multicast_runtime_ready(){ return 1; }
     rootpxe_deployment_identity_windows_hostname_capability_installed(){ return 1; }
     rootpxe_deployment_identity_windows_sysprep_capability_installed(){ return 1; }
+    rootpxe_deployment_identity_linux_hostname_capability_installed(){ return 0; } # 仅模拟已配齐工具的PXEOS，非宿主MSYS能力。
     rootpxe_validate_smb_export(){ printf '%s' "$1"; }
     rootpxe_prepare_smb_credentials(){ :; }
     rootpxe_send_disk_health(){ :; }
@@ -98,7 +104,10 @@ for mode in network-only single mpa; do
     rootpxe_task_curl(){ printf '%s\n' "$@" >"$tmp/permit-request"; printf '{"granted":true,"targetId":"%s","operation":"%s"}\n200' "$rootpxe_planned_target_id" "$rootpxe_planned_disk_operation"; }
     if [[ $mode == mpa ]]; then rootpxe_plan_mpa_disk_permits "$tmp" || fail 'MPA1 planning failed'; else rootpxe_plan_deploy_disk_operation "$hd" "$tmp/d1.partitions"; fi
     rootpxe_wait_for_disk_permit "$rootpxe_planned_target_id" "$rootpxe_planned_disk_operation" || fail 'real scalar grant failed'
-    grep -Fqx 'cloudInitCapability=linux-nocloud-v2' "$tmp/permit-request" || fail 'real disk permit request used obsolete capability'
+    grep -Fqx 'cloudInitCapability=linux-nocloud-v3' "$tmp/permit-request" || fail 'real disk permit request used obsolete capability'
+    grep -Fqx 'deploymentIdentityProtocolVersions=[1]' "$tmp/permit-request" || fail 'permit protocol versions missing'
+    capabilities=$(sed -n 's/^deploymentIdentityCapabilities=//p' "$tmp/permit-request")
+    jq -e 'type=="array" and index("linux-hostname-offline-v1")!=null' <<<"$capabilities" >/dev/null || fail 'permit offline hostname capability missing'
     rootpxe_bind_granted_deploy_targets || fail "$mode permit map not registered"
     rootpxe_verify_disk_permit_binding "$hd" deploy_write || fail "$mode real verify failed"
     phase_file="$tmp/phases-$mode"
@@ -109,6 +118,7 @@ for mode in network-only single mpa; do
     rootpxe_apply_cloud_init || fail "$mode real NoCloud installer/permit chain"
     [[ $(<"$tmp/phases-$mode") == $'ro\nrw' ]] || fail 'read-only preflight must precede the only write mount'
     cmp -s "$tmp/data-$mode" "$fixture_root/var/lib/cloud/seed/nocloud/user-data" || fail "$mode seed bytes"
+    cmp -s "$tmp/meta-$mode" "$fixture_root/var/lib/cloud/seed/nocloud/meta-data" || fail "$mode manual metadata bytes"
     if [[ $mode == network-only ]]; then
         cmp -s "$tmp/network-$mode" "$fixture_root/var/lib/cloud/seed/nocloud/network-config" || fail 'network-only raw bytes'
         [[ $(find "$fixture_root/var/lib/cloud/seed/nocloud" -maxdepth 1 -type f | wc -l) == 3 ]] || fail 'network-only must have exactly three seed files'
@@ -130,6 +140,24 @@ for mode in network-only single mpa; do
     rm -- "$rootpxe_disk_permit_disk_map_file"
     rootpxe_verify_disk_permit_binding "$hd" deploy_write && fail 'missing map accepted'
 done
+rootpxe_task_curl(){ printf '%s\n' "$@" >"$tmp/batch-request"; printf '{"granted":true,"targets":[{"targetId":"ID_A","operation":"deploy_write"},{"targetId":"ID_B","operation":"deploy_write"}]}\n200'; }
+rootpxe_request_disk_permit_batch ID_A deploy_write ID_B deploy_write || fail 'real batch capability request rejected'
+grep -Fqx 'cloudInitCapability=linux-nocloud-v3' "$tmp/batch-request" || fail 'batch permit capability missing'
+grep -Fqx 'deploymentIdentityProtocolVersions=[1]' "$tmp/batch-request" || fail 'batch permit identity protocol missing'
+batch_capabilities=$(sed -n 's/^deploymentIdentityCapabilities=//p' "$tmp/batch-request")
+[[ $batch_capabilities == "$capabilities" ]] || fail 'batch/scalar capabilities diverged'
+[[ $rootpxe_disk_permit_bindings_file =~ ^/tmp/rootpxe-disk-permits\.[A-Za-z0-9]{6}$ && -f $rootpxe_disk_permit_bindings_file && ! -L $rootpxe_disk_permit_bindings_file ]] || fail 'batch fixture binding path unsafe'
+rm -- "$rootpxe_disk_permit_bindings_file"
+unset rootpxe_disk_permit_bindings_file
+eval "$(declare -f rootpxe_deployment_identity_capabilities_json | sed '1s/rootpxe_deployment_identity_capabilities_json/rootpxe_ci_fixture_capabilities_json/')"
+rootpxe_deployment_identity_capabilities_json(){ printf '["hostname",false]\n'; }
+rootpxe_task_curl(){ fail 'malformed capability arrays reached HTTP or permission grant'; }
+rootpxe_request_disk_permit_for_target ID_A deploy_write >"$tmp/malformed-caps" 2>&1 && fail 'scalar accepted malformed capabilities'
+rootpxe_request_disk_permit_batch ID_A deploy_write ID_B deploy_write >>"$tmp/malformed-caps" 2>&1 && fail 'batch accepted malformed capabilities'
+[[ ! -s $tmp/malformed-caps && -z ${rootpxe_disk_permit_bindings_file:-} ]] || fail 'malformed capability response leaked data or permission'
+unset -f rootpxe_deployment_identity_capabilities_json
+eval "$(declare -f rootpxe_ci_fixture_capabilities_json | sed '1s/rootpxe_ci_fixture_capabilities_json/rootpxe_deployment_identity_capabilities_json/')"
 rootpxe_find_linux_root_filesystem(){ fail 'empty configuration attempted root/seed inspection'; }
+unset deploymentIdentityPolicyFile
 for taskType in deploy capture; do osid=50; rootpxe_apply_cloud_init || fail 'empty Linux/capture bypass'; done
-printf 'PASS: network-only real JSON checkin, first single/MPA1 plan-grant-record-verify-NoCloud v2; disk/map rejection and empty bypass\n'
+printf 'PASS: empty-user/manual-meta real JSON checkin, first single/MPA1 plan-grant-record-verify-NoCloud v3; disk/map rejection and empty bypass\n'

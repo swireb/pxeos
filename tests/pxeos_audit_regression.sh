@@ -33,6 +33,7 @@ sed -e 's|^rootpxe_source_core_library partition-funcs.sh.*|:|' -e 's|^rootpxe_s
 cp "$(dirname "$funcs")/partclone-progress.sh" "$tmp/partclone-progress.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-hostname.sh" "$tmp/linux-hostname.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" "$tmp/log-paths.sh"
 set +u; source "$tmp/funcs.sh"; set -u
 rootpxe_require_unused_target_disks(){ :; } # 本段仅使用恢复流程 mock。
@@ -140,6 +141,7 @@ sed -e 's|^rootpxe_source_core_library partition-funcs.sh.*|:|' -e 's|^rootpxe_s
 cp "$(dirname "$funcs")/partclone-progress.sh" "$tmp/partclone-progress.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-hostname.sh" "$tmp/linux-hostname.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" "$tmp/log-paths.sh"
 set +u; source "$tmp/bcd-funcs.sh"; set -u
 osid=7; fsTypeSetting() { fstype=ntfs; }; ntfs-3g() { :; }; umount() { :; }; dots() { :; }; debugPause() { :; }; handleError() { return 1; }

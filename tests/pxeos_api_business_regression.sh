@@ -49,6 +49,8 @@ rootpxe_multicast_apply_transport_mode() { rootpxe_multicast_reset() { :; }; mc=
 rootpxe_multicast_runtime_ready() { return 1; }
 # shellcheck source=/dev/null
 . "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh"
+. "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-hostname.sh"
+. "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/deployment-identity.sh"
 . "$tmp/checkin-json.sh"
 
 flat_smb='{"taskId":42,"type":"capture","pxeType":"up","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"changeHostname":false,"captureBackupName":"demo-backup-20260830T104527123Z","storage":"192.0.2.10:share/images","protocol":"smb","storageip":"192.0.2.10","exportPath":"share/images","smbUsername":"test-user","smbPassword":"pa%ss\\word","smbDomain":"WORKGROUP"}'
@@ -81,6 +83,8 @@ unset unicode_backup_name unicode_capture too_long_backup_name too_long_capture
 
 # 原生 Cloud-init 的私有正文形状/原字节由专属协议 fixture 覆盖。
 . "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh"
+. "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-hostname.sh"
+. "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/deployment-identity.sh"
 
 for smb_export in _share share-name; do
     allowed_smb="{\"protocol\":\"smb\",\"storageip\":\"192.0.2.10\",\"exportPath\":\"$smb_export\",\"smbUsername\":\"test-user\",\"smbPassword\":\"test-pass\"}"
@@ -173,6 +177,7 @@ sed -e 's|^rootpxe_source_core_library partition-funcs.sh.*|:|' \
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-hostname.sh" "$tmp/linux-hostname.sh"
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
 printf '\nif declare -F task_log_test_emulate_pin_flags >/dev/null; then task_log_test_emulate_pin_flags; fi\n' >>"$tmp/log-paths.sh"
 for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
@@ -183,6 +188,7 @@ cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/disk-he
 cat >"$tmp/legacy-runtime.sh" <<EOF
 ismajordebug=0
 . "$tmp/legacy-funcs.sh"
+. "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/deployment-identity.sh"
 clearScreen() { :; }
 displayBanner() { :; }
 debugPause() { :; }
@@ -795,6 +801,7 @@ sed -e "s|^rootpxe_source_core_library partition-funcs.sh|. \"$overlay/usr/share
 cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-hostname.sh" "$tmp/linux-hostname.sh"
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
 printf '\nif declare -F task_log_test_emulate_pin_flags >/dev/null; then task_log_test_emulate_pin_flags; fi\n' >>"$tmp/log-paths.sh"
 for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
@@ -812,6 +819,7 @@ export PATH=$tmp/mock:$PATH
 ismajordebug=0
 isdebug=0
 . $tmp/funcs.sh
+. "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/deployment-identity.sh"
 rootpxe_require_unused_target_disks() { :; } # 布局 writer 的设备全部为 mock。
 rootpxe_deployment_identity_windows_policy_enabled() { return 1; }
 rootpxe_deployment_identity_storage_enabled() { return 1; }
@@ -1590,7 +1598,7 @@ for runtime_candidate in "${runtime_candidates[@]}"; do
     esac
 done
 [[ ${#runtime_files[@]} -gt 0 ]] || { printf 'FAIL: no PXEOS runtime scripts found\n' >&2; exit 1; }
-for required_runtime in pxeos.upload pxeos.av pxeos.man.reg pxeos.debug S99pxeos funcs.sh cloud-init.sh; do
+for required_runtime in pxeos.upload pxeos.av pxeos.man.reg pxeos.debug S99pxeos funcs.sh cloud-init.sh linux-hostname.sh; do
     printf '%s\n' "${runtime_files[@]}" | grep -Eq "/${required_runtime}$" \
         || { printf 'FAIL: runtime shebang scan missed %s\n' "$required_runtime" >&2; exit 1; }
 done

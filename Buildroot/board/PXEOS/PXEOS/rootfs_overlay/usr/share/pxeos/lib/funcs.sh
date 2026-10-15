@@ -14,6 +14,7 @@ rootpxe_source_core_library restore-preflight.sh || return 1
 rootpxe_source_core_library capture-recovery.sh || return 1
 rootpxe_source_core_library deployment-identity.sh || return 1
 rootpxe_source_core_library cloud-init.sh || return 1
+rootpxe_source_core_library linux-hostname.sh || return 1
 rootpxe_source_core_library task-http.sh || return 1
 rootpxe_multicast_lib=/usr/share/pxeos/lib/multicast.sh
 [[ -r $rootpxe_multicast_lib ]] || rootpxe_multicast_lib="$(dirname "${BASH_SOURCE[0]}")/multicast.sh"
@@ -574,9 +575,9 @@ rootpxe_redact_diagnostic() {
         [[ -n $value ]] && text="${text//"$value"/[REDACTED]}"
     done
     text=$(printf '%s' "$text" | sed -E \
-        -e 's/(^|[[:space:],{?&])("?[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitNetworkConfig)[[:alnum:]_.-]*"?[[:space:]]*[:=][[:space:]]*)"(\\.|[^"\\])*"/\1\2"[REDACTED]"/Ig' \
-        -e "s/(^|[[:space:],{?&])('[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitNetworkConfig)[[:alnum:]_.-]*'|[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitNetworkConfig)[[:alnum:]_.-]*)([[:space:]]*[:=][[:space:]]*)'([^']*)'/\\1\\2\\5'[REDACTED]'/Ig" \
-        -e 's/(^|[[:space:],{?&])([[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitNetworkConfig)[[:alnum:]_.-]*[[:space:]]*=[[:space:]]*)[^[:space:],&]+/\1\2[REDACTED]/Ig')
+        -e 's/(^|[[:space:],{?&])("?[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig)[[:alnum:]_.-]*"?[[:space:]]*[:=][[:space:]]*)"(\\.|[^"\\])*"/\1\2"[REDACTED]"/Ig' \
+        -e "s/(^|[[:space:],{?&])('[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig)[[:alnum:]_.-]*'|[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig)[[:alnum:]_.-]*)([[:space:]]*[:=][[:space:]]*)'([^']*)'/\\1\\2\\5'[REDACTED]'/Ig" \
+        -e 's/(^|[[:space:],{?&])([[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig)[[:alnum:]_.-]*[[:space:]]*=[[:space:]]*)[^[:space:],&]+/\1\2[REDACTED]/Ig')
     # Normalize only after redaction: a quoted JSON secret may itself contain
     # literal newline escapes.  Legacy complete argv has a dedicated label;
     # remove that line, not unlabelled native failure details.
@@ -2950,13 +2951,14 @@ rootpxe_task_status_confirms_disk_permit_cancellation() {
 # Permit is bound to a stable target disk identity and the planned destructive
 # operation.  A successful HTTP response alone is never sufficient.
 rootpxe_request_disk_permit_for_target() {
-    local target_id="$1" operation="$2" api response body http_code granted echoed_target echoed_operation
+    local target_id="$1" operation="$2" api response body http_code granted echoed_target echoed_operation capabilities
     local -a rootpxe_permit_attempt_args=()
     # Return values: 0 granted; 10 confirmed cancellation; 11 retry; 12 deny/protocol.
     rootpxe_clear_disk_permit
     rootpxe_require_task_context || return 11
     api="${pxeapi:-${web:-}}"
     [[ -n $api ]] || return 11
+    capabilities=$(rootpxe_deployment_identity_capabilities_json) && rootpxe_deployment_identity_capabilities_valid "$capabilities" || return 12
     if [[ ${mc:-no} == yes ]]; then
         rootpxe_multicast_valid_session_id "${multicastSessionId:-}" || return 12
         rootpxe_permit_attempt_args=(
@@ -2967,7 +2969,9 @@ rootpxe_request_disk_permit_for_target() {
     response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 \
         --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
         --data-urlencode "mac=$mac" --data-urlencode "targetId=$target_id" \
-        --data-urlencode "operation=$operation" --data-urlencode "cloudInitCapability=linux-nocloud-v2" "${rootpxe_permit_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
+        --data-urlencode "operation=$operation" --data-urlencode "cloudInitCapability=linux-nocloud-v3" \
+        --data-urlencode 'deploymentIdentityProtocolVersions=[1]' --data-urlencode "deploymentIdentityCapabilities=$capabilities" \
+        "${rootpxe_permit_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
     http_code=${response##*$'\n'}
     body=${response%$'\n'*}
     [[ $http_code =~ ^[0-9]{3}$ ]] || { rootpxe_set_disk_permit_protocol_error unknown; return 12; }
@@ -3070,12 +3074,13 @@ rootpxe_wait_for_disk_permit() {
 # to replay an XFS journal or write capture metadata.  Arguments are alternating
 # stable target id and operation; the server response must be the same set.
 rootpxe_request_disk_permit_batch() {
-    local api response body http_code request granted expected actual binding_file
+    local api response body http_code request granted expected actual binding_file capabilities
     local -a items=() ids=() ops=()
     (( $# >= 2 && $# % 2 == 0 && $# <= 128 )) || return 12
     rootpxe_require_task_context || return 11
     command -v jq >/dev/null 2>&1 || return 12
     api="${pxeapi:-${web:-}}"; [[ -n $api ]] || return 11
+    capabilities=$(rootpxe_deployment_identity_capabilities_json) && rootpxe_deployment_identity_capabilities_valid "$capabilities" || return 12
     while (( $# )); do
         [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ && $2 =~ ^(capture_read_write|deploy_write|nvme_format\+deploy_write)$ ]] || return 12
         ids+=("$1"); ops+=("$2"); items+=("$(jq -cn --arg targetId "$1" --arg operation "$2" '{targetId:$targetId,operation:$operation}')")
@@ -3091,7 +3096,9 @@ rootpxe_request_disk_permit_batch() {
             --data-urlencode "sessionId=$multicastSessionId"
         )
     fi
-    response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "targets=$request" --data-urlencode "cloudInitCapability=linux-nocloud-v2" "${rootpxe_permit_batch_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
+    response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "targets=$request" --data-urlencode "cloudInitCapability=linux-nocloud-v3" \
+        --data-urlencode 'deploymentIdentityProtocolVersions=[1]' --data-urlencode "deploymentIdentityCapabilities=$capabilities" \
+        "${rootpxe_permit_batch_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
     http_code=${response##*$'\n'}; body=${response%$'\n'*}
     [[ $http_code =~ ^[0-9]{3}$ ]] || { rootpxe_set_disk_permit_protocol_error unknown; return 12; }
     [[ $http_code =~ ^5[0-9][0-9]$ ]] && return 11
@@ -5582,6 +5589,11 @@ rootpxe_find_linux_root_filesystem() {
 
 rootpxe_apply_hostname_for_disk() {
     case ${osid:-} in
+        50)
+            [[ ${changeHostname:-false} == true ]] || return 0
+            rootpxe_cloud_init_policy_enabled && return 0
+            rootpxe_apply_linux_hostname_for_targets ${disks:-${1:-}}
+            ;;
         [1-2]|4|[5-7]|9|10|11) rootpxe_apply_windows_hostname_for_disk "$1" ;;
         *) return 0 ;;
     esac
