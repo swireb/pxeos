@@ -17,13 +17,12 @@ msys_fixture_pv_prefix=$("$real_jq" -nr --arg path /dev/mock '$path') || fail fi
 msys_fixture_pv_prefix=${msys_fixture_pv_prefix//$'\r'/}
 [[ -n $msys_fixture_pv_prefix ]] || fail fixture-device-prefix-empty
 # Production entrypoint contract: the early barrier follows artifact checking
-# but precedes permit planning, hooks, partition layout, and Partclone work.
+# but precedes permit planning, partition layout, and Partclone work.
 artifact_line=$(grep -n '^rootpxe_validate_restore_artifacts ' "$download" | head -n1 | cut -d: -f1)
 early_line=$(grep -n '^    rootpxe_lvm_preflight_restore_groups ' "$download" | head -n1 | cut -d: -f1)
 permit_line=$(grep -n '^    rootpxe_plan_mpa_disk_permits ' "$download" | head -n1 | cut -d: -f1)
-predeploy_line=$(grep -n '^rootpxe_run_pre_deploy_script ' "$download" | tail -n1 | cut -d: -f1)
 prepare_line=$(grep -n '^\[\[ \$nombr -eq 1 \]\].*preparePartitions' "$download" | head -n1 | cut -d: -f1)
-[[ $artifact_line =~ ^[1-9][0-9]*$ && $early_line =~ ^[1-9][0-9]*$ && $permit_line =~ ^[1-9][0-9]*$ && $predeploy_line =~ ^[1-9][0-9]*$ && $prepare_line =~ ^[1-9][0-9]*$ && $artifact_line -lt $early_line && $early_line -lt $permit_line && $early_line -lt $predeploy_line && $early_line -lt $prepare_line ]] || fail early-preflight-entrypoint-must-precede-writers
+[[ $artifact_line =~ ^[1-9][0-9]*$ && $early_line =~ ^[1-9][0-9]*$ && $permit_line =~ ^[1-9][0-9]*$ && $prepare_line =~ ^[1-9][0-9]*$ && $artifact_line -lt $early_line && $early_line -lt $permit_line && $early_line -lt $prepare_line ]] || fail early-preflight-entrypoint-must-precede-writers
 grep -Fq 'LC_ALL=C rootpxe_lvm_native pvdisplay -m --units b' "$overlay/usr/share/pxeos/lib/funcs.sh" || fail capture-pv-sidecar-must-use-c-locale
 : >"$tmp/proc-cmdline"
 sed -e "s|/usr/share/pxeos|$overlay/usr/share/pxeos|g" -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" "$overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/funcs.sh"
@@ -472,7 +471,6 @@ assert_download_barrier() {
     rootpxe_validate_restore_artifacts() { printf 'artifact\n' >>"$events"; }
     rootpxe_plan_deploy_disk_operation() { printf 'UNEXPECTED:permit\n' >>"$events"; }
     rootpxe_wait_for_disk_permit() { printf 'UNEXPECTED:permit-wait\n' >>"$events"; }
-    rootpxe_run_pre_deploy_script() { printf 'UNEXPECTED:pre-deploy\n' >>"$events"; }
     preparePartitions() { printf 'UNEXPECTED:preparePartitions\n' >>"$events"; }
     rootpxe_apply_deployment_layout() { printf 'UNEXPECTED:sfdisk\n' >>"$events"; }
     writeImage() { printf 'UNEXPECTED:ordinary-writeImage\n' >>"$events"; }

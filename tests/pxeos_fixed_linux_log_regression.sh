@@ -53,6 +53,5 @@ native_rc=0
 [[ $(protocol 2>"$tmp/publish-stderr") == yes ]] || fail publish-fault-protocol
 grep -q unavailable "$tmp/publish-stderr" || fail publish-fault-notice
 eval "$saved_publish"
-grep -q 'CODE=LINUX_ROOT_MOUNT_FAILED' "$funcs" || fail mount-code
-grep -q 'rootpxe_linux_cleanup_selected_vg.*handleError.*LINUX_ROOT_MOUNT_FAILED' "$funcs" || fail mount-cleanup
+grep -Fq 'rootpxe_run_logged_typed_native linux-probe.log' "$funcs" || fail probe-fixed-log
 printf 'Fixed Linux log: PASS\n'

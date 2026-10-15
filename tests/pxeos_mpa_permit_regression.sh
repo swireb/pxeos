@@ -23,6 +23,7 @@ sed -e '/partition-funcs\.sh/d' -e '/restore-preflight\.sh/d' -e '/capture-recov
 cp "$progress_lib" "$tmp/partclone-progress.sh"
 cp "$(dirname "$funcs")/log-paths.sh" "$tmp/log-paths.sh"
 cp "$(dirname "$funcs")/task-http.sh" "$tmp/task-http.sh"
+cp "$(dirname "$funcs")/cloud-init.sh" "$tmp/cloud-init.sh"
 download_functions="$tmp/download-functions.sh"
 awk '/^preparePartitions\(\)/,/^findHDDInfo$/{ if ($0 ~ /^findHDDInfo$/) exit; print }' "$download" >"$download_functions"
 set +u; source "$test_funcs"; set -u
@@ -57,7 +58,7 @@ expected_restore=$'activate:/dev/diskA:deploy_write\npayload:/dev/diskAp1\nactiv
 
 # Source a rewritten ordinary-file copy of the downloader with checkin and
 # mount imports removed.  This covers the real top-level ordering: the whole
-# target set is planned, atomically permitted and reverified before the hook;
+# target set is planned, atomically permitted and reverified before any write;
 # each subsequent table and payload write activates its own binding.
 entry="$tmp/pxeos.download"
 entry_stubs="$tmp/entry-stubs.sh"
@@ -75,7 +76,6 @@ rootpxe_plan_mpa_disk_permits(){ rootpxe_mpa_permit_is_batch=yes; rootpxe_mpa_pe
 rootpxe_wait_for_disk_permit_batch(){ printf 'wait-full-batch\n' >>"$events"; }
 rootpxe_verify_disk_permit_binding(){ printf 'verify:%s\n' "$1" >>"$events"; }
 rootpxe_activate_disk_permit_binding(){ printf 'activate:%s\n' "$1" >>"$events"; }
-rootpxe_run_pre_deploy_script(){ printf 'prehook\n' >>"$events"; }
 rootpxe_console_message(){ :; }
 rootpxe_stage(){ :; }
 restorePartitionTablesAndBootLoaders(){ printf 'table:%s\n' "$1" >>"$events"; }
@@ -101,7 +101,7 @@ awk -v funcs="$test_funcs" -v stubs="$entry_stubs" '
     web=https://test/ originalSchemaFile= rootpxe_resolved_lvm_layout_file=
     source "$entry"
 )
-expected_entry=$'preflight\nplan\nwait-full-batch\nverify:/dev/diskA\nverify:/dev/diskB\nprehook\nactivate:/dev/diskA\ntable:/dev/diskA\nactivate:/dev/diskB\ntable:/dev/diskB\npayload:/dev/diskA\npayload:/dev/diskB\ncomplete'
+expected_entry=$'preflight\nplan\nwait-full-batch\nverify:/dev/diskA\nverify:/dev/diskB\nactivate:/dev/diskA\ntable:/dev/diskA\nactivate:/dev/diskB\ntable:/dev/diskB\npayload:/dev/diskA\npayload:/dev/diskB\ncomplete'
 [[ $(<"$events") == "$expected_entry" ]] || { cat "$events" >&2; fail entry-order; }
 
 printf 'PASS: PXEOS mpa permit regression\n'

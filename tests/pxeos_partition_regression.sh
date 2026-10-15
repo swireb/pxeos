@@ -261,7 +261,7 @@ sed -e "s|^rootpxe_source_core_library partition-funcs.sh|. \"$partition_funcs\"
     -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" "$funcs" >"$tmp/funcs.sh"
 cp "$progress_lib" "$tmp/partclone-progress.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
-cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-startup.sh" "$tmp/linux-startup.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
 for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
     [[ ! -f $rootpxe_test_funcs_copy ]] || sed -i -e "s|/tmp/log|$tmp/log|g" -e "s|^rootpxe_log_paths_lib=.*|rootpxe_log_paths_lib=$tmp/log-paths.sh|" "$rootpxe_test_funcs_copy"
@@ -2389,10 +2389,10 @@ grep -Fq 'if rootpxe_wait_for_disk_permit ' "$upload" || fail "$upload does not 
 
 # Run the two deployment permit gates extracted from the top-level script.  A
 # completed attention wait (20) must stop before image work, hostname
-# customization, or the resume post-deploy script. The snippets never receive a grant and therefore do
+# customization, or Cloud-init injection. The snippets never receive a grant and therefore do
 # not write /tmp state, mount storage, or touch a disk.
 awk '/^rootpxe_validate_restore_artifacts/ { armed = 1 } armed && /^while :; do/ { copy = 1 } copy { print } copy && /^done$/ { exit }' "$download" >"$tmp/download-gate.sh"
-awk '/^if \[\[ \$\{resumeStage:-\} == customizing_hostname \|\| \$\{resumeStage:-\} == post_deploy_script \]\]/ { copy = 1 } copy && /^if \[\[ \$\{imgType:-\}/ { exit } copy { print }' "$download" >"$tmp/resume-gate.sh"
+awk '/^if \[\[ \$\{resumeStage:-\} == customizing_hostname \|\| \$\{resumeStage:-\} == cloud_init \]\]/ { copy = 1 } copy && /^if \[\[ \$\{imgType:-\}/ { exit } copy { print }' "$download" >"$tmp/resume-gate.sh"
 for snippet in "$tmp/download-gate.sh" "$tmp/resume-gate.sh"; do
     [[ -s $snippet ]] || fail "empty dynamic permit gate: $snippet"
     bash -n "$snippet" || fail "invalid dynamic permit gate: $snippet"
@@ -2410,6 +2410,9 @@ expect_terminal_gate() {
         hd=/dev/mockdisk
         changeHostname=false
         rootpxe_disk_stable_identity() { printf 'disk-serial-1\n'; }
+        rootpxe_clear_disk_permit(){ :; }
+        rootpxe_record_disk_permit_binding(){ :; }
+        disks=$hd
         permit_wait_calls=0
         rootpxe_wait_for_disk_permit() {
             permit_wait_calls=$((permit_wait_calls + 1))
@@ -2418,8 +2421,6 @@ expect_terminal_gate() {
         }
         sleep() { printf 'sleep:%s\n' "$1"; }
         rootpxe_console_message() { :; }
-        rootpxe_run_pre_deploy_script() { printf 'UNEXPECTED:pre-deploy\n'; return 0; }
-        rootpxe_run_post_deploy_script() { printf 'UNEXPECTED:post-deploy\n'; return 0; }
         rootpxe_stage() { printf 'UNEXPECTED:stage\n'; return 0; }
         rootpxe_apply_hostname_for_disk() { printf 'UNEXPECTED:hostname\n'; return 0; }
         . "$snippet"

@@ -13,7 +13,7 @@ rootpxe_source_core_library partition-funcs.sh || return 1
 rootpxe_source_core_library restore-preflight.sh || return 1
 rootpxe_source_core_library capture-recovery.sh || return 1
 rootpxe_source_core_library deployment-identity.sh || return 1
-rootpxe_source_core_library linux-startup.sh || return 1
+rootpxe_source_core_library cloud-init.sh || return 1
 rootpxe_source_core_library task-http.sh || return 1
 rootpxe_multicast_lib=/usr/share/pxeos/lib/multicast.sh
 [[ -r $rootpxe_multicast_lib ]] || rootpxe_multicast_lib="$(dirname "${BASH_SOURCE[0]}")/multicast.sh"
@@ -574,9 +574,9 @@ rootpxe_redact_diagnostic() {
         [[ -n $value ]] && text="${text//"$value"/[REDACTED]}"
     done
     text=$(printf '%s' "$text" | sed -E \
-        -e 's/(^|[[:space:],{?&])("?[[:alnum:]_.-]*(token|password|credential|secret)[[:alnum:]_.-]*"?[[:space:]]*[:=][[:space:]]*)"(\\.|[^"\\])*"/\1\2"[REDACTED]"/Ig' \
-        -e "s/(^|[[:space:],{?&])('[[:alnum:]_.-]*(token|password|credential|secret)[[:alnum:]_.-]*'|[[:alnum:]_.-]*(token|password|credential|secret)[[:alnum:]_.-]*)([[:space:]]*[:=][[:space:]]*)'([^']*)'/\\1\\2\\5'[REDACTED]'/Ig" \
-        -e 's/(^|[[:space:],{?&])([[:alnum:]_.-]*(token|password|credential|secret)[[:alnum:]_.-]*[[:space:]]*=[[:space:]]*)[^[:space:],&]+/\1\2[REDACTED]/Ig')
+        -e 's/(^|[[:space:],{?&])("?[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitNetworkConfig)[[:alnum:]_.-]*"?[[:space:]]*[:=][[:space:]]*)"(\\.|[^"\\])*"/\1\2"[REDACTED]"/Ig' \
+        -e "s/(^|[[:space:],{?&])('[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitNetworkConfig)[[:alnum:]_.-]*'|[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitNetworkConfig)[[:alnum:]_.-]*)([[:space:]]*[:=][[:space:]]*)'([^']*)'/\\1\\2\\5'[REDACTED]'/Ig" \
+        -e 's/(^|[[:space:],{?&])([[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitNetworkConfig)[[:alnum:]_.-]*[[:space:]]*=[[:space:]]*)[^[:space:],&]+/\1\2[REDACTED]/Ig')
     # Normalize only after redaction: a quoted JSON secret may itself contain
     # literal newline escapes.  Legacy complete argv has a dedicated label;
     # remove that line, not unlabelled native failure details.
@@ -711,90 +711,6 @@ rootpxe_prepare_storage_layout() {
     done
     probe=/storage/.rootpxe-write-probe.$$
     : > "$probe" && rm -f "$probe"
-}
-
-rootpxe_run_deploy_script() {
-    local stage="$1" file_var="$2" hash_var="$3" label="$4" script expected_hash actual_hash script_rc=0
-    script="${!file_var:-}"
-    expected_hash="${!hash_var:-}"
-    rootpxe_deploy_script_error=""
-    [[ -z $script && -z $expected_hash ]] && return 0
-    if [[ -z $script || -z $expected_hash ]] || ! declare -F rootpxe_deploy_script_file_owned >/dev/null || ! rootpxe_deploy_script_file_owned "$script"; then
-        rootpxe_deploy_script_error=script_file_invalid
-        if declare -F rootpxe_release_deploy_script_file >/dev/null; then rootpxe_release_deploy_script_file "$script"; fi
-        unset "$file_var" "$hash_var"
-        return 1
-    fi
-    actual_hash=$(sha256sum "$script" 2>/dev/null) || actual_hash=""
-    actual_hash=${actual_hash%%[[:space:]]*}
-    if [[ ! $expected_hash =~ ^[0-9a-f]{64}$ || $actual_hash != "$expected_hash" ]]; then
-        rootpxe_deploy_script_error=script_hash_mismatch
-        rootpxe_release_deploy_script_file "$script"
-        unset "$file_var" "$hash_var"
-        return 1
-    fi
-    rootpxe_stage "$stage" "running $label" || true
-    rootpxe_console_message INFO "Running $label."
-    env -i \
-        PATH=/usr/sbin:/usr/bin:/sbin:/bin \
-        ROOTPXE_TASK_ID="$taskid" \
-        ROOTPXE_IMAGE_PATH="${imagePath:-}" \
-        ROOTPXE_TARGET_DISK="${hd:-}" \
-        ROOTPXE_HOSTNAME="${hostName:-}" \
-        ROOTPXE_OS_ID="${osid:-}" \
-        /bin/bash "$script" || script_rc=$?
-    rootpxe_release_deploy_script_file "$script"
-    unset "$file_var" "$hash_var"
-    if [[ $script_rc -ne 0 ]]; then
-        rootpxe_deploy_script_error=script_execution_failed
-        rootpxe_console_message ERROR "$label failed."
-        return 1
-    fi
-    rootpxe_console_message INFO "$label completed."
-}
-
-rootpxe_run_pre_deploy_script() {
-    if [[ ${taskType:-} != deploy ]]; then
-        if [[ -z ${preDeployScriptFile:-} && -z ${preDeployScriptSha256:-} ]]; then return 0; fi
-        if declare -F rootpxe_release_deploy_script_file >/dev/null; then rootpxe_release_deploy_script_file "${preDeployScriptFile:-}"; fi
-        unset preDeployScriptFile preDeployScriptSha256
-        rootpxe_deploy_script_error=script_task_invalid
-        return 1
-    fi
-    rootpxe_run_deploy_script pre_deploy_script preDeployScriptFile preDeployScriptSha256 'pre-deploy script'
-}
-
-rootpxe_run_post_deploy_script() {
-    local script="${postDeployScriptFile:-}" hash="${postDeployScriptSha256:-}" disk result=0
-    local -a startup_targets=()
-    rootpxe_deploy_script_error=""
-    if [[ ${taskType:-} != deploy || ${osid:-} != 50 ]]; then
-        [[ -z $script && -z $hash && -z ${postDeployScriptExecution:-} ]] && return 0
-        rootpxe_deploy_script_error=startup_protocol_invalid
-        result=1
-    elif [[ ${postDeployScriptExecution:-} != linux-systemd-v1 ]]; then
-        rootpxe_deploy_script_error=startup_protocol_invalid
-        result=1
-    else
-        if [[ -n $script ]] && { ! declare -F rootpxe_deploy_script_file_owned >/dev/null || ! rootpxe_deploy_script_file_owned "$script"; }; then
-            rootpxe_deploy_script_error=script_file_invalid
-            unset postDeployScriptFile postDeployScriptSha256 postDeployScriptExecution
-            return 1
-        fi
-        rootpxe_stage post_deploy_script 'installing Linux startup script' || true
-        rootpxe_console_message INFO 'Installing Linux startup script (not executing it in PXEOS).'
-        [[ -n ${disks:-${hd:-}} ]] || result=1
-        for disk in ${disks:-${hd:-}}; do
-            startup_targets+=("$disk")
-        done
-        if [[ $result -eq 0 ]]; then rootpxe_install_linux_startup_for_targets "$script" "$hash" "${startup_targets[@]}" || result=1; fi
-        if [[ $result -ne 0 ]]; then
-            rootpxe_deploy_script_error="${rootpxe_startup_error:-startup_install_failed}"
-        fi
-    fi
-    if declare -F rootpxe_release_deploy_script_file >/dev/null; then rootpxe_release_deploy_script_file "$script"; fi
-    unset postDeployScriptFile postDeployScriptSha256 postDeployScriptExecution
-    return "$result"
 }
 
 # LVM is deliberately narrow.  It is not a fallback for arbitrary device
@@ -1827,11 +1743,8 @@ rootpxe_cleanup_task_json() {
     rootpxe_cleanup_derived_layout_files
     rootpxe_cleanup_deployment_partition_file
     rm -f -- "${deploymentLayoutFile:-}" "${originalSchemaFile:-}" "${partitionInventoryFile:-}" "${rootpxe_original_schema_file:-}" "${rootpxe_partition_inventory_file:-}" "${rootpxe_display_metadata_file:-}"
-    if declare -F rootpxe_release_deploy_script_file >/dev/null; then
-        rootpxe_release_deploy_script_file "${preDeployScriptFile:-}"
-        rootpxe_release_deploy_script_file "${postDeployScriptFile:-}"
-    fi
-    unset deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 postDeployScriptExecution rootpxe_original_schema_file rootpxe_partition_inventory_file rootpxe_display_metadata_file rootpxe_display_metadata_identities
+    rootpxe_cloud_init_cleanup_private || return 1
+    unset deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash rootpxe_original_schema_file rootpxe_partition_inventory_file rootpxe_display_metadata_file rootpxe_display_metadata_identities
     unset rootpxe_resolved_layout_file rootpxe_resolved_lvm_layout_file
 }
 
@@ -3054,7 +2967,7 @@ rootpxe_request_disk_permit_for_target() {
     response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 \
         --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
         --data-urlencode "mac=$mac" --data-urlencode "targetId=$target_id" \
-        --data-urlencode "operation=$operation" --data-urlencode "postDeployScriptCapability=linux-systemd-v1" "${rootpxe_permit_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
+        --data-urlencode "operation=$operation" --data-urlencode "cloudInitCapability=linux-nocloud-v2" "${rootpxe_permit_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
     http_code=${response##*$'\n'}
     body=${response%$'\n'*}
     [[ $http_code =~ ^[0-9]{3}$ ]] || { rootpxe_set_disk_permit_protocol_error unknown; return 12; }
@@ -3178,7 +3091,7 @@ rootpxe_request_disk_permit_batch() {
             --data-urlencode "sessionId=$multicastSessionId"
         )
     fi
-    response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "targets=$request" --data-urlencode "postDeployScriptCapability=linux-systemd-v1" "${rootpxe_permit_batch_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
+    response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "targets=$request" --data-urlencode "cloudInitCapability=linux-nocloud-v2" "${rootpxe_permit_batch_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
     http_code=${response##*$'\n'}; body=${response%$'\n'*}
     [[ $http_code =~ ^[0-9]{3}$ ]] || { rootpxe_set_disk_permit_protocol_error unknown; return 12; }
     [[ $http_code =~ ^5[0-9][0-9]$ ]] && return 11
@@ -3251,7 +3164,12 @@ rootpxe_record_disk_permit_binding() {
 rootpxe_verify_disk_permit_binding() {
     local disk="$1" operation="$2" target_id map_disk mapped_id mapped_operation
     [[ -r ${rootpxe_disk_permit_disk_map_file:-} ]] || return 1
-    IFS=$'\t' read -r map_disk mapped_id mapped_operation < <(awk -F '\t' -v disk="$disk" '$1 == disk { print; exit }' "$rootpxe_disk_permit_disk_map_file") || return 1
+    IFS=$'\t' read -r map_disk mapped_id mapped_operation < <(awk -F '\t' -v disk="$disk" '
+      NF != 3 || $1 !~ /^\/dev\// || $2 !~ /^[A-Za-z0-9][A-Za-z0-9._:-]*$/ || $3 !~ /^(capture_read_write|deploy_write|nvme_format\+deploy_write)$/ { bad=1 }
+      seen_disk[$1]++ || seen_target[$2]++ { bad=1 }
+      $1 == disk { row=$0; count++ }
+      END { if (!bad && count == 1) print row; else exit 1 }
+    ' "$rootpxe_disk_permit_disk_map_file") || return 1
     [[ $map_disk == "$disk" && $mapped_id =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || return 1
     target_id=$(rootpxe_disk_stable_identity "$disk") || return 1
     [[ $target_id == "$mapped_id" ]] || return 1
@@ -3266,6 +3184,22 @@ rootpxe_verify_disk_permit_binding() {
     else
         [[ ${rootpxe_disk_permit_granted:-} == yes && ${rootpxe_disk_permit_target_id:-} == "$mapped_id" && ${rootpxe_disk_permit_operation:-} == "$mapped_operation" ]]
     fi
+}
+
+rootpxe_bind_granted_deploy_targets() {
+    local disk target_id operation
+    if [[ ${rootpxe_mpa_permit_is_batch:-no} != yes ]]; then
+        disk="${hd:-}"
+        target_id="${rootpxe_disk_permit_target_id:-}"
+        operation="${rootpxe_disk_permit_operation:-}"
+        [[ ${rootpxe_disk_permit_granted:-} == yes && $target_id == "${rootpxe_planned_target_id:-$target_id}" && $operation == "${rootpxe_planned_disk_operation:-$operation}" ]] || return 1
+        if [[ -z ${rootpxe_disk_permit_disk_map_file:-} ]]; then
+            rootpxe_record_disk_permit_binding "$disk" "$target_id" "$operation" || return 1
+        fi
+    fi
+    for disk in ${disks:-${hd:-}}; do
+        rootpxe_verify_disk_permit_binding "$disk" deploy_write || return 1
+    done
 }
 
 rootpxe_activate_disk_permit_binding() {
@@ -3331,7 +3265,7 @@ rootpxe_error_wait_for_retry() {
         stage_match="${BASH_REMATCH[0]}"
         stage_value="${BASH_REMATCH[2]}"
         case $stage_value in
-            customizing_hostname|post_deploy_script)
+            customizing_hostname|cloud_init)
                 stage_count=$((stage_count + 1))
                 stage="$stage_value"
                 ;;
@@ -5346,7 +5280,8 @@ rootpxe_linux_btrfs_subvolume_ids() {
 rootpxe_linux_mount_options() {
     local mode="$1" fstype="$2" subvolid="${3:-}" options
     case $fstype in
-        xfs) printf '%s,nouuid' "$mode" ;;
+        xfs) if [[ $mode == ro ]]; then printf 'ro,nouuid,norecovery'; else printf '%s,nouuid' "$mode"; fi ;;
+        ext3|ext4) if [[ $mode == ro ]]; then printf 'ro,noload'; else printf '%s' "$mode"; fi ;;
         btrfs)
             [[ -z $subvolid ]] || rootpxe_linux_btrfs_subvolid_valid "$subvolid" || return 1
             if [[ $mode == ro ]]; then options=ro,nologreplay; else options=rw; fi
@@ -5379,16 +5314,6 @@ rootpxe_linux_has_safe_os_release() {
     return 1
 }
 
-rootpxe_linux_paths_safe_for_write() {
-    local mountpoint="$1" path
-    [[ -d "$mountpoint/etc" && ! -L "$mountpoint/etc" ]] || return 1
-    for path in "$mountpoint/etc/hostname" "$mountpoint/etc/hosts"; do
-        [[ ! -L $path ]] || return 1
-        [[ ! -e $path || -f $path ]] || return 1
-    done
-    return 0
-}
-
 rootpxe_linux_probe_root_candidate() {
     local device="$1" fstype="$2" vg_name="${3:-}" vg_uuid="${4:-}" subvolid="${5:-}" mountpoint=/linuxroot options candidate=""
     [[ -z ${rootpxe_linux_probe_mountpoint:-} ]] || mountpoint="$rootpxe_linux_probe_mountpoint"
@@ -5402,8 +5327,8 @@ rootpxe_linux_probe_root_candidate() {
     rootpxe_run_logged_typed_native linux-probe.log "$device" mount -t "$fstype" -o "$options" "$device" "$mountpoint" || { [[ $fstype == btrfs || -n ${rootpxe_linux_probe_mountpoint:-} ]] && return 3; return 1; }
     local marker_result=1 marker_rc=0
     if [[ -d "$mountpoint/etc" && ! -L "$mountpoint/etc" ]]; then
-        if [[ -n ${rootpxe_linux_probe_mountpoint:-} && -n ${rootpxe_startup_probe_disk:-} ]]; then
-            if rootpxe_startup_probe_root_marker "$mountpoint"; then marker_result=0
+        if [[ -n ${rootpxe_linux_probe_mountpoint:-} && -n ${rootpxe_cloud_init_probe_disk:-} ]]; then
+            if rootpxe_cloud_init_probe_root_marker "$mountpoint"; then marker_result=0
             else
                 marker_rc=$?
                 if [[ $marker_rc -ne 1 ]]; then umount "$mountpoint" >/dev/null 2>&1 || return 2; return 3; fi
@@ -5425,7 +5350,18 @@ rootpxe_linux_probe_root_candidate() {
 
 rootpxe_linux_validate_vg_target_pvs() {
     local disk="$1" vg_uuid="$2" pv pvs_json all_pvs target_part pv_on_target
-    getPartitions "$disk"
+    local authorized_disk permitted_parts="" canonical_pv canonical_part
+    if [[ -n ${rootpxe_cloud_init_allowed_disks:-} ]]; then
+        for authorized_disk in $rootpxe_cloud_init_allowed_disks; do
+            rootpxe_verify_disk_permit_binding "$authorized_disk" deploy_write || return 1
+            getPartitions "$authorized_disk"
+            for target_part in ${parts:-}; do
+                canonical_part=$(readlink -f -- "$target_part") || return 1
+                permitted_parts+="$canonical_part"$'\n'
+            done
+        done
+        parts=$permitted_parts
+    else getPartitions "$disk"; fi
     [[ -n ${parts:-} ]] || return 1
     rootpxe_lvm_safe_identifier "$vg_uuid" || return 1
     pvs_json=$(rootpxe_lvm_native pvs --reportformat json -o pv_name,vg_uuid 2>/dev/null) || return 1
@@ -5434,6 +5370,7 @@ rootpxe_linux_validate_vg_target_pvs() {
     [[ -n $all_pvs ]] || return 1
     for pv in $all_pvs; do
         pv=$(rootpxe_lvm_trim "$pv")
+        if [[ -n ${rootpxe_cloud_init_allowed_disks:-} ]]; then pv=$(readlink -f -- "$pv") || return 1; fi
         pv_on_target=no
         while IFS= read -r target_part; do
             [[ -n $target_part && $pv == "$target_part" ]] || continue
@@ -5520,6 +5457,7 @@ rootpxe_find_linux_root_filesystem() {
         # ext2/3/4 become extfs), which are not mount filesystem types.  Root
         # discovery must retain blkid's physical type and only inspect PVs.
         fs=$(blkid -p -o value -s TYPE "$part" 2>/dev/null) || continue
+        if [[ -n ${rootpxe_cloud_init_probe_disk:-} && ( $fs == btrfs || $fs == f2fs ) ]]; then probe_failed=1; continue; fi
         case $fs in
             LVM2_member)
                 lvm_parts="$lvm_parts $part"
@@ -5642,117 +5580,8 @@ rootpxe_find_linux_root_filesystem() {
     return $rc
 }
 
-rootpxe_validate_linux_hostname() {
-    local name="$1"
-    [[ $name =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]
-}
-
-rootpxe_apply_linux_hostname_for_disk() {
-    local disk="$1" root_spec root_device root_fs root_lvm_name root_lvm_uuid root_subvolid root_lvm_activated=no rc mountpoint="${rootpxe_deployment_identity_linux_state_root:-/tmp/rootpxe-identity-root}" options
-    local hostname_path hosts_path old_hostname actual_hostname hosts_tmp expected_hash actual_hash hostname_exists=0
-    [[ ${changeHostname:-false} == true ]] || rootpxe_deployment_identity_linux_policy_enabled || return 0
-    [[ ${changeHostname:-false} != true ]] || rootpxe_validate_linux_hostname "${hostName:-}" || handleError "PXEOS_STAGE=customizing_hostname CODE=INVALID_LINUX_HOSTNAME REASON=linux_name_policy"
-    root_spec=$(rootpxe_find_linux_root_filesystem "$disk")
-    rc=$?
-    case $rc in
-        0) ;;
-        20) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_NOT_FOUND" ;;
-        21) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_AMBIGUOUS" ;;
-        22) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_CROSS_DISK_LVM" ;;
-        23) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_LVM_ACTIVATION_FAILED" ;;
-        24) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED" ;;
-        *) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED" ;;
-    esac
-    root_device=${root_spec%%|*}
-    root_spec=${root_spec#*|}
-    root_fs=${root_spec%%|*}
-    root_spec=${root_spec#*|}
-    root_lvm_name=${root_spec%%|*}
-    root_spec=${root_spec#*|}
-    root_lvm_uuid=${root_spec%%|*}
-    root_subvolid=${root_spec#*|}
-    [[ -n $root_device && -n $root_fs && $root_spec == *"|"* ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"
-    [[ $root_fs != btrfs || $root_subvolid =~ ^[1-9][0-9]*$ ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"
-    if [[ -n $root_lvm_name || -n $root_lvm_uuid ]]; then
-        [[ -n $root_lvm_name && -n $root_lvm_uuid ]] || handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"
-        root_lvm_activated=$(rootpxe_linux_activate_vg_if_needed "$disk" "$root_lvm_name" "$root_lvm_uuid")
-        case $? in
-            0) ;;
-            2) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_CROSS_DISK_LVM" ;;
-            *) handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_LVM_ACTIVATION_FAILED" ;;
-        esac
-    fi
-    rootpxe_stage customizing_hostname "code=HOSTNAME_STARTED method=linux"
-    mkdir -p "$mountpoint" || handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_MOUNTPOINT_FAILED"
-    if mountpoint -q "$mountpoint" 2>/dev/null; then
-        umount "$mountpoint" >/dev/null 2>&1 || { rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"; }
-    fi
-    options=$(rootpxe_linux_mount_options rw "$root_fs" "$root_subvolid") || handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"
-    rootpxe_run_logged_typed_native linux-mount.log "$root_device" mount -t "$root_fs" -o "$options" "$root_device" "$mountpoint" || { rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_MOUNT_FAILED"; }
-    rootpxe_linux_paths_safe_for_write "$mountpoint" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_PATH_UNSAFE"; }
-    if rootpxe_deployment_identity_linux_policy_enabled; then
-        rootpxe_deployment_identity_linux_system_preflight "$mountpoint" || { preflight_rc=$?; preflight_reason="${rootpxe_deployment_identity_preflight_failure_reason:-unknown}"; umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_SYSTEM_IDENTITY_PRECHECK_FAILED REASON=${preflight_reason} RC=${preflight_rc}"; }
-    fi
-    if [[ ${changeHostname:-false} == true ]]; then
-        hostname_path="$mountpoint/etc/hostname"
-        hosts_path="$mountpoint/etc/hosts"
-        old_hostname=""
-        if [[ -f $hostname_path ]]; then
-            hostname_exists=1
-            old_hostname=$(head -n 1 "$hostname_path" 2>/dev/null | tr -d '\r\n')
-        fi
-        printf '%s\n' "$hostName" >"$hostname_path" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTNAME_WRITE_FAILED"; }
-        if [[ $hostname_exists -eq 0 ]]; then
-            chmod 0644 "$hostname_path" && chown root:root "$hostname_path" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTNAME_MODE_FAILED"; }
-        fi
-        actual_hostname=$(cat "$hostname_path" 2>/dev/null | tr -d '\r\n')
-        [[ $actual_hostname == "$hostName" ]] || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTNAME_READBACK_FAILED"; }
-        if [[ -n $old_hostname && -f $hosts_path ]]; then
-        hosts_tmp=$(mktemp "$mountpoint/etc/.hosts.rootpxe.XXXXXX") || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTS_TEMP_FAILED"; }
-        awk -v old="$old_hostname" -v new="$hostName" '
-            function replace_tokens(prefix, out, token, ch, in_token, i) {
-                out=""; token=""; in_token=0
-                for (i=1; i<=length(prefix); i++) {
-                    ch=substr(prefix, i, 1)
-                    if (ch ~ /[[:space:]]/) {
-                        if (in_token) { out=out ((token == old) ? new : token); token=""; in_token=0 }
-                        out=out ch
-                    } else { token=token ch; in_token=1 }
-                }
-                if (in_token) out=out ((token == old) ? new : token)
-                return out
-            }
-            /^[[:space:]]*#/ { print; next }
-            {
-                hash=index($0, "#")
-                if (hash > 0) { prefix=substr($0, 1, hash - 1); comment=substr($0, hash) }
-                else { prefix=$0; comment="" }
-                print replace_tokens(prefix) comment
-            }
-        ' "$hosts_path" >"$hosts_tmp" || { rm -f "$hosts_tmp"; umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTS_RENDER_FAILED"; }
-        expected_hash=$(sha256sum "$hosts_tmp" | awk '{print $1}')
-        cat "$hosts_tmp" >"$hosts_path" || { rm -f "$hosts_tmp"; umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTS_WRITE_FAILED"; }
-        actual_hash=$(sha256sum "$hosts_path" | awk '{print $1}')
-        rm -f "$hosts_tmp"
-        [[ -n $expected_hash && $expected_hash == "$actual_hash" ]] || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_HOSTS_READBACK_FAILED"; }
-        fi
-        rootpxe_deployment_identity_hostname_result=true
-    fi
-    if rootpxe_deployment_identity_linux_policy_enabled; then
-        rootpxe_deployment_identity_linux_system_in_root "$mountpoint" || { umount "$mountpoint" >/dev/null 2>&1 || true; rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_SYSTEM_IDENTITY_FAILED"; }
-    fi
-    if mountpoint -q "$mountpoint" 2>/dev/null; then
-        umount "$mountpoint" >/dev/null 2>&1 || { rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"; handleError "PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_PROBE_FAILED"; }
-    fi
-    rootpxe_linux_cleanup_selected_vg "$root_lvm_name" "$root_lvm_uuid" "$root_lvm_activated"
-    rootpxe_stage customizing_hostname "code=HOSTNAME_COMPLETE method=linux"
-}
-
-# Common deploy-time hostname dispatcher.  The task always supplies the latest
-# hostName/changeHostname on each checkin, including a hostname-only retry.
 rootpxe_apply_hostname_for_disk() {
     case ${osid:-} in
-        50) rootpxe_apply_linux_hostname_for_disk "$1" ;;
         [1-2]|4|[5-7]|9|10|11) rootpxe_apply_windows_hostname_for_disk "$1" ;;
         *) return 0 ;;
     esac
@@ -6419,13 +6248,13 @@ completeTasking() {
             if rootpxe_deployment_identity_private_enabled; then
                 rootpxe_deployment_identity_request_private || handleError "PXEOS_STAGE=system_initialization CODE=INITIALIZATION_PRIVATE_CONFIG_UNAVAILABLE"
             fi
-            if [[ ${changeHostname:-false} == true ]] || rootpxe_deployment_identity_linux_policy_enabled || ( rootpxe_deployment_identity_windows_policy_enabled && jq -e '.systemIdentity.sysprep == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1 ); then
+            if [[ ${changeHostname:-false} == true ]] || ( rootpxe_deployment_identity_windows_policy_enabled && jq -e '.systemIdentity.sysprep == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1 ); then
                 unset rootpxe_initialization_failure_reason
                 rootpxe_apply_hostname_for_disk "$hd" || handleError "PXEOS_STAGE=system_initialization CODE=SYSTEM_INITIALIZATION_FAILED REASON=${rootpxe_initialization_failure_reason:-unknown}"
             fi
-            rootpxe_run_post_deploy_script || handleError "PXEOS_STAGE=post_deploy_script CODE=POST_DEPLOY_SCRIPT_FAILED REASON=${rootpxe_deploy_script_error:-unknown}"
+            rootpxe_apply_cloud_init || handleError "PXEOS_STAGE=cloud_init CODE=CLOUD_INIT_INJECTION_FAILED REASON=${rootpxe_cloud_init_error:-unknown}"
             if rootpxe_deployment_identity_policy_enabled; then
-				rootpxe_deployment_identity_report_result "${rootpxe_deployment_identity_hostname_result:-false}" "${rootpxe_deployment_identity_machine_id_result:-false}" "${rootpxe_deployment_identity_ssh_host_keys_result:-false}" "${rootpxe_deployment_identity_ssh_login_public_keys_result:-false}" "${rootpxe_deployment_identity_root_password_result:-false}" "${rootpxe_deployment_identity_sysprep_result:-false}" || handleError "PXEOS_STAGE=deployment_identity_result CODE=IDENTITY_RESULT_REJECTED"
+				rootpxe_deployment_identity_report_result "${rootpxe_deployment_identity_hostname_result:-false}" "${rootpxe_deployment_identity_sysprep_result:-false}" "${rootpxe_deployment_identity_cloud_init_result:-false}" || handleError "PXEOS_STAGE=deployment_identity_result CODE=IDENTITY_RESULT_REJECTED"
             fi
             rootpxe_deployment_identity_cleanup_private
             . /bin/pxeos.imgcomplete

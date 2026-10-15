@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export MSYS=winsymlinks:nativestrict
+root=$(cd "$(dirname "$0")/.." && pwd)
+lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib"
+tmp=$(mktemp -d /tmp/pxeos-cloud-init-seed.XXXXXX)
+cleanup_fixture(){
+    [[ $tmp =~ ^/tmp/pxeos-cloud-init-seed\.[A-Za-z0-9]{6}$ && -d $tmp && ! -L $tmp ]] || return 1
+    rm -rf -- "$tmp"
+}
+trap cleanup_fixture EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+case $(uname -s) in MINGW*|MSYS*) rootpxe_ci_fixture_jq=$(command -v jq.exe); jq(){ "$rootpxe_ci_fixture_jq" -b "$@"; };; esac
+[[ -r $lib/cloud-init.sh ]] || fail 'NoCloud helper is missing'
+. "$lib/cloud-init.sh"
+case $(uname -s) in MINGW*|MSYS*)
+    rootpxe_ci_is_root(){ return 0; }
+    rootpxe_ci_stat(){ local mode=700; [[ -d $1 ]] || mode=600; printf '0:0:%s:%s\n' "$mode" "$(command stat -c '%h' -- "$1")"; }
+    printf 'SKIP: MSYS root/Unix mode; symlink/hardlink/inode/hash checks are real\n'
+;; esac
+declare -f rootpxe_ci_check_prerequisites | grep -Fq 'cloud-init-network.service' || fail 'native Network mask unit missing'
+fixture(){
+    target="$tmp/$1"
+    mkdir -p "$target/etc/cloud/cloud.cfg.d" "$target/usr/bin" "$target/var/lib/cloud"
+    printf '#!/bin/sh\nexit 99\n' >"$target/usr/bin/cloud-init"
+    chmod +x "$target/usr/bin/cloud-init"
+    printf 'datasource_list: [ NoCloud ]\n' >"$target/etc/cloud/cloud.cfg.d/90-nocloud.cfg"
+    printf 'datasource_list:\n  - NoCloud\n' >"$target/etc/cloud/cloud.cfg"
+    printf '#cloud-config\r\n# 私有内容\r\nruncmd: []\r\n\r\n' >"$tmp/user-data"
+    cloudInitUserDataFile="$tmp/user-data"
+    cloudInitUserDataSha256=$(rootpxe_ci_hash "$cloudInitUserDataFile")
+    cloudInitInstanceId=rootpxe-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    cloudInitHostname=node-1
+    cloudInitNetworkConfigFile='' cloudInitNetworkConfigSha256=''
+}
+network_fixture(){
+    fixture "$1"
+    printf 'version: 2\r\nethernets:\r\n  enp1s0:\r\n    dhcp4: true\r\n\r\n' >"$tmp/network-config"
+    cloudInitNetworkConfigFile="$tmp/network-config"
+    cloudInitNetworkConfigSha256=$(rootpxe_ci_hash "$cloudInitNetworkConfigFile")
+}
+fixture fresh
+rootpxe_cloud_init_install_at_root "$target" || fail "fresh install: ${rootpxe_cloud_init_error:-}"
+seed="$target/var/lib/cloud/seed/nocloud"
+[[ $(find "$seed" -maxdepth 1 -type f | wc -l) == 2 ]] || fail 'seed must contain exactly two files'
+cmp -s "$tmp/user-data" "$seed/user-data" || fail 'CRLF bytes changed'
+grep -Fxq 'instance-id: "rootpxe-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$seed/meta-data" || fail 'instance metadata changed'
+before=$(stat -c '%d:%i' "$seed/user-data")
+rootpxe_cloud_init_install_at_root "$target" || fail 'same frozen seed rejected'
+[[ $(stat -c '%d:%i' "$seed/user-data") == "$before" ]] || fail 'idempotent seed was rewritten'
+network_fixture network
+rootpxe_cloud_init_install_at_root "$target" || fail 'three-file install rejected'
+seed="$target/var/lib/cloud/seed/nocloud"
+[[ $(find "$seed" -mindepth 1 -maxdepth 1 -type f | wc -l) == 3 ]] || fail 'network-config was not installed as third file'
+cmp -s "$tmp/network-config" "$seed/network-config" || fail 'network-config raw bytes changed'
+before=$(stat -c '%d:%i' "$seed/user-data" "$seed/meta-data" "$seed/network-config")
+rootpxe_cloud_init_install_at_root "$target" || fail 'same three-file seed rejected'
+[[ $(stat -c '%d:%i' "$seed/user-data" "$seed/meta-data" "$seed/network-config") == "$before" ]] || fail 'three-file seed was rewritten'
+cloudInitNetworkConfigFile='' cloudInitNetworkConfigSha256=''
+rootpxe_cloud_init_install_at_root "$target" && fail 'cleared network silently removed an existing network-config'
+[[ $rootpxe_cloud_init_error == cloud_init_foreign_seed && -f $seed/network-config ]] || fail 'cleared network conflict not preserved'
+cloudInitInstanceId=rootpxe-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+rootpxe_cloud_init_install_at_root "$target" && fail 'cross-task seed accepted'
+for conflict in cache disabled foreign extra hardlink symlink; do
+    fixture "$conflict"
+    case $conflict in
+        cache) mkdir "$target/var/lib/cloud/instances";;
+        disabled) printf '' >"$target/etc/cloud/cloud-init.disabled";;
+        foreign) mkdir -p "$target/var/lib/cloud/seed/nocloud-net";;
+        extra) mkdir -p "$target/var/lib/cloud/seed/nocloud"; printf 'unknown' >"$target/var/lib/cloud/seed/nocloud/vendor-data";;
+        hardlink) rootpxe_cloud_init_install_at_root "$target"; ln "$target/var/lib/cloud/seed/nocloud/user-data" "$tmp/extra-link";;
+        symlink) mv "$target/var/lib/cloud" "$target/var/lib/foreign"; if ! ln -s foreign "$target/var/lib/cloud"; then printf 'SKIP: native symlink creation denied by Windows\n'; continue; fi;;
+    esac
+    rootpxe_cloud_init_install_at_root "$target" && fail "accepted $conflict"
+    case $conflict in cache) expected=cloud_init_cache_not_clean;; disabled) expected=cloud_init_explicitly_disabled;; foreign|extra|hardlink) expected=cloud_init_foreign_seed;; symlink) expected=cloud_init_target_path_unsafe;; esac
+    [[ $rootpxe_cloud_init_error == "$expected" ]] || fail "$conflict reason: $rootpxe_cloud_init_error"
+done
+for conflict in missing-network tampered-network extra-network hardlinked-network symlink-network; do
+    network_fixture "$conflict"
+    rootpxe_cloud_init_install_at_root "$target" || fail 'network conflict fixture install'
+    seed="$target/var/lib/cloud/seed/nocloud"
+    case $conflict in
+        missing-network) rm -- "$seed/network-config";;
+        tampered-network) printf 'changed' >>"$seed/network-config";;
+        extra-network) printf 'foreign' >"$seed/vendor-data";;
+        hardlinked-network) ln "$seed/network-config" "$tmp/network-extra-link";;
+        symlink-network) rm -- "$seed/network-config"; if ! ln -s /dev/null "$seed/network-config"; then printf 'SKIP: network symlink creation denied by Windows\n'; continue; fi;;
+    esac
+    rootpxe_ci_readonly_preflight "$target" && fail "readonly accepted $conflict"
+    [[ $rootpxe_cloud_init_error == cloud_init_foreign_seed ]] || fail "$conflict reason"
+done
+network_fixture metadata-network
+rootpxe_cloud_init_install_at_root "$target" || fail 'network metadata fixture install'
+eval "$(declare -f rootpxe_ci_stat | sed '1s/rootpxe_ci_stat/rootpxe_ci_fixture_original_stat/')"
+rootpxe_ci_stat(){
+    if [[ $1 == "$target/var/lib/cloud/seed/nocloud/network-config" ]]; then
+        case ${network_unsafe_metadata:-} in owner) printf '12345:0:600:1\n'; return;; mode) printf '0:0:666:1\n'; return;; esac
+    fi
+    rootpxe_ci_fixture_original_stat "$@"
+}
+for network_unsafe_metadata in owner mode; do
+    rootpxe_ci_readonly_preflight "$target" && fail "readonly accepted unsafe network $network_unsafe_metadata"
+    [[ $rootpxe_cloud_init_error == cloud_init_foreign_seed ]] || fail 'unsafe network metadata reason'
+done
+network_unsafe_metadata=''
+fixture masked-network
+mkdir -p "$target/etc/systemd/system"
+if ln -s /dev/null "$target/etc/systemd/system/cloud-init-network.service"; then
+    rootpxe_cloud_init_install_at_root "$target" && fail 'masked native Network service accepted'
+    [[ $rootpxe_cloud_init_error == cloud_init_explicitly_disabled ]] || fail 'native Network mask reason'
+    [[ ! -e $target/var/lib/cloud/seed ]] || fail 'native Network mask rejected after mutation'
+else
+    printf 'SKIP: native Network mask symlink creation denied by Windows\n'
+fi
+fixture empty
+mkdir -p "$target/var/lib/cloud/seed/nocloud"
+inode=$(stat -c '%d:%i' "$target/var/lib/cloud/seed/nocloud")
+rootpxe_cloud_init_install_at_root "$target" || fail 'empty seed directory rejected'
+[[ $(stat -c '%d:%i' "$target/var/lib/cloud/seed/nocloud") == "$inode" ]] || fail 'original empty directory inode changed'
+fixture missing
+rm -- "$target/usr/bin/cloud-init"
+rootpxe_cloud_init_install_at_root "$target" && fail 'missing package accepted'
+[[ $rootpxe_cloud_init_error == cloud_init_not_installed ]] || fail 'missing package reason'
+fixture half-seed
+mkdir -p "$target/var/lib/cloud/seed/nocloud"
+cp "$tmp/user-data" "$target/var/lib/cloud/seed/nocloud/user-data"
+rootpxe_cloud_init_install_at_root "$target" && fail 'half-published seed accepted'
+[[ $rootpxe_cloud_init_error == cloud_init_foreign_seed ]] || fail 'half-seed reason'
+fixture rollback
+mkdir -p "$target/var/lib/cloud/seed/nocloud"
+inode=$(stat -c '%d:%i' "$target/var/lib/cloud/seed/nocloud")
+eval "$(declare -f rootpxe_ci_move | sed '1s/rootpxe_ci_move/rootpxe_ci_original_move/')"
+rootpxe_ci_move(){ [[ $2 != */meta-data ]] || return 1; rootpxe_ci_original_move "$@"; }
+rootpxe_cloud_init_install_at_root "$target" && fail 'publish failure accepted'
+[[ $rootpxe_cloud_init_error == cloud_init_seed_publish_failed ]] || fail 'publish reason'
+[[ $(stat -c '%d:%i' "$target/var/lib/cloud/seed/nocloud") == "$inode" ]] || fail 'rollback replaced empty inode'
+[[ -z $(find "$target/var/lib/cloud/seed/nocloud" -mindepth 1 -print) ]] || fail 'partial seed survived rollback'
+[[ -z $(find "$target/var/lib/cloud/seed" -name '.nocloud.new.*' -print) ]] || fail 'stage survived rollback'
+unset -f rootpxe_ci_move
+eval "$(declare -f rootpxe_ci_original_move | sed '1s/rootpxe_ci_original_move/rootpxe_ci_move/')"
+network_fixture network-publish-rollback
+mkdir -p "$target/var/lib/cloud/seed/nocloud"
+inode=$(stat -c '%d:%i' "$target/var/lib/cloud/seed/nocloud")
+rootpxe_ci_move(){
+    if [[ $2 == */network-config ]]; then printf 'foreign-preserved' >"$target/var/lib/cloud/seed/nocloud/vendor-data"; return 1; fi
+    rootpxe_ci_original_move "$@"
+}
+rootpxe_cloud_init_install_at_root "$target" && fail 'network publish failure accepted'
+[[ $rootpxe_cloud_init_error == cloud_init_seed_publish_failed ]] || fail 'network publish reason'
+[[ $(stat -c '%d:%i' "$target/var/lib/cloud/seed/nocloud") == "$inode" ]] || fail 'network rollback replaced original empty inode'
+[[ $(<"$target/var/lib/cloud/seed/nocloud/vendor-data") == foreign-preserved ]] || fail 'network rollback deleted foreign content'
+[[ ! -e $target/var/lib/cloud/seed/nocloud/user-data && ! -e $target/var/lib/cloud/seed/nocloud/meta-data && ! -e $target/var/lib/cloud/seed/nocloud/network-config ]] || fail 'network rollback left owned files'
+[[ -z $(find "$target/var/lib/cloud/seed" -name '.nocloud.new.*' -print) ]] || fail 'network rollback left its stage'
+unset -f rootpxe_ci_move
+eval "$(declare -f rootpxe_ci_original_move | sed '1s/rootpxe_ci_original_move/rootpxe_ci_move/')"
+fixture selinux
+mkdir -p "$target/etc/selinux/target/contexts/files"
+printf 'SELINUX=enforcing\nSELINUXTYPE=target\n' >"$target/etc/selinux/config"
+printf 'fixture' >"$target/etc/selinux/target/contexts/files/file_contexts"
+rootpxe_ci_label_tools_ready(){ return 1; }
+rootpxe_cloud_init_install_at_root "$target" && fail 'missing label tools accepted'
+[[ $rootpxe_cloud_init_error == cloud_init_label_tools_missing ]] || fail 'label tool reason'
+[[ ! -e $target/var/lib/cloud/seed ]] || fail 'SELinux prerequisite failed after mutation'
+rootpxe_ci_label_tools_ready(){ return 0; }
+rootpxe_ci_expected_label(){ printf 'system_u:object_r:cloud_var_lib_t:s0\n'; }
+rootpxe_ci_write_label(){ printf '%s\n' "$1|$2" >>"$tmp/labels"; }
+rootpxe_ci_read_label(){ printf 'system_u:object_r:cloud_var_lib_t:s0\n'; }
+printf 'version: 2\nethernets: {}\n' >"$tmp/network-config"
+cloudInitNetworkConfigFile="$tmp/network-config"
+cloudInitNetworkConfigSha256=$(rootpxe_ci_hash "$cloudInitNetworkConfigFile")
+rootpxe_cloud_init_install_at_root "$target" || fail 'target-policy label branch failed'
+grep -Fq 'user-data|system_u:object_r:cloud_var_lib_t:s0' "$tmp/labels" || fail 'user-data label not written/read'
+grep -Fq 'network-config|system_u:object_r:cloud_var_lib_t:s0' "$tmp/labels" || fail 'network-config label not written/read'
+rootpxe_ci_read_label(){ if [[ $1 == */network-config ]]; then printf 'system_u:object_r:wrong_t:s0\n'; else printf 'system_u:object_r:cloud_var_lib_t:s0\n'; fi; }
+rootpxe_ci_readonly_preflight "$target" && fail 'readonly accepted wrong network-config label'
+[[ $rootpxe_cloud_init_error == cloud_init_label_unverified ]] || fail 'network-config readonly label reason'
+fixture label-failure
+mkdir -p "$target/etc/selinux/target/contexts/files"
+printf 'SELINUX=enforcing\nSELINUXTYPE=target\n' >"$target/etc/selinux/config"
+printf 'fixture' >"$target/etc/selinux/target/contexts/files/file_contexts"
+rootpxe_ci_read_label(){ printf 'system_u:object_r:wrong_t:s0\n'; }
+rootpxe_cloud_init_install_at_root "$target" && fail 'wrong label readback accepted'
+[[ $rootpxe_cloud_init_error == cloud_init_label_unverified ]] || fail 'label readback reason'
+fixture cleanup-failure
+rootpxe_ci_move(){ return 1; }
+rootpxe_ci_transaction_cleanup(){ return 1; }
+rootpxe_cloud_init_install_at_root "$target" && fail 'cleanup failure accepted'
+[[ $rootpxe_cloud_init_error == cloud_init_seed_rollback_failed ]] || fail 'rollback failure reason'
+[[ -n $(find "$target/var/lib/cloud/seed" -name '.nocloud.new.*' -print) ]] || fail 'rollback failure evidence discarded'
+printf 'PASS: native two/three-file seed, network bytes/idempotence/conflicts/rollback/SELinux\n'

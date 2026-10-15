@@ -73,7 +73,7 @@ python3 tests/pxeos_build_version_test.py
 - `pxeos_lvm_console_regression.sh`：核对 LVM 控制台激活与消息处理。
 - `pxeos_lvm_schema_jq_regression.sh`：以真实 `jq` 核对 LVM capture schema 过滤程序。
 - `pxeos_lvm_udev_rules_regression.sh`：核对 LVM udev 同步及移除 systemd 专用自动激活规则。
-- `pxeos_var_mount_regression.sh`：核对独立 `/var` 初始化时的 fstab 挂载处理。
+- `pxeos_var_mount_regression.sh`：核对原生 NoCloud 的独立 `/var` 许可、全部 PV、挂载身份与借用清理。
 - `pxeos_lvm_multi_regression.sh`：核对同一磁盘上 1/2/3/5 组彼此独立的一 PV/一 VG/多 linear LV，覆盖正序与倒序布局；默认执行叶级集成回归。
 - `pxeos_mbr_partition_contract_regression.sh`：核对 DOS/MBR 分区编号、32 位 LBA 与 GPT 边界契约，同时检查 Schema object 和 resolved partition array 两种输入形态。
 - `pxeos_lvm_naming_contract.sh`：核对 pinned LVM2 官方名称 127 字节边界、保留前缀/内部片段及连字符转义 mapper 名边界。
@@ -81,7 +81,7 @@ python3 tests/pxeos_build_version_test.py
 
 上述脚本均按单脚本独立运行；本目录仍不提供一键 full suite，也不因此宣称 CI、真实磁盘或实机部署已验证。
 
-## Windows、显示与部署身份（11）
+## Windows、显示与部署身份（10）
 
 - `pxeos_xml_command_regression.sh`：以私有文件和命令 mock 覆盖 Sysprep XML 写入路径。
 - `pxeos_windows_initialization_regression.sh`：以真实 hivex/reged/XML 工具覆盖 Windows 主机名与 Sysprep 开关矩阵。
@@ -91,8 +91,7 @@ python3 tests/pxeos_build_version_test.py
 - `pxeos_offline_hostname_contract_regression.sh`：以临时注册表路径和 wrapper 提取核对离线主机名协议。
 - `pxeos_os_type_regression.sh`：核对系统 ID 到内部诊断名称的稳定映射。
 - `pxeos_display_metadata_regression.sh`：以临时库存和边界 stub 核对显示元数据。
-- `pxeos_identity_preflight_regression.sh`：核对 Linux 身份写入前的完整预检。
-- `pxeos_identity_preflight_order_regression.sh`：核对部署入口中身份预检、主机名写入和初始化素材的顺序。
+- `pxeos_identity_preflight_order_regression.sh`：核对部署入口中 Windows XML、NoCloud 注入、冻结回执的顺序及旧执行器缺失。
 - `pxeos_deployment_identity_regression.sh`：核对部署身份工具的 XML 能力门槛与身份契约。
 
 `pxeos_windows_hostname_native_regression.sh` 与 `pxeos_windows_initialization_regression.sh` 都需要 `ROOTPXE_WINDOWS_HOSTNAME_TOOL`、`ROOTPXE_HIVEX_MINIMAL`、`ROOTPXE_REGED`，以及用于 fixture 的 C 编译器、`pkg-config` 和 hivex 开发头文件/库。后者还要求实际 `xml`、`jq`，并以 `/ntfs` **不存在**为隔离前提；不要在已挂载或真实目标盘环境中运行。满足隔离条件后可分别显式执行：
@@ -101,6 +100,16 @@ python3 tests/pxeos_build_version_test.py
 bash tests/pxeos_windows_hostname_native_regression.sh
 bash tests/pxeos_windows_initialization_regression.sh
 ```
+
+## 原生 Cloud-init（5）
+
+- `pxeos_cloud_init_protocol_regression.sh`：真实 jq 二次验证六个私有字段、任务与系统限制、原始 UTF-8/CRLF 字节、网络空值对、散列、两个临时文件的 BASHPID/inode/权限证明、双向 unlink 失败后不可注入且可安全重试清理、新版能力、缺失或关闭策略拒绝，以及日志字段脱敏/无执行/无正文泄漏。
+- `pxeos_cloud_init_permit_regression.sh`：真实首次单盘和 MPA 单盘计划、许可响应、登记及校验，真实 source JSON checkin 后调用两文件或三文件 NoCloud 安装器，覆盖只填网络时冻结的最小用户配置、缺失/损坏映射、错误设备/操作及空配置和捕获绕过。
+- `pxeos_cloud_init_seed_regression.sh`：普通临时目录覆盖期望两文件或三文件、原字节、同任务只读幂等、清空网络不删除已有文件、额外/缺失/篡改、foreign seed/缓存/禁用、硬链接/符号链接、网络阶段发布回滚与外来内容保留、半份 seed 拒绝、固定脱敏理由和 SELinux 工具分支。
+- `pxeos_cloud_init_mounts_regression.sh`：设备边界替身覆盖独立变量数据分区许可、卷组全部物理卷、挂载表歧义/遮盖、借用挂载与清理失败证据。
+- `pxeos_cloud_init_roots_regression.sh`：真实根发现与许可目标循环对同一多物理卷根去重，拒绝两个不同根、候选身份冲突及未许可物理卷。
+
+上述 fixture 不执行目标 Cloud-init、user-data、真实磁盘、真实 mount 或 LVM。MSYS 使用明确的 Unix 属主/模式替身，Windows 原生符号链接可能因权限拒绝而跳过；SELinux 工具分支使用替身，不代表工具包、目标策略或真实首启执行已验证。
 
 ## API、注册、审计与控制台（6）
 

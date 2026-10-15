@@ -48,15 +48,8 @@ export PATH
 rootpxe_multicast_apply_transport_mode() { rootpxe_multicast_reset() { :; }; mc=no; }
 rootpxe_multicast_runtime_ready() { return 1; }
 # shellcheck source=/dev/null
+. "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh"
 . "$tmp/checkin-json.sh"
-case $(uname -s) in
-    MINGW*|MSYS*)
-        rootpxe_deploy_script_identity() {
-            local device inode owner links
-            IFS=: read -r device inode owner links < <(stat -c '%d:%i:%u:%h' -- "$1")
-            printf '%s:%s:%s:700:%s\n' "$device" "$inode" "$owner" "$links"
-        };;
-esac
 
 flat_smb='{"taskId":42,"type":"capture","pxeType":"up","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"changeHostname":false,"captureBackupName":"demo-backup-20260830T104527123Z","storage":"192.0.2.10:share/images","protocol":"smb","storageip":"192.0.2.10","exportPath":"share/images","smbUsername":"test-user","smbPassword":"pa%ss\\word","smbDomain":"WORKGROUP"}'
 rootpxe_apply_json_checkin "$flat_smb" || fail '平铺 SMB JSON 被拒绝'
@@ -86,97 +79,8 @@ too_long_capture=$(jq --arg name "$too_long_backup_name" '.captureBackupName=$na
 rootpxe_apply_json_checkin "$too_long_capture" && fail '超过 255 UTF-8 字节的备份名称被接受'
 unset unicode_backup_name unicode_capture too_long_backup_name too_long_capture
 
-# Two deploy scripts are authenticated independently. Both must retain exact
-# multiline bytes in separate 0700 files; capture and legacy never receive
-# either field.
-pre_script=$'printf "%s\\n" pre\n'
-post_script=$'printf "%s\\n" post\n'
-pre_expected_file="$tmp/pre.expected"; post_expected_file="$tmp/post.expected"
-jq -nj --arg script "$pre_script" '$script' >"$pre_expected_file"
-jq -nj --arg script "$post_script" '$script' >"$post_expected_file"
-pre_hash=$(sha256sum "$pre_expected_file" | awk '{print $1}')
-post_hash=$(sha256sum "$post_expected_file" | awk '{print $1}')
-deploy_with_scripts=$(jq -cn --arg pre "$pre_script" --arg pre_hash "$pre_hash" --arg post "$post_script" --arg post_hash "$post_hash" '{taskId:45,type:"deploy",pxeType:"down",img:"images/demo",imgType:"raw",imgPartitionType:"all",osid:50,imgFormat:5,compressionLevel:6,shutdown:false,protocol:"nfs",storageip:"192.0.2.13",exportPath:"/dept/images",preDeployScript:$pre,preDeployScriptSha256:$pre_hash,postDeployScript:$post,postDeployScriptSha256:$post_hash,postDeployScriptExecution:"linux-systemd-v1"}')
-rootpxe_apply_json_checkin "$deploy_with_scripts" || fail '认证部署双脚本 JSON 被拒绝'
-[[ -f ${preDeployScriptFile:-} && ! -L $preDeployScriptFile && -f ${postDeployScriptFile:-} && ! -L $postDeployScriptFile ]] || fail '部署脚本未保存到独立临时文件'
-cmp -s "$pre_expected_file" "$preDeployScriptFile" && [[ $preDeployScriptSha256 == "$pre_hash" ]] || fail '部署前脚本正文或 SHA256 被改变'
-cmp -s "$post_expected_file" "$postDeployScriptFile" && [[ $postDeployScriptSha256 == "$post_hash" ]] || fail '部署后脚本正文或 SHA256 被改变'
-rm -f -- "$preDeployScriptFile" "$postDeployScriptFile"; unset preDeployScriptFile preDeployScriptSha256 postDeployScriptFile postDeployScriptSha256
-missing_pre_hash=$(jq 'del(.preDeployScriptSha256)' <<<"$deploy_with_scripts")
-missing_post_hash=$(jq 'del(.postDeployScriptSha256)' <<<"$deploy_with_scripts")
-nonstring_pre=$(jq '.preDeployScript=42' <<<"$deploy_with_scripts")
-nonstring_post_hash=$(jq '.postDeployScriptSha256=42' <<<"$deploy_with_scripts")
-empty_both=$(jq '.preDeployScript="" | .preDeployScriptSha256="" | .postDeployScript="" | .postDeployScriptSha256=""' <<<"$deploy_with_scripts")
-rootpxe_apply_json_checkin "$missing_pre_hash" && fail '缺少部署前脚本摘要被接受'
-rootpxe_apply_json_checkin "$missing_post_hash" && fail '缺少部署后脚本摘要被接受'
-rootpxe_apply_json_checkin "$nonstring_pre" && fail '非文本部署前脚本被接受'
-rootpxe_apply_json_checkin "$nonstring_post_hash" && fail '非文本部署后脚本摘要被接受'
-rootpxe_apply_json_checkin "$empty_both" || fail '空部署脚本对被拒绝'
-[[ -z ${preDeployScriptFile:-} && -z ${postDeployScriptFile:-} ]] || fail '空部署脚本仍创建临时文件'
-bad_hash=$(printf '0%.0s' {1..64})
-bad_pre_hash=$(jq --arg hash "$bad_hash" '.preDeployScriptSha256=$hash' <<<"$deploy_with_scripts")
-bad_post_hash=$(jq --arg hash "$bad_hash" '.postDeployScriptSha256=$hash' <<<"$deploy_with_scripts")
-rootpxe_apply_json_checkin "$bad_pre_hash" && fail '错误部署前脚本摘要被接受'
-rootpxe_apply_json_checkin "$bad_post_hash" && fail '错误部署后脚本摘要被接受'
-jq() {
-    case "$*" in
-        *'has($field)'*) printf 'true\n' ;;
-        *'type == "string"'*) return 0 ;;
-        *utf8bytelength*) printf '65537\n' ;;
-        *) return 1 ;;
-    esac
-}
-rootpxe_apply_json_deploy_script '{}' preDeployScript preDeployScriptSha256 preDeployScriptFile preDeployScriptSha256 pre-deploy && fail '超过 64 KiB 的部署前脚本被接受'
-rootpxe_apply_json_deploy_script '{}' postDeployScript postDeployScriptSha256 postDeployScriptFile postDeployScriptSha256 post-deploy && fail '超过 64 KiB 的部署后脚本被接受'
-unset -f jq
-capture_with_script=$(jq '.preDeployScript="echo unsafe" | .preDeployScriptSha256="0000000000000000000000000000000000000000000000000000000000000000"' <<<"$flat_smb")
-rootpxe_apply_json_checkin "$capture_with_script" && fail 'capture JSON 部署前脚本字段被接受'
-capture_with_script=$(jq '.postDeployScript="echo unsafe" | .postDeployScriptSha256="0000000000000000000000000000000000000000000000000000000000000000"' <<<"$flat_smb")
-rootpxe_apply_json_checkin "$capture_with_script" && fail 'capture JSON 部署后脚本字段被接受'
-unset pre_expected_file post_expected_file missing_pre_hash missing_post_hash nonstring_pre nonstring_post_hash empty_both bad_hash bad_pre_hash bad_post_hash capture_with_script
-
-# 前置保留PXEOS干净Bash；后置只交给离线安装器，不即时执行。
-(
-awk '/^rootpxe_run_deploy_script\(\)/ { on=1 } /^# LVM is deliberately narrow/ { on=0 } on { print }' "$funcs" >"$tmp/deploy-scripts-run.sh"
-. "$tmp/deploy-scripts-run.sh"
-mkdir -p "$tmp/deploy-script-image"
-pre_exec=$(mktemp /tmp/rootpxe-pre-deploy.XXXXXX); post_exec=$(mktemp /tmp/rootpxe-post-deploy.XXXXXX)
-cat >"$pre_exec" <<'EOF'
-printf '%s|%s|%s|%s|%s\n' "$ROOTPXE_TASK_ID" "$ROOTPXE_IMAGE_PATH" "$ROOTPXE_TARGET_DISK" "$ROOTPXE_HOSTNAME" "$ROOTPXE_OS_ID" >"$ROOTPXE_IMAGE_PATH/pre.trace"
-[[ -z ${task_token+x} ]]
-EOF
-cat >"$post_exec" <<'EOF'
-printf '%s|%s|%s|%s|%s\n' "$ROOTPXE_TASK_ID" "$ROOTPXE_IMAGE_PATH" "$ROOTPXE_TARGET_DISK" "$ROOTPXE_HOSTNAME" "$ROOTPXE_OS_ID" >"$ROOTPXE_IMAGE_PATH/post.trace"
-[[ -z ${task_token+x} ]]
-EOF
-taskid=45; taskType=deploy; task_token=must-not-reach-script; imagePath="$tmp/deploy-script-image"; hd=/dev/mockdisk; hostName=demo-host; osid=50
-preDeployScriptFile="$pre_exec"; preDeployScriptSha256=$(sha256sum "$pre_exec" | awk '{print $1}')
-postDeployScriptFile="$post_exec"; postDeployScriptSha256=$(sha256sum "$post_exec" | awk '{print $1}')
-chmod 700 "$pre_exec" "$post_exec"
-rootpxe_register_deploy_script_file "$pre_exec"; rootpxe_register_deploy_script_file "$post_exec"
-postDeployScriptExecution=linux-systemd-v1
-rootpxe_stage() { :; }
-rootpxe_console_message() { :; }
-rootpxe_install_linux_startup_for_disk() {
-    [[ $1 == /dev/mockdisk && $3 == "$postDeployScriptSha256" ]] || return 1
-    cp "$2" "$tmp/deploy-script-image/post.injected"
-}
-rootpxe_install_linux_startup_for_targets() { rootpxe_install_linux_startup_for_disk "$3" "$1" "$2"; }
-rootpxe_run_pre_deploy_script || fail '部署前脚本执行失败'
-rootpxe_run_post_deploy_script || fail '部署后脚本执行失败'
-[[ $(<"$tmp/deploy-script-image/pre.trace") == "45|$tmp/deploy-script-image|/dev/mockdisk|demo-host|50" ]] || fail '部署前脚本未获得受限环境变量'
-[[ ! -e $tmp/deploy-script-image/post.trace && -f $tmp/deploy-script-image/post.injected ]] || fail '部署后脚本应离线注入而非PXEOS运行'
-[[ ! -e $pre_exec && ! -e $post_exec && -z ${preDeployScriptFile:-} && -z ${postDeployScriptFile:-} ]] || fail '部署脚本成功后未清理临时文件'
-post_fail=$(mktemp /tmp/rootpxe-post-deploy.XXXXXX)
-printf 'exit 7\n' >"$post_fail"
-postDeployScriptFile="$post_fail"; postDeployScriptSha256=$(sha256sum "$post_fail" | awk '{print $1}')
-chmod 700 "$post_fail"; rootpxe_register_deploy_script_file "$post_fail"
-postDeployScriptExecution=linux-systemd-v1
-rootpxe_install_linux_startup_for_disk() { rootpxe_startup_error=fixture_install_failed; return 1; }
-rootpxe_run_post_deploy_script && fail '失败的离线注入被误报成功'
-[[ ${rootpxe_deploy_script_error:-} == fixture_install_failed && ! -e $post_fail ]] || fail '失败的注入未清理或未标记失败'
-unset pre_exec post_exec post_fail
-)
+# 原生 Cloud-init 的私有正文形状/原字节由专属协议 fixture 覆盖。
+. "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh"
 
 for smb_export in _share share-name; do
     allowed_smb="{\"protocol\":\"smb\",\"storageip\":\"192.0.2.10\",\"exportPath\":\"$smb_export\",\"smbUsername\":\"test-user\",\"smbPassword\":\"test-pass\"}"
@@ -268,7 +172,7 @@ sed -e 's|^rootpxe_source_core_library partition-funcs.sh.*|:|' \
     "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/legacy-funcs.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
-cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-startup.sh" "$tmp/linux-startup.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
 printf '\nif declare -F task_log_test_emulate_pin_flags >/dev/null; then task_log_test_emulate_pin_flags; fi\n' >>"$tmp/log-paths.sh"
 for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
@@ -286,7 +190,6 @@ verifyNetworkConnection() { :; }
 determineOS() { :; }
 dots() { :; }
 handleError() { return 97; }
-rootpxe_deployment_identity_linux_capabilities_installed() { return 1; }
 rootpxe_deployment_identity_windows_hostname_capability_installed() { return 1; }
 rootpxe_deployment_identity_windows_sysprep_capability_installed() { return 1; }
 EOF
@@ -354,8 +257,6 @@ export MOCK_CHECKIN_BODY
 
 protocol=''; storage_server=''; storage_export=''; storage_share=''; storageip=''; export_path=''
 smb_username=''; smb_password=''; smb_domain=''
-preDeployScriptFile="$tmp/inherited-pre-script"; preDeployScriptSha256=$(printf '0%.0s' {1..64})
-postDeployScriptFile="$tmp/inherited-post-script"; postDeployScriptSha256=$(printf '1%.0s' {1..64})
 legacy_checkin_rc=0
 checkin_rootpxe || legacy_checkin_rc=$?
 # checkin_rootpxe installs its runtime session-cleanup trap.  Restore the
@@ -363,7 +264,7 @@ checkin_rootpxe || legacy_checkin_rc=$?
 trap 'rm -rf "$tmp"' EXIT INT TERM
 [[ $legacy_checkin_rc -eq 0 ]] || fail 'legacy checkin 响应被拒绝'
 [[ $protocol == nfs && $storage_server == 192.0.2.20 && $storage_export == /legacy ]] || fail 'legacy NFS 协议或 export 解析错误'
-[[ -z ${preDeployScriptFile:-} && -z ${preDeployScriptSha256:-} && -z ${postDeployScriptFile:-} && -z ${postDeployScriptSha256:-} ]] || fail 'legacy checkin must not retain deploy scripts'
+[[ -z ${cloudInitUserDataFile:-} ]] || fail 'legacy checkin retained Cloud-init private data'
 [[ ! -e $tmp/legacy-smb-credential-attempt ]] || fail 'legacy NFS 不得创建 SMB 凭据'
 
 legacy_smb_body=$(cat <<'EOF'
@@ -505,12 +406,12 @@ test_error_stage_field() {
     fi
 }
 . "$tmp/error-stage.sh"
-test_error_stage_field 'PXEOS_STAGE=post_deploy_script CODE=POST_DEPLOY_SCRIPT_FAILED' post_deploy_script
+test_error_stage_field 'PXEOS_STAGE=cloud_init CODE=CLOUD_INIT_INJECTION_FAILED' cloud_init
 test_error_stage_field 'PXEOS_STAGE=customizing_hostname CODE=HOSTNAME_FAILED' customizing_hostname
 test_error_stage_field 'PXEOS_STAGE=untrusted CODE=FAIL' ''
-test_error_stage_field 'PXEOS_STAGE=pre_deploy_script CODE=PRE_DEPLOY_SCRIPT_FAILED' ''
-test_error_stage_field 'PXEOS_STAGE=post_deploy_script PXEOS_STAGE=untrusted CODE=FAIL' ''
-test_error_stage_field $'PXEOS_STAGE=post_deploy_script\nPXEOS_STAGE=customizing_hostname CODE=FAIL' ''
+test_error_stage_field 'PXEOS_STAGE=restore CODE=RESTORE_FAILED' ''
+test_error_stage_field 'PXEOS_STAGE=cloud_init PXEOS_STAGE=untrusted CODE=FAIL' ''
+test_error_stage_field $'PXEOS_STAGE=cloud_init\nPXEOS_STAGE=customizing_hostname CODE=FAIL' ''
 
 # A server rejection must expose only the HTTP status and its controlled error
 # field.  Full payloads can contain request correlation data and must never be
@@ -893,7 +794,7 @@ chmod +x $tmp/mock/*
 sed -e "s|^rootpxe_source_core_library partition-funcs.sh|. \"$overlay/usr/share/pxeos/lib/partition-funcs.sh\"|" -e "s|^rootpxe_source_core_library deployment-identity.sh|:|" -e "s|^rootpxe_source_core_library restore-preflight.sh|. \"$overlay/usr/share/pxeos/lib/restore-preflight.sh\"|" -e "s|^rootpxe_source_core_library capture-recovery.sh|. \"$overlay/usr/share/pxeos/lib/capture-recovery.sh\"|" -e "s|</proc/cmdline|<$tmp/cmdline|" -e "s|/ntfs/|$tmp/ntfs/|g" -e "s| /ntfs\([ ;)]\)| $tmp/ntfs\1|g" -e "s|mountpoint=/linuxroot|mountpoint=$tmp/linuxroot|g" -e "s|/linuxroot/|$tmp/linuxroot/|g" -e "s| /linuxroot\([ ;)]\)| $tmp/linuxroot\1|g" $funcs >$tmp/funcs.sh
 cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
-cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-startup.sh" "$tmp/linux-startup.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
 printf '\nif declare -F task_log_test_emulate_pin_flags >/dev/null; then task_log_test_emulate_pin_flags; fi\n' >>"$tmp/log-paths.sh"
 for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
@@ -912,8 +813,6 @@ ismajordebug=0
 isdebug=0
 . $tmp/funcs.sh
 rootpxe_require_unused_target_disks() { :; } # 布局 writer 的设备全部为 mock。
-rootpxe_deployment_identity_linux_state_root="$tmp/linuxroot"
-rootpxe_deployment_identity_linux_policy_enabled() { return 1; }
 rootpxe_deployment_identity_windows_policy_enabled() { return 1; }
 rootpxe_deployment_identity_storage_enabled() { return 1; }
 declare -f fsTypeSetting >"$tmp/actual-fsTypeSetting.sh"
@@ -1069,8 +968,7 @@ MODE=hostname_invalid; export MODE
 rootpxe_apply_windows_hostname /dev/mock2 || fail invalid-unattend-must-not-gate-registry
 [[ $(wc -l <$tmp/registry) -eq $((registry_count + 1)) ]] || fail invalid-unattend-registry-not-called
 
-# Linux uses the same deployment hostname contract, but discovers the one
-# actual root filesystem rather than selecting a largest/first partition.
+# Linux 根发现保留文件系统和VG安全回归；不再离线修改主机名。
 rootpxe_stage() { :; }
 getPartitions() { parts='/dev/mockboot /dev/mockroot'; }
 # Restore the production function instead of faking its Partclone category:
@@ -1088,28 +986,18 @@ linux_ext4_root=$(rootpxe_find_linux_root_filesystem /dev/mockdisk)
 linux_ext4_rc=$?
 set -e
 [[ $linux_ext4_rc -eq 0 && $linux_ext4_root == /dev/mockroot'|'ext4'|'* ]] || fail linux-ext4-raw-blkid-root
-rootpxe_apply_hostname_for_disk /dev/mockdisk || fail linux-ext-hostname
-grep -Fqx linux-node $tmp/linuxroot/etc/hostname || fail linux-hostname-write
-grep -Fq '127.0.1.1 linux-node old.example' $tmp/linuxroot/etc/hosts || fail linux-hosts-token-replace
-grep -Fq '10.0.0.1 PXE-OLD.example' $tmp/linuxroot/etc/hosts || fail linux-hosts-substring
-grep -Fq '# PXE-OLD comment' $tmp/linuxroot/etc/hosts || fail linux-hosts-comment
 [[ ! -s $tmp/lvm-trace ]] || fail linux-ordinary-vg-activation
-[[ ! -s $tmp/hostmode-trace ]] || fail linux-existing-hostname-mode
 
 : >$tmp/hostmode-trace
 previous_umask=$(umask)
 umask 077
 MODE=linux_new_hostname; export MODE
-rootpxe_apply_hostname_for_disk /dev/mockdisk || fail linux-new-hostname
 umask "$previous_umask"
-grep -Fq "chmod:0644 $tmp/linuxroot/etc/hostname" $tmp/hostmode-trace || fail linux-new-hostname-mode
-grep -Fq "chown:root:root $tmp/linuxroot/etc/hostname" $tmp/hostmode-trace || fail linux-new-hostname-owner
 
 : >$tmp/mount-trace
 MODE=linux_ext; LINUX_MOCK_ROOT_TYPE=xfs; export MODE LINUX_MOCK_ROOT_TYPE
-rootpxe_apply_hostname_for_disk /dev/mockdisk || fail linux-xfs-hostname
+[[ $(rootpxe_find_linux_root_filesystem /dev/mockdisk) == /dev/mockroot'|'xfs'|'* ]] || fail linux-xfs-root
 grep -Fq -- '-o ro,nouuid' $tmp/mount-trace || fail linux-xfs-readonly-nouuid
-grep -Fq -- '-o rw,nouuid' $tmp/mount-trace || fail linux-xfs-readwrite-nouuid
 LINUX_MOCK_ROOT_TYPE=ext4; export LINUX_MOCK_ROOT_TYPE
 
 # Btrfs must probe without log replay and preserve the selected numeric
@@ -1120,14 +1008,10 @@ MODE=linux_btrfs_default; LINUX_MOCK_ROOT_TYPE=btrfs; BTRFS_DEFAULT_ID=256; BTRF
 [[ $(rootpxe_find_linux_root_filesystem /dev/mockdisk) == '/dev/mockroot|btrfs|||256' ]] || fail linux-btrfs-default-root
 grep -Fq -- '-t btrfs -o ro,nologreplay' $tmp/mount-trace || fail linux-btrfs-readonly-nologreplay
 [[ ! -s $tmp/btrfs-list-trace ]] || fail linux-btrfs-default-must-not-enumerate-snapshot
-rootpxe_apply_hostname_for_disk /dev/mockdisk || fail linux-btrfs-default-hostname
-grep -Fq -- '-t btrfs -o rw,subvolid=256' $tmp/mount-trace || fail linux-btrfs-default-rw-subvolid
 
 : >$tmp/mount-trace
 MODE=linux_btrfs_subvol; BTRFS_SUBVOLS='ID 256 gen 1 top level 5 path @'; export MODE BTRFS_SUBVOLS
 [[ $(rootpxe_find_linux_root_filesystem /dev/mockdisk) == '/dev/mockroot|btrfs|||256' ]] || fail linux-btrfs-subvol-root
-rootpxe_apply_hostname_for_disk /dev/mockdisk || fail linux-btrfs-subvol-hostname
-grep -Fq -- '-t btrfs -o rw,subvolid=256' $tmp/mount-trace || fail linux-btrfs-subvol-rw-subvolid
 
 # A broken default-subvolume query or a malformed listing is a probe error,
 # not permission to select a snapshot or any other candidate.
@@ -1185,10 +1069,8 @@ LINUX_MOCK_ROOT_TYPE=ext4; export LINUX_MOCK_ROOT_TYPE
 
 getPartitions() { parts='/dev/mockpv'; }
 MODE=linux_lvm; LINUX_MOCK_LV_TYPE=ext4; LV_BLKID_TRACE=$tmp/lv-blkid-trace; : >$LV_BLKID_TRACE; export MODE LINUX_MOCK_LV_TYPE LV_BLKID_TRACE
-rootpxe_apply_hostname_for_disk /dev/mockdisk || fail linux-lvm-hostname
-grep -Fqx linux-node $tmp/linuxroot/etc/hostname || fail linux-lvm-write
-[[ $(grep -Fc -- '-ay' $tmp/lvm-trace) -eq 2 ]] || fail linux-lvm-reactivate
-[[ $(grep -Fc -- '-an' $tmp/lvm-trace) -eq 2 ]] || fail linux-lvm-cleanup
+[[ $(rootpxe_find_linux_root_filesystem /dev/mockdisk) == /dev/vg0/root'|'ext4'|'* ]] || fail linux-lvm-root
+[[ $(grep -Fc -- '-an' $tmp/lvm-trace) -eq 1 ]] || fail linux-lvm-cleanup
 grep -Fq -- '-p -o value -s TYPE /dev/vg0/root' $LV_BLKID_TRACE || fail linux-lvm-blkid-probe
 unset LV_BLKID_TRACE
 
@@ -1237,52 +1119,10 @@ MODE=linux_lvm_bad_pvs; export MODE
 rootpxe_find_linux_root_filesystem /dev/mockdisk && fail linux-lvm-bad-pvs-root
 [[ $? -eq 23 ]] || fail linux-lvm-bad-pvs-root-code
 
-getPartitions() { parts='/dev/mockroot'; }
-MODE=linux_readback_fail; export MODE
-set +e
-(
-    handleError() { exit 97; }
-    rootpxe_apply_hostname_for_disk /dev/mockdisk
-)
-linux_readback_rc=$?
-set -e
-[[ $linux_readback_rc -eq 97 ]] || fail linux-readback-result
-
-MODE=linux_symlink; export MODE
-set +e
-(
-    handleError() { exit 97; }
-    rootpxe_apply_hostname_for_disk /dev/mockdisk
-)
-linux_symlink_rc=$?
-set -e
-[[ $linux_symlink_rc -eq 97 ]] || fail linux-symlink-result
-
 getPartitions() { parts='/dev/mockpv'; }
 MODE=linux_lvm_external; export MODE
 rootpxe_find_linux_root_filesystem /dev/mockdisk && fail linux-external-vg
 [[ $? -eq 22 ]] || fail linux-external-vg-code
-
-set +e
-(
-    handleError() { printf '%s\n' "$1" >$tmp/linux-lvm-attention; exit 97; }
-    rootpxe_apply_hostname_for_disk /dev/mockdisk
-)
-linux_cross_disk_rc=$?
-set -e
-[[ $linux_cross_disk_rc -eq 97 ]] || fail linux-external-vg-attention-result
-grep -Fqx 'PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_CROSS_DISK_LVM' $tmp/linux-lvm-attention || fail linux-external-vg-attention
-
-MODE=linux_lvm_mixed; export MODE
-set +e
-(
-    handleError() { printf '%s\n' "$1" >$tmp/linux-lvm-attention; exit 97; }
-    rootpxe_apply_hostname_for_disk /dev/mockdisk
-)
-linux_activation_rc=$?
-set -e
-[[ $linux_activation_rc -eq 97 ]] || fail linux-lvm-activation-attention-result
-grep -Fqx 'PXEOS_STAGE=customizing_hostname CODE=LINUX_ROOT_LVM_ACTIVATION_FAILED' $tmp/linux-lvm-attention || fail linux-lvm-activation-attention
 
 # DOS extended/logical layouts generate Schema v2: the EBR container is a
 # derived metadata record with no artifact, while logical image payloads keep
@@ -1664,114 +1504,56 @@ set -e
 grep -Fq 'Could not determine internal filesystem growth' $tmp/six-plan-error || fail six-layout-missing-leaf-error
 unset originalSchemaFile rootpxe_resolved_layout_file fixed_size_partitions schemaHash schemaRevision SCHEMAHASH six_schema six_layout six_template six_plan six_applied TARGET_BYTES MODE LAYOUT_APPLIED LAYOUT_SFDISK_MODE LAYOUT_SFDISK_ARGS LAYOUT_PARTPROBE_TRACE LAYOUT_SLEEP_TRACE
 
-# Resume is deliberately before layout validation and must not reinvoke image
-# restoration after a hostname or post-deploy-script attention retry. Execute the
-# tail with failing mocks for all prohibited operations, not merely a grep.
+# Windows 名称重试与 Cloud-init 重试都不得重写分区。
 resume_script=$tmp/resume.sh
-awk '/^findHDDInfo$/{on=1} on' $download | sed -e "s|/bin/pxeos.imgcomplete|$tmp/pxeos.imgcomplete|g" >$resume_script
-cat >$tmp/pxeos.imgcomplete <<'EOF'
-printf '%s\n' complete >>$RESUME_TRACE
-EOF
-chmod +x $tmp/pxeos.imgcomplete
-: >$tmp/resume-trace
+awk '/^findHDDInfo$/{on=1} on' "$download" | sed -e "s|/bin/pxeos.imgcomplete|$tmp/pxeos.imgcomplete|g" >"$resume_script"
+printf '%s\n' 'printf "%s\n" complete >>"$RESUME_TRACE"' >"$tmp/pxeos.imgcomplete"
 RESUME_TRACE=$tmp/resume-trace; export RESUME_TRACE
-findHDDInfo() { hd=/dev/mock2; printf '%s\n' find >>$RESUME_TRACE; }
-rootpxe_disk_stable_identity() { echo resume-disk-id; }
-rootpxe_wait_for_disk_permit() { printf 'permit:%s:%s\n' "$1" "$2" >>$RESUME_TRACE; }
-rootpxe_stage() { printf 'stage:%s\n' "$*" >>$RESUME_TRACE; }
-rootpxe_apply_hostname_for_disk() { rootpxe_deployment_identity_hostname_result=true; printf 'hostname:%s:%s\n' "$osid" "$1" >>$RESUME_TRACE; }
-rootpxe_run_pre_deploy_script() { printf '%s\n' UNEXPECTED:pre >>$RESUME_TRACE; return 1; }
-rootpxe_run_post_deploy_script() { printf '%s\n' post >>$RESUME_TRACE; }
-# Exercise the production safe-resume branch with an active identity policy.
-# Both customization and post-deploy retries must submit a result for this
-# attempt before imgcomplete can finish it.
-rootpxe_deployment_identity_policy_enabled() { return 0; }
-rootpxe_deployment_identity_private_enabled() { return 1; }
-rootpxe_deployment_identity_linux_policy_enabled() { return 1; }
-rootpxe_deployment_identity_windows_policy_enabled() { return 1; }
-rootpxe_deployment_identity_storage_enabled() { return 1; }
-rootpxe_deployment_identity_request_plan() { printf 'identity-plan:%s\n' "$1" >>$RESUME_TRACE; }
-rootpxe_deployment_identity_request_private() { fail resume-private-unexpected; }
-rootpxe_deployment_identity_report_result() { printf 'identity-result:%s\n' "$*" >>$RESUME_TRACE; }
-rootpxe_deployment_identity_cleanup_private() { printf '%s\n' identity-cleanup >>$RESUME_TRACE; }
-rootpxe_validate_deployment_layout() { fail resume-layout; }
-rootpxe_apply_deployment_layout() { fail resume-layout-apply; }
-rootpxe_plan_deploy_disk_operation() { fail resume-nvme-plan; }
-preparePartitions() { fail resume-partition; }
-putDataBack() { fail resume-restore; }
-resumeStage=customizing_hostname
-changeHostname=true
-osid=50
-imagePath=$tmp/image
-imgType=n
-imgPartitionType=all
-nombr=0
-(
-    . $resume_script
-) || fail resume-execution
-grep -Fqx permit:resume-disk-id:deploy_write $tmp/resume-trace || fail resume-permit
-grep -Fqx hostname:50:/dev/mock2 $tmp/resume-trace || fail resume-hostname
-grep -Fqx identity-plan:/dev/mock2 $tmp/resume-trace || fail resume-customizing-plan
-grep -Fqx 'identity-result:true false false false false false' $tmp/resume-trace || fail resume-customizing-result
-grep -Fqx identity-cleanup $tmp/resume-trace || fail resume-customizing-cleanup
-grep -Fqx post $tmp/resume-trace || fail resume-post
-grep -Fqx complete $tmp/resume-trace || fail resume-complete
-
-: >$tmp/resume-post-trace
-RESUME_TRACE=$tmp/resume-post-trace; export RESUME_TRACE
-rootpxe_apply_hostname_for_disk() { rootpxe_deployment_identity_hostname_result=true; printf 'hostname:%s:%s\n' "$osid" "$1" >>$RESUME_TRACE; }
-resumeStage=post_deploy_script
-changeHostname=true
-(
-    . $resume_script
-) || fail resume-post-execution
-grep -Fqx permit:resume-disk-id:deploy_write $tmp/resume-post-trace || fail resume-post-permit
-grep -Fqx identity-plan:/dev/mock2 $tmp/resume-post-trace || fail resume-post-plan
-grep -Fqx hostname:50:/dev/mock2 $tmp/resume-post-trace || fail resume-post-hostname
-grep -Fqx 'identity-result:true false false false false false' $tmp/resume-post-trace || fail resume-post-result
-grep -Fqx identity-cleanup $tmp/resume-post-trace || fail resume-post-cleanup
-grep -Fqx post $tmp/resume-post-trace || fail resume-post-script
-grep -Fqx complete $tmp/resume-post-trace || fail resume-post-complete
-! grep -Fq UNEXPECTED:pre $tmp/resume-post-trace || fail resume-post-ran-pre
-
-# replay the hostname step at the customization resume point, and must stop if
-# that offline update fails.
-rootpxe_deployment_identity_policy_enabled() { return 1; }
-: >"$tmp/resume-hostname-only.trace"
-RESUME_TRACE="$tmp/resume-hostname-only.trace"; export RESUME_TRACE
-rootpxe_apply_hostname_for_disk() { printf 'hostname-only:%s\n' "$1" >>$RESUME_TRACE; }
-resumeStage=customizing_hostname
-changeHostname=true
-(
-    . "$resume_script"
-) || fail resume-hostname-only-execution
-grep -Fqx 'hostname-only:/dev/mock2' "$tmp/resume-hostname-only.trace" || fail resume-hostname-only-apply
-! grep -Eq '^identity-(plan|result):' "$tmp/resume-hostname-only.trace" || fail resume-hostname-only-must-not-use-identity
-
-: >"$tmp/resume-hostname-only-error"
+findHDDInfo(){ hd=/dev/mock2; disks=$hd; }
+rootpxe_disk_stable_identity(){ printf 'resume-disk-id\n'; }
+rootpxe_record_disk_permit_binding(){ :; }
+rootpxe_verify_disk_permit_binding(){ :; }
+rootpxe_activate_disk_permit_binding(){ :; }
+rootpxe_wait_for_disk_permit(){ printf 'permit:%s:%s\n' "$1" "$2" >>"$RESUME_TRACE"; }
+rootpxe_stage(){ :; }
+rootpxe_apply_hostname_for_disk(){ rootpxe_deployment_identity_hostname_result=true; printf 'hostname:%s\n' "$1" >>"$RESUME_TRACE"; }
+rootpxe_apply_cloud_init(){ rootpxe_deployment_identity_cloud_init_result=${expected_cloud_result:-false}; printf 'cloud-init\n' >>"$RESUME_TRACE"; }
+rootpxe_deployment_identity_policy_enabled(){ return 0; }
+rootpxe_deployment_identity_private_enabled(){ return 1; }
+rootpxe_deployment_identity_windows_policy_enabled(){ return 1; }
+rootpxe_deployment_identity_request_plan(){ printf 'identity-plan\n' >>"$RESUME_TRACE"; }
+rootpxe_deployment_identity_report_result(){ printf 'identity-result:%s\n' "$*" >>"$RESUME_TRACE"; }
+rootpxe_deployment_identity_cleanup_private(){ printf 'identity-cleanup\n' >>"$RESUME_TRACE"; }
+rootpxe_validate_deployment_layout(){ fail resume-layout; }
+rootpxe_apply_deployment_layout(){ fail resume-layout-apply; }
+rootpxe_plan_deploy_disk_operation(){ fail resume-nvme-plan; }
+preparePartitions(){ fail resume-partition; }
+putDataBack(){ fail resume-restore; }
+imgType=n imgPartitionType=all imagePath=$tmp/image nombr=0
+for resumeStage in customizing_hostname cloud_init; do
+    : >"$RESUME_TRACE"
+    rootpxe_deployment_identity_hostname_result=false
+    rootpxe_deployment_identity_sysprep_result=false
+    if [[ $resumeStage == customizing_hostname ]]; then changeHostname=true; osid=9; expected_cloud_result=false; expected_result='true false false'; else changeHostname=false; osid=50; expected_cloud_result=true; expected_result='false false true'; fi
+    ( . "$resume_script" ) || fail resume-execution
+    grep -Fqx 'permit:resume-disk-id:deploy_write' "$RESUME_TRACE" || fail resume-permit
+    grep -Fqx "identity-result:$expected_result" "$RESUME_TRACE" || fail resume-result
+    grep -Fqx complete "$RESUME_TRACE" || fail resume-complete
+done
+rootpxe_deployment_identity_policy_enabled(){ return 1; }
+resumeStage=customizing_hostname changeHostname=true osid=9
+: >"$RESUME_TRACE"
+( . "$resume_script" ) || fail resume-hostname-only
+grep -Fqx hostname:/dev/mock2 "$RESUME_TRACE" || fail resume-hostname-only-apply
+! grep -Fq identity-plan "$RESUME_TRACE" || fail resume-hostname-only-plan
 set +e
-(
-    handleError() { printf '%s\n' "$1" >"$tmp/resume-hostname-only-error"; exit 94; }
-    rootpxe_apply_hostname_for_disk() { return 1; }
-    . "$resume_script"
-)
+( handleError(){ exit 94; }; rootpxe_apply_hostname_for_disk(){ return 1; }; . "$resume_script" )
 hostname_only_rc=$?
 set -e
-[[ $hostname_only_rc -eq 94 ]] || fail resume-hostname-only-failure-exit
-grep -Fqx 'PXEOS_STAGE=customizing_hostname CODE=HOSTNAME_FAILED' "$tmp/resume-hostname-only-error" || fail resume-hostname-only-failure-reported
-rootpxe_deployment_identity_policy_enabled() { return 0; }
-
-# Keep the ordering assertion as a cheap guard against accidental future
-# movement of the early resume branch.
-resume=$(grep -n -F 'resume_target_id=$(rootpxe_disk_stable_identity "$hd")' "$download" | cut -d: -f1)
-layout=$(grep -n -F 'REASON=pre_permit_validation_failed' "$download" | cut -d: -f1)
-[[ $resume =~ ^[1-9][0-9]*$ && $layout =~ ^[1-9][0-9]*$ && $resume -lt $layout ]] || fail resume-order
-pre_safe=$(grep -n "resumeStage:-} == pre_deploy_script" $download || true)
-[[ -z $pre_safe ]] || fail pre-deploy-stage-must-not-bypass-imaging
-permit=$(grep -n "rootpxe_wait_for_disk_permit \"\$rootpxe_planned_target_id\"" $download | cut -d: -f1)
-pre=$(grep -n "rootpxe_run_pre_deploy_script" $download | tail -n1 | cut -d: -f1)
-prepare=$(grep -n "preparePartitions" $download | tail -n1 | cut -d: -f1)
-[[ $permit -lt $pre && $pre -lt $prepare ]] || fail pre-deploy-script-order
+[[ $hostname_only_rc -eq 94 ]] || fail resume-hostname-only-failure
+resume=$(grep -nF 'if [[ ${resumeStage:-} == customizing_hostname ||' "$download" | cut -d: -f1)
+layout=$(grep -nF 'REASON=pre_permit_validation_failed' "$download" | cut -d: -f1)
+[[ $resume -lt $layout ]] || fail resume-order
 echo 'PASS: PXEOS business regression contract'
 )
 # ===== 原脚本结束：tests/pxeos_business_regression.sh =====
@@ -1794,12 +1576,6 @@ mapfile -d '' -t runtime_candidates < <(
 )
 runtime_files=()
 for runtime_candidate in "${runtime_candidates[@]}"; do
-    # These two exact assets run in the restored target OS, not on the PXEOS
-    # console.  Do not exclude other templates or the PXEOS installer library.
-    case $runtime_candidate in
-        "$overlay/usr/share/pxeos/lib/linux-startup-templates/startup-runner.sh"|\
-        "$overlay/usr/share/pxeos/lib/linux-startup-templates/startup-result.sh") continue ;;
-    esac
     IFS= read -r runtime_shebang <"$runtime_candidate" || true
     case $runtime_shebang in
         '#!'*bash*|'#!'*'/sh'*)
@@ -1814,15 +1590,9 @@ for runtime_candidate in "${runtime_candidates[@]}"; do
     esac
 done
 [[ ${#runtime_files[@]} -gt 0 ]] || { printf 'FAIL: no PXEOS runtime scripts found\n' >&2; exit 1; }
-for required_runtime in pxeos.upload pxeos.av pxeos.man.reg pxeos.debug S99pxeos funcs.sh linux-startup.sh; do
+for required_runtime in pxeos.upload pxeos.av pxeos.man.reg pxeos.debug S99pxeos funcs.sh cloud-init.sh; do
     printf '%s\n' "${runtime_files[@]}" | grep -Eq "/${required_runtime}$" \
         || { printf 'FAIL: runtime shebang scan missed %s\n' "$required_runtime" >&2; exit 1; }
-done
-for target_asset in startup-runner.sh startup-result.sh; do
-    if printf '%s\n' "${runtime_files[@]}" | grep -Fx "$overlay/usr/share/pxeos/lib/linux-startup-templates/$target_asset" >/dev/null; then
-        printf 'FAIL: target OS asset included as PXEOS console source: %s\n' "$target_asset" >&2
-        exit 1
-    fi
 done
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }

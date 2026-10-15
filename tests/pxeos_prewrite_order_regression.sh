@@ -16,8 +16,8 @@ before() { local a b; a=$(grep -nF "$2" "$1" | head -n 1 | cut -d: -f1 || true);
 absent() { ! grep -Fq "$2" "$1"; }
 sed -n '/^findHDDInfo() {/,/^}/p' "$funcs" >"$tmp/discovery"
 assert absent "$tmp/discovery" 'enableWriteCache'
-awk '/^rootpxe_run_pre_deploy_script / {emit=1} emit' "$download" >"$tmp/write-preparation"
-assert before "$tmp/write-preparation" 'rootpxe_run_pre_deploy_script' 'rootpxe_require_unused_target_disks'
+awk '/^rootpxe_bind_granted_deploy_targets / {emit=1} emit' "$download" >"$tmp/write-preparation"
+assert before "$tmp/write-preparation" 'rootpxe_bind_granted_deploy_targets' 'rootpxe_require_unused_target_disks'
 assert before "$tmp/write-preparation" 'rootpxe_require_unused_target_disks' 'enableWriteCache'
 assert before "$tmp/write-preparation" 'enableWriteCache' 'preparePartitions'
 assert before "$tmp/write-preparation" 'validateImageSectorSize "$hd" "$sector_metadata"' 'rootpxe_validate_deployment_layout'
@@ -38,14 +38,15 @@ for function_name in applySfdiskPartitions restoreEBR; do
     sed -n "/^$function_name() {/,/^}/p" "$overlay/usr/share/pxeos/lib/partition-funcs.sh" >"$tmp/$function_name"
     assert grep -Fq 'rootpxe_require_unused_target_disks' "$tmp/$function_name"
 done
-awk '/^rootpxe_run_pre_deploy_script / {emit=1} emit {print} emit && /^\[\[ \$nombr -ne 1 \]\] && rootpxe_stage prepare_partitions / {exit}' "$download" >"$tmp/normal-write-snippet"
+awk '/^rootpxe_bind_granted_deploy_targets / {emit=1} emit {print} emit && /^\[\[ \$nombr -ne 1 \]\] && rootpxe_stage prepare_partitions / {exit}' "$download" >"$tmp/normal-write-snippet"
 for scenario in matching format_allowed format_failed; do
     trace="$tmp/n-$scenario.trace"; : >"$trace"; status=0
     (
-        rootpxe_run_pre_deploy_script() { printf 'prehook\n' >>"$trace"; }
+        rootpxe_bind_granted_deploy_targets() { printf 'binding\n' >>"$trace"; }
         rootpxe_require_unused_target_disks() { printf 'guard\n' >>"$trace"; }
         enableWriteCache() { printf 'cache\n' >>"$trace"; }
         rootpxe_stage() { :; }
+        rootpxe_deployment_identity_policy_enabled(){ return 1; }
         preparePartitions() { :; }
         handleError() { printf 'error\n' >>"$trace"; exit 91; }
         validateImageSectorSize() {

@@ -23,6 +23,7 @@ mkdir -p "$tmp/bin" "$tmp/source/Windows/System32/sysprep"
 cat >"$tmp/bin/jq" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
+    *'.systemIdentity.sysprep == true'*) for last; do :; done; grep -q '"sysprep":true' "$last" ;;
     *' -e '*) exit 0 ;;
     *' -j '*) for last; do :; done; cat "$last" ;;
     *) exit 1 ;;
@@ -69,6 +70,8 @@ awk '/^rootpxe_resolve_windows_sysprep_unattend_path\(\)/ {p=1} p {print} p && /
 awk '/^rootpxe_apply_windows_hostname\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" | sed -e "s|/tmp/ntfs-mount-output|$tmp/mount-output|g" -e "s|/ntfs|$tmp/ntfs|g" >>"$tmp/functions.sh"
 source "$tmp/functions.sh"
 rootpxe_stage() { :; }
+rootpxe_run_logged_typed_native() { shift 2; "$@"; }
+rootpxe_change_hostname_registry() { printf 'registry\n' >>"$tmp/registry.trace"; }
 
 policy="$tmp/policy.json"
 private="$tmp/private.xml"
@@ -88,6 +91,22 @@ grep -Eq '^val -w .+' "$XML_TRACE" || fail 'xml val arguments were not forwarded
 grep -Eq '^sel -t -m .+count\(' "$XML_TRACE" || fail 'xml sel discovery arguments were not forwarded'
 grep -Eq '^ed -L -s .+ -t elem -n ComputerName -v PXEHOST ' "$XML_TRACE" || fail 'xml ed arguments were not forwarded'
 [[ $(grep -Ec '^sel -t -m ' "$XML_TRACE") -eq 2 ]] || fail 'xml sel verification call missing'
+[[ ! -e $tmp/registry.trace ]] || fail 'ON/ON changed registry'
+
+# OFF/ON 保留私有 XML 原字节；OFF/OFF 无挂载；ON/OFF 只调用注册表。
+changeHostname=false
+: >"$XML_TRACE"
+rootpxe_apply_windows_hostname "$tmp/source" || fail 'OFF/ON rejected'
+cmp -s "$private" "$tmp/ntfs/Windows/System32/sysprep/unattend.xml" || fail 'OFF/ON changed supplied bytes'
+[[ ! -e $tmp/registry.trace ]] || fail 'OFF/ON changed registry'
+printf '{"systemIdentity":{"sysprep":false}}\n' >"$policy"
+: >"$NTFS_MOUNT_TRACE"
+rootpxe_apply_windows_hostname "$tmp/source" || fail 'OFF/OFF rejected'
+[[ ! -s $NTFS_MOUNT_TRACE ]] || fail 'OFF/OFF mounted target'
+changeHostname=true
+rootpxe_apply_windows_hostname "$tmp/source" || fail 'ON/OFF rejected'
+[[ $(<"$tmp/registry.trace") == registry ]] || fail 'ON/OFF did not use registry'
+printf '{"systemIdentity":{"sysprep":true}}\n' >"$policy"
 
 : >"$XML_TRACE"
 XML_FAIL=val

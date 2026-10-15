@@ -1,23 +1,16 @@
 #!/usr/bin/env bash
-# Contract for the real deployment entrypoints: selected Linux system-identity
-# validation precedes hostname writes, and private initialization material is
-# fetched before the post-restore initializer runs.
+# 冻结身份计划、Windows私有XML、NoCloud离线注入与回执的真实入口顺序。
 set -euo pipefail
-root="$(cd "$(dirname "$0")/.." && pwd)"
-funcs="${ROOTPXE_FUNCS:-$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh}"
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
-body() { sed -n "/^$1() {\$/,/^}\$/p" "$2"; }
-line_of() { (grep -nF "$1" || true) | head -n1 | cut -d: -f1; }
-
-hostname=$(body rootpxe_apply_linux_hostname_for_disk "$funcs")
-host_pre=$(printf '%s\n' "$hostname" | line_of 'rootpxe_deployment_identity_linux_system_preflight "$mountpoint"')
-host_write=$(printf '%s\n' "$hostname" | line_of "printf '%s\\n' \"\$hostName\" >\"\$hostname_path\"")
-[[ $host_pre =~ ^[0-9]+$ && $host_write =~ ^[0-9]+$ && $host_pre -lt $host_write ]] || fail 'Linux system preflight does not precede hostname write'
-printf '%s\n' "$hostname" | grep -Fq 'REASON=${preflight_reason} RC=${preflight_rc}' || fail 'Linux system preflight failure reason is not reported'
-
-complete=$(body completeTasking "$funcs")
-private=$(printf '%s\n' "$complete" | line_of 'rootpxe_deployment_identity_request_private')
-initializer=$(printf '%s\n' "$complete" | line_of 'rootpxe_apply_hostname_for_disk "$hd"')
-[[ $private =~ ^[0-9]+$ && $initializer =~ ^[0-9]+$ && $private -lt $initializer ]] || fail 'private initialization configuration is not fetched before initializer'
-
-printf 'PASS: PXEOS identity initialization preflight-order regression\n'
+root=$(cd "$(dirname "$0")/.." && pwd)
+lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib"
+tmp=$(mktemp -d)
+trap 'rm -rf -- "$tmp"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+sed -n '/^completeTasking() {/,/^}/p' "$lib/funcs.sh" >"$tmp/complete"
+before(){ local a b; a=$(grep -nF "$1" "$tmp/complete" | head -n1 | cut -d: -f1); b=$(grep -nF "$2" "$tmp/complete" | head -n1 | cut -d: -f1); [[ $a -lt $b ]]; }
+before rootpxe_deployment_identity_request_private rootpxe_apply_hostname_for_disk || fail 'Windows XML follows initialization'
+before rootpxe_apply_cloud_init rootpxe_deployment_identity_report_result || fail 'receipt precedes NoCloud installation'
+grep -Fq 'rootpxe_verify_disk_permit_binding' "$lib/cloud-init.sh" || fail 'injection lacks permit guard'
+! grep -Eq 'preDeployScript|postDeployScript|rootpxe_run_.*deploy_script|rootpxe_apply_linux_hostname|machineId|sshHostKeys|sshLoginPublicKeys|rootPassword' "$lib/funcs.sh" "$lib/deployment-identity.sh" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.checkin" || fail 'retired runtime contract remains'
+[[ ! -e $lib/linux-startup.sh && ! -d $lib/linux-startup-templates ]] || fail 'retired startup assets remain'
+printf 'PASS: identity/NoCloud ordering and obsolete runtime absence\n'

@@ -1,43 +1,91 @@
 ## RootPXE 集成
 
-- PXEOS 从认证通道获取任务冻结的计算机名称、系统初始化与部署脚本；管理员重新部署仍完整覆盖，不以目标已有系统作为跳过恢复的条件。
-- 前置保持 PXEOS Bash；后置只对明确 Linux 类别离线安装，并由目标 systemd 每次正常开机运行，不即时执行正文。
-- 全部 Windows、Apple Mac OS、Other、Chromium OS、未知及空类别无后置；Windows 系统内命令沿现有 Sysprep XML，平台只校验和写应答文件，不自动执行 Sysprep 或保证 Setup 触发。
-- 捕获任何系统都无部署脚本，也不删除源系统的启动入口。
-- Linux 部署的客户端能力必须在准入与写盘许可前校验，空后置也包含停用策略；未知能力、模式或错误散列拒绝，不从发布版本推断。
-- 后置在恢复及可选系统初始化后处理；名称和初始化开关都关闭时仍可以安装，不进入 Windows 初始化逻辑。
+- Linux 镜像可保存原生 Cloud-init 配置，任务创建时冻结正文、散列、实例标识和主机名。部署前和部署后的平台脚本功能已移除。
+- PXEOS 完成镜像恢复后仅离线安装 NoCloud seed；目标系统首次开机由预装的 Cloud-init 读取并执行原生配置。部署回执证明期望文件集合注入成功，不证明首次开机执行成功。
+- 未配置 Cloud-init 的普通 Linux 部署和任何系统的捕获都不检查安装、不增加 seed、不清理目标缓存或已有内容、不离线修改 Linux 主机名。
+- Windows 保留计算机名称与 Sysprep 应答文件两个独立开关：都关闭时不处理；只改名时写离线注册表；只启用 Sysprep 时保留自定义 XML 原字节；都启用时替换 XML 的计算机名称。平台不运行 Sysprep，也不保证 Windows Setup 已触发。
 
 ```text
-postDeployScriptCapability=linux-systemd-v1
-postDeployScriptExecution=linux-systemd-v1
+#客户端能力
+cloudInitCapability=linux-nocloud-v2
+#仅配置的Linux部署使用
 osTypeId=50
-#目标Linux固定路径
-/etc/rootpxe/startup.sh
-/etc/rootpxe/startup-runner.sh
-/etc/rootpxe/startup-result.sh
-/etc/rootpxe/startup.manifest
-/etc/rootpxe/startup.transaction
-/etc/systemd/system/rootpxe-startup.service
-/var/log/rootpxe/startup.log
+#目标系统始终注入的两个seed文件
+/var/lib/cloud/seed/nocloud/user-data
+/var/lib/cloud/seed/nocloud/meta-data
+#仅网络配置非空时注入的第三个文件
+/var/lib/cloud/seed/nocloud/network-config
 ```
 
-## 挂载、归属与恢复
+## 准备 Linux 镜像
 
-- 先探测所有已许可目标并证明唯一 Linux 根，纯数据盘可无根；零根、多根或真实探测失败停止，不先写某个根再发现歧义。
-- 普通分区、LVM 与 Btrfs 根沿底层发现；只卸载自建挂载、停用自有激活，清理失败不能报告成功。
-- 独立系统程序分区必须由挂载表、设备与卷组 UUID、全部物理卷证明属于选中许可盘；跨盘或未知关系不猜测。
-- 无受管入口的空后置无写入返回；现有入口必须完整核验固定路径、权限、散列和清单，不能只凭文件名清理。
-- 同名 foreign、写路径链接或同名单元附加配置停止；目标内能力链接有限解析，允许常见 usr-merge，不跟随到 PXEOS 根。
-- 安装事务保留原 inode 与标签，最后才启用；未提交失败受控恢复，已提交清理另行核验重试，未知记录或 foreign 项保留证据待处理。
-- 最后删除事务记录与删除本次新建空私有目录之间中断可能仅剩无入口空目录，不宣称断电跨文件原子性已验收。
+- 镜像管理员在制镜系统中安装、启用 Cloud-init，并确认 NoCloud 数据源及所需原生模块可用。使用发行版支持的配置和服务启用方法；PXEOS 不安装软件、不执行目标程序、不代替原生 YAML 合并或服务状态验证。
+- 镜像管理员在源镜像系统中使用官方 schema 检查配置，完成试启动并确认发行版支持下列清理选项后再执行。清理后直接关机，通过 PXE 捕获干净镜像；不要再次正常启动源镜像，以免 Cloud-init 重新创建缓存。
+- 清理缓存、seed 和准备 machine-id 属于镜像制作步骤；machine-id 不是平台 user-data 开关，PXEOS 不执行这些清理或修改。
+- 原生默认的每实例模块以冻结实例标识区分任务；需要每次开机行为时使用原生每次启动配置，平台不会强制循环执行。
+- 配置会原字节保存，不能把真实密码、私钥、访问令牌放入共享文档或诊断输出。
 
-## 运行时与日志
+```shell
+#仅镜像管理员在源镜像系统内执行，先确认发行版支持这些选项
+cloud-init schema --system
+#验证待使用的user-data配置，可按实际文件位置调整
+cloud-init schema --config-file /root/user-data
+#完成清理后直接关机，不再正常启动源镜像
+cloud-init clean --logs --machine-id --seed
+```
 
-- 离线不执行目标二进制验证版本；目标运行器有限查询加载单元的真实身份、时限、重试、日志与来源属性，不满足则失败且不运行正文。
-- 运行总时限为 300 秒，停止和收尾有短期限，受管子进程由 control-group 管理；不依赖用户登录，不把脚本成功设为关键启动依赖。
-- 输出到目标 journal，收尾只保存当前 invocation 最近 200 条的有限样本，固定文件总上限 4 MiB；字节截断标志不承诺完整原始输出。
-- 结果散列是收尾时当前文件散列，不是被执行字节的独立证明；主进程非零退出或超时不会被日志失败改成成功。
-- 不改全局日志或 SELinux 策略，不增加全盘重新标记；按目标策略精确设置并回读受管标签，工具缺失拒绝非空安装。
-- 当前三架构配置声明现有标签库依赖，但实际工具打包尚未构建验证，不能据此承诺当前 initrd 或 Rocky 实机可用。
-- 配置、任务或正文不含真实部署凭据；平台不传 PXEOS 令牌或成像变量给目标正文，用户须避免在自己的输出中泄漏敏感信息。
-- 本地 fixture、静态检查和服务端测试不等于已发布 PXEOS 或真实首次、第二次开机验收。完整契约见 [部署脚本设计](../../../docs/部署系统开机脚本设计.md)。
+- 数据源、清理和模块频率以 [NoCloud 官方说明](https://docs.cloud-init.io/en/latest/reference/datasources/nocloud.html)、[clean 官方说明](https://docs.cloud-init.io/en/latest/reference/cli.html#clean) 和 [原生模块说明](https://docs.cloud-init.io/en/latest/reference/modules.html) 为准。
+
+## 可选网络配置
+
+- 用户配置与网络配置可独立填写。网络配置使用原生 NoCloud 文件格式，不是写在外层网络键下的系统配置；后端检查单个映射和版本，完整发行版兼容性仍由镜像管理员验证。格式说明见 [NoCloud 网络配置](https://docs.cloud-init.io/en/latest/reference/datasources/nocloud.html#network-config)。
+- 网络配置只在目标系统开机时交由原生 Cloud-init 处理；PXEOS 不解析原生网络 YAML、不执行配置，也不修改 PXEOS 当前网卡、DHCP 或管理连接。
+- 配置任务要求新版客户端能力；旧版客户端能力不能继续配置部署，也不自动转换。私有响应始终携带两个网络字符串，未填写时正文和散列均为空，不创建第三个文件。
+- 网络正文非空时最多为 65536 个 UTF-8 字节，不允许 NUL，按原字节核验 SHA-256。网络配置可能包含 Wi-Fi 凭据，按用户配置同等私密保护，不输出正文到日志、错误或命令参数。
+- 只填写网络配置时，后端在冻结任务时生成下列最小用户配置及其散列；PXEOS 不补写或改写正文。
+
+```yaml
+#cloud-config
+{}
+```
+
+```yaml
+#network-config示例，网卡名称按目标镜像实际情况设置
+version: 2
+ethernets:
+  enp1s0:
+    dhcp4: true
+```
+
+## 目标发现与注入
+
+- 配置任务先验证所有目标当前的硬件身份及写盘许可，只读发现唯一 Linux 根；纯数据盘可无根，零根、多根和探测失败都停止。
+- 支持已许可普通分区及卷组中的扩展文件系统和 XFS。独立系统程序分区以只读方式检查预装程序，独立变量数据分区依据安全挂载表、设备身份和全部物理卷的当前许可关系挂载。
+- 所有物理卷必须属于本任务明确许可的目标集合；设备可见不代表已授权。未知跨盘关系、重复挂载项、不支持的嵌套挂载和 Btrfs 根拒绝注入。
+- 文件路径拒绝逃逸、不可信链接、硬链接及可被其他用户改写的组件。新增目录权限为 0700，两个文件为 root 属主、单链接的普通 0600 文件。
+- 已有 NoCloud seed 只有恰好包含本任务期望的两个或三个文件、各文件字节与同一冻结任务完全匹配且安全属性和标签均通过时才只读接受；额外文件、缺失文件、篡改、不同任务、其他 seed 和未清理的 Cloud-init 缓存都明确拒绝。
+- 清空平台网络配置不会删除镜像中的网络文件。任务网络为空但目标已有第三文件时视为外来冲突并拒绝，不覆盖或静默清理已有内容。
+- 同一文件系统暂存完整期望文件集合，核对散列与目标 SELinux 标签后发布并读回。已有空目录保留原 inode 和扩展属性；受控失败仅回滚本次新建对象，清理失败保留证据并报告失败。
+- 只卸载本次挂载、停用本次激活的卷组，借用挂载不卸载。关机断电或 SIGKILL 可能留下半份 seed，后续部署会拒绝；不宣称文件集合发布具备断电原子性。
+- 沿目标 SELinux 策略核对固定路径标签，不关闭安全策略或触发全盘重新标记。三架构配置已声明标签库及扩展属性工具依赖，实际工具打包和 initrd 尚未构建验证。
+
+## 原生日志与验证边界
+
+- 目标首次开机后的状态和执行结果在目标系统检查，使用发行版提供的 Cloud-init 状态命令与日志。
+- 本地 shell fixture 使用普通临时文件和设备命令替身；Windows 上 Unix 属主、模式及原生符号链接存在验证限制。通过 fixture 不代表真实 Linux 权限、挂载、Cloud-init 首启或已发布 PXEOS 验证通过。
+
+```shell
+#目标系统
+cloud-init status --long
+```
+
+```text
+#目标系统原生日志
+/var/log/cloud-init.log
+/var/log/cloud-init-output.log
+```
+
+## 修改记录
+
+- 2026-10-15：退役平台部署脚本与 Linux 自制初始化，改用原生 NoCloud 两文件离线注入；保留 Windows 计算机名称与 Sysprep 应答文件四态。
+- 2026-10-15：升级 NoCloud 能力并支持可选网络配置；未配置网络仍保持两文件，非空网络增加第三文件并纳入私密校验、只读幂等与回滚。

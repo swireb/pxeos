@@ -386,18 +386,13 @@ must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '/storage/backup'
 must_not_have_literal "$overlay" '/storage/postinitscripts'
 must_not_have_literal "$overlay" '/storage/postdeployscripts'
 must_not_have_literal "$overlay" 'rootpxe_run_postinit'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_run_pre_deploy_script'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_run_post_deploy_script'
-must_have "$overlay/bin/pxeos.checkin" 'preDeployScript'
-must_have "$overlay/bin/pxeos.checkin" 'preDeployScriptSha256'
-must_have "$overlay/bin/pxeos.checkin" 'postDeployScript'
-must_have "$overlay/bin/pxeos.checkin" 'postDeployScriptSha256'
 must_have "$overlay/bin/pxeos.checkin" 'captureBackupName'
-must_have "$overlay/bin/pxeos.checkin" 'chmod 700 "$script_file"'
-awk '/^rootpxe_run_deploy_script\(\)/ { on=1 } /^# LVM is deliberately narrow/ { on=0 } on { print }' "$overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp.deploy-scripts.sh"
-must_not_have "$tmp.deploy-scripts.sh" 'source[[:space:]]'
-must_not_have "$tmp.deploy-scripts.sh" 'eval[[:space:]]'
-rm -f "$tmp.deploy-scripts.sh"
+must_have "$overlay/usr/share/pxeos/lib/cloud-init.sh" 'chmod 600 "$file"'
+must_have "$overlay/usr/share/pxeos/lib/cloud-init.sh" 'rootpxe_cloud_init_install_at_root'
+must_not_have "$overlay/usr/share/pxeos/lib/cloud-init.sh" 'eval[[:space:]]'
+must_not_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_run_deploy_script'
+must_not_have_literal "$overlay" 'preDeployScript'
+must_not_have_literal "$overlay" 'postDeployScript'
 legacy_field='inject'"Script"
 legacy_stage='injecting'"_script"
 must_not_have_literal "$overlay" "$legacy_field"

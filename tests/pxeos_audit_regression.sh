@@ -32,7 +32,7 @@ trap 'rm -rf -- "$tmp"' EXIT
 sed -e 's|^rootpxe_source_core_library partition-funcs.sh.*|:|' -e 's|^rootpxe_source_core_library restore-preflight.sh.*|:|' -e 's|^rootpxe_source_core_library capture-recovery.sh.*|:|' -e 's|^rootpxe_source_core_library deployment-identity.sh.*|:|' "$funcs" >"$tmp/funcs.sh"
 cp "$(dirname "$funcs")/partclone-progress.sh" "$tmp/partclone-progress.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
-cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-startup.sh" "$tmp/linux-startup.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" "$tmp/log-paths.sh"
 set +u; source "$tmp/funcs.sh"; set -u
 rootpxe_require_unused_target_disks(){ :; } # 本段仅使用恢复流程 mock。
@@ -139,7 +139,7 @@ bcdroot="$tmp/bcdstore"; mkdir -p "$bcdroot/Boot"; printf 'old-bcd' >"$bcdroot/B
 sed -e 's|^rootpxe_source_core_library partition-funcs.sh.*|:|' -e 's|^rootpxe_source_core_library restore-preflight.sh.*|:|' -e 's|^rootpxe_source_core_library capture-recovery.sh.*|:|' -e 's|^rootpxe_source_core_library deployment-identity.sh.*|:|' -e "s|/bcdstore|$bcdroot|g" -e "s|/usr/share/pxeos/BCD|$tmp/template-bcd|g" "$funcs" >"$tmp/bcd-funcs.sh"
 cp "$(dirname "$funcs")/partclone-progress.sh" "$tmp/partclone-progress.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
-cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-startup.sh" "$tmp/linux-startup.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" "$tmp/log-paths.sh"
 set +u; source "$tmp/bcd-funcs.sh"; set -u
 osid=7; fsTypeSetting() { fstype=ntfs; }; ntfs-3g() { :; }; umount() { :; }; dots() { :; }; debugPause() { :; }; handleError() { return 1; }
