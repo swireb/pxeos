@@ -1,13 +1,15 @@
 ## RootPXE 集成
 
-- Linux 镜像独立保存原生用户配置、手工元数据和可选网络配置，并有独立的 Cloud-init 启用开关；关闭时保留镜像草稿，但任务不下发私有正文。启用时任务冻结最终配置副本及散列，不自动生成实例标识；名称关闭时保留三份原文。部署前和部署后的平台脚本功能已移除。
+- Linux 镜像保存手工编辑的用户、元数据、可选供应方和可选网络四份模板，并有独立的 Cloud-init 启用开关；关闭时保留镜像草稿，但任务不下发私有正文。服务端只替换显式宏，在任务创建时渲染一次并冻结最终字节与散列；重试复用同一快照，PXEOS 不渲染模板。部署前和部署后的平台脚本功能已移除。
 - PXEOS 完成镜像恢复后仅离线安装 NoCloud seed；目标系统首次开机由预装的 Cloud-init 读取并执行原生配置。部署回执证明期望文件集合注入成功，不证明首次开机执行成功。
 - Cloud-init 关闭时不检查安装、不增加 seed、不清理目标缓存或已有内容；是否离线修改 Linux 主机名由计算机名称开关决定。捕获不执行配置注入或改名。
-- Windows 保留计算机名称与 Sysprep 应答文件两个独立开关：都关闭时不处理；只改名时写离线注册表；只启用 Sysprep 时保留自定义 XML 原字节；都启用时替换 XML 的计算机名称。平台不运行 Sysprep，也不保证 Windows Setup 已触发。
+- Windows 启用 Sysprep 应答模板时，PXEOS 仅校验并原字节注入服务端冻结 XML，不插入或覆盖固定计算机名称，也不另写离线注册表。未启用模板且名称开关开启时，保留离线注册表改名。平台不运行 Sysprep，也不保证 Windows Setup 已触发。
 
 ```text
 #客户端能力
-cloudInitCapability=linux-nocloud-v3
+cloudInitCapability=linux-nocloud-v5
+#Windows应答模板能力，替换旧Sysprep v1能力
+windows-sysprep-template-v2
 #Cloud-init关闭且计算机名称开启时，checkin与两种permit请求均声明
 deploymentIdentityProtocolVersions=[1]
 deploymentIdentityCapabilities=["hostname","linux-hostname-offline-v1"]
@@ -16,8 +18,9 @@ osTypeId=50
 #目标系统始终注入的两个seed文件
 /var/lib/cloud/seed/nocloud/user-data
 /var/lib/cloud/seed/nocloud/meta-data
-#仅网络配置非空时注入的第三个文件
+#仅对应配置非空时分别增加文件，seed共两个、三个或四个文件
 /var/lib/cloud/seed/nocloud/network-config
+/var/lib/cloud/seed/nocloud/vendor-data
 ```
 
 ## 准备 Linux 镜像
@@ -25,7 +28,7 @@ osTypeId=50
 - 镜像管理员在制镜系统中安装、启用 Cloud-init，并确认 NoCloud 数据源及所需原生模块可用。使用发行版支持的配置和服务启用方法；PXEOS 不安装软件、不执行目标程序、不代替原生 YAML 合并或服务状态验证。
 - 镜像管理员在源镜像系统中使用官方 schema 检查配置，完成试启动并确认发行版支持下列清理选项后再执行。清理后直接关机，通过 PXE 捕获干净镜像；不要再次正常启动源镜像，以免 Cloud-init 重新创建缓存。
 - 清理缓存、seed 和准备 machine-id 属于镜像制作步骤；machine-id 不是平台 user-data 开关，PXEOS 不执行这些清理或修改。
-- 每实例模块使用手工实例标识判断实例，并不自动按平台任务重新执行。应由管理员为使用场景管理标识；复用标识和缓存可能使原生模块不再执行。需要每次开机行为时使用原生每次启动配置，平台不会强制循环执行。
+- 每实例模块依据元数据实例标识判断实例；元数据可填写固定标识，也可显式使用实例标识宏，让新任务生成随机值并在重试时复用。仍需准备干净缓存，不能用新标识替代镜像清理。需要每次开机行为时使用原生每次启动配置，平台不会强制循环执行。
 - 配置会原字节保存，不能把真实密码、私钥、访问令牌放入共享文档或诊断输出。
 
 ```shell
@@ -39,14 +42,14 @@ cloud-init clean --logs --machine-id --seed
 
 - 数据源、清理和模块频率以 [NoCloud 官方说明](https://docs.cloud-init.io/en/latest/reference/datasources/nocloud.html)、[clean 官方说明](https://docs.cloud-init.io/en/latest/reference/cli.html#clean) 和 [原生模块说明](https://docs.cloud-init.io/en/latest/reference/modules.html) 为准。
 
-## 三份原生配置
+## 四份原生配置
 
-- 用户配置可以为空；空文件仍必须有真实空字节 SHA-256，PXEOS 保留空文件，不生成最小用户配置。元数据必须非空并由管理员填写合法实例标识；后端验证 YAML 和字段，PXEOS 只核对认证任务原字节与散列，不引入原生 YAML 解析器。
-- 手工实例标识为一至一百二十八个 ASCII 字母、数字、点、下划线、冒号或连字符，不能只有点；平台不自动生成或改写。下例标识仅作占位，实际部署由管理员选择。
+- 用户配置可以为空；空文件仍必须有真实空字节 SHA-256，PXEOS 保留空文件，不强制写入平台名称字段。元数据必须非空，支持手工实例标识及原生合法其他键；PXEOS 只核对认证任务原字节与散列，不引入原生 YAML 解析器。
+- 供应方配置非空时必须为原生 Cloud-config，后端验证格式；PXEOS 不解析或执行正文，只校验完整性并离线写入固定种子路径。供应方配置与用户配置的原生合并和模块行为由目标系统 Cloud-init 决定。
 - 网络配置使用原生 NoCloud 文件格式，不是写在外层网络键下的系统配置；后端检查单个映射和版本，完整发行版兼容性仍由镜像管理员验证。格式说明见 [NoCloud 网络配置](https://docs.cloud-init.io/en/latest/reference/datasources/nocloud.html#network-config)。
 - 网络配置只在目标系统开机时交由原生 Cloud-init 处理；PXEOS 不解析原生网络 YAML、不执行配置，也不修改 PXEOS 当前网卡、DHCP 或管理连接。
-- 启用的 Linux 部署私有响应始终携带六个字符串，旧版能力、旧自动元数据字段、部分字段或散列错误均拒绝，不兼容降级。网络未填写时正文和散列都为空，不创建第三个文件；其他两项即使用户正文为空也携带真实散列。
-- 每项最多为 65536 个 UTF-8 字节，不允许 NUL，按原字节核验 SHA-256，包括原有 CRLF。三份正文同等私密，可能包含 Wi-Fi 凭据等秘密，不输出到日志、错误或命令参数。
+- 启用的 Linux 部署私有响应始终携带八个字符串，旧版能力、旧自动元数据字段、部分字段或散列错误均拒绝，不兼容降级。网络和供应方配置分别未填写时，对应正文与散列都为空，不创建对应文件或私有句柄；用户正文即使为空也携带真实散列。
+- 每项最多为 65536 个 UTF-8 字节，不允许 NUL，按原字节核验 SHA-256，包括原有 CRLF。四份正文同等私密，可能包含 Wi-Fi 凭据等秘密，不输出到日志、错误或外部进程命令参数；解析通过标准输入传递完整响应。
 
 ```text
 cloudInitUserData
@@ -55,12 +58,25 @@ cloudInitMetaData
 cloudInitMetaDataSha256
 cloudInitNetworkConfig
 cloudInitNetworkConfigSha256
+cloudInitVendorData
+cloudInitVendorDataSha256
 ```
 
 ```yaml
-#meta-data示例，必须手工提供instance-id
-instance-id: operator-chosen-instance
-local-hostname: image-default
+#meta-data固定标识模板示例
+instance-id: operator-fixed-instance
+local-hostname: fixed.example
+```
+
+```yaml
+#meta-data显式宏模板示例，任务创建时由服务端替换
+instance-id: "{{ROOTPXE_INSTANCE_ID}}"
+```
+
+```yaml
+#cloud-config
+#vendor-data示例，不在PXEOS中执行
+timezone: Asia/Shanghai
 ```
 
 ```yaml
@@ -71,42 +87,29 @@ ethernets:
     dhcp4: true
 ```
 
-## Linux 计算机名称四态
+## 计算机名称策略入口
 
-- Cloud-init 关闭、名称关闭：不修改主机名，不检查或修改 Cloud-init 内容。
-- Cloud-init 关闭、名称开启：PXEOS 按任务冻结的管理端名称离线更新主机名和必要的本机回环映射，不要求预装 Cloud-init。
-- Cloud-init 开启、名称关闭：三份配置保持原文，包括管理员手写的元数据主机名；不套用管理端名称校验，也不离线修改主机名。
-- Cloud-init 开启、名称开启：服务端只在任务副本中渲染冻结管理名称，镜像原文不变，重试复用相同快照。PXEOS 不离线改名，只验证并注入已渲染副本；下发的任务用户配置必须非空，镜像用户配置可留空，由服务端生成最小命名副本。
-- 管理名称沿用单标签一至六十三个 ASCII 字母、数字或连字符、首尾非连字符的规则，不扩展为管理端 FQDN。手工配置且名称关闭时的原生主机名由后端按元数据格式验证。
-- 只有全部期望文件注入、读回和本次清理均成功且名称开启，才提交名称回执；该回执表示平台名称配置已注入，不表示客户机首启后已采用名称。
-
-```yaml
-#meta-data任务副本：保留手工instance-id，只渲染local-hostname
-instance-id: operator-chosen-instance
-local-hostname: managed-node
-```
-
-```yaml
-#cloud-config
-#user-data任务副本中的平台名称字段
-hostname: managed-node
-fqdn: managed-node
-preserve_hostname: false
-create_hostname_file: true
-```
-
-## Linux 离线改名边界
-
-- 离线名称分支先验证完整许可目标集合并只读查找唯一根，再读写处理一次；同一多物理卷根去重，全部物理卷都必须属于已许可集合。纯数据盘不猜为根，多个系统根拒绝。
-- 只更新下面两个固定配置文件；已有文件保留 inode、属主、模式和 SELinux 标签。只替换本机回环行的完整旧名称 token，保留本地主机默认别名、注释、空白和远端行，不推断域名后缀。没有可替换自身条目时追加本机映射，已有新名称映射不重复追加。
-- 配置文件缺失时可创建受控普通文件；危险链接、硬链接、属主、模式、额外挂载或标签无法验证均拒绝。系统配置目录的额外挂载不在支持范围。
-- 受控失败只回滚本次文件，外来替换不覆盖；回滚或清理无法证明成功时保留事务证据并报告失败，不承诺多文件断电原子性。不执行目标程序或旧初始化功能。
+- 名称开关、Windows 与 Linux 规则、四态路由和任务冻结语义统一见根项目 [主机名称策略](../../../docs/主机名称策略.md)；本页只说明客户端 NoCloud 注入边界。
+- 宏模板字段与编辑约定见根项目 [Cloud-init 配置](../../../docs/Cloud-init配置.md)。服务端只替换显式宏，固定名称保留；名称宏仅在名称开关开启时可用。ROOTPXE_MAC_COLON 固定输出小写冒号，ROOTPXE_MAC_HYPHEN 固定输出大写横线，两者均可在Linux和Windows模板中使用，客户端不作二次转换。
+- 平台掩码宏使用点分十进制，前缀长度宏由掩码派生为纯数字；客户端不再次推导或替换宏。
+- Cloud-init 或 Windows 应答模板启用时，PXEOS 验证并注入已冻结副本，不校验固定名称是否等于管理端名称，不另行离线改名。
+- 只有全部期望文件注入、读回和本次清理均成功，才提交对应模板注入回执；模板启用时名称回执始终为 false。未启用模板时独立离线改名的名称回执保持原语义。回执都不证明目标首次开机已执行或采用名称。
 
 ```text
-/etc/hostname
-/etc/hosts
-#需人工核对的受控失败证据，不由后续任务盲删
-/etc/.rootpxe-hostname.*
+{{ROOTPXE_INSTANCE_ID}}
+{{ROOTPXE_HOSTNAME}}
+{{ROOTPXE_MAC_COLON}}
+{{ROOTPXE_MAC_HYPHEN}}
+{{ROOTPXE_IP}}
+{{ROOTPXE_NETMASK}}
+{{ROOTPXE_PREFIX}}
+{{ROOTPXE_GATEWAY}}
+{{ROOTPXE_DNS1}}
+{{ROOTPXE_DNS2}}
+{{ROOTPXE_DNS_SUFFIX}}
+{{ROOTPXE_FQDN}}
+{{ROOTPXE_TIMEZONE_IANA}}
+{{ROOTPXE_TIMEZONE_WINDOWS}}
 ```
 
 ## 目标发现与注入
@@ -115,8 +118,8 @@ create_hostname_file: true
 - 支持已许可普通分区及卷组中的扩展文件系统和 XFS。独立系统程序分区以只读方式检查预装程序，独立变量数据分区依据安全挂载表、设备身份和全部物理卷的当前许可关系挂载。
 - 所有物理卷必须属于本任务明确许可的目标集合；设备可见不代表已授权。未知跨盘关系、重复挂载项、不支持的嵌套挂载和 Btrfs 根拒绝注入。
 - 文件路径拒绝逃逸、不可信链接、硬链接及可被其他用户改写的组件。新增目录权限为 0700，期望集合中的所有文件为 root 属主、单链接的普通 0600 文件。
-- 已有 NoCloud seed 只有恰好包含期望的两个或三个文件、各文件字节与当前冻结内容完全匹配且安全属性和标签均通过时才只读接受；额外文件、缺失文件、篡改、内容不同、其他 seed 和未清理缓存都拒绝。手工实例标识下，散列相等只能证明内容一致，不能证明历史归属同一任务，不新增任务归属标记文件。
-- 清空平台网络配置不会删除镜像中的网络文件。任务网络为空但目标已有第三文件时视为外来冲突并拒绝，不覆盖或静默清理已有内容。
+- 已有 NoCloud seed 只有恰好包含期望的两个、三个或四个文件、各文件字节与当前冻结内容完全匹配且安全属性和标签均通过时才只读接受；额外文件、缺失文件、篡改、内容不同、其他 seed 和未清理缓存都拒绝。散列相等只证明内容一致，不能单独证明历史归属同一任务，不新增任务归属标记文件。
+- 清空平台网络或供应方配置不会删除镜像中的对应文件。任务配置为空但目标已有对应种子文件时视为外来冲突并拒绝，不覆盖或静默清理已有内容。
 - 同一文件系统暂存完整期望文件集合，核对散列与目标 SELinux 标签后发布并读回。已有空目录保留原 inode 和扩展属性；受控失败仅回滚本次新建对象，清理失败保留证据并报告失败。
 - 只卸载本次挂载、停用本次激活的卷组，借用挂载不卸载。关机断电或 SIGKILL 可能留下半份 seed，后续部署会拒绝；不宣称文件集合发布具备断电原子性。
 - 沿目标 SELinux 策略核对固定路径标签，不关闭安全策略或触发全盘重新标记。三架构配置已声明标签库及扩展属性工具依赖，实际工具打包和 initrd 尚未构建验证。
@@ -142,3 +145,4 @@ cloud-init status --long
 - 2026-10-15：退役平台部署脚本与 Linux 自制初始化，改用原生 NoCloud 两文件离线注入；保留 Windows 计算机名称与 Sysprep 应答文件四态。
 - 2026-10-15：升级 NoCloud 能力并支持可选网络配置；未配置网络仍保持两文件，非空网络增加第三文件并纳入私密校验、只读幂等与回滚。
 - 2026-10-15：升级为三份原文私有链及手工元数据，允许空用户文件；恢复独立 Linux 离线改名并按四态路由，名称回执只证明配置注入或离线文件更新，不代表首启执行。
+- 2026-10-16：增加可选供应方配置，四文件集合完整纳入私有句柄、只读预检、标签、暂存发布和回滚；升级为 v5 冻结模板及 Windows 应答模板 v2，保留手工元数据和固定名称，客户端停止强制名称覆盖，模板只报告注入结果。

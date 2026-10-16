@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Real hivex/reged/XMLStarlet regression for the Windows hostname/Sysprep
-# matrix.  changeHostname and Sysprep are the only two controls.
+# matrix. Sysprep injects the server-frozen XML without separate naming.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
@@ -41,12 +41,12 @@ awk '/^rootpxe_resolve_casefold_directory\(\)/ {p=1} p {print} p && /^}$/ {exit}
 awk '/^rootpxe_resolve_windows_sysprep_unattend_path\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" >>"$tmp/functions.sh"
 awk '/^rootpxe_apply_windows_hostname\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" >>"$tmp/functions.sh"
 source "$tmp/functions.sh"; rootpxe_stage(){ :; }
+rootpxe_run_logged_typed_native(){ shift 2; "$@"; }
 policy="$tmp/policy.json"; private="$tmp/private.json"; deploymentIdentityPolicyFile=$policy; rootpxe_deployment_initialization_private_file=$private
 output_xml=/ntfs/Windows/System32/Sysprep/unattend.xml
 write_private(){ printf '{"unattendXml":%s}' "$(printf '%s' "$1" | jq -Rs .)" >"$private"; }
 write_policy(){ printf '{"systemIdentity":{"sysprep":%s}}' "$1" >"$policy"; }
 assert_registry(){ rootpxe-offline-identities windows-hostname-verify /ntfs/Windows/System32/config/SYSTEM "$1" || fail "registry did not contain $1"; }
-assert_xml_names(){ local expected="$1" count="$2" got actual; got=$(xml sel -t -m "/*[local-name()='unattend']/*[local-name()='settings'][@pass='specialize']/*[local-name()='component'][@name='Microsoft-Windows-Shell-Setup']/*[local-name()='ComputerName']" -v . -n "$output_xml" | sort -u); actual=$(xml sel -t -m "/*[local-name()='unattend']/*[local-name()='settings'][@pass='specialize']/*[local-name()='component'][@name='Microsoft-Windows-Shell-Setup']/*[local-name()='ComputerName']" -v . -n "$output_xml" | wc -l | tr -d ' '); [[ $got == "$expected" && $actual == "$count" ]] || fail "XML expected $count copies of $expected, got $actual: $got"; }
 
 # OFF/OFF does not mount or modify either registry or unattend XML.
 printf 'sentinel' >"$tmp/source/Windows/System32/Sysprep/unattend.xml"; write_policy false; changeHostname=false; hostName=''
@@ -64,15 +64,21 @@ printf '%s' "$xml" >"$tmp/expected.xml"; write_private "$xml"; write_policy true
 mv "$tmp/bin/reged" "$tmp/bin/reged.real"; printf '#!/usr/bin/env bash\nexit 97\n' >"$tmp/bin/reged"; chmod +x "$tmp/bin/reged"
 rootpxe_apply_windows_hostname "$tmp/source" || fail 'OFF/ON failed'; cmp -s "$tmp/expected.xml" "$output_xml" || fail 'OFF/ON changed supplied XML'
 
-# ON/ON must update only the Shell-Setup ComputerName in the supplied XML,
-# and must not use the direct registry route.
+# ON/ON preserves fixed and absent ComputerName elements byte-for-byte,
+# and must not use the direct registry route or fabricate hostname success.
 multi_xml='<?xml version="1.0"?><unattend xmlns="urn:schemas-microsoft-com:unattend"><settings pass="specialize"><component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"><ComputerName>AMD</ComputerName></component><component name="Microsoft-Windows-Shell-Setup" processorArchitecture="arm64"></component></settings></unattend>'
 write_private "$multi_xml"; changeHostname=true; hostName=TASK-MULTI
-rootpxe_apply_windows_hostname "$tmp/source" || fail 'ON/ON failed'; assert_xml_names TASK-MULTI 2
+printf '%s' "$multi_xml" >"$tmp/expected.xml"
+rootpxe_deployment_identity_hostname_result=true
+rootpxe_apply_windows_hostname "$tmp/source" || fail 'ON/ON failed'
+cmp -s "$tmp/expected.xml" "$output_xml" || fail 'ON/ON replaced fixed or absent ComputerName'
+[[ $rootpxe_deployment_identity_hostname_result == false && $rootpxe_deployment_identity_sysprep_result == true ]] || fail 'ON/ON fabricated hostname result'
+hostName='unused.management.fqdn'
+rootpxe_apply_windows_hostname "$tmp/source" || fail 'template validated unused management name'
 rm "$tmp/bin/reged"; mv "$tmp/bin/reged.real" "$tmp/bin/reged"
 
-# A malformed specialize shell setup is rejected before it can be published.
-bad_xml='<?xml version="1.0"?><unattend xmlns="urn:schemas-microsoft-com:unattend"><settings pass="specialize"><component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"><ComputerName>A</ComputerName><ComputerName>B</ComputerName></component></settings></unattend>'
+# A malformed XML document is rejected before it can be published.
+bad_xml='<?xml version="1.0"?><unattend xmlns="urn:schemas-microsoft-com:unattend"><settings>'
 write_private "$bad_xml"; changeHostname=true; hostName=TASK-BAD; expect_fail rootpxe_apply_windows_hostname "$tmp/source"
 
 # A direct-registry write or its native readback failure is fail-closed.

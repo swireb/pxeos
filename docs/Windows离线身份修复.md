@@ -1,5 +1,14 @@
-# Windows 离线计算机名称
+## Windows 离线计算机名称
 
-未启用 Sysprep 应答文件时，PXEOS 使用离线 SYSTEM 注册表更新并验证计算机名称。启用应答文件时，关闭名称开关会原样写入用户 XML；开启名称开关仅在 specialize 的 Shell-Setup ComputerName 元素写入平台名称并回读验证。
+- 未启用 Sysprep 应答模板且名称开关开启时，PXEOS 使用离线 SYSTEM 注册表更新并验证计算机名称；关闭名称开关时不改名。
+- 启用应答模板时，服务端仅替换显式宏并冻结 XML，PXEOS 校验 XML 后按原字节、安全路径和散列读回注入。固定计算机名称保留，不插入缺失的名称元素，不校验其是否等于管理端名称，也不另改注册表。
+- 模板启用时只报告应答文件注入结果，名称回执为 false。该流程不执行 Sysprep，不修改 SID、MachineGuid 或引导配置，不证明首次开机已经执行应答文件。
+- 统一名称与宏策略见根项目 [主机名称策略](../../../docs/主机名称策略.md)，客户端验证边界见 [RootPXE 集成](RootPXE集成.md)。
 
-该流程不执行 sysprep.exe，不修改 SID、MachineGuid 或引导配置。
+```text
+windows-sysprep-template-v2
+```
+
+## 修改记录
+
+- 2026-10-16：应答模板由服务端一次渲染并冻结，PXEOS 移除强制计算机名称覆盖与模板名称成功回执。

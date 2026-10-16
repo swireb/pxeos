@@ -80,7 +80,7 @@ rootpxe_apply_json_deployment_identity_policy() {
     rm -f -- "$policy_file"
     unset deploymentIdentityPolicyFile
     jq -e '
-      if has("deploymentIdentityPolicy") | not then ([has("cloudInitUserData"),has("cloudInitUserDataSha256"),has("cloudInitMetaData"),has("cloudInitMetaDataSha256"),has("cloudInitInstanceId"),has("cloudInitHostname"),has("cloudInitNetworkConfig"),has("cloudInitNetworkConfigSha256")] | any | not)
+      if has("deploymentIdentityPolicy") | not then ([has("cloudInitUserData"),has("cloudInitUserDataSha256"),has("cloudInitMetaData"),has("cloudInitMetaDataSha256"),has("cloudInitInstanceId"),has("cloudInitHostname"),has("cloudInitNetworkConfig"),has("cloudInitNetworkConfigSha256"),has("cloudInitVendorData"),has("cloudInitVendorDataSha256")] | any | not)
       else .deploymentIdentityPolicy as $p |
         ($p | type == "object") and $p.version == 1 and
         (($p | keys - ["version","systemIdentity","taskHostname","cloudInit"]) | length == 0) and
@@ -88,8 +88,8 @@ rootpxe_apply_json_deployment_identity_policy() {
         ($p.systemIdentity.sysprep | type == "boolean") and
         ($p.cloudInit | type == "boolean") and
         (if $p | has("taskHostname") then ($p.taskHostname | type == "string") else true end) and
-        (if $p.cloudInit then .type == "deploy" and .osid == 50 and has("cloudInitUserData") and has("cloudInitUserDataSha256") and has("cloudInitMetaData") and has("cloudInitMetaDataSha256") and has("cloudInitNetworkConfig") and has("cloudInitNetworkConfigSha256") and (has("cloudInitInstanceId")|not) and (has("cloudInitHostname")|not)
-         else ([has("cloudInitUserData"),has("cloudInitUserDataSha256"),has("cloudInitMetaData"),has("cloudInitMetaDataSha256"),has("cloudInitInstanceId"),has("cloudInitHostname"),has("cloudInitNetworkConfig"),has("cloudInitNetworkConfigSha256")] | any | not) end)
+        (if $p.cloudInit then .type == "deploy" and .osid == 50 and has("cloudInitUserData") and has("cloudInitUserDataSha256") and has("cloudInitMetaData") and has("cloudInitMetaDataSha256") and has("cloudInitNetworkConfig") and has("cloudInitNetworkConfigSha256") and has("cloudInitVendorData") and has("cloudInitVendorDataSha256") and (has("cloudInitInstanceId")|not) and (has("cloudInitHostname")|not)
+         else ([has("cloudInitUserData"),has("cloudInitUserDataSha256"),has("cloudInitMetaData"),has("cloudInitMetaDataSha256"),has("cloudInitInstanceId"),has("cloudInitHostname"),has("cloudInitNetworkConfig"),has("cloudInitNetworkConfigSha256"),has("cloudInitVendorData"),has("cloudInitVendorDataSha256")] | any | not) end)
       end' >/dev/null 2>&1 <<<"$document" || return 1
     if jq -e 'has("deploymentIdentityPolicy")' >/dev/null <<<"$document"; then
         (umask 077; jq -c '.deploymentIdentityPolicy' <<<"$document" >"$policy_file") || { rm -f -- "$policy_file"; return 1; }
@@ -132,7 +132,7 @@ rootpxe_write_checkin_json_payload() {
         --arg sysuuid "${sysuuid_local:-}" \
         --argjson versions "$identity_versions" \
         --argjson capabilities "$capabilities" \
-		'{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",cloudInitCapability:"linux-nocloud-v3",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities}' >"$output_file"
+		'{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",cloudInitCapability:"linux-nocloud-v5",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities}' >"$output_file"
 	result=$?
 	: >"$token_file"
 	rm -f -- "$token_file"
@@ -280,7 +280,7 @@ rootpxe_apply_json_checkin() {
     rootpxe_json_assign "$document" schemaRevision '.schemaRevision // .schema_revision' || return 1
     rootpxe_json_assign_text "$document" schemaHash '.schemaHash // .schema_hash' || return 1
     rootpxe_apply_json_deployment_identity_policy "$document" || return 1
-    if [[ ${osid:-} == 50 && ${changeHostname:-false} == true ]]; then
+    if [[ ${osid:-} == 50 && ${changeHostname:-false} == true ]] && ! rootpxe_cloud_init_policy_enabled; then
         rootpxe_linux_hostname_task_valid || return 1
     fi
     rootpxe_apply_json_partition_inventory "$document" || return 1
@@ -467,7 +467,7 @@ checkin_rootpxe() {
     imgType=${img_type:-${imgType:-}}; imgPartitionType=${img_partition_type:-${imgPartitionType:-}}
     imgFormat=${img_format:-${imgFormat:-}}; PIGZ_COMP=${pigz_comp:-${PIGZ_COMP:-}}; hostName=${hostName:-${host_name:-}}
     [[ -z ${changeHostname:-} || ${changeHostname:-} == true || ${changeHostname:-} == false ]] || handleError "Invalid changeHostname ($0)"
-    if [[ ${osid:-} == 50 && ${changeHostname:-false} == true ]]; then
+    if [[ ${osid:-} == 50 && ${changeHostname:-false} == true ]] && ! rootpxe_cloud_init_policy_enabled; then
         rootpxe_linux_hostname_task_valid || { handleError 'PXEOS_STAGE=checkin CODE=LINUX_HOSTNAME_POLICY_INVALID'; return 1; }
     fi
     export taskType type pxeType imgType imgPartitionType imgFormat PIGZ_COMP hostName changeHostname progress_attempt rootpxe_partition_progress_enabled resumeStage schemaRevision schemaHash captureBackupName partitionInventoryFile partitionInventoryHash deploymentIdentityPolicyFile

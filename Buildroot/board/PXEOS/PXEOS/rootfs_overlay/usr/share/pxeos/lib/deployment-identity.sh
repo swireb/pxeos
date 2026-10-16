@@ -1,5 +1,5 @@
 #!/bin/bash
-# 冻结部署身份 v1：Linux离线主机名、Windows计算机名/Sysprep与原生NoCloud注入回执。
+# 冻结部署身份 v1：独立离线改名与服务端冻结的Windows/NoCloud模板注入回执。
 . "$(dirname "${BASH_SOURCE[0]}")/task-http.sh" || return 1
 
 rootpxe_deployment_identity_policy_enabled() {
@@ -75,7 +75,7 @@ rootpxe_deployment_identity_capabilities_json() {
     local capabilities='["hostname"]'
     if rootpxe_deployment_identity_linux_hostname_capability_installed; then capabilities=$(jq -c '. + ["linux-hostname-offline-v1"]' <<<"$capabilities") || return 1; fi
     if rootpxe_deployment_identity_windows_hostname_capability_installed; then capabilities=$(jq -c '. + ["windows-hostname-registry-v1"]' <<<"$capabilities") || return 1; fi
-    if rootpxe_deployment_identity_windows_sysprep_capability_installed; then capabilities=$(jq -c '. + ["windows-sysprep-v1"]' <<<"$capabilities") || return 1; fi
+    if rootpxe_deployment_identity_windows_sysprep_capability_installed; then capabilities=$(jq -c '. + ["windows-sysprep-template-v2"]' <<<"$capabilities") || return 1; fi
     if declare -F rootpxe_multicast_runtime_ready >/dev/null && rootpxe_multicast_runtime_ready; then capabilities=$(jq -c '. + ["manual-multicast-session"]' <<<"$capabilities") || return 1; fi
     rootpxe_deployment_identity_capabilities_valid "$capabilities" || return 1
     printf '%s\n' "$capabilities"

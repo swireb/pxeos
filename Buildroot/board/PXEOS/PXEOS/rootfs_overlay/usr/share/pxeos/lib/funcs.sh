@@ -575,9 +575,12 @@ rootpxe_redact_diagnostic() {
         [[ -n $value ]] && text="${text//"$value"/[REDACTED]}"
     done
     text=$(printf '%s' "$text" | sed -E \
-        -e 's/(^|[[:space:],{?&])("?[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig)[[:alnum:]_.-]*"?[[:space:]]*[:=][[:space:]]*)"(\\.|[^"\\])*"/\1\2"[REDACTED]"/Ig' \
-        -e "s/(^|[[:space:],{?&])('[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig)[[:alnum:]_.-]*'|[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig)[[:alnum:]_.-]*)([[:space:]]*[:=][[:space:]]*)'([^']*)'/\\1\\2\\5'[REDACTED]'/Ig" \
-        -e 's/(^|[[:space:],{?&])([[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig)[[:alnum:]_.-]*[[:space:]]*=[[:space:]]*)[^[:space:],&]+/\1\2[REDACTED]/Ig')
+        -e "s/((['\"]?)[[:alnum:]_.-]*(cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*\\2[[:space:]]*[:=][[:space:]]*)\"([^\"\\\\]|\\\\.)*(\\\\)?$/\\1\"[REDACTED: incomplete quoted field]\"/Ig" \
+        -e "s/((['\"]?)[[:alnum:]_.-]*(cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*\\2[[:space:]]*[:=][[:space:]]*)'[^']*$/\\1'[REDACTED: incomplete quoted field]'/Ig" \
+        -e 's/(^|[[:space:],{?&])("?[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig|cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*"?[[:space:]]*[:=][[:space:]]*)"(\\.|[^"\\])*"/\1\2"[REDACTED]"/Ig' \
+        -e "s/(^|[[:space:],{?&])('[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig|cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*'|[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig|cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*)([[:space:]]*[:=][[:space:]]*)'([^']*)'/\\1\\2\\5'[REDACTED]'/Ig" \
+        -e 's/(^|[[:space:],{?&])([[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig|cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*[[:space:]]*=[[:space:]]*)[^[:space:],&]+/\1\2[REDACTED]/Ig' \
+        -e 's@/tmp/rootpxe-cloud-vendor\.[[:alnum:]]{6}@[REDACTED]@g')
     # Normalize only after redaction: a quoted JSON secret may itself contain
     # literal newline escapes.  Legacy complete argv has a dedicated label;
     # remove that line, not unlabelled native failure details.
@@ -2969,7 +2972,7 @@ rootpxe_request_disk_permit_for_target() {
     response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 \
         --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
         --data-urlencode "mac=$mac" --data-urlencode "targetId=$target_id" \
-        --data-urlencode "operation=$operation" --data-urlencode "cloudInitCapability=linux-nocloud-v3" \
+        --data-urlencode "operation=$operation" --data-urlencode "cloudInitCapability=linux-nocloud-v5" \
         --data-urlencode 'deploymentIdentityProtocolVersions=[1]' --data-urlencode "deploymentIdentityCapabilities=$capabilities" \
         "${rootpxe_permit_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
     http_code=${response##*$'\n'}
@@ -3096,7 +3099,7 @@ rootpxe_request_disk_permit_batch() {
             --data-urlencode "sessionId=$multicastSessionId"
         )
     fi
-    response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "targets=$request" --data-urlencode "cloudInitCapability=linux-nocloud-v3" \
+    response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "targets=$request" --data-urlencode "cloudInitCapability=linux-nocloud-v5" \
         --data-urlencode 'deploymentIdentityProtocolVersions=[1]' --data-urlencode "deploymentIdentityCapabilities=$capabilities" \
         "${rootpxe_permit_batch_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
     http_code=${response##*$'\n'}; body=${response%$'\n'*}
@@ -5702,12 +5705,14 @@ rootpxe_resolve_windows_sysprep_unattend_path() {
 }
 
 rootpxe_apply_windows_hostname() {
-    local part="$1" sysprep=0 xml_path source_xml xml_tmp rows architecture count expected_hash actual_hash
+    local part="$1" sysprep=0 xml_path source_xml xml_tmp expected_hash actual_hash
     rootpxe_initialization_failure_reason=windows_hostname_invalid
-    [[ ${changeHostname:-false} == true ]] && rootpxe_validate_windows_hostname "${hostName:-}" || [[ ${changeHostname:-false} != true ]] || return 1
     [[ -r ${deploymentIdentityPolicyFile:-} ]] && jq -e '.systemIdentity.sysprep == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1 && sysprep=1
+    [[ $sysprep -eq 1 || ${changeHostname:-false} != true ]] || rootpxe_validate_windows_hostname "${hostName:-}" || return 1
     [[ ${changeHostname:-false} == true || $sysprep -eq 1 ]] || return 0
     if [[ $sysprep -eq 1 ]]; then
+        rootpxe_deployment_identity_hostname_result=false
+        rootpxe_deployment_identity_sysprep_result=false
         rootpxe_initialization_failure_reason=windows_sysprep_private_config_unavailable
         source_xml="${rootpxe_deployment_initialization_private_file:-}"
         [[ -r $source_xml && ! -L $source_xml ]] || return 1
@@ -5731,31 +5736,15 @@ rootpxe_apply_windows_hostname() {
         xml_tmp=$(mktemp "${xml_path%/*}/.unattend.rootpxe.XXXXXX") || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
         chmod 0600 "$xml_tmp" && jq -j '.unattendXml' "$source_xml" >"$xml_tmp" || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
         command -v xml >/dev/null 2>&1 && xml val -w "$xml_tmp" >/dev/null 2>&1 || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
-        if [[ ${changeHostname:-false} == true ]]; then
-            rows=$(xml sel -t -m "/*[local-name()='unattend' and namespace-uri()='urn:schemas-microsoft-com:unattend']/*[local-name()='settings' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@pass='specialize']/*[local-name()='component' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@name='Microsoft-Windows-Shell-Setup']" -v "concat(@processorArchitecture,'|',count(*[local-name()='ComputerName' and namespace-uri()='urn:schemas-microsoft-com:unattend']))" -n "$xml_tmp" 2>/dev/null) || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
-            [[ -n $rows ]] && awk -F'|' 'NF==2 && $1!="" && ($2==0 || $2==1) && !seen[$1]++ {next} {exit 1}' <<<"$rows" || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
-            while IFS='|' read -r architecture count; do
-                if [[ $count -eq 0 ]]; then
-                    xml ed -L -s "/*[local-name()='unattend' and namespace-uri()='urn:schemas-microsoft-com:unattend']/*[local-name()='settings' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@pass='specialize']/*[local-name()='component' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@name='Microsoft-Windows-Shell-Setup'][@processorArchitecture='$architecture']" -t elem -n ComputerName -v "$hostName" "$xml_tmp" >/dev/null 2>&1 || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
-                else
-                    xml ed -L -u "/*[local-name()='unattend' and namespace-uri()='urn:schemas-microsoft-com:unattend']/*[local-name()='settings' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@pass='specialize']/*[local-name()='component' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@name='Microsoft-Windows-Shell-Setup'][@processorArchitecture='$architecture']/*[local-name()='ComputerName' and namespace-uri()='urn:schemas-microsoft-com:unattend']" -v "$hostName" "$xml_tmp" >/dev/null 2>&1 || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
-                fi
-            done <<<"$rows"
-            [[ $(xml sel -t -m "/*[local-name()='unattend' and namespace-uri()='urn:schemas-microsoft-com:unattend']/*[local-name()='settings' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@pass='specialize']/*[local-name()='component' and namespace-uri()='urn:schemas-microsoft-com:unattend'][@name='Microsoft-Windows-Shell-Setup']/*[local-name()='ComputerName' and namespace-uri()='urn:schemas-microsoft-com:unattend']" -v . -n "$xml_tmp" 2>/dev/null | sort -u) == "$hostName" ]] || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
-			# With Sysprep enabled, the specialize Shell-Setup entry is the
-			# authoritative computer-name action.  Its verified readback fulfils
-			# the task-level change_hostname result without a second registry edit.
-			rootpxe_deployment_identity_hostname_result=true
-        fi
         expected_hash=$(sha256sum "$xml_tmp" 2>/dev/null | awk '{print $1}') || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
         [[ $expected_hash =~ ^[0-9a-fA-F]{64}$ ]] || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
         mv -f -- "$xml_tmp" "$xml_path" || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
         actual_hash=$(sha256sum "$xml_path" 2>/dev/null | awk '{print $1}') || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
         [[ $actual_hash == "$expected_hash" ]] || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
-        rootpxe_deployment_identity_sysprep_result=true
     fi
     rootpxe_initialization_failure_reason=windows_system_unmount_failed
     umount /ntfs >/dev/null 2>&1 || return 1
+    [[ $sysprep -ne 1 ]] || rootpxe_deployment_identity_sysprep_result=true
     unset rootpxe_initialization_failure_reason
     rootpxe_stage customizing_hostname "code=WINDOWS_INITIALIZATION_COMPLETE"
 }
@@ -6260,7 +6249,7 @@ completeTasking() {
             if rootpxe_deployment_identity_private_enabled; then
                 rootpxe_deployment_identity_request_private || handleError "PXEOS_STAGE=system_initialization CODE=INITIALIZATION_PRIVATE_CONFIG_UNAVAILABLE"
             fi
-            if [[ ${changeHostname:-false} == true ]] || ( rootpxe_deployment_identity_windows_policy_enabled && jq -e '.systemIdentity.sysprep == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1 ); then
+            if ! rootpxe_cloud_init_policy_enabled && { [[ ${changeHostname:-false} == true ]] || ( rootpxe_deployment_identity_windows_policy_enabled && jq -e '.systemIdentity.sysprep == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1 ); }; then
                 unset rootpxe_initialization_failure_reason
                 rootpxe_apply_hostname_for_disk "$hd" || handleError "PXEOS_STAGE=system_initialization CODE=SYSTEM_INITIALIZATION_FAILED REASON=${rootpxe_initialization_failure_reason:-unknown}"
             fi

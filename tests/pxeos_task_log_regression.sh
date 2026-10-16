@@ -33,7 +33,7 @@ check test "$(stat -c '%d:%i' "$log")" != "$old_identity"
 check bash -c '! grep -Fq "first diagnostic" "$1"' _ "$log"
 # Source-only definitions preserve context; an exec attempt explicitly starts
 # a new trusted file, rather than accepting any inherited scalar marker.
-for name in $(declare -F | awk '{print $3}' | grep -E '^rootpxe_(task_|run_logged|redact|utf8|bound_callback)'); do declare -f "$name"; done >"$tmp/helpers"
+for name in $(declare -F | awk '{print $3}' | grep -E '^rootpxe_(task_|run_logged|redact|utf8|bound_callback|console_message)'); do declare -f "$name"; done >"$tmp/helpers"
 before_source=$log; . "$tmp/helpers"
 check test "$(rootpxe_task_log_path)" = "$before_source"
 declare -f rootpxe_log_directory rootpxe_log_type_valid rootpxe_log_new_file rootpxe_log_pin_valid rootpxe_log_pin_release rootpxe_log_pin_readonly rootpxe_log_pin_register >"$tmp/paths"
@@ -56,6 +56,13 @@ check bash -c '! grep -Eq "first|second|secret-fragment|hidden-argv-fragment" "$
 newline_callback=$(rootpxe_bound_callback_message '{"password":"first\nsecond"} bare known\nsecret-fragment\nArgs Passed: hidden-argv-fragment')
 check bash -c '[[ $1 != *first* && $1 != *second* && $1 != *secret-fragment* && $1 != *hidden-argv-fragment* ]]' _ "$newline_callback"
 unset execution_token
+for field in cloudInitVendorData cloud_init_vendor_data cloudInitVendorDataSha256 cloud_init_vendor_data_sha256; do
+    rootpxe_task_log_append "{\"$field\":\"vendor-full-secret\"}"
+    rootpxe_task_log_append "{\"$field\":\"vendor-incomplete-secret"
+    check bash -c '! grep -Eq "vendor-full-secret|vendor-incomplete-secret" "$1"' _ "$log"
+done
+rootpxe_task_log_append 'private vendor file /tmp/rootpxe-cloud-vendor.A1b2C3'
+check bash -c '! grep -Fq "/tmp/rootpxe-cloud-vendor.A1b2C3" "$1"' _ "$log"
 for count in 65001 65535; do
     printf -v boundary '%0*d' "$count" 0
     printf '%s' "$boundary" | rootpxe_task_log_stream fake /dev/vg/root

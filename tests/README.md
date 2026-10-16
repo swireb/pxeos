@@ -81,10 +81,10 @@ python3 tests/pxeos_build_version_test.py
 
 上述脚本均按单脚本独立运行；本目录仍不提供一键 full suite，也不因此宣称 CI、真实磁盘或实机部署已验证。
 
-## Windows、Linux 名称、显示与部署身份（11）
+## Windows、Linux 名称、显示与部署身份（12）
 
 - `pxeos_xml_command_regression.sh`：以私有文件和命令 mock 覆盖 Sysprep XML 写入路径。
-- `pxeos_windows_initialization_regression.sh`：以真实 hivex/reged/XML 工具覆盖 Windows 主机名与 Sysprep 开关矩阵。
+- `pxeos_windows_initialization_regression.sh`：以真实 hivex/reged/XML 工具覆盖 Windows 主机名与 Sysprep 模板开关矩阵，模板原字节、固定或缺失名称不覆盖、管理名不影响注入及注入回执。
 - `pxeos_windows_hostname_native_regression.sh`：以真实 `reged` 写入测试 hive，并由 native 工具只读核验两个 ControlSet 的主机名。
 - `pxeos_windows_display_registry_regression.sh`：解析只读 MountedDevices 文本导出，不打开真实 hive 或块设备。
 - `pxeos_sysprep_path_regression.sh`：核对 Sysprep 路径大小写发现、链接拒绝和歧义拒绝。
@@ -94,6 +94,7 @@ python3 tests/pxeos_build_version_test.py
 - `pxeos_identity_preflight_order_regression.sh`：核对部署入口中 Windows XML、NoCloud 注入、冻结回执的顺序及旧执行器缺失。
 - `pxeos_deployment_identity_regression.sh`：核对部署身份工具的 XML 能力门槛与身份契约。
 - `pxeos_linux_hostname_regression.sh`：真实普通文件事务覆盖 Linux 单标签校验、主机名/回环自身 hosts 更新、CRLF/注释/远端保留、旧名缺失与本机映射去重、路径/模式/硬链接拒绝、回读回滚、外来 inode 不覆盖、清理失败留证、标签工具分支、许可目标唯一根、只读重试和命名四态；不要求 Cloud-init 包或干净缓存/seed。
+- `pxeos_template_injection_regression.sh`：私有普通文件与设备/XML 边界替身覆盖 v5/v2 新能力、Windows 固定或缺失计算机名称原字节、Cloud 手工名称/固定实例标识/其他元数据键、名称开启仍允许空用户配置、checkin 跳过未使用的管理名称校验、restore 尾部名称隔离和模板只报告注入成功；不证明真实 XML 工具、注册表、磁盘或首启行为。
 
 `pxeos_windows_hostname_native_regression.sh` 与 `pxeos_windows_initialization_regression.sh` 都需要 `ROOTPXE_WINDOWS_HOSTNAME_TOOL`、`ROOTPXE_HIVEX_MINIMAL`、`ROOTPXE_REGED`，以及用于 fixture 的 C 编译器、`pkg-config` 和 hivex 开发头文件/库。后者还要求实际 `xml`、`jq`，并以 `/ntfs` **不存在**为隔离前提；不要在已挂载或真实目标盘环境中运行。满足隔离条件后可分别显式执行：
 
@@ -104,9 +105,9 @@ bash tests/pxeos_windows_initialization_regression.sh
 
 ## 原生 Cloud-init（5）
 
-- `pxeos_cloud_init_protocol_regression.sh`：真实 jq 二次验证 v3 六个私有字段、手工元数据、空用户正文及真实空字节散列、UTF-8/CRLF、网络空值对、三个私密文件的 BASHPID/inode/权限证明、三向及组合 unlink 故障后的整份失效与安全重试、旧键/缺失或关闭策略拒绝、三正文脱敏、能力异常不生成请求及注入/清理成功后才设置名称回执。
-- `pxeos_cloud_init_permit_regression.sh`：真实首次单盘和 MPA 单盘计划、许可响应、登记及校验，真实 source JSON checkin 后调用两文件或三文件安装器；覆盖手工 meta、空用户/网络配置、两 permit 的 JSON 数组能力声明、异常能力不发请求、缺失/损坏映射、错误设备/操作及普通部署/捕获绕过。
-- `pxeos_cloud_init_seed_regression.sh`：普通临时目录覆盖两文件或三文件原字节、空用户文件、手工 meta、内容完全一致时的只读幂等、清空网络不删除已有文件、额外/缺失/篡改、foreign seed/缓存/禁用、链接、网络阶段回滚与外来内容保留、半份 seed 拒绝和 SELinux 工具分支；内容相等不证明同一任务归属。
+- `pxeos_cloud_init_protocol_regression.sh`：真实 jq 二次验证 v5 八个私有字段、空用户正文及真实空字节散列、UTF-8/CRLF、网络与供应方空值对、三个各 64 KiB 的总体大响应通过标准输入解析、四个私密文件的 BASHPID/inode/权限证明、独立及组合 unlink 故障后的整份失效与安全重试、旧键/缺失或关闭策略拒绝、四正文及供应方字段与路径脱敏、能力异常不生成请求及模板仅上报注入回执。
+- `pxeos_cloud_init_permit_regression.sh`：真实首次单盘和 MPA 单盘计划、许可响应、登记及校验，真实 source JSON checkin 后调用两文件、三文件或四文件安装器；覆盖冻结 meta、空用户/网络/供应方配置、两 permit 的 v5 与 JSON 数组能力声明、异常能力不发请求、缺失/损坏映射、错误设备/操作及普通部署/捕获绕过。
+- `pxeos_cloud_init_seed_regression.sh`：普通临时目录覆盖两文件、三文件或四文件原字节、空用户文件、冻结 meta、内容完全一致时的只读幂等、清空网络或供应方配置不删除已有文件、额外/缺失/篡改、foreign seed/缓存/禁用、链接、网络及供应方阶段回滚与外来内容保留、半份 seed 拒绝和 SELinux 工具分支；内容相等不证明同一任务归属。
 - `pxeos_cloud_init_mounts_regression.sh`：设备边界替身覆盖独立只读程序分区探测不依赖 Cloud 路径、变量分区仍严格拒绝遮盖、全部物理卷许可、挂载歧义、借用与失败清理证据。
 - `pxeos_cloud_init_roots_regression.sh`：Cloud 注入与离线名称共用真实根发现/全部物理卷许可，对同一根去重，拒绝两个不同根、候选身份冲突及未许可物理卷。
 
@@ -124,7 +125,7 @@ bash tests/pxeos_windows_initialization_regression.sh
 ## 脚本审计回归（3）
 
 - `pxeos_script_audit_regression.sh`：提取局部函数，以命令替身覆盖扩展分区、SATA/NVMe 名称碰撞、坏分区 dump、旧 Windows 分片、printf、控制字符及数组作用域、恢复格式与选择、时间显示、hash 前置门禁、磁盘容量、假钟倒计时、压缩参数、主机名、库存与 LVM probe 清理、算术错误传播和存储空间列。
-- `pxeos_script_io_regression.sh`：以临时普通文件核对 NFS/SMB 的 EXIT/INT/TERM 清理及自有派生计划清理、umask/trap 保留、缺库及 source 失败、入口停止、有限设备重读、raw 引导区逻辑字节、GPT backup 与 raw 区分及坏 raw 在清表前拒绝、日志折行、严格 JSON 响应、任务库存/磁盘健康/非镜像完成的 HTTP 失败门禁，以及大于 2^31 和接近 GPT 安全整数上界的 LBA 精确读回。设备重读和写入只调用函数替身，不执行真实 `sfdisk`、`nvme` 或 LVM。
+- `pxeos_script_io_regression.sh`：以临时普通文件核对 NFS/SMB 的 EXIT/INT/TERM 四份 Cloud-init 私有文件清理及自有派生计划清理、umask/trap 保留、缺库及 source 失败、入口停止、有限设备重读、raw 引导区逻辑字节、GPT backup 与 raw 区分及坏 raw 在清表前拒绝、日志折行、严格 JSON 响应、任务库存/磁盘健康/非镜像完成的 HTTP 失败门禁，以及大于 2^31 和接近 GPT 安全整数上界的 LBA 精确读回。设备重读和写入只调用函数替身，不执行真实 `sfdisk`、`nvme` 或 LVM。
 - `pxeos_task_http_regression.sh`：以 curl 替身核对私有 form/JSON 文件原始字节、无附加换行、curl 参数和 stdin、EOF、真实返回码、重定向拒绝及成功/失败/信号/临时目录失败后的清理。多播真实 mock curl PID 和取消继续由 `pxeos_https_control_regression.sh` 等现有回归覆盖。
 
 Git Bash 可显式补齐工具路径及设备字符串转换边界，例如：

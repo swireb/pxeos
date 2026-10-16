@@ -14,8 +14,11 @@ trap 'rm -rf -- "$tmp"; [[ -z ${task_log:-} ]] || rm -f -- "$task_log"' EXIT
 test_funcs="$tmp/funcs.sh"
 # The production library imports an absolute Buildroot companion.  These
 # ordinary-file tests do not call that companion, so remove only this import.
-sed -e '/partition-funcs\.sh/d' -e '/restore-preflight\.sh/d' -e '/capture-recovery\.sh/d' -e '/deployment-identity\.sh/d' "$funcs" >"$test_funcs"
+sed -e '/partition-funcs\.sh/d' -e '/restore-preflight\.sh/d' -e '/capture-recovery\.sh/d' "$funcs" >"$test_funcs"
 cp "$progress_lib" "$tmp/partclone-progress.sh"
+for library in cloud-init.sh linux-hostname.sh deployment-identity.sh task-http.sh; do
+    cp "${funcs%/*}/$library" "$tmp/$library"
+done
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
 printf '\nif declare -F task_log_test_emulate_pin_flags >/dev/null; then task_log_test_emulate_pin_flags; fi\n' >>"$tmp/log-paths.sh"
 for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do

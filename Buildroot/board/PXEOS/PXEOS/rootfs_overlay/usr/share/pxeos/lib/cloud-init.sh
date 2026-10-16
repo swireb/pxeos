@@ -1,5 +1,5 @@
 #!/bin/bash
-# 仅离线安装原生 NoCloud seed；不执行目标程序或 user-data。
+# 仅离线安装原生 NoCloud seed；不执行目标程序或任何配置正文。
 
 rootpxe_ci_stat() { stat -c '%u:%g:%a:%h' -- "$1"; }
 rootpxe_ci_is_root() { [[ $EUID == 0 ]]; }
@@ -123,13 +123,14 @@ rootpxe_cloud_init_policy_enabled() {
     [[ ${taskType:-} == deploy && ${osid:-} == 50 && -r ${deploymentIdentityPolicyFile:-} ]] &&
         jq -e '.version == 1 and .cloudInit == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1
 }
-rootpxe_cloud_init_configured() { [[ -n ${cloudInitUserDataFile:-} || -n ${cloudInitMetaDataFile:-} || -n ${cloudInitNetworkConfigFile:-} ]]; }
+rootpxe_cloud_init_configured() { [[ -n ${cloudInitUserDataFile:-} || -n ${cloudInitMetaDataFile:-} || -n ${cloudInitNetworkConfigFile:-} || -n ${cloudInitVendorDataFile:-} ]]; }
 rootpxe_ci_private_file_valid() {
     local file="$1" hash="$2" inode="$3" pid="$4" kind="$5" info owner group mode links
     case $kind in
         user-data) [[ $file =~ ^/tmp/rootpxe-cloud-init\.[A-Za-z0-9]{6}$ ]];;
         meta-data) [[ $file =~ ^/tmp/rootpxe-cloud-meta\.[A-Za-z0-9]{6}$ ]];;
         network-config) [[ $file =~ ^/tmp/rootpxe-cloud-network\.[A-Za-z0-9]{6}$ ]];;
+        vendor-data) [[ $file =~ ^/tmp/rootpxe-cloud-vendor\.[A-Za-z0-9]{6}$ ]];;
         *) return 1;;
     esac || return 1
     [[ -f $file && ! -L $file && -O $file ]] || return 1
@@ -147,6 +148,10 @@ rootpxe_cloud_init_private_valid() {
         rootpxe_ci_private_file_valid "${cloudInitNetworkConfigFile:-}" "${cloudInitNetworkConfigSha256:-}" "${rootpxe_cloud_init_network_private_inode:-}" "${rootpxe_cloud_init_network_private_pid:-}" network-config || return 1
         [[ -s $cloudInitNetworkConfigFile ]] || return 1
     fi
+    if [[ -n ${cloudInitVendorDataFile:-} || -n ${cloudInitVendorDataSha256:-} ]]; then
+        rootpxe_ci_private_file_valid "${cloudInitVendorDataFile:-}" "${cloudInitVendorDataSha256:-}" "${rootpxe_cloud_init_vendor_private_inode:-}" "${rootpxe_cloud_init_vendor_private_pid:-}" vendor-data || return 1
+        [[ -s $cloudInitVendorDataFile ]] || return 1
+    fi
     return 0
 }
 rootpxe_ci_private_names() {
@@ -154,6 +159,7 @@ rootpxe_ci_private_names() {
         user-data) ci_file_var=cloudInitUserDataFile; ci_hash_var=cloudInitUserDataSha256; ci_inode_var=rootpxe_cloud_init_private_inode; ci_pid_var=rootpxe_cloud_init_private_pid; ci_field=cloudInitUserData; ci_prefix=/tmp/rootpxe-cloud-init.XXXXXX;;
         meta-data) ci_file_var=cloudInitMetaDataFile; ci_hash_var=cloudInitMetaDataSha256; ci_inode_var=rootpxe_cloud_init_meta_private_inode; ci_pid_var=rootpxe_cloud_init_meta_private_pid; ci_field=cloudInitMetaData; ci_prefix=/tmp/rootpxe-cloud-meta.XXXXXX;;
         network-config) ci_file_var=cloudInitNetworkConfigFile; ci_hash_var=cloudInitNetworkConfigSha256; ci_inode_var=rootpxe_cloud_init_network_private_inode; ci_pid_var=rootpxe_cloud_init_network_private_pid; ci_field=cloudInitNetworkConfig; ci_prefix=/tmp/rootpxe-cloud-network.XXXXXX;;
+        vendor-data) ci_file_var=cloudInitVendorDataFile; ci_hash_var=cloudInitVendorDataSha256; ci_inode_var=rootpxe_cloud_init_vendor_private_inode; ci_pid_var=rootpxe_cloud_init_vendor_private_pid; ci_field=cloudInitVendorData; ci_prefix=/tmp/rootpxe-cloud-vendor.XXXXXX;;
         *) return 1;;
     esac
 }
@@ -161,7 +167,7 @@ rootpxe_cloud_init_cleanup_private() {
     local result=0 kind file ci_file_var ci_hash_var ci_inode_var ci_pid_var ci_field ci_prefix
     # 整份快照的有效标记不可继承；先失效，再独立清理各文件并保留失败proof。
     unset rootpxe_cloud_init_valid_pid
-    for kind in user-data meta-data network-config; do
+    for kind in user-data meta-data network-config vendor-data; do
         rootpxe_ci_private_names "$kind" || return 1
         file=${!ci_file_var-}
         if [[ -n $file ]]; then
@@ -190,10 +196,10 @@ rootpxe_ci_capture_private_field() {
     [[ $result -eq 0 && $actual == "$expected" ]]
 }
 rootpxe_apply_json_cloud_init() {
-    local document="$1" hash meta_hash network_hash
+    local document="$1" hash meta_hash network_hash vendor_hash
     rootpxe_cloud_init_cleanup_private || return 1
     jq -e 'type == "object"' >/dev/null 2>&1 <<<"$document" || return 1
-    jq -e '[has("cloudInitUserData"),has("cloudInitUserDataSha256"),has("cloudInitMetaData"),has("cloudInitMetaDataSha256"),has("cloudInitNetworkConfig"),has("cloudInitNetworkConfigSha256"),has("cloudInitInstanceId"),has("cloudInitHostname")] | any' >/dev/null 2>&1 <<<"$document" || return 0
+    jq -e '[has("cloudInitUserData"),has("cloudInitUserDataSha256"),has("cloudInitMetaData"),has("cloudInitMetaDataSha256"),has("cloudInitNetworkConfig"),has("cloudInitNetworkConfigSha256"),has("cloudInitVendorData"),has("cloudInitVendorDataSha256"),has("cloudInitInstanceId"),has("cloudInitHostname")] | any' >/dev/null 2>&1 <<<"$document" || return 0
     [[ ${taskType:-} == deploy && ${osid:-} == 50 ]] || return 1
     jq -e '.type == "deploy" and (.osid | type == "number") and .osid == 50 and
       (has("cloudInitInstanceId") | not) and (has("cloudInitHostname") | not) and
@@ -203,20 +209,24 @@ rootpxe_apply_json_cloud_init() {
       (.cloudInitMetaDataSha256 | type == "string" and test("^[0-9a-f]{64}$")) and
       (.cloudInitNetworkConfig | type == "string" and utf8bytelength <= 65536 and (contains("\u0000") | not)) and
       (.cloudInitNetworkConfigSha256 | type == "string") and
-      (if .cloudInitNetworkConfig == "" then .cloudInitNetworkConfigSha256 == "" else (.cloudInitNetworkConfigSha256 | test("^[0-9a-f]{64}$")) end)' >/dev/null 2>&1 <<<"$document" || return 1
-    [[ ${changeHostname:-false} != true ]] || jq -e '.cloudInitUserData | utf8bytelength > 0' >/dev/null 2>&1 <<<"$document" || return 1
+      (if .cloudInitNetworkConfig == "" then .cloudInitNetworkConfigSha256 == "" else (.cloudInitNetworkConfigSha256 | test("^[0-9a-f]{64}$")) end) and
+      (.cloudInitVendorData | type == "string" and utf8bytelength <= 65536 and (contains("\u0000") | not)) and
+      (.cloudInitVendorDataSha256 | type == "string") and
+      (if .cloudInitVendorData == "" then .cloudInitVendorDataSha256 == "" else (.cloudInitVendorDataSha256 | test("^[0-9a-f]{64}$")) end)' >/dev/null 2>&1 <<<"$document" || return 1
     hash=$(jq -r '.cloudInitUserDataSha256' <<<"$document") || return 1
     meta_hash=$(jq -r '.cloudInitMetaDataSha256' <<<"$document") || return 1
     network_hash=$(jq -r '.cloudInitNetworkConfigSha256' <<<"$document") || return 1
+    vendor_hash=$(jq -r '.cloudInitVendorDataSha256' <<<"$document") || return 1
     if ! rootpxe_ci_capture_private_field "$document" user-data "$hash" ||
        ! rootpxe_ci_capture_private_field "$document" meta-data "$meta_hash" ||
-       { [[ -n $network_hash ]] && ! rootpxe_ci_capture_private_field "$document" network-config "$network_hash"; }; then
+       { [[ -n $network_hash ]] && ! rootpxe_ci_capture_private_field "$document" network-config "$network_hash"; } ||
+       { [[ -n $vendor_hash ]] && ! rootpxe_ci_capture_private_field "$document" vendor-data "$vendor_hash"; }; then
         rootpxe_cloud_init_cleanup_private || return 1
         return 1
     fi
     rootpxe_cloud_init_valid_pid=$BASHPID
     export -n rootpxe_cloud_init_valid_pid
-    export cloudInitUserDataFile cloudInitUserDataSha256 cloudInitMetaDataFile cloudInitMetaDataSha256 cloudInitNetworkConfigFile cloudInitNetworkConfigSha256
+    export cloudInitUserDataFile cloudInitUserDataSha256 cloudInitMetaDataFile cloudInitMetaDataSha256 cloudInitNetworkConfigFile cloudInitNetworkConfigSha256 cloudInitVendorDataFile cloudInitVendorDataSha256
     if ! rootpxe_cloud_init_private_valid; then rootpxe_cloud_init_cleanup_private || return 1; return 1; fi
 }
 
@@ -263,16 +273,18 @@ rootpxe_ci_validate_cloud_state() {
     return 0
 }
 rootpxe_ci_verify_seed() {
-    local seed="$1" data_hash="$2" metadata_hash="$3" network_hash="${4:-}" entry count=0 expected_count=2
-    if [[ -n $network_hash ]]; then [[ $network_hash =~ ^[0-9a-f]{64}$ ]] || return 1; expected_count=3; fi
+    local seed="$1" data_hash="$2" metadata_hash="$3" network_hash="${4:-}" vendor_hash="${5:-}" entry count=0 expected_count=2
+    if [[ -n $network_hash ]]; then [[ $network_hash =~ ^[0-9a-f]{64}$ ]] || return 1; expected_count=$((expected_count + 1)); fi
+    if [[ -n $vendor_hash ]]; then [[ $vendor_hash =~ ^[0-9a-f]{64}$ ]] || return 1; expected_count=$((expected_count + 1)); fi
     rootpxe_ci_metadata_safe "$seed" directory || return 1
     while IFS= read -r -d '' entry; do
-        case ${entry##*/} in user-data|meta-data) ;; network-config) [[ -n $network_hash ]] || return 1;; *) return 1;; esac
+        case ${entry##*/} in user-data|meta-data) ;; network-config) [[ -n $network_hash ]] || return 1;; vendor-data) [[ -n $vendor_hash ]] || return 1;; *) return 1;; esac
         rootpxe_ci_metadata_safe "$entry" file 600 || return 1
         count=$((count + 1))
     done < <(find "$seed" -mindepth 1 -maxdepth 1 -print0)
     [[ $count -eq $expected_count && $(rootpxe_ci_hash "$seed/user-data") == "$data_hash" && $(rootpxe_ci_hash "$seed/meta-data") == "$metadata_hash" ]] || return 1
-    [[ -z $network_hash || $(rootpxe_ci_hash "$seed/network-config") == "$network_hash" ]]
+    [[ -z $network_hash || $(rootpxe_ci_hash "$seed/network-config") == "$network_hash" ]] || return 1
+    [[ -z $vendor_hash || $(rootpxe_ci_hash "$seed/vendor-data") == "$vendor_hash" ]]
 }
 rootpxe_ci_verify_label() {
     local physical="$1" target="$2" expected
@@ -284,6 +296,7 @@ rootpxe_ci_verify_seed_labels() {
     local seed="$1" file
     local -a files=(user-data meta-data)
     [[ -z ${cloudInitNetworkConfigSha256:-} ]] || files+=(network-config)
+    [[ -z ${cloudInitVendorDataSha256:-} ]] || files+=(vendor-data)
     rootpxe_ci_verify_label "$seed" /var/lib/cloud/seed/nocloud || return 1
     for file in "${files[@]}"; do rootpxe_ci_verify_label "$seed/$file" "/var/lib/cloud/seed/nocloud/$file" || return 1; done
 }
@@ -296,7 +309,7 @@ rootpxe_ci_readonly_preflight() {
     if [[ -n ${rootpxe_ci_selinux_contexts:-} ]]; then rootpxe_ci_label_tools_ready || { rootpxe_ci_reject 47 cloud_init_label_tools_missing; return $?; }; fi
     if [[ -d $seed ]]; then
         if [[ -n $(find "$seed" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
-            rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" || { rootpxe_ci_reject 45 cloud_init_foreign_seed; return $?; }
+            rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" "${cloudInitVendorDataSha256:-}" || { rootpxe_ci_reject 45 cloud_init_foreign_seed; return $?; }
             rootpxe_ci_verify_seed_labels "$seed" || { rootpxe_ci_reject 48 cloud_init_label_unverified; return $?; }
             rootpxe_cloud_init_seed_verified=yes
         else rootpxe_ci_verify_label "$seed" /var/lib/cloud/seed/nocloud || { rootpxe_ci_reject 48 cloud_init_label_unverified; return $?; }; fi
@@ -533,12 +546,10 @@ rootpxe_apply_cloud_init() {
     fi
     if [[ ${osid:-} == 50 ]]; then rootpxe_deployment_identity_hostname_result=false; fi
     [[ ${taskType:-} == deploy && ${osid:-} == 50 ]] && rootpxe_cloud_init_private_valid || return 1
-    [[ ${changeHostname:-false} != true || -s $cloudInitUserDataFile ]] || { rootpxe_cloud_init_error=cloud_init_hostname_user_data_empty; return 1; }
     rootpxe_stage cloud_init 'installing native NoCloud seed'
     rootpxe_cloud_init_install_for_targets ${disks:-${hd:-}} || return 1
     rootpxe_cloud_init_cleanup_private || return 1
     rootpxe_deployment_identity_cloud_init_result=true
-    [[ ${changeHostname:-false} != true ]] || rootpxe_deployment_identity_hostname_result=true
     return 0
 }
 rootpxe_ci_create_directory() {
@@ -568,10 +579,14 @@ rootpxe_cloud_init_install_at_root() {
             [[ -f ${cloudInitNetworkConfigFile:-} && ! -L $cloudInitNetworkConfigFile && ${cloudInitNetworkConfigSha256:-} =~ ^[0-9a-f]{64}$ && $(rootpxe_ci_hash "$cloudInitNetworkConfigFile") == "$cloudInitNetworkConfigSha256" && $(wc -c <"$cloudInitNetworkConfigFile") -gt 0 && $(wc -c <"$cloudInitNetworkConfigFile") -le 65536 ]] || exit 46
             ci_seed_files+=(network-config)
         fi
+        if [[ -n ${cloudInitVendorDataFile:-} || -n ${cloudInitVendorDataSha256:-} ]]; then
+            [[ -f ${cloudInitVendorDataFile:-} && ! -L $cloudInitVendorDataFile && ${cloudInitVendorDataSha256:-} =~ ^[0-9a-f]{64}$ && $(rootpxe_ci_hash "$cloudInitVendorDataFile") == "$cloudInitVendorDataSha256" && $(wc -c <"$cloudInitVendorDataFile") -gt 0 && $(wc -c <"$cloudInitVendorDataFile") -le 65536 ]] || exit 46
+            ci_seed_files+=(vendor-data)
+        fi
         rootpxe_ci_readonly_preflight "$root" || exit $?
         [[ $rootpxe_cloud_init_seed_verified != yes ]] || exit 0
         if [[ -d $seed && -n $(find "$seed" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
-            rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" || exit 45
+            rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" "${cloudInitVendorDataSha256:-}" || exit 45
             rootpxe_ci_verify_seed_labels "$seed" || exit 48
             exit 0
         fi
@@ -590,10 +605,11 @@ rootpxe_cloud_init_install_at_root() {
                 user-data) cp -- "$cloudInitUserDataFile" "$path" || exit 1;;
                 meta-data) cp -- "$cloudInitMetaDataFile" "$path" || exit 1;;
                 network-config) cp -- "$cloudInitNetworkConfigFile" "$path" || exit 1;;
+                vendor-data) cp -- "$cloudInitVendorDataFile" "$path" || exit 1;;
             esac
             rootpxe_ci_label_path "$path" "/var/lib/cloud/seed/nocloud/$file" || exit 48
         done
-        rootpxe_ci_verify_seed "$stage" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" || exit 46
+        rootpxe_ci_verify_seed "$stage" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" "${cloudInitVendorDataSha256:-}" || exit 46
         if [[ -d $seed ]]; then
             [[ -z $(find "$seed" -mindepth 1 -maxdepth 1 -print -quit) ]] || exit 45
             rootpxe_ci_verify_label "$seed" /var/lib/cloud/seed/nocloud || exit 48
@@ -611,7 +627,7 @@ rootpxe_cloud_init_install_at_root() {
             ci_created_dirs[${#ci_created_dirs[@]}-1]="$seed"
             for index in "${!ci_owned_files[@]}"; do ci_owned_files[$index]="$seed/${ci_owned_files[$index]##*/}"; done
         fi
-        rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" || exit 46
+        rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" "${cloudInitVendorDataSha256:-}" || exit 46
         rootpxe_ci_verify_seed_labels "$seed" || exit 48
         ci_owned_files=(); ci_owned_file_inodes=(); ci_created_dirs=(); ci_created_dir_inodes=()
     ); then result=0; else

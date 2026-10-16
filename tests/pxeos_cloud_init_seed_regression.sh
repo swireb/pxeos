@@ -33,10 +33,23 @@ fixture(){
     cloudInitMetaDataFile="$tmp/meta-data"
     cloudInitMetaDataSha256=$(rootpxe_ci_hash "$cloudInitMetaDataFile")
     cloudInitNetworkConfigFile='' cloudInitNetworkConfigSha256=''
+    cloudInitVendorDataFile='' cloudInitVendorDataSha256=''
 }
 network_fixture(){
     fixture "$1"
     printf 'version: 2\r\nethernets:\r\n  enp1s0:\r\n    dhcp4: true\r\n\r\n' >"$tmp/network-config"
+    cloudInitNetworkConfigFile="$tmp/network-config"
+    cloudInitNetworkConfigSha256=$(rootpxe_ci_hash "$cloudInitNetworkConfigFile")
+}
+vendor_fixture(){
+    fixture "$1"
+    printf '#cloud-config\r\n# 供应方私有原始字节\r\nruncmd: []\r\n\r\n' >"$tmp/vendor-data"
+    cloudInitVendorDataFile="$tmp/vendor-data"
+    cloudInitVendorDataSha256=$(rootpxe_ci_hash "$cloudInitVendorDataFile")
+}
+four_fixture(){
+    vendor_fixture "$1"
+    printf 'version: 2\nethernets: {}\n' >"$tmp/network-config"
     cloudInitNetworkConfigFile="$tmp/network-config"
     cloudInitNetworkConfigSha256=$(rootpxe_ci_hash "$cloudInitNetworkConfigFile")
 }
@@ -63,6 +76,25 @@ rootpxe_cloud_init_install_at_root "$target" && fail 'cleared network silently r
 printf 'instance-id: different-manual-task\n' >"$cloudInitMetaDataFile"
 cloudInitMetaDataSha256=$(rootpxe_ci_hash "$cloudInitMetaDataFile")
 rootpxe_cloud_init_install_at_root "$target" && fail 'cross-task seed accepted'
+vendor_fixture vendor-only
+rootpxe_cloud_init_install_at_root "$target" || fail 'vendor-only three-file install rejected'
+seed="$target/var/lib/cloud/seed/nocloud"
+[[ $(find "$seed" -mindepth 1 -maxdepth 1 -type f | wc -l) == 3 && ! -e $seed/network-config ]] || fail 'vendor-only expected file set mismatch'
+cmp -s "$tmp/vendor-data" "$seed/vendor-data" || fail 'vendor-data raw bytes changed'
+four_fixture four
+rootpxe_cloud_init_install_at_root "$target" || fail 'four-file install rejected'
+seed="$target/var/lib/cloud/seed/nocloud"
+[[ $(find "$seed" -mindepth 1 -maxdepth 1 -type f | wc -l) == 4 ]] || fail 'vendor-data was not installed as fourth file'
+cmp -s "$tmp/vendor-data" "$seed/vendor-data" || fail 'four-file vendor bytes changed'
+before=$(stat -c '%d:%i' "$seed/user-data" "$seed/meta-data" "$seed/network-config" "$seed/vendor-data")
+rootpxe_ci_readonly_preflight "$target" || fail 'four-file readonly retry rejected'
+[[ $rootpxe_cloud_init_seed_verified == yes ]] || fail 'four-file readonly retry not verified'
+rootpxe_cloud_init_install_at_root "$target" || fail 'same four-file seed rejected'
+[[ $(stat -c '%d:%i' "$seed/user-data" "$seed/meta-data" "$seed/network-config" "$seed/vendor-data") == "$before" ]] || fail 'four-file seed was rewritten'
+cloudInitVendorDataFile='' cloudInitVendorDataSha256=''
+rootpxe_ci_readonly_preflight "$target" && fail 'readonly cleared vendor accepted existing vendor-data'
+rootpxe_cloud_init_install_at_root "$target" && fail 'cleared vendor silently removed existing vendor-data'
+[[ $rootpxe_cloud_init_error == cloud_init_foreign_seed && -f $seed/vendor-data ]] || fail 'cleared vendor conflict not preserved'
 fixture empty-user
 : >"$cloudInitUserDataFile"
 cloudInitUserDataSha256=$(rootpxe_ci_hash "$cloudInitUserDataFile")
@@ -123,6 +155,33 @@ for network_unsafe_metadata in owner mode; do
     [[ $rootpxe_cloud_init_error == cloud_init_foreign_seed ]] || fail 'unsafe network metadata reason'
 done
 network_unsafe_metadata=''
+for conflict in missing-vendor tampered-vendor extra-vendor hardlinked-vendor symlink-vendor; do
+    four_fixture "$conflict"
+    rootpxe_cloud_init_install_at_root "$target" || fail 'vendor conflict fixture install'
+    seed="$target/var/lib/cloud/seed/nocloud"
+    case $conflict in
+        missing-vendor) rm -- "$seed/vendor-data";;
+        tampered-vendor) printf 'changed' >>"$seed/vendor-data";;
+        extra-vendor) printf 'foreign' >"$seed/unknown-data";;
+        hardlinked-vendor) ln "$seed/vendor-data" "$tmp/vendor-extra-link";;
+        symlink-vendor) rm -- "$seed/vendor-data"; if ! ln -s /dev/null "$seed/vendor-data"; then printf 'SKIP: vendor symlink creation denied by Windows\n'; continue; fi;;
+    esac
+    rootpxe_ci_readonly_preflight "$target" && fail "readonly accepted $conflict"
+    [[ $rootpxe_cloud_init_error == cloud_init_foreign_seed ]] || fail "$conflict reason"
+done
+four_fixture metadata-vendor
+rootpxe_cloud_init_install_at_root "$target" || fail 'vendor metadata fixture install'
+rootpxe_ci_stat(){
+    if [[ $1 == "$target/var/lib/cloud/seed/nocloud/vendor-data" ]]; then
+        case ${vendor_unsafe_metadata:-} in owner) printf '12345:0:600:1\n'; return;; mode) printf '0:0:666:1\n'; return;; esac
+    fi
+    rootpxe_ci_fixture_original_stat "$@"
+}
+for vendor_unsafe_metadata in owner mode; do
+    rootpxe_ci_readonly_preflight "$target" && fail "readonly accepted unsafe vendor $vendor_unsafe_metadata"
+    [[ $rootpxe_cloud_init_error == cloud_init_foreign_seed ]] || fail 'unsafe vendor metadata reason'
+done
+vendor_unsafe_metadata=''
 fixture masked-network
 mkdir -p "$target/etc/systemd/system"
 if ln -s /dev/null "$target/etc/systemd/system/cloud-init-network.service"; then
@@ -158,6 +217,28 @@ rootpxe_cloud_init_install_at_root "$target" && fail 'publish failure accepted'
 [[ -z $(find "$target/var/lib/cloud/seed" -name '.nocloud.new.*' -print) ]] || fail 'stage survived rollback'
 unset -f rootpxe_ci_move
 eval "$(declare -f rootpxe_ci_original_move | sed '1s/rootpxe_ci_original_move/rootpxe_ci_move/')"
+four_fixture vendor-publish-rollback
+mkdir -p "$target/var/lib/cloud/seed/nocloud"
+inode=$(stat -c '%d:%i' "$target/var/lib/cloud/seed/nocloud")
+rootpxe_ci_move(){ [[ $2 != */vendor-data ]] || return 1; rootpxe_ci_original_move "$@"; }
+rootpxe_cloud_init_install_at_root "$target" && fail 'vendor publish failure accepted'
+[[ $rootpxe_cloud_init_error == cloud_init_seed_publish_failed ]] || fail 'vendor publish reason'
+[[ $(stat -c '%d:%i' "$target/var/lib/cloud/seed/nocloud") == "$inode" ]] || fail 'vendor rollback replaced original empty inode'
+[[ -z $(find "$target/var/lib/cloud/seed/nocloud" -mindepth 1 -print) && -z $(find "$target/var/lib/cloud/seed" -name '.nocloud.new.*' -print) ]] || fail 'vendor rollback left owned files/stage'
+unset -f rootpxe_ci_move
+eval "$(declare -f rootpxe_ci_original_move | sed '1s/rootpxe_ci_original_move/rootpxe_ci_move/')"
+four_fixture vendor-foreign-rollback
+mkdir -p "$target/var/lib/cloud/seed/nocloud"
+rootpxe_ci_move(){
+    if [[ $2 == */vendor-data ]]; then printf 'foreign-preserved' >"$2"; return 1; fi
+    rootpxe_ci_original_move "$@"
+}
+rootpxe_cloud_init_install_at_root "$target" && fail 'foreign vendor publish race accepted'
+[[ $rootpxe_cloud_init_error == cloud_init_seed_publish_failed ]] || fail 'foreign vendor publish reason'
+[[ $(<"$target/var/lib/cloud/seed/nocloud/vendor-data") == foreign-preserved ]] || fail 'vendor rollback deleted foreign content'
+[[ $(find "$target/var/lib/cloud/seed/nocloud" -mindepth 1 -maxdepth 1 -type f | wc -l) == 1 && -z $(find "$target/var/lib/cloud/seed" -name '.nocloud.new.*' -print) ]] || fail 'foreign vendor rollback retained owned files/stage'
+unset -f rootpxe_ci_move
+eval "$(declare -f rootpxe_ci_original_move | sed '1s/rootpxe_ci_original_move/rootpxe_ci_move/')"
 network_fixture network-publish-rollback
 mkdir -p "$target/var/lib/cloud/seed/nocloud"
 inode=$(stat -c '%d:%i' "$target/var/lib/cloud/seed/nocloud")
@@ -188,10 +269,17 @@ rootpxe_ci_read_label(){ printf 'system_u:object_r:cloud_var_lib_t:s0\n'; }
 printf 'version: 2\nethernets: {}\n' >"$tmp/network-config"
 cloudInitNetworkConfigFile="$tmp/network-config"
 cloudInitNetworkConfigSha256=$(rootpxe_ci_hash "$cloudInitNetworkConfigFile")
+printf '#cloud-config\nruncmd: []\n' >"$tmp/vendor-data"
+cloudInitVendorDataFile="$tmp/vendor-data"
+cloudInitVendorDataSha256=$(rootpxe_ci_hash "$cloudInitVendorDataFile")
 rootpxe_cloud_init_install_at_root "$target" || fail 'target-policy label branch failed'
 grep -Fq 'user-data|system_u:object_r:cloud_var_lib_t:s0' "$tmp/labels" || fail 'user-data label not written/read'
 grep -Fq 'meta-data|system_u:object_r:cloud_var_lib_t:s0' "$tmp/labels" || fail 'manual meta-data label not written/read'
 grep -Fq 'network-config|system_u:object_r:cloud_var_lib_t:s0' "$tmp/labels" || fail 'network-config label not written/read'
+grep -Fq 'vendor-data|system_u:object_r:cloud_var_lib_t:s0' "$tmp/labels" || fail 'vendor-data label not written/read'
+rootpxe_ci_read_label(){ if [[ $1 == */vendor-data ]]; then printf 'system_u:object_r:wrong_t:s0\n'; else printf 'system_u:object_r:cloud_var_lib_t:s0\n'; fi; }
+rootpxe_ci_readonly_preflight "$target" && fail 'readonly accepted wrong vendor-data label'
+[[ $rootpxe_cloud_init_error == cloud_init_label_unverified ]] || fail 'vendor-data readonly label reason'
 rootpxe_ci_read_label(){ if [[ $1 == */network-config ]]; then printf 'system_u:object_r:wrong_t:s0\n'; else printf 'system_u:object_r:cloud_var_lib_t:s0\n'; fi; }
 rootpxe_ci_readonly_preflight "$target" && fail 'readonly accepted wrong network-config label'
 [[ $rootpxe_cloud_init_error == cloud_init_label_unverified ]] || fail 'network-config readonly label reason'
@@ -208,4 +296,4 @@ rootpxe_ci_transaction_cleanup(){ return 1; }
 rootpxe_cloud_init_install_at_root "$target" && fail 'cleanup failure accepted'
 [[ $rootpxe_cloud_init_error == cloud_init_seed_rollback_failed ]] || fail 'rollback failure reason'
 [[ -n $(find "$target/var/lib/cloud/seed" -name '.nocloud.new.*' -print) ]] || fail 'rollback failure evidence discarded'
-printf 'PASS: native two/three-file seed, network bytes/idempotence/conflicts/rollback/SELinux\n'
+printf 'PASS: native two/three/four-file seed, vendor bytes/readonly retry/conflicts/rollback/foreign preservation/SELinux\n'

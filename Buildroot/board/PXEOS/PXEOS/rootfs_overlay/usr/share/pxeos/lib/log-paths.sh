@@ -197,16 +197,17 @@ rootpxe_log_redact() {
     local rootpxe_redaction_text
     # A snapshot may end mid-field while a daemon continues writing.
     rootpxe_redaction_text=$(LC_ALL=C printf '%s' "$1" | sed -E \
-      -e "s/((['\"]?)[[:alnum:]_.-]*(token|password|credential|secret)[[:alnum:]_.-]*\\2[[:space:]]*[:=][[:space:]]*)\"([^\"\\\\]|\\\\.)*(\\\\)?$/\\1\"[REDACTED: incomplete quoted field]\"/Ig" \
-      -e "s/((['\"]?)[[:alnum:]_.-]*(token|password|credential|secret)[[:alnum:]_.-]*\\2[[:space:]]*[:=][[:space:]]*)'[^']*$/\\1'[REDACTED: incomplete quoted field]'/Ig") || return 1
+      -e "s/((['\"]?)[[:alnum:]_.-]*(token|password|credential|secret|cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*\\2[[:space:]]*[:=][[:space:]]*)\"([^\"\\\\]|\\\\.)*(\\\\)?$/\\1\"[REDACTED: incomplete quoted field]\"/Ig" \
+      -e "s/((['\"]?)[[:alnum:]_.-]*(token|password|credential|secret|cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*\\2[[:space:]]*[:=][[:space:]]*)'[^']*$/\\1'[REDACTED: incomplete quoted field]'/Ig") || return 1
     set -- "$rootpxe_redaction_text"
     if declare -F rootpxe_redact_diagnostic >/dev/null; then rootpxe_redact_diagnostic "$1"; return $?; fi
     # Boot has no task payload: redact common fields without loading funcs.
     LC_ALL=C printf '%s' "$1" | sed -E \
-      -e 's/("(token|password|credential|secret|executionToken)"[[:space:]]*:[[:space:]]*)"([^"\\]|\\.)*"/\1"[REDACTED]"/Ig' \
-      -e "s/((token|password|credential|secret)[[:space:]]*=[[:space:]]*)'[^']*'/\\1[REDACTED]/Ig" \
-      -e 's/((token|password|credential|secret)[[:space:]]*=[[:space:]]*)"([^"\\]|\\.)*"/\1[REDACTED]/Ig' \
-      -e 's/((token|password|credential|secret)[[:space:]]*=[[:space:]]*)[^&[:space:]]+/\1[REDACTED]/Ig'
+      -e 's/("(token|password|credential|secret|executionToken|cloudInitVendorData|cloud_init_vendor_data)(Sha256|_sha256|File|_file)?"[[:space:]]*:[[:space:]]*)"([^"\\]|\\.)*"/\1"[REDACTED]"/Ig' \
+      -e "s/((token|password|credential|secret|cloudInitVendorData|cloud_init_vendor_data)(Sha256|_sha256|File|_file)?[[:space:]]*=[[:space:]]*)'[^']*'/\\1[REDACTED]/Ig" \
+      -e 's/((token|password|credential|secret|cloudInitVendorData|cloud_init_vendor_data)(Sha256|_sha256|File|_file)?[[:space:]]*=[[:space:]]*)"([^"\\]|\\.)*"/\1[REDACTED]/Ig' \
+      -e 's/((token|password|credential|secret|cloudInitVendorData|cloud_init_vendor_data)(Sha256|_sha256|File|_file)?[[:space:]]*=[[:space:]]*)[^&[:space:]]+/\1[REDACTED]/Ig' \
+      -e 's@/tmp/rootpxe-cloud-vendor\.[[:alnum:]]{6}@[REDACTED]@g'
 }
 
 rootpxe_log_diagnostic_stream() {

@@ -16,8 +16,8 @@ for config in "$config_root/configs/fsx64.config" "$config_root/configs/fsx86.co
 done
 ! grep -Fq 'xmlstarlet ' "$funcs" || fail 'production Sysprep path still invokes xmlstarlet'
 grep -Fq 'xml val -w "$xml_tmp"' "$funcs" || fail 'production XML validation does not invoke xml'
-grep -Fq 'rows=$(xml sel ' "$funcs" || fail 'production XML selection does not invoke xml'
-grep -Fq 'xml ed -L ' "$funcs" || fail 'production XML editing does not invoke xml'
+! grep -Fq 'rows=$(xml sel ' "$funcs" || fail 'template path still selects forced ComputerName'
+! grep -Fq 'xml ed -L ' "$funcs" || fail 'template path still edits frozen XML'
 
 mkdir -p "$tmp/bin" "$tmp/source/Windows/System32/sysprep"
 cat >"$tmp/bin/jq" <<'EOF'
@@ -88,9 +88,9 @@ export XML_TRACE NTFS_MOUNT_TRACE
 
 rootpxe_apply_windows_hostname "$tmp/source" || fail 'Sysprep XML path rejected fixed xml command'
 grep -Eq '^val -w .+' "$XML_TRACE" || fail 'xml val arguments were not forwarded'
-grep -Eq '^sel -t -m .+count\(' "$XML_TRACE" || fail 'xml sel discovery arguments were not forwarded'
-grep -Eq '^ed -L -s .+ -t elem -n ComputerName -v PXEHOST ' "$XML_TRACE" || fail 'xml ed arguments were not forwarded'
-[[ $(grep -Ec '^sel -t -m ' "$XML_TRACE") -eq 2 ]] || fail 'xml sel verification call missing'
+! grep -Eq '^(sel|ed) ' "$XML_TRACE" || fail 'client rendered frozen XML'
+cmp -s "$private" "$tmp/ntfs/Windows/System32/sysprep/unattend.xml" || fail 'ON/ON changed supplied XML bytes'
+[[ ${rootpxe_deployment_identity_hostname_result:-false} == false && ${rootpxe_deployment_identity_sysprep_result:-false} == true ]] || fail 'template receipt changed'
 [[ ! -e $tmp/registry.trace ]] || fail 'ON/ON changed registry'
 
 # OFF/ON 保留私有 XML 原字节；OFF/OFF 无挂载；ON/OFF 只调用注册表。

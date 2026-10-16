@@ -65,8 +65,22 @@ test_download_session_cleanup() {
             rootpxe_cloud_init_meta_private_inode=$(rootpxe_ci_inode "$cloudInitMetaDataFile") || exit 9
             rootpxe_cloud_init_meta_private_pid=$BASHPID
             printf '%s\n' "$cloudInitMetaDataFile" >>"$marker/owned-data-path"
+            cloudInitNetworkConfigFile=$(mktemp /tmp/rootpxe-cloud-network.XXXXXX) || exit 9
+            printf 'version: 2\nethernets: {}\n' >"$cloudInitNetworkConfigFile"
+            chmod 600 "$cloudInitNetworkConfigFile" || exit 9
+            cloudInitNetworkConfigSha256=$(rootpxe_ci_hash "$cloudInitNetworkConfigFile") || exit 9
+            rootpxe_cloud_init_network_private_inode=$(rootpxe_ci_inode "$cloudInitNetworkConfigFile") || exit 9
+            rootpxe_cloud_init_network_private_pid=$BASHPID
+            printf '%s\n' "$cloudInitNetworkConfigFile" >>"$marker/owned-data-path"
+            cloudInitVendorDataFile=$(mktemp /tmp/rootpxe-cloud-vendor.XXXXXX) || exit 9
+            printf '#cloud-config\nruncmd: []\n' >"$cloudInitVendorDataFile"
+            chmod 600 "$cloudInitVendorDataFile" || exit 9
+            cloudInitVendorDataSha256=$(rootpxe_ci_hash "$cloudInitVendorDataFile") || exit 9
+            rootpxe_cloud_init_vendor_private_inode=$(rootpxe_ci_inode "$cloudInitVendorDataFile") || exit 9
+            rootpxe_cloud_init_vendor_private_pid=$BASHPID
+            printf '%s\n' "$cloudInitVendorDataFile" >>"$marker/owned-data-path"
             rootpxe_cloud_init_valid_pid=$BASHPID
-            export -n rootpxe_cloud_init_valid_pid rootpxe_cloud_init_meta_private_pid rootpxe_cloud_init_meta_private_inode
+            export -n rootpxe_cloud_init_valid_pid rootpxe_cloud_init_meta_private_pid rootpxe_cloud_init_meta_private_inode rootpxe_cloud_init_network_private_pid rootpxe_cloud_init_network_private_inode rootpxe_cloud_init_vendor_private_pid rootpxe_cloud_init_vendor_private_inode
             rootpxe_resolved_layout_file=$(mktemp /tmp/rootpxe-resolved-layout.XXXXXX)
             rootpxe_resolved_lvm_layout_file=$(mktemp /tmp/rootpxe-resolved-lvm.XXXXXX)
             printf '%s\n' "$rootpxe_resolved_layout_file" "$rootpxe_resolved_lvm_layout_file" >"$marker/owned-derived-paths"
