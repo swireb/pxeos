@@ -16,6 +16,9 @@ rootpxe_source_core_library deployment-identity.sh || return 1
 rootpxe_source_core_library cloud-init.sh || return 1
 rootpxe_source_core_library linux-hostname.sh || return 1
 rootpxe_source_core_library task-http.sh || return 1
+rootpxe_message_format_lib=/usr/share/pxeos/lib/message-format.sh
+[[ -r $rootpxe_message_format_lib ]] || rootpxe_message_format_lib="$(dirname "${BASH_SOURCE[0]}")/message-format.sh"
+[[ ! -r $rootpxe_message_format_lib ]] || . "$rootpxe_message_format_lib"
 rootpxe_multicast_lib=/usr/share/pxeos/lib/multicast.sh
 [[ -r $rootpxe_multicast_lib ]] || rootpxe_multicast_lib="$(dirname "${BASH_SOURCE[0]}")/multicast.sh"
 [[ -r $rootpxe_multicast_lib ]] && . "$rootpxe_multicast_lib"
@@ -549,22 +552,34 @@ rootpxe_run_logged_mutation() {
 
 
 rootpxe_task_console_failure() {
-    local level="$1" text="$2" summary code='' log_status=0
+    # Arguments remain (level, raw diagnostic); optional $3 is display-only.
+    # It must never replace the raw log or any callback diagnostic.
+    local level="$1" text="$2" display_text="${3:-$2}" summary code='' log_status=0
     text=$(rootpxe_redact_diagnostic "$text")
+    display_text=$(rootpxe_redact_diagnostic "$display_text")
     # Existing callers use both actual and escaped diagnostic newlines.
     # Do not printf %b arbitrary diagnostic data (other escapes stay inert).
     text=${text//\\n/$'\n'}
+    display_text=${display_text//\\n/$'\n'}
     summary=${text%%$'\n'*}
     summary=$(LC_ALL=C printf '%s' "$summary" | tr '\000-\037\177' ' ')
     summary=$(rootpxe_utf8_safe_prefix "$summary" 160)
     [[ $text =~ (^|[[:space:]])CODE=([A-Z0-9_]+) ]] && code=${BASH_REMATCH[2]}
     [[ -z $code || $summary != *"CODE=$code"* ]] || summary=${summary//"CODE=$code"/}
+    if declare -F rootpxe_console_summary >/dev/null 2>&1; then
+        summary=$(rootpxe_console_summary "$display_text")
+    else
+        summary='Operation failed; check task log'
+    fi
+    if [[ $level == WARN && $summary == *'Operation failed; check task log' ]]; then
+        summary='Warning; check task log'
+    fi
     rootpxe_task_log_append "$text" || log_status=1
     rootpxe_task_log_append "LEVEL=$level CODE=${code:-unspecified} SUMMARY=$summary" || log_status=1
     # A later successful summary append does not make a lost detail complete.
     (( log_status == 0 )) || rootpxe_task_log_state[unavailable]=yes
     printf '\n'
-    rootpxe_console_message "$level" "$summary${code:+ CODE=$code}"
+    rootpxe_console_message "$level" "$summary"
     rootpxe_task_log_notice
 }
 
@@ -1123,8 +1138,7 @@ rootpxe_activate_lvm_vg() {
     local vg_uuid="$1" vg_name="$2" rc=0
     rootpxe_run_logged_mutation vgchange "$vg_name" vgchange -ay --select "vg_uuid=$vg_uuid" "$vg_name" || rc=$?
     if [[ $rc -ne 0 ]]; then
-        rootpxe_console_message ERROR "Volume group activation failed: $vg_name (exit $rc)."
-        rootpxe_task_log_notice
+        rootpxe_task_console_failure ERROR "Volume group activation failed: $vg_name (exit $rc)." 'CODE=LVM_VG_ACTIVATION_FAILED'
         rootpxe_run_logged_mutation vgchange "$vg_name" vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" || true
         return "$rc"
     fi
@@ -2620,13 +2634,13 @@ rootpxe_layout_readback_failed() {
     rootpxe_cleanup_deployment_partition_file
     # Field names and the normalized mismatch class are safe to display; raw
     # partition data is deliberately kept out of task logs.
-    rootpxe_console_message ERROR "Deployment layout readback mismatch: $reason"
+    rootpxe_task_console_failure ERROR "Deployment layout readback mismatch: $reason" 'CODE=LAYOUT_READBACK_FAILED'
     rootpxe_stage layout_apply "Deployment layout readback mismatch: $reason"
     return 1
 }
 
 rootpxe_layout_apply_failed() {
-    local code="$1" reason="$2" diagnostics="${3:-}" name=''
+    local code="$1" reason="$2" diagnostics="${3:-}" name='' raw_diagnostic
     rootpxe_layout_apply_code="$code"
     rootpxe_layout_apply_reason="$reason"
     rootpxe_layout_diagnostics_file=''
@@ -2641,8 +2655,9 @@ rootpxe_layout_apply_failed() {
     fi
     # Do not print the partition table: sfdisk stderr is retained only in the
     # protected diagnostic file, while task logs receive a stable phase code.
-    rootpxe_console_message ERROR "Deployment layout apply failed: $code ($reason)${diagnostics:+; diagnostics: $diagnostics}"
-    rootpxe_stage layout_apply "Deployment layout apply failed: $code ($reason)${diagnostics:+; diagnostics: $diagnostics}"
+    raw_diagnostic="Deployment layout apply failed: $code ($reason)${diagnostics:+; diagnostics: $diagnostics}"
+    rootpxe_task_console_failure ERROR "$raw_diagnostic" "PXEOS_STAGE=layout_apply CODE=$code REASON=$reason"
+    rootpxe_stage layout_apply "$raw_diagnostic"
     return 1
 }
 
@@ -3531,6 +3546,9 @@ rootpxe_clear_capture_marker() {
 rootpxe_stage() {
     local st="$1"
     local msg="${2:-}"
+    if declare -F rootpxe_message_text >/dev/null 2>&1; then
+        msg=$(rootpxe_message_text "$msg")
+    fi
     rootpxe_require_task_context || return 1
     local api="${pxeapi:-$web}"
     [[ -z $api ]] && return 0

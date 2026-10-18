@@ -79,13 +79,13 @@ printf '%s\nLAST_NATIVE_ERROR\n' "$boundary" | rootpxe_task_log_stream fake /dev
 check grep -Fq LAST_NATIVE_ERROR "$log"
 check test "$(rootpxe_utf8_safe_tail "$utf8" 64000 | wc -c)" -eq 63999
 rootpxe_task_console_failure ERROR 'First cause CODE=FAKE_FAIL\nSecond cause token=hidden' >"$tmp/console"
-check test "$(grep -o 'CODE=FAKE_FAIL' "$tmp/console" | wc -l)" -eq 1
+check bash -c '! grep -Fq "CODE=FAKE_FAIL" "$1"' _ "$tmp/console"
 check bash -c '! grep -Fq "Second cause" "$1"' _ "$tmp/console"
 check grep -Fq 'Second cause token=[REDACTED]' "$log"
 rootpxe_task_console_failure ERROR 'Native error CODE=ARGS_SAFE\nNative detail remains\n   Args Passed: fake-argv-secret --private something' >"$tmp/argv-console"
 check bash -c '! grep -Fq "fake-argv-secret" "$1" "$2"' _ "$log" "$tmp/argv-console"
 check grep -Fq 'Native detail remains' "$log"
-check grep -Fq 'CODE=ARGS_SAFE' "$tmp/argv-console"
+check grep -Fq 'Operation failed; check task log' "$tmp/argv-console"
 safe_callback=$(rootpxe_bound_callback_message 'Native error CODE=ARGS_SAFE\nArgs Passed: callback-argv-secret')
 check bash -c '[[ $1 != *callback-argv-secret* && $1 == *CODE=ARGS_SAFE* ]]' _ "$safe_callback"
 # A failed logger must never masquerade as a retained diagnostic.

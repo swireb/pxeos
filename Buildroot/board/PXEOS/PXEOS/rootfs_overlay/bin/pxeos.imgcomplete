@@ -65,7 +65,7 @@ while true; do
     if echo "$res" | grep -q '"success"[[:space:]]*:[[:space:]]*true'; then
         echo "Done"
         if ! rootpxe_clear_capture_marker; then
-            rootpxe_console_message WARN "PXEOS_STAGE=finish_notify CODE=CAPTURE_MARKER_CLEAR_FAILED REASON=${rootpxe_capture_marker_clear_error_reason:-marker_clear_failed}"
+            rootpxe_task_console_failure WARN "PXEOS_STAGE=finish_notify CODE=CAPTURE_MARKER_CLEAR_FAILED REASON=${rootpxe_capture_marker_clear_error_reason:-marker_clear_failed}"
             rootpxe_console_message WARN 'Marker retained for manual cleanup.'
         fi
         rootpxe_cleanup_task_json

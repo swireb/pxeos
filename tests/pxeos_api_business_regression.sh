@@ -1736,7 +1736,7 @@ set +e
 error_status=$?
 set -e
 [[ $error_status -eq 1 ]] || fail "handleError exit policy changed: $error_status"
-[[ $(sed -n '2p' "$tmp/error.out") == '[ERROR] Mock failure details token=[REDACTED]' ]] || fail 'handleError must start on a new concise ERROR line after dots'
+[[ $(sed -n '2p' "$tmp/error.out") == '[ERROR] Operation failed; check task log' ]] || fail 'handleError must start on a new concise ERROR line after dots'
 ! grep -Eq 'command not found|Error details:|Kernel variables|Mock failure detail line two' "$tmp/error.out" || fail 'handleError repeated details or missing dependency'
 error_log=$(sed -n 's/^\[INFO\]  Task log: //p' "$tmp/error.out")
 [[ -f $error_log && ! -L $error_log && $(stat -c %a "$error_log") == 600 ]] || fail 'handleError trusted log location'
@@ -1774,7 +1774,7 @@ grep -Fqx 'retry-callback:Mock task failure:PXEOS_ERROR' "$tmp/task-context.out"
     dots 'Mounting File System'
     handleWarning 'Mock warning details'
 ) >"$tmp/warning.out" 2>&1
-[[ $(sed -n '2p' "$tmp/warning.out") == '[WARN]  Mock warning details' ]] || fail 'handleWarning must start on a new concise WARN line after dots'
+[[ $(sed -n '2p' "$tmp/warning.out") == '[WARN]  Warning; check task log' ]] || fail 'handleWarning must start on a new concise WARN line after dots'
 ! grep -Eq 'command not found|Warning details:' "$tmp/warning.out" || fail 'handleWarning repeated details or missing dependency'
 warning_log=$(sed -n 's/^\[INFO\]  Task log: //p' "$tmp/warning.out")
 [[ -f $warning_log && ! -L $warning_log ]] || fail 'handleWarning log location'
