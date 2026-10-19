@@ -387,6 +387,8 @@ exit 0
 EOF
 chmod +x "$tmp/bin/curl" "$tmp/bin/dmidecode" "$tmp/bin/usleep"
 
+export rootpxe_pipeline_fixture_funcs="$funcs"
+export rootpxe_pipeline_fixture_log="$tmp/task-console.log"
 cat > "$tmp/bash_env" <<'EOF'
 rootpxe_require_task_context() { return 0; }
 rootpxe_stage() { return 0; }
@@ -400,6 +402,13 @@ rootpxe_cleanup_task_json() { : > "${MOCK_JSON_CLEARED:?}"; }
 rootpxe_capture_resume_cleanup() { :; }
 rootpxe_deployment_identity_policy_enabled() { [[ ${MOCK_IDENTITY:-no} == yes ]]; }
 rootpxe_console_message() { printf '%-7s %s\n' "[$1]" "$2"; }
+declare -A rootpxe_task_log_state=()
+rootpxe_task_log_append() { printf '%s\n' "$1" >>"$rootpxe_pipeline_fixture_log"; }
+rootpxe_task_log_notice() { :; }
+. "${rootpxe_pipeline_fixture_funcs%/*}/message-format.sh"
+for function in rootpxe_task_console_failure rootpxe_redact_diagnostic rootpxe_utf8_safe_prefix; do
+    eval "$(sed -n "/^${function}() {$/,/^}$/p" "$rootpxe_pipeline_fixture_funcs")"
+done
 dots() { :; }
 debugPause() { :; }
 handleError() { printf 'HANDLE_ERROR:%s\n' "$*" >&2; exit 91; }
@@ -458,12 +467,14 @@ PATH="$tmp/bin:$PATH" BASH_ENV="$tmp/bash_env" MOCK_CURL_COUNT="$tmp/marker-warn
     bash -e "$imgcomplete" >"$tmp/marker-warning.out" 2>"$tmp/marker-warning.err"
 marker_warning_rc=$?
 set -e
+if [[ $marker_warning_rc != 0 ]]; then tail -n 5 "$tmp/marker-warning.err" >&2; fi
 assert_eq "$marker_warning_rc" 0 'finish 确认后的 marker 清理失败不得变成业务失败'
-grep -Fq 'CODE=CAPTURE_MARKER_CLEAR_FAILED' "$tmp/marker-warning.out" || fail 'marker 清理失败必须输出稳定告警码'
+grep -Fq 'CODE=CAPTURE_MARKER_CLEAR_FAILED' "$tmp/task-console.log" || fail 'marker 清理失败必须保留原始稳定告警码'
+grep -Fq '[WARN]  Capture marker cleanup failed' "$tmp/marker-warning.out" || { cat "$tmp/marker-warning.out" >&2; fail 'marker 清理失败必须输出短告警'; }
 grep -Fxq 'Done' "$tmp/marker-warning.out" || fail 'finish 成功状态行必须在 marker 告警前结束'
 grep -Fqx '[INFO]  Task complete.' "$tmp/marker-warning.out" || fail 'Task complete 必须在 finish 确认流程结束后输出'
 done_line=$(grep -n -m1 -x 'Done' "$tmp/marker-warning.out" | cut -d: -f1)
-warning_line=$(grep -n -m1 'CODE=CAPTURE_MARKER_CLEAR_FAILED' "$tmp/marker-warning.out" | cut -d: -f1)
+warning_line=$(grep -n -m1 -F '[WARN]  Capture marker cleanup failed' "$tmp/marker-warning.out" | cut -d: -f1)
 complete_line=$(grep -n -m1 -F '[INFO]  Task complete.' "$tmp/marker-warning.out" | cut -d: -f1)
 [[ $done_line =~ ^[1-9][0-9]*$ && $warning_line =~ ^[1-9][0-9]*$ && $complete_line =~ ^[1-9][0-9]*$ && $done_line -lt $warning_line && $warning_line -lt $complete_line ]] || fail 'finish状态、marker告警和Task Complete的输出顺序错误'
 [[ ! -e $tmp/marker-warning-cleared && -f $tmp/marker-warning-json-cleared ]] || fail 'marker 失败应保留 marker 并仍清理任务上下文'

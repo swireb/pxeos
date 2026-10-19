@@ -34,6 +34,9 @@ chmod 600 "$imagePath/.rootpxe-partition-inventory.json" || handleError "PXEOS_S
     rootpxe_capture_publish_metadata "$imagePath" "$imgType" || handleError "PXEOS_STAGE=capture_metadata CODE=CAPTURE_METADATA_INCOMPLETE REASON=publish_not_started"
     rootpxe_finalize_capture || handleError "PXEOS_STAGE=capture_finalize CODE=${rootpxe_finalize_capture_error_code:-CAPTURE_FINALIZE_FAILED} REASON=${rootpxe_finalize_capture_error_reason:-unsafe_finalize_state}"
 fi
+    # Both a fresh publish and resume_published have verified this task's
+    # finalized artifacts. Report while RUNNING, before finish revokes stages.
+    rootpxe_stage finalizing 'captured image finalized' || true
 fi
 finish_args=(
     --data-urlencode "taskid=$taskid"

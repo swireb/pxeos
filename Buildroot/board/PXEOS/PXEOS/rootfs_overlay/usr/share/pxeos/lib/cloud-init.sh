@@ -550,6 +550,7 @@ rootpxe_apply_cloud_init() {
     rootpxe_cloud_init_install_for_targets ${disks:-${hd:-}} || return 1
     rootpxe_cloud_init_cleanup_private || return 1
     rootpxe_deployment_identity_cloud_init_result=true
+    rootpxe_stage cloud_init 'Cloud-init configuration installed' || true
     return 0
 }
 rootpxe_ci_create_directory() {

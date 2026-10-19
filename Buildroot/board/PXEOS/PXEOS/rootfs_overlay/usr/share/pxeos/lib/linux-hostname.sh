@@ -277,4 +277,5 @@ rootpxe_apply_linux_hostname_for_targets() {
         rootpxe_linux_hostname_process_root "$rootpxe_linux_selected_disk" "$rootpxe_linux_selected_candidate" rw || return 1
     fi
     rootpxe_deployment_identity_hostname_result=true
+    rootpxe_stage customizing_hostname 'Linux hostname configured' || true
 }

@@ -449,6 +449,9 @@
     "moving captured image into final path": "正在整理镜像文件",
     "installing native NoCloud seed": "正在写入 Cloud-init 配置",
     "configuring offline Linux hostname": "正在设置 Linux 计算机名称",
+    "Linux hostname configured": "Linux 计算机名称设置完成",
+    "Cloud-init configuration installed": "Cloud-init 配置写入完成",
+    "captured image finalized": "镜像文件整理完成",
     "finish: completed": "任务完成",
     "PXEOS 执行异常": "执行异常"
   },
@@ -978,6 +981,9 @@
       "moving captured image into final path": "Finalizing image files",
       "installing native NoCloud seed": "Writing Cloud-init configuration",
       "configuring offline Linux hostname": "Setting Linux computer name",
+      "Linux hostname configured": "Linux computer name configured",
+      "Cloud-init configuration installed": "Cloud-init configuration installed",
+      "captured image finalized": "Captured image finalized",
       "finish: completed": "Task completed",
       "PXEOS 执行异常": "Operation failed; check task log"
     }
