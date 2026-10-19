@@ -16,6 +16,7 @@ jq() {
     case "$*" in
         *'transportMode'*) printf '%s\n' "${MOCK_MODE:-unicast}" ;;
         *'multicastSessionId'*) printf '%s\n' "${MOCK_SESSION:-}" ;;
+        *'multicastSessionKey'*) printf '%s\n' "${MOCK_SESSION_KEY:-mc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" ;;
         *'waitTimeoutSec'*) printf '%s\n' "${MOCK_TIMEOUT:-}" ;;
         *) return 1 ;;
     esac
@@ -49,18 +50,18 @@ MOCK_HELP_EXIT=1 MOCK_HELP_TEXT='' assert_receiver_rejected
 unset MOCK_HELP_EXIT MOCK_HELP_TEXT
 rootpxe_multicast_runtime_ready=yes
 taskType=deploy
-MOCK_MODE=multicast MOCK_SESSION=manual-session-1 MOCK_TIMEOUT=300 rootpxe_multicast_apply_transport_mode '{}'
-[[ $mc == yes && $multicastSessionId == manual-session-1 && $multicastWaitTimeoutSec == 300 ]]
-MOCK_MODE=multicast MOCK_SESSION=manual-session-1 MOCK_TIMEOUT=86400 rootpxe_multicast_apply_transport_mode '{}'
+MOCK_MODE=multicast MOCK_SESSION=1 MOCK_TIMEOUT=300 rootpxe_multicast_apply_transport_mode '{}'
+[[ $mc == yes && $multicastSessionId == 1 && $multicastSessionKey == mc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa && $multicastWaitTimeoutSec == 300 ]]
+MOCK_MODE=multicast MOCK_SESSION=1 MOCK_TIMEOUT=86400 rootpxe_multicast_apply_transport_mode '{}'
 [[ $mc == yes && $multicastWaitTimeoutSec == 86400 ]]
-if MOCK_MODE=multicast MOCK_SESSION=manual-session-1 MOCK_TIMEOUT=86401 rootpxe_multicast_apply_transport_mode '{}'; then
+if MOCK_MODE=multicast MOCK_SESSION=1 MOCK_TIMEOUT=86401 rootpxe_multicast_apply_transport_mode '{}'; then
     echo 'wait timeout above one day was accepted' >&2
     exit 1
 fi
 MOCK_MODE=unicast rootpxe_multicast_apply_transport_mode '{}'
-[[ $mc == no && ${multicastSessionId:-} == '' ]]
+[[ $mc == no && ${multicastSessionId:-} == '' && ${multicastSessionKey:-} == '' ]]
 taskType=capture
-if MOCK_MODE=multicast MOCK_SESSION=manual-session-1 MOCK_TIMEOUT=300 rootpxe_multicast_apply_transport_mode '{}'; then
+if MOCK_MODE=multicast MOCK_SESSION=1 MOCK_TIMEOUT=300 rootpxe_multicast_apply_transport_mode '{}'; then
     echo 'capture accepted multicast' >&2
     exit 1
 fi

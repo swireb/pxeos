@@ -22,11 +22,12 @@ curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_arg
             *) shift ;;
         esac
     done
-    printf '{"sessionId":"https-control","state":"WAITING"}\n' >"$output"
+    printf '{"sessionId":"1","sessionKey":"mc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"WAITING"}\n' >"$output"
     printf '200'
 }
 
 . "$lib"
+mc=yes multicastSessionId=1 multicastSessionKey=mc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa progress_attempt=1
 printf '{}' >"$tmp/request.json"
 
 rootpxe_api=https://192.0.2.30:9443/service/pxeos/

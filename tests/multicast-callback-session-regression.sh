@@ -16,13 +16,19 @@ awk '/^rootpxe_error_response_reason\(\)/ { copy = 1 } /^rootpxe_directory_size_
 . "$tmp/permit.sh"
 . "$tmp/error.sh"
 . "$multicast"
+. "${multicast%/*}/deployment-identity.sh"
+rootpxe_multicast_runtime_ready() { return 0; }
+rootpxe_deployment_identity_linux_hostname_capability_installed() { return 1; }
+rootpxe_deployment_identity_windows_hostname_capability_installed() { return 1; }
+rootpxe_deployment_identity_windows_sysprep_capability_installed() { return 1; }
 taskid=71
 task_token=session-test-token
 mac=aa:bb:cc:dd:ee:ff
 pxeapi=http://controller/
 web=$pxeapi
 mc=yes
-multicastSessionId=manual-session-callback
+multicastSessionId=9223372036854775807
+multicastSessionKey=mc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 progress_attempt=4
 rootpxe_require_task_context() { :; }
 rootpxe_clear_disk_permit() { :; }
@@ -39,10 +45,12 @@ curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_arg
     esac
 }
 rootpxe_request_disk_permit_for_target disk-id deploy_write
-grep -Fqx 'sessionId=manual-session-callback' "$permit_args"
+grep -Fqx 'sessionId=9223372036854775807' "$permit_args"
+grep -Fqx "sessionKey=$multicastSessionKey" "$permit_args"
 grep -Fqx 'progressAttempt=4' "$permit_args"
 rootpxe_request_disk_permit_batch disk-id deploy_write
-grep -Fqx 'sessionId=manual-session-callback' "$permit_args"
+grep -Fqx 'sessionId=9223372036854775807' "$permit_args"
+grep -Fqx "sessionKey=$multicastSessionKey" "$permit_args"
 grep -Fqx 'progressAttempt=4' "$permit_args"
 
 error_log="$tmp/error.args"
@@ -63,7 +71,8 @@ set -e
 [[ $error_rc == 2 ]]
 ! grep -Fq 'command not found' "$tmp/error-console"
 grep -Fq "Task log: $tmp/log/pxeos-task.log" "$tmp/error-console"
-grep -Fqx 'sessionId=manual-session-callback' "$error_log"
+[[ $(grep -Fxc 'sessionId=9223372036854775807' "$error_log") == 2 ]]
+[[ $(grep -Fxc "sessionKey=$multicastSessionKey" "$error_log") == 2 ]]
 grep -Fqx 'progressAttempt=4' "$error_log"
 
 finish_log="$tmp/finish.args"
@@ -82,7 +91,8 @@ debugPause() { :; }
 type=down
 rootpxe_api=$pxeapi
 . "$imgcomplete"
-grep -Fqx -- 'sessionId=manual-session-callback' "$finish_log"
+grep -Fqx -- 'sessionId=9223372036854775807' "$finish_log"
+grep -Fqx -- "sessionKey=$multicastSessionKey" "$finish_log"
 grep -Fqx -- 'progressAttempt=4' "$finish_log"
 
 mc=no
@@ -93,4 +103,5 @@ curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_arg
 }
 rootpxe_request_disk_permit_for_target disk-id deploy_write
 ! grep -Fq 'sessionId=' "$permit_args"
+! grep -Fq 'sessionKey=' "$permit_args"
 echo 'PASS: multicast callback session regression'

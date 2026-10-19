@@ -12,6 +12,7 @@ jq(){ command "$TEST_JQ" "$@"; }
 req="$tmp/request"
 printf '{}' >"$req"
 rootpxe_api=http://mock/
+mc=yes multicastSessionId=1 multicastSessionKey=mc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa progress_attempt=1
 rootpxe_multicast_operation_deadline=$((SECONDS+1))
 curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
   local out= next=0 arg
@@ -20,7 +21,7 @@ curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_arg
     ((next)) && { out=$arg; break; }
     [[ $arg == -o ]] && next=1
   done
-  printf '{}' >"$out"
+  printf '{"sessionId":"1","sessionKey":"mc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' >"$out"
   printf 200
 }
 rootpxe_multicast_http_post status "$req"

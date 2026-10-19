@@ -53,3 +53,30 @@ rootpxe_task_curl() {
         return 0
     )
 }
+
+# 会话编号始终作为十进制文本处理，不能经 shell 整数或 jq 数值转换。
+rootpxe_task_multicast_number_valid() {
+    local value=${1:-} LC_ALL=C
+    [[ $value =~ ^[1-9][0-9]*$ && ${#value} -le 19 ]] || return 1
+    [[ ${#value} -lt 19 || $value < 9223372036854775807 || $value == 9223372036854775807 ]]
+}
+
+rootpxe_task_multicast_identity_valid() {
+    [[ ${mc:-no} == yes && ${multicastSessionKey:-} =~ ^mc-[0-9a-f]{48}$ && ${progress_attempt:-} =~ ^[1-9][0-9]*$ ]] &&
+        rootpxe_task_multicast_number_valid "${multicastSessionId:-}"
+}
+
+rootpxe_task_multicast_form_args() {
+    rootpxe_task_multicast_args=()
+    [[ ${mc:-no} == yes ]] || return 0
+    rootpxe_task_multicast_identity_valid || return 1
+    rootpxe_task_multicast_args=(--data-urlencode "progressAttempt=$progress_attempt" --data-urlencode "sessionId=$multicastSessionId" --data-urlencode "sessionKey=$multicastSessionKey")
+}
+
+rootpxe_task_multicast_json() {
+    local document=$1
+    if [[ ${mc:-no} != yes ]]; then printf '%s' "$document"; return 0; fi
+    rootpxe_task_multicast_identity_valid || return 1
+    jq -c --arg sessionId "$multicastSessionId" --arg sessionKey "$multicastSessionKey" --argjson progressAttempt "$progress_attempt" \
+        '. + {sessionId:$sessionId,sessionKey:$sessionKey,progressAttempt:$progressAttempt}' <<<"$document"
+}

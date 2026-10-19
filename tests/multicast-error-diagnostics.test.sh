@@ -56,7 +56,8 @@ if rootpxe_multicast_http_post join "$request"; then exit 1; fi
 [[ ${messages[-1]} == *'http=none curl=7 code=redacted error=redacted'* ]]
 
 message_count=${#messages[@]}
-MOCK_HTTP=200 MOCK_CURL_EXIT=0 MOCK_RESPONSE='{}'
+mc=yes multicastSessionId=1 multicastSessionKey=mc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa progress_attempt=1
+MOCK_HTTP=200 MOCK_CURL_EXIT=0 MOCK_RESPONSE='{"sessionId":"1","sessionKey":"mc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
 rootpxe_multicast_http_post join "$request"
 [[ ${#messages[@]} == "$message_count" && -r $rootpxe_multicast_response_file ]]
 rm -f -- "$rootpxe_multicast_response_file"

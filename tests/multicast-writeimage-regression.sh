@@ -13,7 +13,10 @@ case_run() (
   trace="$tmp/$name.trace"
   export trace
   rootpxe_multicast_shutdown_grace_sec=0
-  eval "$(sed "s|/tmp/pigz1|$fifo|g" "$multicast")"
+  . "${multicast%/*}/task-http.sh"
+  # eval 的 BASH_SOURCE 属于测试文件；依赖已从真实库加载，只在副本去重。
+  eval "$(sed -e '/^\. .*\/task-http\.sh".*$/d' -e "s|/tmp/pigz1|$fifo|g" "$multicast")"
+  eval "$(awk '/^rootpxe_effective_img_format\(\)/ {on=1} on {print} on && /^}$/ {exit}' "$funcs")"
   eval "$(printf '%s\n' "$write" | sed "s|/tmp/pigz1|$fifo|g")"
   rootpxe_validate_runtime_img_format(){ :; }
   rootpxe_require_unused_target_disks(){ :; } # FIFO/恢复流程 mock，不访问真实块设备。

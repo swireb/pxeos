@@ -301,7 +301,7 @@ rootpxe_apply_json_checkin() {
         chmod 600 "$originalSchemaFile"
     fi
     rootpxe_apply_json_cloud_init "$document" || return 1
-    export taskid execution_token taskType pxe_type img img_type img_partition_type osid img_format pigz_comp shutdown protocol storage_server storage_export hostName changeHostname resumeStage schemaRevision schemaHash captureBackupName deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash deploymentIdentityPolicyFile multicastTransportMode multicastSessionId multicastWaitTimeoutSec mc
+    export taskid execution_token taskType pxe_type img img_type img_partition_type osid img_format pigz_comp shutdown protocol storage_server storage_export hostName changeHostname resumeStage schemaRevision schemaHash captureBackupName deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash deploymentIdentityPolicyFile multicastTransportMode multicastSessionId multicastSessionKey multicastWaitTimeoutSec mc
 }
 
 checkin_rootpxe() {

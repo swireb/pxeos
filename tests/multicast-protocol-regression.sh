@@ -10,7 +10,8 @@ sleep() { :; }
 udp-receiver() { [[ ${1:-} == --help ]] && printf '%s\n' 'udp-receiver --nokbd --portbase --ttl --mcast-rdv-address --start-timeout --receive-timeout'; }
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
-session=manual-session-aaaaaaaaaaaaaaaa
+session=9223372036854775807
+session_key=mc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 stream=cccccccccccccccccccccccccccccccc
 curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
   local out='' url='' arg body=''
@@ -23,17 +24,18 @@ curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_arg
   done
   body=$(cat "${arg#@}")
   [[ $body != *secret-token* || $arg == @* ]] || return 91
+  jq -e --arg id "$session" --arg key "$session_key" '.sessionId == $id and (.sessionId|type) == "string" and .sessionKey == $key' <<<"$body" >/dev/null || return 91
   case $url in
-    *join) printf '{"sessionId":"%s","state":"WAITING","deadlineAt":"x","readyCount":1,"candidateCount":1,"selectedCount":0,"member":{"state":"READY","selected":false}}' "$session" >"$out";;
-    *prepare) printf '{"sessionId":"%s","streamId":"%s","sequence":1,"portBase":9000,"multicastAddress":"239.1.2.3","ttl":32,"senderAddress":"10.1.2.3","receiverTimeoutSec":300}' "$session" "$stream" >"$out";;
-    *status) printf '{"sessionId":"%s","state":"RUNNING","deadlineAt":"x","currentSequence":2,"member":{"state":"RUNNING","selected":true}}' "$session" >"$out";;
-    *end) printf '{"sessionId":"%s","completed":true}' "$session" >"$out";;
-    *) printf '{"sessionId":"%s"}' "$session" >"$out";;
+    *join) printf '{"sessionId":"%s","sessionKey":"%s","state":"WAITING","deadlineAt":"x","readyCount":1,"candidateCount":1,"selectedCount":0,"member":{"state":"READY","selected":false}}' "$session" "$session_key" >"$out";;
+    *prepare) printf '{"sessionId":"%s","sessionKey":"%s","streamId":"%s","sequence":1,"portBase":9000,"multicastAddress":"239.1.2.3","ttl":32,"senderAddress":"10.1.2.3","receiverTimeoutSec":300}' "$session" "$session_key" "$stream" >"$out";;
+    *status) printf '{"sessionId":"%s","sessionKey":"%s","state":"RUNNING","deadlineAt":"x","currentSequence":2,"member":{"state":"RUNNING","selected":true}}' "$session" "$session_key" >"$out";;
+    *end) printf '{"sessionId":"%s","sessionKey":"%s","completed":true}' "$session" "$session_key" >"$out";;
+    *) printf '{"sessionId":"%s","sessionKey":"%s"}' "$session" "$session_key" >"$out";;
   esac
   printf 200
 }
 . "$lib"
-taskType=deploy multicastTransportMode=multicast multicastSessionId="$session" multicastWaitTimeoutSec=1 taskid=9 task_token=secret-token mac=aa:bb:cc:dd:ee:ff progress_attempt=1 rootpxe_api=http://controller/
+taskType=deploy mc=yes multicastTransportMode=multicast multicastSessionId="$session" multicastSessionKey="$session_key" multicastWaitTimeoutSec=1 taskid=9 task_token=secret-token mac=aa:bb:cc:dd:ee:ff progress_attempt=1 rootpxe_api=http://controller/
 mkdir -p "$tmp/image"
 printf x >"$tmp/image/d1p1.img.000"; printf y >"$tmp/image/d1p1.img.001"; printf z >"$tmp/image/d1p1.lvm.lv.root.img"; printf s >"$tmp/image/d1p1.swap.img"
 cat >"$tmp/schema.json" <<'EOF'

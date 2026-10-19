@@ -222,7 +222,9 @@ rootpxe_partition_progress_send_snapshot() {
     stage=capture; [[ ${type:-} =~ ^([Dd][Oo][Ww][Nn]|down)$ ]] && stage=restore
     api_base="${pxeapi:-${web:-}}"
     [[ -n $api_base ]] || return 0
-    rootpxe_task_curl -ks --connect-timeout 3 --max-time "$max_time" --data-urlencode "taskid=$taskid" --data-urlencode "token=${task_token:-${execution_token:-}}" --data-urlencode "mac=$mac" --data-urlencode "progressProtocol=2" --data-urlencode "stage=$stage" --data-urlencode "snapshot=$payload" "${api_base}progress" >/dev/null 2>&1 || true
+    local -a rootpxe_task_multicast_args=()
+    rootpxe_task_multicast_form_args || return 0
+    rootpxe_task_curl -ks --connect-timeout 3 --max-time "$max_time" --data-urlencode "taskid=$taskid" --data-urlencode "token=${task_token:-${execution_token:-}}" --data-urlencode "mac=$mac" --data-urlencode "progressProtocol=2" --data-urlencode "stage=$stage" --data-urlencode "snapshot=$payload" "${rootpxe_task_multicast_args[@]}" "${api_base}progress" >/dev/null 2>&1 || true
     return 0
 }
 rootpxe_partition_progress_flush() {
@@ -2952,10 +2954,12 @@ rootpxe_set_disk_permit_protocol_error() {
 # status endpoint and accept only explicit JSON terminal states.
 rootpxe_task_status_confirms_disk_permit_cancellation() {
     local api="${pxeapi:-${web:-}}" response body http_code status
+    local -a rootpxe_task_multicast_args=()
     [[ -n $api ]] || return 1
+    rootpxe_task_multicast_form_args || return 1
     response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 \
         --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
-        --data-urlencode "mac=$mac" -w $'\n%{http_code}' "${api}task-status" 2>/dev/null) || return 1
+        --data-urlencode "mac=$mac" "${rootpxe_task_multicast_args[@]}" -w $'\n%{http_code}' "${api}task-status" 2>/dev/null) || return 1
     http_code=${response##*$'\n'}
     body=${response%$'\n'*}
     command -v jq >/dev/null 2>&1 || return 1
@@ -2977,13 +2981,9 @@ rootpxe_request_disk_permit_for_target() {
     api="${pxeapi:-${web:-}}"
     [[ -n $api ]] || return 11
     capabilities=$(rootpxe_deployment_identity_capabilities_json) && rootpxe_deployment_identity_capabilities_valid "$capabilities" || return 12
-    if [[ ${mc:-no} == yes ]]; then
-        rootpxe_multicast_valid_session_id "${multicastSessionId:-}" || return 12
-        rootpxe_permit_attempt_args=(
-            --data-urlencode "progressAttempt=${progress_attempt:-1}"
-            --data-urlencode "sessionId=$multicastSessionId"
-        )
-    fi
+    local -a rootpxe_task_multicast_args=()
+    rootpxe_task_multicast_form_args || return 12
+    rootpxe_permit_attempt_args=("${rootpxe_task_multicast_args[@]}")
     response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 \
         --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
         --data-urlencode "mac=$mac" --data-urlencode "targetId=$target_id" \
@@ -3107,13 +3107,9 @@ rootpxe_request_disk_permit_batch() {
     [[ $(printf '%s\n' "${ids[@]}" | sort -u | wc -l) -eq ${#ids[@]} ]] || return 12
     request=$(printf '%s\n' "${items[@]}" | jq -cs .) || return 12
     local -a rootpxe_permit_batch_attempt_args=()
-    if [[ ${mc:-no} == yes ]]; then
-        rootpxe_multicast_valid_session_id "${multicastSessionId:-}" || return 12
-        rootpxe_permit_batch_attempt_args=(
-            --data-urlencode "progressAttempt=${progress_attempt:-1}"
-            --data-urlencode "sessionId=$multicastSessionId"
-        )
-    fi
+    local -a rootpxe_task_multicast_args=()
+    rootpxe_task_multicast_form_args || return 12
+    rootpxe_permit_batch_attempt_args=("${rootpxe_task_multicast_args[@]}")
     response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "targets=$request" --data-urlencode "cloudInitCapability=linux-nocloud-v5" \
         --data-urlencode 'deploymentIdentityProtocolVersions=[1]' --data-urlencode "deploymentIdentityCapabilities=$capabilities" \
         "${rootpxe_permit_batch_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
@@ -3303,13 +3299,9 @@ rootpxe_error_wait_for_retry() {
         --data-urlencode "mac=$mac" --data-urlencode "errorCode=$code"
         --data-urlencode "message=$message"
     )
-    if [[ ${mc:-no} == yes ]]; then
-        rootpxe_multicast_valid_session_id "${multicastSessionId:-}" || return 1
-        error_args+=(
-            --data-urlencode "progressAttempt=${progress_attempt:-1}"
-            --data-urlencode "sessionId=$multicastSessionId"
-        )
-    fi
+    local -a rootpxe_task_multicast_args=()
+    rootpxe_task_multicast_form_args || return 1
+    error_args+=("${rootpxe_task_multicast_args[@]}")
     [[ $stage_count -eq 1 && $stage_invalid -eq 0 ]] && error_args+=(--data-urlencode "stage=$stage")
     # Do not arm the local timeout until the service confirms persistence.
     while :; do
@@ -3357,7 +3349,7 @@ rootpxe_error_wait_for_retry() {
         fi
         status=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 20 \
             --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
-            --data-urlencode "mac=$mac" "${api}task-status" 2>/dev/null) || { sleep 5; continue; }
+            --data-urlencode "mac=$mac" "${rootpxe_task_multicast_args[@]}" "${api}task-status" 2>/dev/null) || { sleep 5; continue; }
         status=$(jq -er 'if type == "object" and (.status | type) == "string" then .status else empty end' <<<"$status" 2>/dev/null) || status=''
         if [[ ${mc:-no} != yes && $status == queued ]]; then
             rootpxe_console_message INFO 'Retry requested. Resuming task.'
@@ -3552,6 +3544,8 @@ rootpxe_stage() {
     rootpxe_require_task_context || return 1
     local api="${pxeapi:-$web}"
     [[ -z $api ]] && return 0
+    local -a rootpxe_task_multicast_args=()
+    rootpxe_task_multicast_form_args || return 1
     rootpxe_task_curl -ks --max-time 20 \
         --data-urlencode "taskid=$taskid" \
         --data-urlencode "token=$task_token" \
@@ -3559,6 +3553,7 @@ rootpxe_stage() {
         --data-urlencode "stage=$st" \
         --data-urlencode "status=running" \
         --data-urlencode "message=$msg" \
+        "${rootpxe_task_multicast_args[@]}" \
         "${api}stage" >/dev/null 2>&1 || true
 }
 

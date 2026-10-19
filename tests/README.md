@@ -46,18 +46,21 @@ python3 tests/pxeos_build_version_test.py
 
 `pxeos_build_kernel_regression.sh` 还提供可选的 `--arm64-initrd`（仅核对 arm64 initrd 格式）和 `--qemu`（格式核对后运行 QEMU smoke）模式；仅在相应构建/QEMU 环境具备时显式运行。`pxeos_partition_regression.sh` 的原生 FAT16/32 常规文件镜像段由 `PXEOS_FATGROW_TEST_*` 环境变量明确门控，只操作 regular image，不应据此推断真实块设备验证。
 
-## 多播、网络与控制面（10）
+## 多播、网络与控制面（11）
 
 - `multicast-callback-session-regression.sh`：核对多播回调会话与磁盘许可绑定。
 - `multicast-capability.test.sh`：以命令 mock 核对 udp-receiver 能力探测和传输模式限制。
 - `multicast-deadline-regression.sh`：以真实 `jq` 和临时请求核对多播截止时间处理。
 - `multicast-error-diagnostics.test.sh`：以 curl mock 核对多播错误诊断输出。
 - `multicast-monitor-http-cancel-regression.sh`：核对 watchdog 故障、接收进程终止和状态清理。
+- `multicast-number-identity-regression.sh`：真实jq核对有符号64位上限编号的文本往返、非法编号和JSON数字拒绝、第二版能力、环境及私有上下文、七类专用请求、普通回调完整身份、错响应拒绝、切单播清理、路径穿越保护及已确认空磁盘返回值。
 - `multicast-protocol-regression.sh`：核对多播协议请求与会话字段；当前脚本硬编码 `/c/Windows/System32/jq.exe`。
 - `multicast-writeimage-regression.sh`：核对多播写入失败、进程终止和 FIFO 清理。
 - `pxeos_multicast_architecture_regression.sh`：核对多架构多播接收依赖、内核能力和构建映射。
 - `pxeos_https_control_regression.sh`：以 `jq` 和临时文件核对 HTTPS 参数、请求截止、脱敏和 curl PID 清理。
 - `pxeos_network_storage_regression.sh`：合并的网络故障诊断、存储和相关离线回归。
+
+- 编号回归在Git Bash与原生jq可执行；若探测到Cygwin正则引擎不支持既有512次重复上限，仅在抽取fixture中把令牌上界缩窄到255，测试令牌为32字符，全部身份和HTTP断言保留，生产校验不改。这不等于已运行Linux或BusyBox，真实权限、设备及已构建PXEOS仍需独立验证。
 
 ## 捕获、恢复、存储与分区（17）
 

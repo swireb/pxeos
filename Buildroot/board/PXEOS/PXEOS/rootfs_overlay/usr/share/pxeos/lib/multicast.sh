@@ -29,14 +29,18 @@ rootpxe_multicast_control_curl_args() {
 }
 
 rootpxe_multicast_reset() {
-    unset multicastTransportMode multicastSessionId multicastWaitTimeoutSec
+    local file
+    for file in "${rootpxe_multicast_context_file:-}" "${rootpxe_multicast_secret_file:-}" "${rootpxe_multicast_response_file:-}" "${rootpxe_multicast_request_body_file:-}"; do
+        if [[ $file =~ ^/tmp/rootpxe-multicast-(context|token|response|body)\.[A-Za-z0-9]{6}$ && ! -L $file ]]; then rm -f -- "$file"; fi
+    done
+    unset multicastTransportMode multicastSessionId multicastSessionKey multicastWaitTimeoutSec rootpxe_multicast_context_file rootpxe_multicast_secret_file rootpxe_multicast_response_file rootpxe_multicast_request_body_file rootpxe_task_multicast_args
     mc=no
 }
 
-rootpxe_multicast_valid_session_id() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]]; }
+rootpxe_multicast_valid_session_id() { rootpxe_task_multicast_number_valid "${1:-}"; }
 
 rootpxe_multicast_apply_transport_mode() {
-    local document=$1 mode session timeout
+    local document=$1 mode session session_key timeout
     rootpxe_multicast_reset
     mode=$(jq -r 'if has("transportMode") then .transportMode else "unicast" end' <<<"$document") || return 1
     [[ $mode == unicast || $mode == multicast ]] || return 1
@@ -47,13 +51,15 @@ rootpxe_multicast_apply_transport_mode() {
     fi
     [[ ${taskType:-} == deploy ]] && rootpxe_multicast_runtime_ready || return 1
     session=$(jq -r 'if (.multicastSessionId|type)=="string" then .multicastSessionId else "" end' <<<"$document") || return 1
+    session_key=$(jq -r 'if (.multicastSessionKey|type)=="string" then .multicastSessionKey else "" end' <<<"$document") || return 1
     timeout=$(jq -r 'if (.waitTimeoutSec|type)=="number" then .waitTimeoutSec else empty end' <<<"$document") || return 1
-    rootpxe_multicast_valid_session_id "$session" && [[ $timeout =~ ^[1-9][0-9]*$ ]] && (( timeout <= 86400 )) || return 1
+    rootpxe_multicast_valid_session_id "$session" && [[ $session_key =~ ^mc-[0-9a-f]{48}$ && $timeout =~ ^[1-9][0-9]*$ ]] && (( timeout <= 86400 )) || return 1
     multicastTransportMode=multicast
     multicastSessionId=$session
+    multicastSessionKey=$session_key
     multicastWaitTimeoutSec=$timeout
     mc=yes
-    export multicastTransportMode multicastSessionId multicastWaitTimeoutSec mc
+    export multicastTransportMode multicastSessionId multicastSessionKey multicastWaitTimeoutSec mc
 }
 
 rootpxe_multicast_safe_relative_path() {
@@ -159,13 +165,27 @@ rootpxe_multicast_build_manifest() {
 
 rootpxe_multicast_context_begin() {
     local token=${task_token:-${execution_token:-}}
-    [[ ${taskid:-} =~ ^[1-9][0-9]*$ && -n $token && -n ${mac:-} && ${progress_attempt:-1} =~ ^[0-9]+$ ]] || return 1
+    [[ ${taskid:-} =~ ^[1-9][0-9]*$ && -n $token && -n ${mac:-} ]] && rootpxe_task_multicast_identity_valid || return 1
     rm -f -- "${rootpxe_multicast_context_file:-}" "${rootpxe_multicast_secret_file:-}"
     umask 077
     rootpxe_multicast_secret_file=$(mktemp /tmp/rootpxe-multicast-token.XXXXXX) || return 1
     printf %s "$token" >"$rootpxe_multicast_secret_file" && chmod 600 "$rootpxe_multicast_secret_file" || return 1
     rootpxe_multicast_context_file=$(mktemp /tmp/rootpxe-multicast-context.XXXXXX) || return 1
-    jq -cn --argjson taskId "$taskid" --rawfile token "$rootpxe_multicast_secret_file" --arg mac "$mac" --argjson progressAttempt "${progress_attempt:-1}" '{taskId:$taskId,executionToken:$token,mac:$mac,progressAttempt:$progressAttempt}' >"$rootpxe_multicast_context_file" && chmod 600 "$rootpxe_multicast_context_file"
+    jq -cn --argjson taskId "$taskid" --rawfile token "$rootpxe_multicast_secret_file" --arg mac "$mac" --argjson progressAttempt "$progress_attempt" --arg sessionId "$multicastSessionId" --arg sessionKey "$multicastSessionKey" '{taskId:$taskId,executionToken:$token,mac:$mac,progressAttempt:$progressAttempt,sessionId:$sessionId,sessionKey:$sessionKey}' >"$rootpxe_multicast_context_file" && chmod 600 "$rootpxe_multicast_context_file"
+}
+
+rootpxe_multicast_context_matches() {
+    rootpxe_task_multicast_identity_valid || return 1
+    [[ -r ${rootpxe_multicast_context_file:-} && ! -L ${rootpxe_multicast_context_file:-} && -r ${rootpxe_multicast_secret_file:-} && ! -L ${rootpxe_multicast_secret_file:-} ]] || return 1
+    [[ $(cat "$rootpxe_multicast_secret_file") == "${task_token:-${execution_token:-}}" ]] || return 1
+    jq -e --arg taskId "${taskid:-}" --arg mac "${mac:-}" --arg attempt "$progress_attempt" --arg sessionId "$multicastSessionId" --arg sessionKey "$multicastSessionKey" --rawfile token "$rootpxe_multicast_secret_file" \
+        '(.taskId|tostring) == $taskId and .mac == $mac and (.progressAttempt|tostring) == $attempt and .executionToken == $token and (.sessionId|type) == "string" and .sessionId == $sessionId and .sessionKey == $sessionKey' "$rootpxe_multicast_context_file" >/dev/null
+}
+
+rootpxe_multicast_response_matches_instance() {
+    rootpxe_task_multicast_identity_valid || return 1
+    jq -e --arg sessionId "$multicastSessionId" --arg sessionKey "$multicastSessionKey" \
+        '(.sessionId|type) == "string" and .sessionId == $sessionId and .sessionKey == $sessionKey' "$1" >/dev/null
 }
 
 rootpxe_multicast_error_summary() {
@@ -238,6 +258,9 @@ rootpxe_multicast_http_post() {
         [[ $curl_rc == 0 && $status =~ ^2[0-9][0-9]$ ]] && kind=response_invalid
         rootpxe_multicast_http_failure "$op" "$status" "$curl_rc" "$response" "$kind"; rm -f -- "$response"; return 1
     fi
+    if ! rootpxe_multicast_response_matches_instance "$response"; then
+        rootpxe_multicast_http_failure "$op" "$status" "$curl_rc" "$response" response_invalid; rm -f -- "$response"; return 1
+    fi
     rm -f -- "${rootpxe_multicast_response_file:-}"
     rootpxe_multicast_response_file=$response
 }
@@ -245,7 +268,7 @@ rootpxe_multicast_http_post() {
 rootpxe_multicast_request() {
     local op=$1 filter=$2 body rc
     shift 2
-    [[ -r ${rootpxe_multicast_context_file:-} && ! -L ${rootpxe_multicast_context_file:-} ]] || return 1
+    rootpxe_multicast_context_matches || return 1
     umask 077
     body=$(mktemp /tmp/rootpxe-multicast-body.XXXXXX) || return 1
     rootpxe_multicast_request_body_file=$body
@@ -262,6 +285,7 @@ rootpxe_multicast_session_terminal() { [[ $1 == COMPLETED || $1 == PARTIAL || $1
 
 rootpxe_multicast_read_session_response() {
     local data
+    rootpxe_multicast_response_matches_instance "$rootpxe_multicast_response_file" || return 1
     data=$(jq -r '[.sessionId,.state,.member.state,(.member.selected|tostring),(.deadlineAt//""),(.remainingWaitSec//""),(.heartbeatLeaseSec//"")]|@tsv' "$rootpxe_multicast_response_file") || return 1
     IFS=$'\t' read -r rootpxe_multicast_response_session_id rootpxe_multicast_state rootpxe_multicast_member_state rootpxe_multicast_member_selected rootpxe_multicast_deadline_at rootpxe_multicast_remaining_wait_sec rootpxe_multicast_heartbeat_lease_sec <<<"$data"
     [[ $rootpxe_multicast_response_session_id == "$multicastSessionId" && $rootpxe_multicast_state =~ ^(WAITING|RUNNING|COMPLETED|PARTIAL|FAILED|CANCELLED)$ && $rootpxe_multicast_member_state =~ ^(PENDING|READY|RUNNING|COMPLETED|FAILED|CANCELLED|MISSED)$ && $rootpxe_multicast_member_selected =~ ^(true|false)$ && ( -z $rootpxe_multicast_remaining_wait_sec || $rootpxe_multicast_remaining_wait_sec =~ ^[0-9]+$ ) && ( -z $rootpxe_multicast_heartbeat_lease_sec || $rootpxe_multicast_heartbeat_lease_sec =~ ^[1-9][0-9]*$ ) ]]
@@ -276,7 +300,7 @@ rootpxe_multicast_join() {
 }
 
 rootpxe_multicast_status() {
-    rootpxe_multicast_request status '($common[0] + {sessionId:$sessionId})' --arg sessionId "$multicastSessionId" || return 1
+    rootpxe_multicast_request status '($common[0] + {sessionId:$sessionId})' --arg sessionId "${multicastSessionId:-}" || return 1
     rootpxe_multicast_read_session_response || { rootpxe_multicast_last_failure=response_invalid; return 1; }
 }
 
