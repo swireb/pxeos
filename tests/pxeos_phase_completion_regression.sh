@@ -12,6 +12,7 @@ trap cleanup_fixture EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 source "$overlay/usr/share/pxeos/lib/cloud-init.sh"
 source "$overlay/usr/share/pxeos/lib/linux-hostname.sh"
+source "$overlay/usr/share/pxeos/lib/task-http.sh"
 trace="$tmp/trace"
 rootpxe_stage(){ printf '%s|%s\n' "$1" "$2" >>"$trace"; }
 rootpxe_linux_hostname_task_valid(){ return 0; }

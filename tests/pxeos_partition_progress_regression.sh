@@ -26,6 +26,8 @@ awk '/^rootpxe_partition_progress_initialize_runtime\(\)/ { copy=1 } /^REG_LOCAL
         -e 's/{16,512}/+/g' >"$tmp/progress-functions.sh"
 # shellcheck source=/dev/null
 . "$tmp/progress-functions.sh"
+. "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh"
+rootpxe_stage() { return 0; }
 
 # The progress helpers are extracted before the LVM implementation section.
 # Provide the legacy single-group view that the production lookup helper also

@@ -5,6 +5,44 @@
 
 : "${ROOTPXE_PROGRESS_STATUS_FILE:=/tmp/status.pxeos}"
 
+# A decoder's initialized=0 is not a copy-start fact. Bind the explicit start
+# marker to this task, retry and decoder run, including LVM child shells.
+rootpxe_progress_data_phase_identity() {
+    local stage=capture digest
+    [[ ${type:-} =~ ^([Dd][Oo][Ww][Nn]|down)$ ]] && stage=restore
+    [[ -n ${taskid:-} && -n ${rootpxe_partclone_progress_run_id:-${progress_run_id:-}} && -n ${task_token:-${execution_token:-}} ]] || return 1
+    digest=$(printf '%s' "${task_token:-${execution_token:-}}" | sha256sum 2>/dev/null) || return 1
+    digest=${digest%% *}
+    [[ $digest =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s|%s|%s|%s|%s' "$taskid" "${progress_attempt:-0}" "${rootpxe_partclone_progress_run_id:-${progress_run_id:-}}" "$stage" "$digest"
+}
+
+rootpxe_progress_data_phase_active() {
+    local recorded expected
+    expected=$(rootpxe_progress_data_phase_identity) || return 1
+    [[ -r /tmp/pxeos.data-phase ]] || return 1
+    IFS= read -r recorded </tmp/pxeos.data-phase || return 1
+    [[ $recorded == "$expected" ]]
+}
+
+rootpxe_progress_data_phase_begin() {
+    local stage=capture marker tmp
+    rootpxe_progress_data_phase_active && return 0
+    [[ ${type:-} =~ ^([Dd][Oo][Ww][Nn]|down)$ ]] && stage=restore
+    [[ -n ${taskid:-} && -n ${rootpxe_partclone_progress_run_id:-} ]] || return 0
+    marker=$(rootpxe_progress_data_phase_identity) || return 0
+    # Keep the first real 0% visible even when a small partition finishes
+    # between two three-second sampling cycles. Telemetry remains best effort.
+    rootpxe_stage "$stage" 'progress=0' || true
+    tmp=$(mktemp /tmp/pxeos.data-phase.XXXXXX 2>/dev/null) || return 0
+    if printf '%s\n' "$marker" >"$tmp" 2>/dev/null; then
+        mv "$tmp" /tmp/pxeos.data-phase >/dev/null 2>&1 || rm -f -- "$tmp"
+    else
+        rm -f -- "$tmp"
+    fi
+    return 0
+}
+
 rootpxe_partclone_progress_write() {
     local pct="$1" message="${2:-partclone_progress}"
     [[ ${rootpxe_partclone_progress_run_id:-} =~ ^[A-Za-z0-9._-]{8,128}$ ]] || return 1

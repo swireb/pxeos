@@ -62,7 +62,7 @@ python3 tests/pxeos_build_version_test.py
 
 - 编号回归在Git Bash与原生jq可执行；若探测到Cygwin正则引擎不支持既有512次重复上限，仅在抽取fixture中把令牌上界缩窄到255，测试令牌为32字符，全部身份和HTTP断言保留，生产校验不改。这不等于已运行Linux或BusyBox，真实权限、设备及已构建PXEOS仍需独立验证。
 
-## 捕获、恢复、存储与分区（17）
+## 捕获、恢复、存储与分区（18）
 
 - `pxeos_capture_regression.sh`：合并核对 capture 收尾、发布与进度管线。
 - `pxeos_capture_resume_regression.sh`：核对 capture marker、恢复衔接和交接状态。
@@ -71,6 +71,7 @@ python3 tests/pxeos_build_version_test.py
 - `pxeos_layout_alignment_regression.sh`：核对 4Kn 等扇区/布局对齐契约。
 - `pxeos_disk_health_regression.sh`：核对磁盘健康盘点及上报接口。
 - `pxeos_partition_progress_regression.sh`：核对分区计划、进度 flush 与 LVM 事实。
+- `pxeos_timeline_order_regression.sh`：使用临时普通文件和真实入口的安全叶级替身，核对准备心跳、pending计划先发、真实零进度开始、单播和多播部署各镜像类型、MBR-only、初始化续跑、重试/执行身份隔离，以及停止采样并等待在途HTTP替身子进程后才结束数据阶段；不访问真实磁盘或网络，不重排历史事件。
 - `pxeos_partclone_progress_regression.sh`：核对 Partclone 文本模式 stderr 进度适配。
 - `pxeos_partclone_vt_progress_regression.sh`：核对 Partclone VT/VCSA 快照进度解析。
 - `pxeos_lvm_console_regression.sh`：核对 LVM 控制台激活与消息处理。

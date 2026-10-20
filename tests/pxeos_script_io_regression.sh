@@ -24,6 +24,8 @@ load() {
 run() { cases=$((cases+1)); if ( "$@" ); then printf 'PASS: %s\n' "$1"; else failures=$((failures+1)); printf 'FAIL CASE: %s\n' "$1" >&2; fi; }
 handleError() { printf 'mock-error:%s\n' "$*" >&2; exit 77; }
 debugPause() { :; }
+statusReporter=''
+load killStatusReporter || exit 1
 for name in rootpxe_cleanup_session rootpxe_cleanup_smb_credentials rootpxe_clear_smb_plaintext rootpxe_cleanup_task_json rootpxe_prepare_smb_credentials runPartprobe restoreGRUB rootpxe_task_console_failure rootpxe_redact_diagnostic rootpxe_utf8_safe_prefix rootpxe_console_message rootpxe_error_response_reason rootpxe_error_wait_for_retry; do load "$name" || exit 1; done
 for name in rootpxe_register_derived_layout_file rootpxe_cleanup_derived_layout_files; do
     if grep -q "^$name() {" "$funcs"; then load "$name" || exit 1; fi

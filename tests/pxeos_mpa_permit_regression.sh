@@ -74,6 +74,7 @@ rootpxe_validate_fixed_image_lvm_inventory(){ :; }
 rootpxe_validate_restore_artifacts(){ printf 'preflight\n' >>"$events"; }
 getMACAddresses(){ printf x; }
 pxeos.statusreporter(){ :; }
+debugPause(){ :; }
 rootpxe_plan_mpa_disk_permits(){ rootpxe_mpa_permit_is_batch=yes; rootpxe_mpa_permit_args=(ID_A deploy_write ID_B deploy_write); printf 'plan\n' >>"$events"; }
 rootpxe_wait_for_disk_permit_batch(){ printf 'wait-full-batch\n' >>"$events"; }
 rootpxe_verify_disk_permit_binding(){ printf 'verify:%s\n' "$1" >>"$events"; }

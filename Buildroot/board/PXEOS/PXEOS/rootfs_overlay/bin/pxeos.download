@@ -3,6 +3,7 @@
 rootpxe_task_log_initialize || printf '[WARN]  Task log: unavailable.\n' >&2
 . /bin/pxeos.checkin
 rootpxe_download_cleanup_initialization_private() {
+    killStatusReporter
     rootpxe_cleanup_session
     rootpxe_multicast_cleanup
 }
@@ -14,6 +15,9 @@ trap 'rootpxe_download_cleanup_initialization_private; exit 143' TERM
 rootpxe_partition_progress_initialize_runtime
 . /bin/pxeos.mount
 . /bin/pxeos.checkmount
+# An initialization-only retry must never overwrite its authoritative resume
+# stage with init; a crash here must not turn it back into a disk-writing run.
+rootpxe_stage "${resumeStage:-init}" "pxeos download started, storage mounted"
 . /bin/pxeos.checkimgvar
 rootpxe_validate_image_contract || handleError "PXEOS_STAGE=layout_validation CODE=IMAGE_CONTRACT_INVALID REASON=unsupported_type_scope_or_capture_format"
 hd=""
@@ -39,7 +43,7 @@ if [[ ${imgLegacy:-${imgFormat:-}} == 1 ]]; then
 else
     rootpxe_partclone_progress_initialize || handleError "PXEOS_STAGE=restore CODE=RESTORE_PROGRESS_SETUP_FAILED REASON=unable_to_initialize_partclone_progress"
 fi
-pxeos.statusreporter "$mac" "${pxeapi:-$web}" "$taskid" "$rootpxe_partclone_progress_run_id" "$progress_mode" & disown
+pxeos.statusreporter "$mac" "${pxeapi:-$web}" "$taskid" "$rootpxe_partclone_progress_run_id" "$progress_mode" &
 statusReporter="$!"
 fixed_size_partitions=""
 rootpxe_console_message INFO "Using image: $img."
@@ -233,7 +237,6 @@ case ${imgType:-} in
     [Nn]|mps|dd) enableWriteCache "$hd" ;;
 esac
 [[ ${mc:-no} != yes ]] || rootpxe_multicast_session_guard || handleError "PXEOS_STAGE=init CODE=MULTICAST_SESSION_CANCELLED REASON=session_watchdog_stopped_before_layout"
-rootpxe_stage init "pxeos download started, storage mounted"
 [[ $nombr -eq 1 ]] && rootpxe_console_message INFO 'Skipping partition layout: single-partition restore.' || preparePartitions
 if [[ ${imgType:-} == [Nn] ]]; then
     unset rootpxe_nvme_reformatted_disk

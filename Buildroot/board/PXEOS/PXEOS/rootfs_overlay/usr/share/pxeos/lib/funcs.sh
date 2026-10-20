@@ -34,6 +34,7 @@ rootpxe_progress_lib=/usr/share/pxeos/lib/partclone-progress.sh
 # 分区进度是旁路遥测；业务流程仅追加状态事件，statusreporter 是快照唯一写者。
 # 这样采样不会并发覆盖完成状态，缺少 jq、队列写入或上报失败也不影响成像。
 rootpxe_partition_progress_initialize_runtime() {
+    rm -f -- /tmp/pxeos.data-phase
     [[ ${rootpxe_partition_progress_enabled:-no} == yes ]] || return 0
     rm -f -- /tmp/pxeos.partition-progress.json /tmp/pxeos.partition-progress.json.tmp
     rm -rf -- /tmp/pxeos.partition-progress.events
@@ -158,6 +159,7 @@ rootpxe_partition_progress_plan_disk() (
     plan="${taskid:-task}-${progress_attempt}-${RANDOM}"; tmp=/tmp/pxeos.partition-progress.json.tmp
     jq -cn --arg plan "$plan" --argjson attempt "$progress_attempt" --argjson items "$items" '{version:2,planId:$plan,attempt:$attempt,fullPlan:true,items:$items}' >"$tmp" 2>/dev/null || return 0
     mv "$tmp" /tmp/pxeos.partition-progress.json >/dev/null 2>&1 || rm -f -- "$tmp"
+    rootpxe_partition_progress_send_snapshot /tmp/pxeos.partition-progress.json
     return 0
 )
 rootpxe_partition_progress_plan_disks() (
@@ -180,6 +182,7 @@ rootpxe_partition_progress_plan_disks() (
     [[ $items != '[]' ]] || return 0; plan="${taskid:-task}-${progress_attempt}-${RANDOM}"; tmp=/tmp/pxeos.partition-progress.json.tmp
     jq -cn --arg plan "$plan" --argjson attempt "$progress_attempt" --argjson items "$items" '{version:2,planId:$plan,attempt:$attempt,fullPlan:true,items:$items}' >"$tmp" 2>/dev/null || return 0
     mv "$tmp" /tmp/pxeos.partition-progress.json >/dev/null 2>&1 || rm -f -- "$tmp"
+    rootpxe_partition_progress_send_snapshot /tmp/pxeos.partition-progress.json
     return 0
 )
 rootpxe_partition_progress_plan_whole_disk() (
@@ -190,6 +193,7 @@ rootpxe_partition_progress_plan_whole_disk() (
     plan="${taskid:-task}-${progress_attempt}-${RANDOM}"; tmp=/tmp/pxeos.partition-progress.json.tmp
     jq -cn --arg plan "$plan" --argjson attempt "$progress_attempt" --arg key "d${disk_number}:disk" --arg label "$disk" --argjson disk "$disk_number" --argjson weight "$bytes" '{version:2,planId:$plan,attempt:$attempt,fullPlan:true,items:[{key:$key,kind:"disk",diskIndex:$disk,label:$label,weightBytes:$weight,status:"pending",sequence:0}]}' >"$tmp" 2>/dev/null || return 0
     mv "$tmp" /tmp/pxeos.partition-progress.json >/dev/null 2>&1 || rm -f -- "$tmp"
+    rootpxe_partition_progress_send_snapshot /tmp/pxeos.partition-progress.json
     return 0
 )
 rootpxe_partition_progress_swap_uuid_saved() {
@@ -207,6 +211,7 @@ rootpxe_partition_progress_item() {
 }
 rootpxe_partition_progress_current_item() {
     [[ -n ${1:-} ]] || return 0
+    rootpxe_progress_data_phase_begin
     rootpxe_partition_progress_queue_event current "$1" '' '' '' "${rootpxe_partclone_progress_run_id:-}" "${rootpxe_partclone_progress_generation:-}"
     return 0
 }
@@ -219,7 +224,10 @@ rootpxe_partition_progress_send_snapshot() {
     [[ ${taskid:-} =~ ^[1-9][0-9]*$ && ${task_token:-${execution_token:-}} =~ ^[A-Za-z0-9._~+/=-]{16,512}$ && -n ${mac:-} ]] || return 0
     payload=$(cat "$snapshot" 2>/dev/null) || return 0
     [[ -n $payload ]] || return 0
-    stage=capture; [[ ${type:-} =~ ^([Dd][Oo][Ww][Nn]|down)$ ]] && stage=restore
+    stage=init
+    if rootpxe_progress_data_phase_active; then
+        stage=capture; [[ ${type:-} =~ ^([Dd][Oo][Ww][Nn]|down)$ ]] && stage=restore
+    fi
     api_base="${pxeapi:-${web:-}}"
     [[ -n $api_base ]] || return 0
     local -a rootpxe_task_multicast_args=()
@@ -273,7 +281,7 @@ rootpxe_partition_progress_flush() {
         else
             # The foreground budget is exhausted.  Retain one short final
             # best-effort attempt without holding up completion any longer.
-            rootpxe_partition_progress_send_snapshot "$snapshot" 1 &
+            rootpxe_partition_progress_send_snapshot "$snapshot" 1
         fi
     else
         rootpxe_partition_progress_send_snapshot "$snapshot"
@@ -3270,6 +3278,9 @@ rootpxe_error_response_reason() {
 }
 
 rootpxe_error_wait_for_retry() {
+    # exec /bin/pxeos below does not run EXIT traps. Stop the old sampler
+    # before reporting an error or admitting a new retry in this process.
+    killStatusReporter
     local message code="${2:-PXEOS_ERROR}" api="${pxeapi:-$web}" response raw_response http_status response_reason wait action deadline now status stage="" stage_count=0 stage_invalid=0 stage_match stage_remainder stage_value
     local -a error_args
     if [[ ${3:-} != console_shown ]]; then
@@ -6243,18 +6254,18 @@ findHDDInfo() {
 
 # Imaging complete
 completeTasking() {
+    # No progress request may outlive the data-phase end or overwrite a later
+    # finalization/initialization phase. Reap first, then drain all milestones.
+    killStatusReporter
+    rootpxe_partition_progress_flush
     case $type in
         up)
-            rootpxe_stage upload_complete "capture write finished, notifying server"
+            rootpxe_progress_data_phase_active && rootpxe_stage upload_complete "capture write finished, notifying server"
             chmod -R 775 "$imagePath" >/dev/null 2>&1 || handleError "PXEOS_STAGE=capture_finalize CODE=CAPTURE_ARTIFACT_PERMISSION_FAILED REASON=unable_to_finalize_storage_artifacts"
-            killStatusReporter
-            rootpxe_partition_progress_flush
             . /bin/pxeos.imgcomplete
             ;;
         down)
-            rootpxe_stage restore "deploy write finished, running completion"
-            killStatusReporter
-            rootpxe_partition_progress_flush
+            rootpxe_progress_data_phase_active && rootpxe_stage restore "deploy write finished, running completion"
             [[ $capone -eq 1 ]] && exit 0
             if rootpxe_deployment_identity_policy_enabled; then
                 rootpxe_deployment_identity_request_plan "$hd" || handleError "PXEOS_STAGE=deployment_identity_plan CODE=IDENTITY_PLAN_REJECTED"
@@ -7328,8 +7339,10 @@ runFixparts() {
 }
 killStatusReporter() {
     [[ -z ${statusReporter:-} ]] && return
-    kill "$statusReporter" >/dev/null 2>&1 || true
-    wait "$statusReporter" >/dev/null 2>&1 || true
+    local reporter_pid=$statusReporter
+    statusReporter=''
+    kill "$reporter_pid" >/dev/null 2>&1 || true
+    wait "$reporter_pid" >/dev/null 2>&1 || true
     debugPause
 }
 prepareResizeDownloadPartitions() {

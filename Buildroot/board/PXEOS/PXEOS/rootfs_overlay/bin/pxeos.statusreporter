@@ -1,6 +1,9 @@
 #!/bin/bash
 . /usr/share/pxeos/lib/partclone-progress.sh || exit 1
 . /usr/share/pxeos/lib/task-http.sh || exit 1
+# A trapped termination waits for the current bounded foreground HTTP request
+# to return before exiting, so killStatusReporter/wait is a real handoff.
+trap 'exit 0' INT TERM
 sysuuid=$(dmidecode -s system-uuid)
 sysuuid=${sysuuid,,}
 oIFS=$IFS
@@ -90,13 +93,27 @@ rootpxe_progress_send_snapshot() {
     rootpxe_task_curl -ks --connect-timeout 3 --max-time 8 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "progressProtocol=2" --data-urlencode "stage=$prog_stage" --data-urlencode "snapshot=$snapshot" "${rootpxe_task_multicast_args[@]}" "${api_base}progress" >/dev/null 2>&1 || true
     return 0
 }
-rootpxe_progress_sleep
-last_pct=0; last_snapshot_hash=""; last_snapshot_sent=0; active_key=''; active_generation=''
-while :; do
-    [[ -n $mac ]] || { rootpxe_progress_sleep; continue; }
+rootpxe_progress_send_heartbeat() {
+    local now="$1"
+    (( now - ${last_heartbeat_sent:-0} >= 15 )) || return 0
+    local -a rootpxe_task_multicast_args=()
+    rootpxe_task_multicast_form_args || return 0
+    [[ ${mc:-no} == yes ]] || rootpxe_task_multicast_args+=(--data-urlencode "progressAttempt=${progress_attempt:-0}")
+    rootpxe_task_curl -ks --connect-timeout 3 --max-time 8 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "heartbeat=true" "${rootpxe_task_multicast_args[@]}" "${api_base}progress" >/dev/null 2>&1 || true
+    last_heartbeat_sent=$now
+}
+rootpxe_progress_report_once() {
+    local snapshot_file=/tmp/pxeos.partition-progress.json snapshot snapshot_hash now pct b64
+    now=$(date +%s)
+    # Preserve liveness during long preparation or multicast selection without
+    # pretending the decoder's initialized zero means data is being copied.
+    if ! rootpxe_progress_data_phase_active; then
+        rootpxe_progress_send_heartbeat "$now"
+        return 0
+    fi
     rootpxe_progress_apply_events; rootpxe_progress_sample_current
-    snapshot_file=/tmp/pxeos.partition-progress.json; now=$(date +%s)
     if [[ -r $snapshot_file ]]; then
+        jq -e --argjson attempt "${progress_attempt:-0}" '.version == 2 and .attempt == $attempt' "$snapshot_file" >/dev/null 2>&1 || { rootpxe_progress_send_heartbeat "$now"; return 0; }
         snapshot=$(cat "$snapshot_file" 2>/dev/null); snapshot_hash=$(printf '%s' "$snapshot" | sha256sum 2>/dev/null | awk '{print $1}')
         if [[ -n $snapshot_hash && $snapshot_hash != "$last_snapshot_hash" ]]; then
             rootpxe_progress_send_snapshot
@@ -115,9 +132,17 @@ while :; do
     else
         case $progress_mode in partclone) pct=$(rootpxe_partclone_progress_next_pct /tmp/status.pxeos "$progress_run_id" "$last_pct") || pct=$last_pct ;; partimage) pct=$(rootpxe_partimage_progress_next_pct /tmp/status.pxeos "$last_pct") || pct=$last_pct ;; esac
         last_pct=$pct; b64=$(printf '%s' "${message:-}" | base64)
-        rootpxe_task_multicast_form_args || { rootpxe_progress_sleep; continue; }
+        rootpxe_task_multicast_form_args || return 0
         rootpxe_task_curl -ks --connect-timeout 3 --max-time 8 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "sysuuid=$sysuuid" --data-urlencode "progress=$pct" --data-urlencode "stage=$prog_stage" --data-urlencode "message=$b64" "${rootpxe_task_multicast_args[@]}" "${api_base}progress" >/dev/null 2>&1 || true
     fi
+    rootpxe_progress_send_heartbeat "$now"
+    return 0
+}
+rootpxe_progress_sleep
+last_pct=0; last_snapshot_hash=""; last_snapshot_sent=0; last_heartbeat_sent=0; active_key=''; active_generation=''
+while :; do
+    [[ -n $mac ]] || { rootpxe_progress_sleep; continue; }
+    rootpxe_progress_report_once
     rootpxe_progress_sleep
 done
 IFS=$oIFS
