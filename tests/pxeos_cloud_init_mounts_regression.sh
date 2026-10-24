@@ -79,3 +79,109 @@ ci_owned_mounts=("$target/var") cleanup_fail=yes
 rootpxe_ci_cleanup_mounts && fail 'unmount failure swallowed'
 [[ ${#ci_owned_mounts[@]} == 1 ]] || fail 'failed cleanup evidence discarded'
 printf 'PASS: independent readonly /usr probe, strict /var permissions, all VG PVs, shadowing fstab, borrowed/failed cleanup\n'
+
+# 使用真实 ownership 清理；失败项保留后再次清理也不得漏掉稀疏数组中的 VG。
+(
+    . "$lib/cloud-init.sh"
+    eval "$(sed -n '/^rootpxe_linux_cleanup_selected_vg() {$/,/^}$/p' "$funcs")"
+    cleanup_events="$tmp/cleanup-events"
+    rootpxe_lvm_native(){
+        [[ $1 == vgchange && $2 == -an ]] || fail 'unexpected cleanup command'
+        printf 'vg:%s\n' "${@: -1}" >>"$cleanup_events"
+        [[ ${@: -1} != ${failed_vg:-} ]]
+    }
+    umount(){ printf 'mount:%s\n' "$1" >>"$cleanup_events"; [[ $1 != ${failed_mount:-} ]]; }
+    for failed_vg in '' vg-root vg-usr vg-var; do
+        : >"$cleanup_events"
+        failed_mount=''
+        ci_owned_mounts=(root-mount usr-mount var-mount)
+        ci_vg_names=(vg-root vg-borrowed vg-usr vg-var)
+        ci_vg_uuids=(uuid-root uuid-borrowed uuid-usr uuid-var)
+        ci_vg_owned=(yes no yes yes)
+        if rootpxe_ci_cleanup_mounts; then cleanup_rc=0; else cleanup_rc=$?; fi
+        [[ $(cat "$cleanup_events") == $'mount:var-mount\nmount:usr-mount\nmount:root-mount\nvg:vg-var\nvg:vg-usr\nvg:vg-root' ]] || fail 'VG failure skipped independent cleanup or changed normal order'
+        [[ ${#ci_owned_mounts[@]} == 0 ]] || fail 'successful unmount ownership retained'
+        if [[ -n $failed_vg ]]; then
+            [[ $cleanup_rc == 1 && ${ci_vg_names[*]} == "$failed_vg" && ${ci_vg_owned[*]} == yes ]] || fail 'failed VG ownership/status lost'
+            [[ ${ci_vg_uuids[*]} == "uuid-${failed_vg#vg-}" ]] || fail 'failed VG UUID ownership lost'
+            : >"$cleanup_events"
+            retry_vg=$failed_vg; failed_vg=''
+            rootpxe_ci_cleanup_mounts || fail 'remaining VG cleanup retry failed'
+            [[ $(cat "$cleanup_events") == "vg:$retry_vg" ]] || fail 'sparse VG ownership was skipped or borrowed VG changed'
+        else [[ $cleanup_rc == 0 ]] || fail 'normal VG cleanup failed'; fi
+        [[ ${#ci_vg_names[@]} == 0 && ${#ci_vg_uuids[@]} == 0 && ${#ci_vg_owned[@]} == 0 ]] || fail 'successful VG ownership retained'
+    done
+    : >"$cleanup_events"
+    failed_mount=var-mount
+    ci_owned_mounts=(root-mount var-mount)
+    ci_vg_names=(vg-root vg-var) ci_vg_uuids=(uuid-root uuid-var) ci_vg_owned=(yes yes)
+    rootpxe_ci_cleanup_mounts && fail 'unmount failure accepted'
+    [[ $(cat "$cleanup_events") == mount:var-mount && ${ci_owned_mounts[*]} == 'root-mount var-mount' && ${ci_vg_names[*]} == 'vg-root vg-var' ]] || fail 'failed unmount changed dependent ownership or deactivated a VG'
+    printf 'PASS: all independent owned VGs attempted, failed ownership retry, borrowed VG and failed unmount dependency preserved\n'
+)
+
+# 仅创建临时块设备节点并读取元数据，不打开设备；保留真实 mount_matches/stat/readlink。
+case $(uname -s):$EUID in
+    Linux:0)
+        (
+            . "$lib/cloud-init.sh"
+            identity_root="$tmp/mount-identities"
+            mkdir -p "$identity_root/mounted" "$identity_root/work" "$identity_root/system/etc" "$identity_root/system/var"
+            mknod -m 600 "$identity_root/device" b 7 201 || fail 'native block fixture unavailable'
+            mknod -m 600 "$identity_root/wrong-device" b 7 202 || fail 'native wrong-device fixture unavailable'
+            ln -s device "$identity_root/device-alias"
+            ln -s missing-device "$identity_root/dangling-alias"
+            printf 'not a block device\n' >"$identity_root/regular-file"
+            rootpxe_ci_device_is_block(){ [[ -b $1 ]]; } # 临时节点位于私有 /tmp，而非宿主 /dev。
+            stat(){
+                if [[ $1 == -c && $2 == %d ]]; then
+                    case ${@: -1} in
+                        "$identity_root/mounted"|"$identity_root/work/root"|"$identity_root/system/var") printf '%s\n' "$fixture_mount_device"; return;;
+                    esac
+                fi
+                command stat "$@"
+            }
+            readlink(){
+                if [[ $1 == -f && ( ${@: -1} == /dev/vg/var || ${@: -1} == /dev/Ap2 ) ]]; then
+                    command readlink -f "$identity_root/device-alias"
+                else command readlink "$@"; fi
+            }
+            findmnt(){ [[ ${@: -1} == OPTIONS ]] && printf '%s\n' "$fixture_mount_options"; }
+            mountpoint(){ [[ ${fixture_borrowed_var:-no} == yes && ${@: -1} == "$identity_root/system/var" ]]; }
+            mount(){ printf 'mount:%s\n' "$*" >>"$events"; }
+            umount(){ printf 'umount:%s\n' "$1" >>"$events"; }
+            blkid(){ printf xfs; } # 不读取临时块设备节点。
+            fixture_mount_device=1993 # major=7, minor=201，独立于待测 stat 实现。
+            for fixture_mount_mode in ro rw; do
+                fixture_mount_options="$fixture_mount_mode,relatime"
+                for device in "$identity_root/device" "$identity_root/device-alias"; do
+                    rootpxe_ci_mount_matches "$identity_root/mounted" "$device" "$fixture_mount_mode" || fail "native $fixture_mount_mode identity rejected: ${device##*/}"
+                done
+                for device in "$identity_root/wrong-device" "$identity_root/dangling-alias" "$identity_root/regular-file"; do
+                    rootpxe_ci_mount_matches "$identity_root/mounted" "$device" "$fixture_mount_mode" && fail "native $fixture_mount_mode wrong/nonblock identity accepted"
+                done
+                if [[ $fixture_mount_mode == ro ]]; then wrong_mode=rw; else wrong_mode=ro; fi
+                rootpxe_ci_mount_matches "$identity_root/mounted" "$identity_root/device-alias" "$wrong_mode" && fail 'wrong native mount mode accepted'
+            done
+            fixture_mount_options=ro,relatime
+            declare -a ci_owned_mounts=() ci_vg_names=() ci_vg_uuids=() ci_vg_owned=()
+            rootpxe_ci_mount_root "$identity_root/device-alias" xfs "$identity_root/work" ro || fail 'root mount rejected a native device alias'
+            rootpxe_ci_cleanup_mounts || fail 'native alias root fixture cleanup failed'
+            printf '/dev/vg/var /var xfs defaults 0 2\n' >"$identity_root/system/etc/fstab"
+            for fixture_borrowed_var in no yes; do
+                for fixture_mount_mode in ro rw; do
+                    fixture_mount_options="$fixture_mount_mode,relatime"
+                    rootpxe_ci_mount_fstab "$identity_root/system" /var "$fixture_mount_mode" || fail 'fstab alias rejected a matching native block identity'
+                    rootpxe_ci_cleanup_mounts || fail 'fstab native fixture cleanup failed'
+                done
+            done
+            fixture_borrowed_var=yes fixture_mount_options=ro,relatime
+            fixture_mount_device=1994
+            rootpxe_ci_mount_fstab "$identity_root/system" /var ro && fail 'fstab alias accepted a different mounted device'
+            fixture_mount_device=1993
+            rootpxe_ci_mount_fstab "$identity_root/system" /var rw && fail 'fstab alias accepted the wrong mounted mode'
+            printf 'PASS: native block/symlink identities, root/fstab aliases, wrong devices and ro/rw mode rejection\n'
+        )
+        ;;
+    *) printf 'SKIP: native block-node metadata checks require Linux root\n';;
+esac

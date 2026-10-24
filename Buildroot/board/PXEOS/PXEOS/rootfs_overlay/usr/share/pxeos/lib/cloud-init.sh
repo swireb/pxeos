@@ -378,6 +378,8 @@ rootpxe_ci_device_permitted() {
 }
 rootpxe_ci_mount_matches() {
     local path="$1" device="$2" mode="$3" actual expected options
+    device=$(readlink -f -- "$device") || return 1
+    rootpxe_ci_device_is_block "$device" || return 1
     actual=$(stat -c %d -- "$path") && expected=$(stat -c %r -- "$device") || return 1
     [[ $actual == "$expected" ]] || return 1
     options=$(findmnt -rn --mountpoint "$path" -o OPTIONS) || return 1
@@ -421,14 +423,16 @@ rootpxe_ci_mount_fstab() {
     rootpxe_ci_mount_matches "$root$requested" "$device" "$mode"
 }
 rootpxe_ci_cleanup_mounts() {
-    local index result=0
+    local index vg_index result=0
     for ((index=${#ci_owned_mounts[@]}-1; index>=0; index--)); do
         if umount "${ci_owned_mounts[$index]}"; then unset 'ci_owned_mounts[index]'; else result=1; break; fi
     done
     # 任一卸载失败时不撤销它依赖的 VG，也不丢弃本次 ownership 证据。
     [[ $result -eq 0 ]] || return 1
-    for ((index=${#ci_vg_names[@]}-1; index>=0; index--)); do
-        if rootpxe_linux_cleanup_selected_vg "${ci_vg_names[$index]}" "${ci_vg_uuids[$index]}" "${ci_vg_owned[$index]}"; then unset 'ci_vg_names[index]' 'ci_vg_uuids[index]' 'ci_vg_owned[index]'; else result=1; break; fi
+    local -a vg_indices=("${!ci_vg_names[@]}")
+    for ((index=${#vg_indices[@]}-1; index>=0; index--)); do
+        vg_index=${vg_indices[$index]}
+        if rootpxe_linux_cleanup_selected_vg "${ci_vg_names[$vg_index]}" "${ci_vg_uuids[$vg_index]}" "${ci_vg_owned[$vg_index]}"; then unset 'ci_vg_names[vg_index]' 'ci_vg_uuids[vg_index]' 'ci_vg_owned[vg_index]'; else result=1; fi
     done
     return "$result"
 }
@@ -502,31 +506,45 @@ rootpxe_ci_candidate_identity() {
     printf '%s|%s|%s|%s|%s|%s\n' "$canonical" "$rdev" "$fs" "$vg" "$uuid" "$subvol"
 }
 rootpxe_linux_select_unique_root_for_targets() {
-    local disk work candidate identity identity_device identity_rdev identity_rest key rc selected="" selected_candidate="" count=0
+    local disk work candidate identity identity_device identity_rdev identity_rest key rc device fs vg uuid subvol extra owned index result=0 selected="" selected_candidate="" count=0
     local -A candidates_seen=()
+    local -a selected_vg_names=() selected_vg_uuids=()
     local rootpxe_cloud_init_allowed_disks="$*" rootpxe_cloud_init_probe_disk=""
     [[ $# -gt 0 && ${taskType:-} == deploy && ${osid:-} == 50 ]] || return 1
     for disk in "$@"; do rootpxe_verify_disk_permit_binding "$disk" deploy_write || { rootpxe_cloud_init_error=cloud_init_disk_permit_invalid; return 1; }; done
     for disk in "$@"; do
-        work=$(mktemp -d /tmp/rootpxe-cloud-mount.XXXXXX) || return 1
+        work=$(mktemp -d /tmp/rootpxe-cloud-mount.XXXXXX) || { rootpxe_cloud_init_error=cloud_init_root_probe_failed; result=1; break; }
         rootpxe_cloud_init_probe_disk="$disk"
         if candidate=$(rootpxe_find_linux_root_filesystem "$disk" "$work/probe"); then rc=0; else rc=$?; fi
-        rootpxe_ci_workspace_remove "$work" || { rootpxe_cloud_init_error=cloud_init_probe_cleanup_failed; return 1; }
+        rootpxe_ci_workspace_remove "$work" || { rootpxe_cloud_init_error=cloud_init_probe_cleanup_failed; result=1; break; }
         case $rc in
             0)
-                identity=$(rootpxe_ci_candidate_identity "$candidate") || { rootpxe_cloud_init_error=cloud_init_root_identity_unverified; return 1; }
+                IFS='|' read -r device fs vg uuid subvol extra <<<"$candidate"
+                [[ $device == /dev/* && -z $subvol && -z $extra ]] || { rootpxe_cloud_init_error=cloud_init_root_identity_unverified; result=1; break; }
+                case $fs in ext2|ext3|ext4|xfs) ;; *) rootpxe_cloud_init_error=cloud_init_root_identity_unverified; result=1; break;; esac
+                if [[ -n $vg ]]; then
+                    owned=$(rootpxe_linux_activate_vg_if_needed "$disk" "$vg" "$uuid") || { rootpxe_cloud_init_error=cloud_init_root_probe_failed; result=1; break; }
+                    if [[ $owned == yes ]]; then selected_vg_names+=("$vg"); selected_vg_uuids+=("$uuid"); fi
+                fi
+                identity=$(rootpxe_ci_candidate_identity "$candidate") || { rootpxe_cloud_init_error=cloud_init_root_identity_unverified; result=1; break; }
                 IFS='|' read -r identity_device identity_rdev identity_rest <<<"$identity"
                 key="$identity_device|$identity_rdev"
                 # 同一LV可从多个已许可PV发现；完整候选必须一致。
                 if [[ -n ${candidates_seen[$key]:-} ]]; then
-                    [[ ${candidates_seen[$key]} == "$identity" ]] || { rootpxe_cloud_init_error=cloud_init_root_identity_conflict; return 1; }
+                    [[ ${candidates_seen[$key]} == "$identity" ]] || { rootpxe_cloud_init_error=cloud_init_root_identity_conflict; result=1; break; }
                 else candidates_seen[$key]="$identity"; count=$((count + 1)); selected="$disk"; selected_candidate="$candidate"; fi
                 ;;
             20) ;;
-            *) rootpxe_cloud_init_error=cloud_init_root_probe_failed; return 1;;
+            *) rootpxe_cloud_init_error=cloud_init_root_probe_failed; result=1; break;;
         esac
     done
-    [[ $count -eq 1 ]] || { rootpxe_cloud_init_error=cloud_init_roots_not_unique; return 1; }
+    if [[ $result -eq 0 && $count -ne 1 ]]; then rootpxe_cloud_init_error=cloud_init_roots_not_unique; result=1; fi
+    # 在整个目标循环保留自有 VG，避免同一 LV 的设备号随 PV 探测反复变化。
+    # 只清理本次重新激活的 VG；任一清理失败仍继续释放其他自有 VG。
+    for ((index=${#selected_vg_names[@]}-1; index>=0; index--)); do
+        rootpxe_linux_cleanup_selected_vg "${selected_vg_names[$index]}" "${selected_vg_uuids[$index]}" yes || { rootpxe_cloud_init_error=cloud_init_mount_cleanup_failed; result=1; }
+    done
+    [[ $result -eq 0 ]] || return 1
     rootpxe_linux_selected_disk="$selected"
     rootpxe_linux_selected_candidate="$selected_candidate"
 }
