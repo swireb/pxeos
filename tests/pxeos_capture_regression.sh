@@ -72,6 +72,7 @@ rootpxe_prepare_storage_layout || fail '捕获存储布局无法准备'
 rootpxe_finalize_capture || fail '没有 backup 目录时首次 capture 未能安全发布'
 assert_file_text "$target/d1p1.img" 'new-image' '首次 capture 未发布新镜像'
 [[ ! -e "$ROOTPXE_TEST_STORAGE/backup" ]] || fail '首次 capture 不应创建 backup'
+[[ -d "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks" && ! -e "$ROOTPXE_TEST_STORAGE/images/.repeat.rootpxe-finalize.lock" ]] || fail '捕获没有使用统一导入控制目录中的目标锁'
 pass 'first capture publishes without a backup directory'
 
 # 旧目录必须完整删除后再发布整棵新树，旧文件和旧子目录不得混入。
@@ -183,12 +184,29 @@ pass 'SMB publish failure retains staging for retry'
 setup_fixture
 mkdir -p "$target"
 printf 'old-image\n' >"$target/d1p1.img"
-mkdir "$ROOTPXE_TEST_STORAGE/images/.repeat.rootpxe-finalize.lock"
+mkdir -p "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks"
+mkdir "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks/repeat"
 rootpxe_finalize_capture && fail '已有 finalizer 锁被错误抢占'
 [[ ${rootpxe_finalize_capture_error_reason:-} == finalize_lock_unavailable ]] || fail '锁冲突未返回稳定原因'
 assert_file_text "$target/d1p1.img" 'old-image' '锁冲突修改了旧镜像'
 assert_file_text "$source/d1p1.img" 'new-image' '锁冲突修改了新 source'
 pass 'finalizer lock is fail-closed'
+
+setup_fixture
+mkdir -p "$target"
+printf 'old-image\n' >"$target/d1p1.img"
+mkdir "$ROOTPXE_TEST_STORAGE/images/.repeat.rootpxe-finalize.lock"
+rootpxe_finalize_capture && fail '旧版本 finalizer 锁被忽视'
+[[ ${rootpxe_finalize_capture_error_reason:-} == finalize_lock_unavailable ]] || fail '旧锁未明确拒绝'
+assert_file_text "$target/d1p1.img" 'old-image' '旧锁场景改变目标'
+[[ ! -e "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks/repeat" ]] || fail '旧锁场景创建了新锁'
+pass 'legacy finalizer lock is fail-closed'
+
+setup_fixture
+img='images/.ROOTPXE-IMPORTS/task'
+rootpxe_finalize_capture && fail '保留控制目录被当作公开镜像路径'
+[[ ${rootpxe_finalize_capture_error_reason:-} == unsafe_target_path ]] || fail '保留控制目录未返回安全路径错误'
+pass 'reserved import control path is rejected'
 
 # 词法路径互含与链接均不得进入 rename。此处 source 使用 img=dev，target 是其父目录。
 setup_fixture
@@ -294,10 +312,11 @@ setup_fixture
 mkdir -p "$target"
 printf 'new-image\n' >"$target/d1p1.img"
 printf '3\n' >"$target/.rootpxe-capture-taskid"
-mkdir "$ROOTPXE_TEST_STORAGE/images/.repeat.rootpxe-finalize.lock"
+mkdir -p "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks"
+mkdir "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks/repeat"
 rootpxe_clear_capture_marker && fail 'marker 清理抢占了已有 finalizer 锁'
 assert_file_text "$target/.rootpxe-capture-taskid" '3' '锁冲突时 marker 被错误清理'
-rmdir "$ROOTPXE_TEST_STORAGE/images/.repeat.rootpxe-finalize.lock"
+rmdir "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks/repeat"
 rootpxe_clear_capture_marker || fail '当前任务 marker 未能安全清理'
 [[ ! -e $target/.rootpxe-capture-taskid ]] || fail '当前任务 marker 未被清理'
 

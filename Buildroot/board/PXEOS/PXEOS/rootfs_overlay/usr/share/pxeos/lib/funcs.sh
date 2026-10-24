@@ -704,7 +704,7 @@ rootpxe_safe_relative_path() {
     [[ -n $value && $value != */ && $value != *\\* && $value != *//* ]] || return 1
     IFS=/ read -r -a _rootpxe_parts <<< "$value"
     for segment in "${_rootpxe_parts[@]}"; do
-        [[ -n $segment && $segment != . && $segment != .. && $segment != *$'\n'* && $segment != *$'\r'* ]] || return 1
+        [[ -n $segment && $segment != . && $segment != .. && ${segment,,} != .rootpxe-imports && $segment != *$'\n'* && $segment != *$'\r'* ]] || return 1
     done
     printf '%s\n' "$value"
 }
@@ -3457,11 +3457,21 @@ rootpxe_capture_marker_matches_task() {
 }
 
 rootpxe_capture_finalize_lock_path() {
-    local target="$1" parent base
+    local target="$1" parent base control locks old path
     parent=$(dirname "$target") || return 1
     base=$(basename "$target") || return 1
     [[ -n $parent && -n $base ]] || return 1
-    printf '%s/.%s.rootpxe-finalize.lock\n' "$parent" "$base"
+    old="$parent/.$base.rootpxe-finalize.lock"
+    [[ ! -e $old && ! -L $old ]] || return 1
+    control="$parent/.rootpxe-imports"
+    locks="$control/.locks"
+    for path in "$control" "$locks"; do
+        if [[ ! -e $path && ! -L $path ]]; then
+            mkdir "$path" 2>/dev/null || [[ -d $path && ! -L $path ]] || return 1
+        fi
+        [[ -d $path && ! -L $path ]] || return 1
+    done
+    printf '%s/%s\n' "$locks" "$base"
 }
 
 rootpxe_capture_paths_same_device() {
@@ -3509,7 +3519,7 @@ rootpxe_finalize_capture() {
     mkdir -p "$target_parent" || { rootpxe_capture_finalize_fail target_parent_unavailable; return 1; }
     [[ -d $target_parent && ! -L $target_parent ]] || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
     [[ $(rootpxe_storage_path "$relative") == "$target" && ! -L $target ]] || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
-    lock=$(rootpxe_capture_finalize_lock_path "$target") || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
+    lock=$(rootpxe_capture_finalize_lock_path "$target") || { rootpxe_capture_finalize_fail finalize_lock_unavailable; return 1; }
     mkdir "$lock" 2>/dev/null || { rootpxe_capture_finalize_fail finalize_lock_unavailable; return 1; }
 
     target_marker="$target/.rootpxe-capture-taskid"
@@ -3558,7 +3568,7 @@ rootpxe_clear_capture_marker() {
     target=$(rootpxe_storage_path "$relative") || { rootpxe_capture_marker_clear_error_reason=unsafe_target_path; return 1; }
     target_parent=$(dirname "$target") || { rootpxe_capture_marker_clear_error_reason=unsafe_target_path; return 1; }
     [[ -d $storage_root && ! -L $storage_root && -d $target_parent && ! -L $target_parent && -d $target && ! -L $target ]] || { rootpxe_capture_marker_clear_error_reason=unsafe_target_path; return 1; }
-    lock=$(rootpxe_capture_finalize_lock_path "$target") || { rootpxe_capture_marker_clear_error_reason=unsafe_target_path; return 1; }
+    lock=$(rootpxe_capture_finalize_lock_path "$target") || { rootpxe_capture_marker_clear_error_reason=finalize_lock_unavailable; return 1; }
     mkdir "$lock" 2>/dev/null || { rootpxe_capture_marker_clear_error_reason=finalize_lock_unavailable; return 1; }
     marker="$target/.rootpxe-capture-taskid"
     if ! rootpxe_capture_marker_matches_task "$marker" "$taskid"; then
