@@ -734,7 +734,7 @@ rootpxe_storage_path() {
 rootpxe_prepare_storage_layout() {
     local path probe
     [[ -d /storage && ! -L /storage ]] || return 1
-    for path in /storage/dev /storage/backup; do
+    for path in /storage/dev; do
         [[ ! -e $path || ( -d $path && ! -L $path ) ]] || return 1
         mkdir -p "$path" || return 1
     done
@@ -3475,14 +3475,6 @@ rootpxe_capture_paths_same_device() {
     fi
 }
 
-rootpxe_validate_capture_backup_name() {
-    local name="$1" byte_count
-    [[ -n $name && $name != . && $name != .. && $name != .* ]] || return 1
-    [[ $name != */* && $name != *\\* && $name != *[[:cntrl:]]* ]] || return 1
-    byte_count=$(LC_ALL=C printf '%s' "$name" | wc -c) || return 1
-    [[ $byte_count =~ ^[1-9][0-9]*$ && $byte_count -le 255 ]]
-}
-
 rootpxe_capture_paths_overlap() {
     local first="$1" second="$2"
     [[ $first == "$second" || $first == "$second"/* || $second == "$first"/* ]]
@@ -3506,69 +3498,48 @@ rootpxe_finalize_capture() {
     rootpxe_finalize_capture_error_code=CAPTURE_FINALIZE_FAILED
     rootpxe_finalize_capture_error_reason=unsafe_finalize_state
     rootpxe_require_task_context || { rootpxe_capture_finalize_fail invalid_task_context; return 1; }
-    local storage_root="/storage" backup_root="/storage/backup" source="/storage/dev/$macWinSafe" relative target target_parent source_parent lock backup target_marker source_marker source_dev backup_dev
+    local storage_root="/storage" source="/storage/dev/$macWinSafe" relative target target_parent source_parent lock target_marker source_marker
     relative=$(rootpxe_safe_relative_path "${img:-}") || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
     target=$(rootpxe_storage_path "$relative") || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
     target_parent=$(dirname "$target") || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
     source_parent=$(dirname "$source") || { rootpxe_capture_finalize_fail unsafe_source_path; return 1; }
-    [[ -d $storage_root && ! -L $storage_root && -d $backup_root && ! -L $backup_root && -d $source_parent && ! -L $source_parent && ! -L $source ]] || { rootpxe_capture_finalize_fail unsafe_source_path; return 1; }
+    [[ -d $storage_root && ! -L $storage_root && -d $source_parent && ! -L $source_parent && ! -L $source ]] || { rootpxe_capture_finalize_fail unsafe_source_path; return 1; }
     rootpxe_capture_paths_overlap "$source" "$target" && { rootpxe_capture_finalize_fail source_target_overlap; return 1; }
     [[ ! -e $target || -d $target ]] || { rootpxe_capture_finalize_fail target_not_directory; return 1; }
     mkdir -p "$target_parent" || { rootpxe_capture_finalize_fail target_parent_unavailable; return 1; }
     [[ -d $target_parent && ! -L $target_parent ]] || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
     [[ $(rootpxe_storage_path "$relative") == "$target" && ! -L $target ]] || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
-    # An already-published retry has no source tree left to rename.  Device
-    # identity is required only before a capture source can be moved.
-    if [[ -d $source ]]; then
-        rootpxe_capture_paths_same_device "$source" "$target_parent" "$target" || { rootpxe_capture_finalize_fail cross_device_capture_paths; return 1; }
-        source_dev=$(stat -c %d "$source" 2>/dev/null) || { rootpxe_capture_finalize_fail cross_device_capture_paths; return 1; }
-        backup_dev=$(stat -c %d "$backup_root" 2>/dev/null) || { rootpxe_capture_finalize_fail cross_device_capture_paths; return 1; }
-        [[ $source_dev =~ ^[0-9]+$ && $backup_dev =~ ^[0-9]+$ && $source_dev == "$backup_dev" ]] || { rootpxe_capture_finalize_fail cross_device_capture_paths; return 1; }
-    fi
     lock=$(rootpxe_capture_finalize_lock_path "$target") || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
     mkdir "$lock" 2>/dev/null || { rootpxe_capture_finalize_fail finalize_lock_unavailable; return 1; }
 
     target_marker="$target/.rootpxe-capture-taskid"
     source_marker="$source/.rootpxe-capture-taskid"
-    if [[ -d $source && -d $target ]]; then
+    # Recheck both paths under the target lock before any destructive action.
+    [[ -d $storage_root && ! -L $storage_root && -d $source_parent && ! -L $source_parent && ! -L $source ]] || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail unsafe_source_path; return 1; }
+    [[ $(rootpxe_storage_path "$relative") == "$target" && -d $target_parent && ! -L $target_parent && ! -L $target ]] || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
+    if [[ -d $source && ( ! -e $target || -d $target ) ]]; then
         rootpxe_capture_marker_matches_task "$source_marker" "$taskid" || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail source_marker_invalid; return 1; }
         capture_size_bytes=$(rootpxe_directory_size_bytes "$source") || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail source_payload_invalid; return 1; }
         [[ $capture_size_bytes =~ ^[1-9][0-9]*$ ]] || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail source_payload_invalid; return 1; }
         [[ ! -e $target_marker && ! -L $target_marker ]] || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail target_marker_present; return 1; }
-        rootpxe_validate_capture_backup_name "${captureBackupName:-}" || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail invalid_backup_name; return 1; }
-        backup="$backup_root/$captureBackupName"
-        [[ ! -e $backup && ! -L $backup ]] || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail backup_already_exists; return 1; }
-        if ! mv -T "$target" "$backup"; then
-            rmdir "$lock" >/dev/null 2>&1 || true
-            rootpxe_capture_finalize_fail backup_move_failed
-            return 1
-        fi
-        if ! mv -T "$source" "$target"; then
-            if mv -T "$backup" "$target"; then
+        rootpxe_capture_paths_same_device "$source" "$target_parent" "$target" || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail cross_device_capture_paths; return 1; }
+        # All writers and metadata validation finish in staging before this
+        # point. Replace the entire old tree; never merge its stale files.
+        if [[ -d $target ]]; then
+            if ! rm -rf -- "$target" || [[ -e $target || -L $target ]]; then
                 rmdir "$lock" >/dev/null 2>&1 || true
-                rootpxe_capture_finalize_fail publish_failed_rolled_back
-            else
-                rmdir "$lock" >/dev/null 2>&1 || true
-                rootpxe_capture_finalize_fail publish_and_rollback_failed
+                rootpxe_capture_finalize_fail target_remove_failed
+                return 1
             fi
-            return 1
-        fi
-    elif [[ ! -e $source && ! -L $source && -d $target ]]; then
-        rootpxe_capture_set_final_path "$target" || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail published_target_invalid; return 1; }
-    elif [[ -d $source && ! -e $target && ! -L $target ]]; then
-        rootpxe_capture_marker_matches_task "$source_marker" "$taskid" || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail source_marker_invalid; return 1; }
-        capture_size_bytes=$(rootpxe_directory_size_bytes "$source") || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail source_payload_invalid; return 1; }
-        [[ $capture_size_bytes =~ ^[1-9][0-9]*$ ]] || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail source_payload_invalid; return 1; }
-        if [[ -n ${captureBackupName:-} ]]; then
-            rootpxe_validate_capture_backup_name "$captureBackupName" || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail invalid_backup_name; return 1; }
-            backup="$backup_root/$captureBackupName"
-            [[ ! -e $backup && ! -L $backup ]] || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail backup_already_exists; return 1; }
         fi
         if ! mv -T "$source" "$target"; then
             rmdir "$lock" >/dev/null 2>&1 || true
             rootpxe_capture_finalize_fail publish_failed_source_retained
             return 1
         fi
+    elif [[ ! -e $source && ! -L $source && -d $target ]]; then
+        # A retry after publication confirms only this task's existing tree.
+        rootpxe_capture_set_final_path "$target" || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail published_target_invalid; return 1; }
     else
         rmdir "$lock" >/dev/null 2>&1 || true
         rootpxe_capture_finalize_fail capture_path_state_invalid
@@ -4599,7 +4570,7 @@ prepareUploadLocation() {
     rootpxe_require_task_context || handleError "Invalid task context (${FUNCNAME[0]})"
     [[ $imagePath == "/storage/dev/$macWinSafe" ]] || handleError "Unsafe capture path (${FUNCNAME[0]})"
     [[ ! -L $imagePath ]] || handleError "Unsafe capture path (${FUNCNAME[0]})"
-    dots "Preparing backup location"
+    dots "Preparing capture staging directory"
     if [[ -d $imagePath ]]; then
         find "$imagePath" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || handleError "Failed to clear capture path (${FUNCNAME[0]})"
     else

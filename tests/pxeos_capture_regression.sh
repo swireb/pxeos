@@ -45,8 +45,8 @@ setup_fixture() {
     rm -rf "$ROOTPXE_TEST_STORAGE"
     source="$ROOTPXE_TEST_STORAGE/dev/001122334455"
     target="$ROOTPXE_TEST_STORAGE/images/repeat"
-    backup="$ROOTPXE_TEST_STORAGE/backup/repeat-backup-20260830T104527123Z"
-    mkdir -p "$source" "$(dirname "$target")" "$ROOTPXE_TEST_STORAGE/backup"
+    backup="$ROOTPXE_TEST_STORAGE/backup/legacy-image"
+    mkdir -p "$source" "$(dirname "$target")"
     printf 'new-image\n' >"$source/d1p1.img"
     printf '3\n' >"$source/.rootpxe-capture-taskid"
     type=up
@@ -55,7 +55,6 @@ setup_fixture() {
     mac='00:11:22:33:44:55'
     macWinSafe=001122334455
     img='images/repeat'
-    captureBackupName='repeat-backup-20260830T104527123Z'
     unset rootpxe_finalize_capture_error_reason rootpxe_finalize_capture_error_code
 }
 
@@ -66,102 +65,102 @@ set -u
 # exercised by its dedicated PXEOS checkin/runtime tests.
 rootpxe_require_task_context() { return 0; }
 
-# First capture remains a direct non-merging publish and has no backup.
+# 首次与重复捕获均只依赖 dev 暂存，不自动创建 backup。
 setup_fixture
-rootpxe_finalize_capture || fail '首次 capture 未能安全发布'
+rootpxe_prepare_storage_layout || fail '捕获存储布局无法准备'
+[[ ! -e "$ROOTPXE_TEST_STORAGE/backup" ]] || fail '存储布局不应创建 backup'
+rootpxe_finalize_capture || fail '没有 backup 目录时首次 capture 未能安全发布'
 assert_file_text "$target/d1p1.img" 'new-image' '首次 capture 未发布新镜像'
-[[ ! -e $backup ]] || fail '首次 capture 不应创建旧镜像备份'
-pass 'first capture publishes without backup'
+[[ ! -e "$ROOTPXE_TEST_STORAGE/backup" ]] || fail '首次 capture 不应创建 backup'
+pass 'first capture publishes without a backup directory'
 
-# 红测：合法重捕获必须将旧版本完整保留到可见的统一备份目录，并发布新版本。
+# 旧目录必须完整删除后再发布整棵新树，旧文件和旧子目录不得混入。
 setup_fixture
-mkdir -p "$target"
+mkdir -p "$target/old-only"
 printf 'old-image\n' >"$target/d1p1.img"
-rootpxe_finalize_capture || fail '合法重复 capture 被安全收尾拒绝'
+printf 'stale\n' >"$target/old-only/stale.img"
+printf 'new-metadata\n' >"$source/.rootpxe-partition-inventory.json"
+rootpxe_finalize_capture || fail '没有 backup 目录时重复 capture 被拒绝'
 assert_file_text "$target/d1p1.img" 'new-image' '新 capture 未发布为正式镜像'
-assert_file_text "$backup/d1p1.img" 'old-image' '旧镜像未保留到统一备份目录'
+assert_file_text "$target/.rootpxe-partition-inventory.json" 'new-metadata' '新元数据未随目录发布'
 assert_file_text "$target/.rootpxe-capture-taskid" '3' '已发布镜像未保留当前任务标记'
-[[ ! -e $source ]] || fail '发布成功后 staging source 仍存在'
-pass 'recapture replaces by backup and publish'
+[[ ! -e "$target/old-only" && ! -e $source && ! -e "$ROOTPXE_TEST_STORAGE/backup" ]] || fail '重捕获遗留旧文件、暂存或备份'
+pass 'recapture replaces the whole directory without backup'
 
-# 服务端允许 UTF-8 镜像名称；PXEOS 必须将可见中文备份名原样作为单层目录。
+# 历史 backup 内容不参与发布，发布和幂等重试均须原样保留。
 setup_fixture
-mkdir -p "$target"
+mkdir -p "$target" "$backup"
 printf 'old-image\n' >"$target/d1p1.img"
-captureBackupName='Rocky中文-backup-20260830T104527123Z'
-backup="$ROOTPXE_TEST_STORAGE/backup/$captureBackupName"
-rootpxe_finalize_capture || fail 'UTF-8 备份名称被安全收尾拒绝'
-assert_file_text "$backup/d1p1.img" 'old-image' 'UTF-8 备份名称未保留旧镜像'
-pass 'UTF-8 visible backup name is accepted'
+printf 'historic-image\n' >"$backup/d1p1.img"
+rootpxe_finalize_capture || fail '历史 backup 不应阻止重捕获'
+rootpxe_finalize_capture || fail '同任务已发布镜像未能幂等确认'
+assert_file_text "$target/d1p1.img" 'new-image' '幂等确认改变了已发布镜像'
+assert_file_text "$backup/d1p1.img" 'historic-image' '重捕获修改了历史 backup'
+[[ $(find "$ROOTPXE_TEST_STORAGE/backup" -mindepth 1 -maxdepth 1 | wc -l) == 1 ]] || fail '重捕获创建了新备份'
+pass 'existing backups are untouched and publication is idempotent'
 
-# 备份名称由服务端固化为单级目录名。PXEOS 不得拼接任务 ID、接受隐藏
-# 目录或路径穿越，也不得在没有旧镜像的首次捕获中创建备份目录。
-setup_fixture
-long_backup_name=$(printf 'a%.0s' {1..256})
-[[ $backup == "$ROOTPXE_TEST_STORAGE/backup/repeat-backup-20260830T104527123Z" ]] || fail '备份名称不是服务端下发的可见名称'
-[[ ! -e "$ROOTPXE_TEST_STORAGE/images/.repeat.rootpxe-capture-backup-3" ]] || fail '旧隐藏备份目录不应出现'
-for invalid_backup_name in '' . .. '.hidden-backup' '../escape' 'nested/name' 'nested\\name' $'line\nbreak' "$long_backup_name"; do
+# 目标上的任何 marker 都代表未确认的发布，不能被下一次 capture 覆盖。
+for target_taskid in 2 3; do
     setup_fixture
     mkdir -p "$target"
     printf 'old-image\n' >"$target/d1p1.img"
-    captureBackupName="$invalid_backup_name"
-    rootpxe_finalize_capture && fail "危险备份名称被接受: $invalid_backup_name"
-    [[ ${rootpxe_finalize_capture_error_reason:-} == invalid_backup_name ]] || fail '危险备份名称未返回稳定原因'
+    printf '%s\n' "$target_taskid" >"$target/.rootpxe-capture-taskid"
+    rootpxe_finalize_capture && fail '未确认的 target marker 被错误覆盖'
+    [[ ${rootpxe_finalize_capture_error_reason:-} == target_marker_present ]] || fail 'target marker 未返回稳定原因'
+    assert_file_text "$target/d1p1.img" 'old-image' 'target marker 场景修改了旧镜像'
+    assert_file_text "$source/d1p1.img" 'new-image' 'target marker 场景修改了新 source'
 done
-unset long_backup_name
-pass 'server-provided visible backup name is fail-closed'
+pass 'unacknowledged target markers are rejected'
 
-# Rebuild the published state after the invalid-name cases, which deliberately
-# leave their staging directories untouched.
+# 新暂存归属无效时必须在删除旧目录前停止。
 setup_fixture
 mkdir -p "$target"
 printf 'old-image\n' >"$target/d1p1.img"
-rootpxe_finalize_capture || fail '回归幂等状态未能建立'
+printf '2\n' >"$source/.rootpxe-capture-taskid"
+rootpxe_finalize_capture && fail '无效 source marker 被错误发布'
+[[ ${rootpxe_finalize_capture_error_reason:-} == source_marker_invalid ]] || fail 'source marker 未返回稳定原因'
+assert_file_text "$target/d1p1.img" 'old-image' '无效 source marker 删除了旧镜像'
+assert_file_text "$source/d1p1.img" 'new-image' '无效 source marker 修改了新暂存'
+pass 'invalid source marker preserves the old image'
 
-# 发布已经完成时，仅同任务 marker 可幂等确认；不允许再触碰备份。
-rootpxe_finalize_capture || fail '同任务已发布镜像未能幂等确认'
-assert_file_text "$target/d1p1.img" 'new-image' '幂等确认改变了已发布镜像'
-assert_file_text "$backup/d1p1.img" 'old-image' '幂等确认改变了旧镜像备份'
-pass 'same task publication is idempotent'
-
-# 目标上的任何 marker 都代表未确认的发布，不能被下一次 capture 覆盖。
+# 模拟 SMB 删除失败：旧目录可能部分删除，新暂存必须完整保留且明确失败。
 setup_fixture
 mkdir -p "$target"
 printf 'old-image\n' >"$target/d1p1.img"
-printf '2\n' >"$target/.rootpxe-capture-taskid"
-rootpxe_finalize_capture && fail 'foreign target marker 被错误覆盖'
-[[ ${rootpxe_finalize_capture_error_reason:-} == target_marker_present ]] || fail 'foreign target marker 未返回稳定原因'
-assert_file_text "$target/d1p1.img" 'old-image' 'foreign target marker 场景修改了旧镜像'
-assert_file_text "$source/d1p1.img" 'new-image' 'foreign target marker 场景修改了新 source'
-pass 'foreign target marker is rejected'
-
-# 同任务 target marker 也不是可替换的旧版本；只有 source 不存在时才允许幂等。
-setup_fixture
-mkdir -p "$target"
-printf 'old-image\n' >"$target/d1p1.img"
-printf '3\n' >"$target/.rootpxe-capture-taskid"
-rootpxe_finalize_capture && fail '未确认同任务 target marker 被错误覆盖'
-[[ ${rootpxe_finalize_capture_error_reason:-} == target_marker_present ]] || fail '同任务 target marker 未返回稳定原因'
-pass 'unacknowledged same-task target is not replaced'
-
-# 模拟 SMB 第一次 rename 失败：既有目标与 staging source 都不能改变。
-setup_fixture
-mkdir -p "$target"
-printf 'old-image\n' >"$target/d1p1.img"
-mv() {
-    if [[ $1 == -T && $2 == "$target" && $3 == "$backup" ]]; then
+rm() {
+    if [[ $1 == -rf && $2 == -- && $3 == "$target" ]]; then
         return 70
     fi
-    command mv "$@"
+    command rm "$@"
 }
-rootpxe_finalize_capture && fail '模拟 SMB 备份失败被误报成功'
-[[ ${rootpxe_finalize_capture_error_reason:-} == backup_move_failed ]] || fail 'SMB 备份失败未返回稳定原因'
-assert_file_text "$target/d1p1.img" 'old-image' 'SMB 备份失败后旧目标被改变'
-assert_file_text "$source/d1p1.img" 'new-image' 'SMB 备份失败后新 source 被改变'
-unset -f mv
-pass 'SMB backup failure preserves both images'
+rootpxe_finalize_capture && fail '模拟 SMB 删除失败被误报成功'
+[[ ${rootpxe_finalize_capture_error_reason:-} == target_remove_failed ]] || fail 'SMB 删除失败未返回稳定原因'
+assert_file_text "$target/d1p1.img" 'old-image' 'SMB 删除失败后旧目标被改变'
+assert_file_text "$source/d1p1.img" 'new-image' 'SMB 删除失败后新暂存被改变'
+unset -f rm
+rootpxe_finalize_capture || fail '删除失败后未能从完整新暂存重试'
+pass 'SMB removal failure retains staging for retry'
 
-# 模拟 SMB 第二次 rename 失败：旧目标必须回滚，新 source 必须保留。
+# 删除返回失败时，旧目录即使已部分改变也必须保留完整新暂存。
+setup_fixture
+mkdir -p "$target"
+printf 'old-image\n' >"$target/d1p1.img"
+printf 'old-extra\n' >"$target/stale.img"
+rm() {
+    if [[ $1 == -rf && $2 == -- && $3 == "$target" ]]; then
+        command rm -f -- "$target/stale.img"
+        return 70
+    fi
+    command rm "$@"
+}
+rootpxe_finalize_capture && fail '部分删除失败被误报成功'
+[[ ${rootpxe_finalize_capture_error_reason:-} == target_remove_failed ]] || fail '部分删除失败未返回稳定原因'
+assert_file_text "$source/d1p1.img" 'new-image' '部分删除失败损坏了新暂存'
+assert_file_text "$source/.rootpxe-capture-taskid" '3' '部分删除失败损坏了新暂存 marker'
+unset -f rm
+pass 'partial removal failure preserves complete staging'
+
+# 旧目标已删除而发布失败时不保留旧镜像，新暂存仍供下次重试。
 setup_fixture
 mkdir -p "$target"
 printf 'old-image\n' >"$target/d1p1.img"
@@ -172,42 +171,13 @@ mv() {
     command mv "$@"
 }
 rootpxe_finalize_capture && fail '模拟 SMB 发布失败被误报成功'
-[[ ${rootpxe_finalize_capture_error_reason:-} == publish_failed_rolled_back ]] || fail 'SMB 发布失败未返回回滚原因'
-assert_file_text "$target/d1p1.img" 'old-image' 'SMB 发布失败后旧目标未回滚'
-assert_file_text "$source/d1p1.img" 'new-image' 'SMB 发布失败后新 source 未保留'
-[[ ! -e $backup ]] || fail '成功回滚后不应遗留备份目录'
+[[ ${rootpxe_finalize_capture_error_reason:-} == publish_failed_source_retained ]] || fail 'SMB 发布失败未返回保留新暂存原因'
+[[ ! -e $target && ! -e "$ROOTPXE_TEST_STORAGE/backup" ]] || fail '发布失败后不应伪造正式目标或备份'
+assert_file_text "$source/d1p1.img" 'new-image' 'SMB 发布失败后新暂存未保留'
+assert_file_text "$source/.rootpxe-capture-taskid" '3' 'SMB 发布失败后新暂存 marker 未保留'
 unset -f mv
-pass 'SMB publish failure rolls back old target'
-
-# 若发布与回滚都失败，不能删除 source 或 backup，也不能伪造成功。
-setup_fixture
-mkdir -p "$target"
-printf 'old-image\n' >"$target/d1p1.img"
-mv() {
-    if [[ $1 == -T && $2 == "$source" && $3 == "$target" ]]; then
-        return 70
-    fi
-    if [[ $1 == -T && $2 == "$backup" && $3 == "$target" ]]; then
-        return 71
-    fi
-    command mv "$@"
-}
-rootpxe_finalize_capture && fail '模拟 SMB 发布和回滚双失败被误报成功'
-[[ ${rootpxe_finalize_capture_error_reason:-} == publish_and_rollback_failed ]] || fail 'SMB 双失败未返回稳定原因'
-[[ ! -e $target ]] || fail 'SMB 双失败后不应伪造正式目标'
-assert_file_text "$source/d1p1.img" 'new-image' 'SMB 双失败后新 source 未保留'
-assert_file_text "$backup/d1p1.img" 'old-image' 'SMB 双失败后旧备份未保留'
-unset -f mv
-pass 'SMB publish and rollback failure is fail-closed'
-# 已存在备份表示中断窗口；不得猜测或抢占它。
-setup_fixture
-mkdir -p "$backup"
-printf 'old-image\n' >"$backup/d1p1.img"
-rootpxe_finalize_capture && fail '已有备份的中断状态被错误发布'
-[[ ${rootpxe_finalize_capture_error_reason:-} == backup_already_exists ]] || fail '已有备份未返回稳定原因'
-assert_file_text "$source/d1p1.img" 'new-image' '中断状态修改了新 source'
-assert_file_text "$backup/d1p1.img" 'old-image' '中断状态修改了旧备份'
-pass 'existing backup is fail-closed'
+rootpxe_finalize_capture || fail '发布失败后未能从完整新暂存重试'
+pass 'SMB publish failure retains staging for retry'
 
 # 锁不得抢占：并发 finalizer 必须保留双方数据并明确失败。
 setup_fixture
@@ -281,10 +251,12 @@ fi
 
 # Empty staging data cannot replace a valid image even when its task marker is valid.
 setup_fixture
+mkdir -p "$target"
+printf 'old-image\n' >"$target/d1p1.img"
 rm -f "$source/d1p1.img"
 rootpxe_finalize_capture && fail '零大小 capture source 被错误发布'
 [[ ${rootpxe_finalize_capture_error_reason:-} == source_payload_invalid ]] || fail '零大小 source 未返回稳定原因'
-[[ ! -e $target ]] || fail '零大小 source 创建了正式目标'
+assert_file_text "$target/d1p1.img" 'old-image' '零大小 source 删除了旧镜像'
 pass 'zero-size source is rejected'
 
 # find 即使先输出部分大小，随后失败也不能被命令替换或循环吞掉。
@@ -351,6 +323,8 @@ funcs="$overlay/usr/share/pxeos/lib/funcs.sh"
 progress_lib="$overlay/usr/share/pxeos/lib/partclone-progress.sh"
 imgcomplete="$overlay/bin/pxeos.imgcomplete"
 tmp="$(mktemp -d)"
+ROOTPXE_PROGRESS_STATUS_FILE="$tmp/status.pxeos"
+export ROOTPXE_PROGRESS_STATUS_FILE
 trap 'rm -rf "$tmp"' EXIT
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }

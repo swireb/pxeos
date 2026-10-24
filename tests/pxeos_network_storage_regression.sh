@@ -77,8 +77,15 @@ grep -Fq 'Test NIC' "$tmp/output" || fail missing-pci-fact
 # lspci is optional in reduced PXEOS builds; the failure path must remain
 # useful and must not turn the diagnostic itself into a startup failure.
 rm -f "$tmp/mock/lspci"
+# Hide only command lookup for this fixture; the host may also install lspci.
+cat >"$tmp/no-lspci-env" <<'EOF'
+command() {
+    [[ ${1:-} == -v && ${2:-} == lspci ]] && return 1
+    builtin command "$@"
+}
+EOF
 set +e
-PATH="$tmp/mock:$PATH" bash "$tmp/S40network" >"$tmp/output-no-lspci" 2>&1
+PATH="$tmp/mock:$PATH" BASH_ENV="$tmp/no-lspci-env" bash "$tmp/S40network" >"$tmp/output-no-lspci" 2>&1
 rc=$?
 set -e
 [[ $rc -eq 1 ]] || fail "missing-lspci failure path exit code: $rc"
@@ -382,11 +389,11 @@ for export_path in '' /share share/ share//images share/../images //server/share
 done
 [[ /storage == /* ]] || fail 'NFS export path 必须接受绝对路径'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_prepare_storage_layout'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '/storage/backup'
+must_not_have_literal "$overlay/usr/share/pxeos/lib/funcs.sh" '/storage/backup'
 must_not_have_literal "$overlay" '/storage/postinitscripts'
 must_not_have_literal "$overlay" '/storage/postdeployscripts'
 must_not_have_literal "$overlay" 'rootpxe_run_postinit'
-must_have "$overlay/bin/pxeos.checkin" 'captureBackupName'
+must_not_have_literal "$overlay/bin/pxeos.checkin" 'captureBackupName'
 must_have "$overlay/usr/share/pxeos/lib/cloud-init.sh" 'chmod 600 "$file"'
 must_have "$overlay/usr/share/pxeos/lib/cloud-init.sh" 'rootpxe_cloud_init_install_at_root'
 must_not_have "$overlay/usr/share/pxeos/lib/cloud-init.sh" 'eval[[:space:]]'

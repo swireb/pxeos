@@ -24,9 +24,9 @@ fi
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-awk '/^rootpxe_json_get_string\(\)/ { on=1 } /^checkin_rootpxe\(\)/ { on=0 } on { print }' "$checkin" >"$tmp/checkin-json.sh"
+awk '/^rootpxe_json_get_string\(\)/ { on=1 } /^checkin_rootpxe\(\)/ { on=0 } on { print }' "$checkin" \
+    | sed "s|/tmp/pxeos.deployment-identity-policy.json|$tmp/pxeos.deployment-identity-policy.json|g" >"$tmp/checkin-json.sh"
 awk '/^rootpxe_validate_smb_export\(\)/ { on=1 } /^rootpxe_storage_path\(\)/ { on=0 } on { print }' "$funcs" >"$tmp/smb-validation.sh"
-awk '/^rootpxe_validate_capture_backup_name\(\)/ { on=1 } /^rootpxe_capture_paths_overlap\(\)/ { on=0 } on { print }' "$funcs" >"$tmp/capture-backup-name.sh"
 
 # The production script resolves jq through PATH.  This test provides a
 # one-command PATH wrapper without replacing jq's behavior.
@@ -42,7 +42,6 @@ export PATH
 # shellcheck source=/dev/null
 . "$tmp/smb-validation.sh"
 # shellcheck source=/dev/null
-. "$tmp/capture-backup-name.sh"
 # The extracted checkin parser is tested independently from the multicast
 # library. Its dedicated protocol tests cover the real parser below.
 rootpxe_multicast_apply_transport_mode() { rootpxe_multicast_reset() { :; }; mc=no; }
@@ -53,7 +52,7 @@ rootpxe_multicast_runtime_ready() { return 1; }
 . "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/deployment-identity.sh"
 . "$tmp/checkin-json.sh"
 
-flat_smb='{"taskId":42,"type":"capture","pxeType":"up","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"changeHostname":false,"captureBackupName":"demo-backup-20260830T104527123Z","storage":"192.0.2.10:share/images","protocol":"smb","storageip":"192.0.2.10","exportPath":"share/images","smbUsername":"test-user","smbPassword":"pa%ss\\word","smbDomain":"WORKGROUP"}'
+flat_smb='{"taskId":42,"type":"capture","pxeType":"up","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"changeHostname":false,"storage":"192.0.2.10:share/images","protocol":"smb","storageip":"192.0.2.10","exportPath":"share/images","smbUsername":"test-user","smbPassword":"pa%ss\\word","smbDomain":"WORKGROUP"}'
 rootpxe_apply_json_checkin "$flat_smb" || fail '平铺 SMB JSON 被拒绝'
 # Old servers do not advertise progressProtocolVersions, so PXEOS must retain
 # its existing v1 reporter instead of sending incomplete v2 snapshots.
@@ -71,15 +70,7 @@ rootpxe_apply_json_checkin "$flat_smb" || fail '平铺 SMB JSON 在 v2 校验后
 [[ $smb_password == 'pa%ss\word' ]] || fail 'SMB 密码中的 % 或反斜线被改变'
 [[ $shutdown == false && $changeHostname == false ]] || fail 'JSON false 被当作缺失'
 export -p | grep -q 'smb_\(username\|password\|domain\)' && fail 'SMB 凭据不得导出到子进程环境'
-[[ $captureBackupName == demo-backup-20260830T104527123Z ]] || fail 'capture backup name 未从认证 JSON 保留'
-unicode_backup_name='Rocky中文-backup-20260830T104527123Z'
-unicode_capture=$(jq --arg name "$unicode_backup_name" '.captureBackupName=$name' <<<"$flat_smb")
-rootpxe_apply_json_checkin "$unicode_capture" || fail 'UTF-8 capture backup name 被认证 JSON 拒绝'
-[[ $captureBackupName == "$unicode_backup_name" ]] || fail 'UTF-8 capture backup name 未原样保留'
-too_long_backup_name=$(printf 'a%.0s' {1..256})
-too_long_capture=$(jq --arg name "$too_long_backup_name" '.captureBackupName=$name' <<<"$flat_smb")
-rootpxe_apply_json_checkin "$too_long_capture" && fail '超过 255 UTF-8 字节的备份名称被接受'
-unset unicode_backup_name unicode_capture too_long_backup_name too_long_capture
+[[ ! -v captureBackupName ]] || fail 'checkin 不应设置已退役的捕获备份字段'
 
 # 原生 Cloud-init 的私有正文形状/原字节由专属协议 fixture 覆盖。
 . "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh"
@@ -202,6 +193,7 @@ EOF
 sed -e "s|^\. /usr/share/pxeos/lib/funcs.sh|. \"$tmp/legacy-runtime.sh\"|" \
     -e "s|^\. /usr/share/pxeos/lib/disk-health.sh$|. \"$tmp/disk-health.sh\"|" \
     -e "s|/tmp/pxeos.shutdown|$tmp/pxeos.shutdown|g" \
+    -e "s|/tmp/pxeos.deployment-identity-policy.json|$tmp/pxeos.deployment-identity-policy.json|g" \
     -e "s|/proc/cmdline|$tmp/proc-cmdline|g" \
     "$checkin" >"$tmp/legacy-checkin.sh"
 legacy_body=$(cat <<'EOF'
@@ -247,7 +239,7 @@ rootpxe_prepare_smb_credentials() {
     return 0
 }
 
-json_checkin_body='{"taskId":49,"executionToken":"0123456789abcdef","type":"capture","pxeType":"up","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"captureBackupName":"demo-backup-20260830T104527123Z","storage":"192.0.2.20:share/images","protocol":"smb","storageip":"192.0.2.20","exportPath":"share/images","smbUsername":"json-user","smbPassword":"json-pass"}'
+json_checkin_body='{"taskId":49,"executionToken":"0123456789abcdef","type":"capture","pxeType":"up","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"storage":"192.0.2.20:share/images","protocol":"smb","storageip":"192.0.2.20","exportPath":"share/images","smbUsername":"json-user","smbPassword":"json-pass"}'
 protocol=''; storage_server=''; storage_export=''; storageip=''; export_path=''; smb_username=''; smb_password=''; smb_domain=''
 rm -f "$tmp/legacy-smb-credential-attempt" "$tmp/json.credentials"
 MOCK_CHECKIN_BODY="$json_checkin_body"
@@ -831,7 +823,11 @@ real_jq=${TASK_LOG_TEST_REAL_JQ:-${REAL_JQ:-}}
 rootpxe_linux_test_jq() {
     local arg converted=()
     for arg in "$@"; do
-        [[ -e $arg ]] && converted+=("$(cygpath -w "$arg")") || converted+=("$arg")
+        if [[ -e $arg ]] && command -v cygpath >/dev/null 2>&1; then
+            converted+=("$(cygpath -w "$arg")")
+        else
+            converted+=("$arg")
+        fi
     done
     MSYS_NO_PATHCONV=1 "$real_jq" "${converted[@]}"
 }

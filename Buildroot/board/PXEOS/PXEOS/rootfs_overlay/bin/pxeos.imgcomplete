@@ -20,7 +20,7 @@ count=0
 res=""
 if [[ ${type:-} == "up" ]]; then
     rootpxe_stage finalizing "moving captured image into final path"
-    # Persist facts in staging before the atomic publish; a retry must never
+    # Persist facts in staging before publication; a retry must never
     # reconstruct them from a source disk that may have changed meanwhile.
 if [[ ${rootpxe_capture_resume_published:-} != 1 ]]; then
 rootpxe_build_partition_inventory "$imagePath" "$imgType" "$hd" "${rootpxe_capture_disks_string:-${disks:-}}" || handleError "PXEOS_STAGE=capture_inventory CODE=PARTITION_INVENTORY_INVALID REASON=capture_partition_facts_unavailable"
