@@ -1156,7 +1156,7 @@ rootpxe_activate_lvm_vg() {
 }
 
 rootpxe_capture_lvm_volumes_single() {
-    local image_path="$1" fragment_path="${rootpxe_lvm_capture_fragment_path:-}" pv_artifact vg_artifact lv_name lv_uuid lv_path lv_size fs swap_uuid artifact fifo=/tmp/pigz1 producer writer progress_decoder min_bytes pv_min_bytes stage vg_active=no rootpxe_lvm_capture_status_file rootpxe_lvm_capture_status_rc lvm_schema_stderr lvm_schema_rc vgchange_rc=0
+    local image_path="$1" fragment_path="${rootpxe_lvm_capture_fragment_path:-}" pv_artifact vg_artifact lv_name lv_uuid lv_path lv_size fs swap_uuid artifact fifo=/tmp/pigz1 producer writer progress_decoder min_bytes pv_min_bytes stage vg_active=no vg_cleanup_attempted=no rootpxe_lvm_capture_status_file rootpxe_lvm_capture_status_rc lvm_schema_stderr lvm_schema_rc vgchange_rc=0
     rootpxe_lvm_capture_error_code=LVM_CAPTURE_FAILED
     rootpxe_lvm_capture_error_reason=unknown
     [[ ${rootpxe_lvm_active:-no} == yes && ${rootpxe_lvm_captured:-no} != yes ]] || return 0
@@ -1169,7 +1169,28 @@ rootpxe_capture_lvm_volumes_single() {
     rootpxe_lvm_capture_status_file=$(mktemp /tmp/rootpxe-lvm-capture-status.XXXXXX) || return 1
     stage=$(mktemp -d "$image_path/.rootpxe-lvm.XXXXXX") || { rm -f -- "$rootpxe_lvm_capture_status_file"; return 1; }
     (
-    trap 'rm -f -- "$fifo"; [[ $vg_active == yes ]] && rootpxe_lvm_native vgchange -an --select "vg_uuid=$rootpxe_lvm_vg_uuid" "$rootpxe_lvm_vg_name" >/dev/null 2>&1 || true; rm -rf -- "$stage"' EXIT
+    rootpxe_capture_lvm_cleanup_vg() {
+        [[ $vg_active == yes && $vg_cleanup_attempted == no ]] || return 0
+        vg_cleanup_attempted=yes
+        if rootpxe_lvm_native vgchange -an --select "vg_uuid=$rootpxe_lvm_vg_uuid" "$rootpxe_lvm_vg_name" >/dev/null 2>&1; then
+            vg_active=no
+            return 0
+        fi
+        printf 'PXEOS_STAGE=lvm_capture CODE=LVM_CAPTURE_CLEANUP_FAILED REASON=vg_deactivation_failed\n' >&2
+        return 1
+    }
+    rootpxe_capture_lvm_cleanup_exit() {
+        local primary_rc=$?
+        trap - EXIT
+        rm -f -- "$fifo" || true
+        if ! rootpxe_capture_lvm_cleanup_vg && [[ $primary_rc -eq 0 ]]; then
+            printf '%s|%s\n' LVM_CAPTURE_CLEANUP_FAILED vg_deactivation_failed >"$rootpxe_lvm_capture_status_file"
+            primary_rc=1
+        fi
+        rm -rf -- "$stage" || true
+        exit "$primary_rc"
+    }
+    trap rootpxe_capture_lvm_cleanup_exit EXIT
     pv_artifact="d1p${rootpxe_lvm_pv_number}.lvm.pv.meta"; vg_artifact="d1p${rootpxe_lvm_pv_number}.lvm.vg.cfg"
     rootpxe_safe_relative_path "$pv_artifact" >/dev/null && rootpxe_safe_relative_path "$vg_artifact" >/dev/null || return 1
     if rootpxe_activate_lvm_vg "$rootpxe_lvm_vg_uuid" "$rootpxe_lvm_vg_name"; then
@@ -1259,6 +1280,11 @@ rootpxe_capture_lvm_volumes_single() {
     done <"$rootpxe_lvm_lv_facts_file"
     mv "$stage/$pv_artifact" "$image_path/$pv_artifact" || return 1
     mv "$stage/$vg_artifact" "$image_path/$vg_artifact" || return 1
+    # 成功停用自有 VG 后才能发布完成标记；EXIT 只为前序失败兜底清理。
+    if ! rootpxe_capture_lvm_cleanup_vg; then
+        printf '%s|%s\n' LVM_CAPTURE_CLEANUP_FAILED vg_deactivation_failed >"$rootpxe_lvm_capture_status_file"
+        return 1
+    fi
     # A dispatcher receives a private per-group fragment.  Only it can merge
     # all fragments and publish the image-level commit marker.
     if [[ -n $fragment_path ]]; then
@@ -2121,7 +2147,38 @@ rootpxe_restore_lvm_volumes_single() {
     }
     local image_path="$1" target_disk="$2" plan="${rootpxe_resolved_lvm_layout_file:-}" pv vg pv_part pv_path parent_progress_key pv_meta vg_cfg lv_name lv_uuid lv_fs lv_artifact lv_bytes swap_uuid target_id actual_size current_size pv_original pv_bytes vg_uuid extent lv_list expected_lvs prevalidated_lvs=0 restored_lvs=0 xfs_mount="" vg_active=no vgs_json pvs_json lvs_json vgs_diag pvs_diag
     local -A seen_lv_names=() seen_artifacts=()
-    trap '[[ -n $xfs_mount ]] && umount "$xfs_mount" >/dev/null 2>&1 || true; [[ -n $xfs_mount ]] && rmdir "$xfs_mount" >/dev/null 2>&1 || true; [[ $vg_active == yes && -n $vg && -n $vg_uuid ]] && rootpxe_lvm_native vgchange -an --select "vg_uuid=$vg_uuid" "$vg" >/dev/null 2>&1 || true; rm -f -- "${lv_list:-}"' EXIT
+    rootpxe_restore_lvm_cleanup_exit() {
+        local primary_rc=$? cleanup_reason='' vg_can_deactivate=yes mount_state mount_query_rc=0
+        trap - EXIT
+        if [[ -n $xfs_mount ]]; then
+            if mount_state=$(findmnt -rn --mountpoint "$xfs_mount" -o TARGET 2>/dev/null); then
+                if [[ $mount_state != "$xfs_mount" ]]; then
+                    vg_can_deactivate=no; cleanup_reason=xfs_mount_state_unavailable
+                elif ! umount "$xfs_mount" >/dev/null 2>&1; then
+                    vg_can_deactivate=no; cleanup_reason=xfs_unmount_failed
+                fi
+            else
+                mount_query_rc=$?
+                if [[ $mount_query_rc -ne 1 || -n $mount_state ]]; then vg_can_deactivate=no; cleanup_reason=xfs_mount_state_unavailable; fi
+            fi
+            if [[ $vg_can_deactivate == yes ]]; then rmdir "$xfs_mount" >/dev/null 2>&1 || cleanup_reason=xfs_directory_cleanup_failed; fi
+        fi
+        if [[ $vg_active == yes && $vg_can_deactivate == yes && -n ${vg:-} && -n ${vg_uuid:-} ]]; then
+            rootpxe_lvm_native vgchange -an --select "vg_uuid=$vg_uuid" "$vg" >/dev/null 2>&1 || cleanup_reason=vg_deactivation_failed
+        fi
+        if [[ -n ${lv_list:-} ]]; then
+            rm -f -- "$lv_list" || { [[ -n $cleanup_reason ]] || cleanup_reason=temporary_file_cleanup_failed; }
+        fi
+        if [[ -n $cleanup_reason ]]; then
+            printf 'PXEOS_STAGE=lvm_restore CODE=LVM_RESTORE_CLEANUP_FAILED REASON=%s\n' "$cleanup_reason" >&2
+            if [[ $primary_rc -eq 0 ]]; then
+                printf '%s|%s\n' LVM_RESTORE_CLEANUP_FAILED "$cleanup_reason" >"$rootpxe_restore_status_file"
+                primary_rc=1
+            fi
+        fi
+        exit "$primary_rc"
+    }
+    trap rootpxe_restore_lvm_cleanup_exit EXIT
     [[ ${rootpxe_disk_permit_granted:-no} == yes && -r $plan ]] || { rootpxe_restore_lvm_fail LVM_RESTORE_PERMIT_FAILED permit_or_plan; return 1; }
     target_id=$(rootpxe_disk_stable_identity "$target_disk") || { rootpxe_restore_lvm_fail LVM_RESTORE_TARGET_IDENTITY_FAILED stable_identity; return 1; }
     [[ ${rootpxe_disk_permit_target_id:-} == "$target_id" && ${rootpxe_disk_permit_operation:-} =~ ^(deploy_write|nvme_format\+deploy_write)$ ]] || { rootpxe_restore_lvm_fail LVM_RESTORE_PERMIT_FAILED target_or_operation; return 1; }
