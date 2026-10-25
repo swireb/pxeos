@@ -704,7 +704,7 @@ rootpxe_safe_relative_path() {
     [[ -n $value && $value != */ && $value != *\\* && $value != *//* ]] || return 1
     IFS=/ read -r -a _rootpxe_parts <<< "$value"
     for segment in "${_rootpxe_parts[@]}"; do
-        [[ -n $segment && $segment != . && $segment != .. && ${segment,,} != .rootpxe-imports && $segment != *$'\n'* && $segment != *$'\r'* ]] || return 1
+        [[ -n $segment && $segment != . && $segment != .. && ${segment,,} != .rootpxe-imports && ${segment,,} != .imports && $segment != *$'\n'* && $segment != *$'\r'* ]] || return 1
     done
     printf '%s\n' "$value"
 }
@@ -3457,13 +3457,23 @@ rootpxe_capture_marker_matches_task() {
 }
 
 rootpxe_capture_finalize_lock_path() {
-    local target="$1" parent base control locks old path
+    local target="$1" parent base control locks old path old_control old_locks old_import_lock
     parent=$(dirname "$target") || return 1
     base=$(basename "$target") || return 1
     [[ -n $parent && -n $base ]] || return 1
     old="$parent/.$base.rootpxe-finalize.lock"
     [[ ! -e $old && ! -L $old ]] || return 1
-    control="$parent/.rootpxe-imports"
+    old_control="$parent/.rootpxe-imports"
+    if [[ -e $old_control || -L $old_control ]]; then
+        [[ -d $old_control && ! -L $old_control ]] || return 1
+        old_locks="$old_control/.locks"
+        if [[ -e $old_locks || -L $old_locks ]]; then
+            [[ -d $old_locks && ! -L $old_locks ]] || return 1
+            old_import_lock="$old_locks/$base"
+            [[ ! -e $old_import_lock && ! -L $old_import_lock ]] || return 1
+        fi
+    fi
+    control="$parent/.imports"
     locks="$control/.locks"
     for path in "$control" "$locks"; do
         if [[ ! -e $path && ! -L $path ]]; then
@@ -3472,6 +3482,75 @@ rootpxe_capture_finalize_lock_path() {
         [[ -d $path && ! -L $path ]] || return 1
     done
     printf '%s/%s\n' "$locks" "$base"
+}
+
+rootpxe_capture_lock_identity() {
+    local path="$1"
+    [[ -e $path && ! -L $path ]] || return 1
+    stat -c '%d:%i' -- "$path" 2>/dev/null
+}
+
+rootpxe_capture_lock_verify() {
+    local lock="${rootpxe_capture_lock_path:-}" owner control locks base entry
+    local -a entries=()
+    [[ -n $lock && -n ${rootpxe_capture_lock_claim:-} ]] || return 1
+    owner="$lock/owner"
+    locks=$(dirname "$lock") || return 1
+    control=$(dirname "$locks") || return 1
+    base=$(basename "$lock") || return 1
+    [[ -d $control && ! -L $control && -d $locks && ! -L $locks && -d $lock && ! -L $lock && -f $owner && ! -L $owner ]] || return 1
+    for entry in "$lock"/* "$lock"/.[!.]* "$lock"/..?*; do
+        [[ -e $entry || -L $entry ]] && entries+=("$entry")
+    done
+    [[ ${#entries[@]} -eq 1 && ${entries[0]} == "$owner" ]] || return 1
+    [[ $(rootpxe_capture_lock_identity "$control") == "${rootpxe_capture_lock_control_identity:-}" &&
+       $(rootpxe_capture_lock_identity "$locks") == "${rootpxe_capture_lock_locks_identity:-}" &&
+       $(rootpxe_capture_lock_identity "$lock") == "${rootpxe_capture_lock_dir_identity:-}" &&
+       $(rootpxe_capture_lock_identity "$owner") == "${rootpxe_capture_lock_owner_identity:-}" ]] || return 1
+    cmp -s -- "$owner" <(printf 'task_id=%s\noperation=capture\ntarget=%s\nclaim_id=%s\n' "$taskid" "$base" "$rootpxe_capture_lock_claim") || return 1
+    [[ $(rootpxe_capture_lock_identity "$owner") == "$rootpxe_capture_lock_owner_identity" ]] || return 1
+}
+
+rootpxe_capture_lock_acquire() {
+    local target="$1" lock owner claim locks control base
+    [[ ${taskid:-} =~ ^[1-9][0-9]*$ ]] || return 1
+    lock=$(rootpxe_capture_finalize_lock_path "$target") || return 1
+    locks=$(dirname "$lock") || return 1
+    control=$(dirname "$locks") || return 1
+    base=$(basename "$lock") || return 1
+    mkdir "$lock" 2>/dev/null || return 1
+    rootpxe_capture_lock_path="$lock"
+    rootpxe_capture_lock_control_identity=$(rootpxe_capture_lock_identity "$control") || return 1
+    rootpxe_capture_lock_locks_identity=$(rootpxe_capture_lock_identity "$locks") || return 1
+    rootpxe_capture_lock_dir_identity=$(rootpxe_capture_lock_identity "$lock") || return 1
+    claim=$(od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d '[:space:]') || return 1
+    [[ $claim =~ ^[0-9a-f]{32}$ ]] || return 1
+    rootpxe_capture_lock_claim="$claim"
+    owner="$lock/owner"
+    ( set -C; printf 'task_id=%s\noperation=capture\ntarget=%s\nclaim_id=%s\n' "$taskid" "$base" "$claim" >"$owner" ) || return 1
+    sync -f "$owner" && sync -f "$lock" || return 1
+    rootpxe_capture_lock_owner_identity=$(rootpxe_capture_lock_identity "$owner") || return 1
+    rootpxe_capture_lock_verify
+}
+
+rootpxe_capture_lock_release() {
+    rootpxe_capture_lock_verify || return 1
+    local lock="$rootpxe_capture_lock_path" owner="$rootpxe_capture_lock_path/owner" entry
+    local -a entries=()
+    for entry in "$lock"/* "$lock"/.[!.]* "$lock"/..?*; do
+        [[ -e $entry || -L $entry ]] && entries+=("$entry")
+    done
+    [[ ${#entries[@]} -eq 1 && ${entries[0]} == "$owner" ]] || return 1
+    rm -- "$owner" || return 1
+    [[ ! -e $owner && ! -L $owner ]] || return 1
+    rmdir "$lock" || return 1
+    unset rootpxe_capture_lock_path rootpxe_capture_lock_control_identity rootpxe_capture_lock_locks_identity rootpxe_capture_lock_dir_identity rootpxe_capture_lock_owner_identity rootpxe_capture_lock_claim
+}
+
+rootpxe_capture_finalize_fail_releasing_lock() {
+    local reason="$1"
+    rootpxe_capture_lock_release || { rootpxe_capture_finalize_fail finalize_lock_release_failed; return 1; }
+    rootpxe_capture_finalize_fail "$reason"
 }
 
 rootpxe_capture_paths_same_device() {
@@ -3508,7 +3587,7 @@ rootpxe_finalize_capture() {
     rootpxe_finalize_capture_error_code=CAPTURE_FINALIZE_FAILED
     rootpxe_finalize_capture_error_reason=unsafe_finalize_state
     rootpxe_require_task_context || { rootpxe_capture_finalize_fail invalid_task_context; return 1; }
-    local storage_root="/storage" source="/storage/dev/$macWinSafe" relative target target_parent source_parent lock target_marker source_marker
+    local storage_root="/storage" source="/storage/dev/$macWinSafe" relative target target_parent source_parent target_marker source_marker
     relative=$(rootpxe_safe_relative_path "${img:-}") || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
     target=$(rootpxe_storage_path "$relative") || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
     target_parent=$(dirname "$target") || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
@@ -3519,69 +3598,68 @@ rootpxe_finalize_capture() {
     mkdir -p "$target_parent" || { rootpxe_capture_finalize_fail target_parent_unavailable; return 1; }
     [[ -d $target_parent && ! -L $target_parent ]] || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
     [[ $(rootpxe_storage_path "$relative") == "$target" && ! -L $target ]] || { rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
-    lock=$(rootpxe_capture_finalize_lock_path "$target") || { rootpxe_capture_finalize_fail finalize_lock_unavailable; return 1; }
-    mkdir "$lock" 2>/dev/null || { rootpxe_capture_finalize_fail finalize_lock_unavailable; return 1; }
+    rootpxe_capture_lock_acquire "$target" || { rootpxe_capture_finalize_fail finalize_lock_unavailable; return 1; }
+    rootpxe_capture_lock_verify || { rootpxe_capture_finalize_fail finalize_lock_unavailable; return 1; }
 
     target_marker="$target/.rootpxe-capture-taskid"
     source_marker="$source/.rootpxe-capture-taskid"
     # Recheck both paths under the target lock before any destructive action.
-    [[ -d $storage_root && ! -L $storage_root && -d $source_parent && ! -L $source_parent && ! -L $source ]] || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail unsafe_source_path; return 1; }
-    [[ $(rootpxe_storage_path "$relative") == "$target" && -d $target_parent && ! -L $target_parent && ! -L $target ]] || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail unsafe_target_path; return 1; }
+    [[ -d $storage_root && ! -L $storage_root && -d $source_parent && ! -L $source_parent && ! -L $source ]] || { rootpxe_capture_finalize_fail_releasing_lock unsafe_source_path; return 1; }
+    [[ $(rootpxe_storage_path "$relative") == "$target" && -d $target_parent && ! -L $target_parent && ! -L $target ]] || { rootpxe_capture_finalize_fail_releasing_lock unsafe_target_path; return 1; }
     if [[ -d $source && ( ! -e $target || -d $target ) ]]; then
-        rootpxe_capture_marker_matches_task "$source_marker" "$taskid" || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail source_marker_invalid; return 1; }
-        capture_size_bytes=$(rootpxe_directory_size_bytes "$source") || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail source_payload_invalid; return 1; }
-        [[ $capture_size_bytes =~ ^[1-9][0-9]*$ ]] || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail source_payload_invalid; return 1; }
-        [[ ! -e $target_marker && ! -L $target_marker ]] || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail target_marker_present; return 1; }
-        rootpxe_capture_paths_same_device "$source" "$target_parent" "$target" || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail cross_device_capture_paths; return 1; }
+        rootpxe_capture_marker_matches_task "$source_marker" "$taskid" || { rootpxe_capture_finalize_fail_releasing_lock source_marker_invalid; return 1; }
+        capture_size_bytes=$(rootpxe_directory_size_bytes "$source") || { rootpxe_capture_finalize_fail_releasing_lock source_payload_invalid; return 1; }
+        [[ $capture_size_bytes =~ ^[1-9][0-9]*$ ]] || { rootpxe_capture_finalize_fail_releasing_lock source_payload_invalid; return 1; }
+        [[ ! -e $target_marker && ! -L $target_marker ]] || { rootpxe_capture_finalize_fail_releasing_lock target_marker_present; return 1; }
+        rootpxe_capture_paths_same_device "$source" "$target_parent" "$target" || { rootpxe_capture_finalize_fail_releasing_lock cross_device_capture_paths; return 1; }
+        rootpxe_capture_lock_verify || { rootpxe_capture_finalize_fail finalize_lock_unavailable; return 1; }
         # All writers and metadata validation finish in staging before this
         # point. Replace the entire old tree; never merge its stale files.
         if [[ -d $target ]]; then
             if ! rm -rf -- "$target" || [[ -e $target || -L $target ]]; then
-                rmdir "$lock" >/dev/null 2>&1 || true
                 rootpxe_capture_finalize_fail target_remove_failed
                 return 1
             fi
         fi
+        rootpxe_capture_lock_verify || { rootpxe_capture_finalize_fail finalize_lock_unavailable; return 1; }
         if ! mv -T "$source" "$target"; then
-            rmdir "$lock" >/dev/null 2>&1 || true
             rootpxe_capture_finalize_fail publish_failed_source_retained
             return 1
         fi
     elif [[ ! -e $source && ! -L $source && -d $target ]]; then
         # A retry after publication confirms only this task's existing tree.
-        rootpxe_capture_set_final_path "$target" || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail published_target_invalid; return 1; }
+        rootpxe_capture_set_final_path "$target" || { rootpxe_capture_finalize_fail_releasing_lock published_target_invalid; return 1; }
     else
-        rmdir "$lock" >/dev/null 2>&1 || true
-        rootpxe_capture_finalize_fail capture_path_state_invalid
+        rootpxe_capture_finalize_fail_releasing_lock capture_path_state_invalid
         return 1
     fi
-    rootpxe_capture_set_final_path "$target" || { rmdir "$lock" >/dev/null 2>&1 || true; rootpxe_capture_finalize_fail published_target_invalid; return 1; }
-    rmdir "$lock" 2>/dev/null || { rootpxe_capture_finalize_fail finalize_lock_release_failed; return 1; }
+    rootpxe_capture_set_final_path "$target" || { rootpxe_capture_finalize_fail published_target_invalid; return 1; }
+    rootpxe_capture_lock_release || { rootpxe_capture_finalize_fail finalize_lock_release_failed; return 1; }
 }
 
 rootpxe_clear_capture_marker() {
     [[ ${type:-} == "up" && -n ${img:-} ]] || return 0
     rootpxe_capture_marker_clear_error_reason=invalid_task_context
     rootpxe_require_task_context || return 1
-    local storage_root="/storage" relative target target_parent marker lock
+    local storage_root="/storage" relative target target_parent marker
     relative=$(rootpxe_safe_relative_path "$img") || { rootpxe_capture_marker_clear_error_reason=unsafe_target_path; return 1; }
     target=$(rootpxe_storage_path "$relative") || { rootpxe_capture_marker_clear_error_reason=unsafe_target_path; return 1; }
     target_parent=$(dirname "$target") || { rootpxe_capture_marker_clear_error_reason=unsafe_target_path; return 1; }
     [[ -d $storage_root && ! -L $storage_root && -d $target_parent && ! -L $target_parent && -d $target && ! -L $target ]] || { rootpxe_capture_marker_clear_error_reason=unsafe_target_path; return 1; }
-    lock=$(rootpxe_capture_finalize_lock_path "$target") || { rootpxe_capture_marker_clear_error_reason=finalize_lock_unavailable; return 1; }
-    mkdir "$lock" 2>/dev/null || { rootpxe_capture_marker_clear_error_reason=finalize_lock_unavailable; return 1; }
+    rootpxe_capture_lock_acquire "$target" || { rootpxe_capture_marker_clear_error_reason=finalize_lock_unavailable; return 1; }
+    rootpxe_capture_lock_verify || { rootpxe_capture_marker_clear_error_reason=finalize_lock_unavailable; return 1; }
     marker="$target/.rootpxe-capture-taskid"
     if ! rootpxe_capture_marker_matches_task "$marker" "$taskid"; then
-        rmdir "$lock" >/dev/null 2>&1 || true
+        rootpxe_capture_lock_release || { rootpxe_capture_marker_clear_error_reason=finalize_lock_release_failed; return 1; }
         rootpxe_capture_marker_clear_error_reason=marker_not_owned
         return 1
     fi
+    rootpxe_capture_lock_verify || { rootpxe_capture_marker_clear_error_reason=finalize_lock_unavailable; return 1; }
     if ! rm -f -- "$marker"; then
-        rmdir "$lock" >/dev/null 2>&1 || true
         rootpxe_capture_marker_clear_error_reason=marker_remove_failed
         return 1
     fi
-    rmdir "$lock" 2>/dev/null || { rootpxe_capture_marker_clear_error_reason=finalize_lock_release_failed; return 1; }
+    rootpxe_capture_lock_release || { rootpxe_capture_marker_clear_error_reason=finalize_lock_release_failed; return 1; }
 }
 # RootPXE 任务阶段上报：缺少任务上下文失败；无 web/pxeapi 时跳过。
 rootpxe_stage() {

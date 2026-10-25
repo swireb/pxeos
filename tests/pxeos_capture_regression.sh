@@ -67,12 +67,32 @@ rootpxe_require_task_context() { return 0; }
 
 # 首次与重复捕获均只依赖 dev 暂存，不自动创建 backup。
 setup_fixture
+rootpxe_capture_lock_acquire "$target" || fail '捕获目标锁不能独占建立'
+unset lock
+rootpxe_capture_lock_verify || fail '无调用者 lock 变量时归属校验失败'
+lock="$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat"
+assert_file_text "$lock/owner" $'task_id=3\noperation=capture\ntarget=repeat\nclaim_id='"$rootpxe_capture_lock_claim" '锁 owner 未写入可读归属'
+printf 'unexpected\n' >"$lock/unknown"
+rootpxe_capture_lock_verify && fail '锁内未知文件未阻止归属校验'
+rootpxe_capture_lock_release && fail '锁目录存在未知文件时错误释放'
+[[ -f "$lock/owner" && -f "$lock/unknown" ]] || fail '未知锁现场未保留'
+rm -f "$lock/unknown"
+rootpxe_capture_lock_release || fail '自有目标锁未能释放'
+setup_fixture
+rootpxe_capture_lock_acquire "$target" || fail '替换 owner 测试不能取得锁'
+owner="$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/owner"
+ln -- "$owner" "$tmp/owner-copy"
+rm -- "$owner"
+cp -- "$tmp/owner-copy" "$owner"
+rootpxe_capture_lock_release && fail '同内容不同对象 owner 被误认归属'
+[[ -f $owner ]] || fail '被替换的 owner 未保留现场'
+setup_fixture
 rootpxe_prepare_storage_layout || fail '捕获存储布局无法准备'
 [[ ! -e "$ROOTPXE_TEST_STORAGE/backup" ]] || fail '存储布局不应创建 backup'
 rootpxe_finalize_capture || fail '没有 backup 目录时首次 capture 未能安全发布'
 assert_file_text "$target/d1p1.img" 'new-image' '首次 capture 未发布新镜像'
 [[ ! -e "$ROOTPXE_TEST_STORAGE/backup" ]] || fail '首次 capture 不应创建 backup'
-[[ -d "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks" && ! -e "$ROOTPXE_TEST_STORAGE/images/.repeat.rootpxe-finalize.lock" ]] || fail '捕获没有使用统一导入控制目录中的目标锁'
+[[ -d "$ROOTPXE_TEST_STORAGE/images/.imports/.locks" && ! -e "$ROOTPXE_TEST_STORAGE/images/.repeat.rootpxe-finalize.lock" ]] || fail '捕获没有使用统一导入控制目录中的目标锁'
 pass 'first capture publishes without a backup directory'
 
 # 旧目录必须完整删除后再发布整棵新树，旧文件和旧子目录不得混入。
@@ -139,8 +159,10 @@ rootpxe_finalize_capture && fail '模拟 SMB 删除失败被误报成功'
 assert_file_text "$target/d1p1.img" 'old-image' 'SMB 删除失败后旧目标被改变'
 assert_file_text "$source/d1p1.img" 'new-image' 'SMB 删除失败后新暂存被改变'
 unset -f rm
-rootpxe_finalize_capture || fail '删除失败后未能从完整新暂存重试'
-pass 'SMB removal failure retains staging for retry'
+[[ -f "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/owner" ]] || fail '删除回执不确定时未保留目标锁'
+rootpxe_finalize_capture && fail '删除回执不确定时错误抢锁重试'
+[[ ${rootpxe_finalize_capture_error_reason:-} == finalize_lock_unavailable ]] || fail '不确定现场未阻止重试'
+pass 'SMB removal failure retains staging and lock for inspection'
 
 # 删除返回失败时，旧目录即使已部分改变也必须保留完整新暂存。
 setup_fixture
@@ -159,7 +181,8 @@ rootpxe_finalize_capture && fail '部分删除失败被误报成功'
 assert_file_text "$source/d1p1.img" 'new-image' '部分删除失败损坏了新暂存'
 assert_file_text "$source/.rootpxe-capture-taskid" '3' '部分删除失败损坏了新暂存 marker'
 unset -f rm
-pass 'partial removal failure preserves complete staging'
+[[ -f "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/owner" ]] || fail '部分删除失败未保留目标锁'
+pass 'partial removal failure preserves staging and lock'
 
 # 旧目标已删除而发布失败时不保留旧镜像，新暂存仍供下次重试。
 setup_fixture
@@ -177,15 +200,15 @@ rootpxe_finalize_capture && fail '模拟 SMB 发布失败被误报成功'
 assert_file_text "$source/d1p1.img" 'new-image' 'SMB 发布失败后新暂存未保留'
 assert_file_text "$source/.rootpxe-capture-taskid" '3' 'SMB 发布失败后新暂存 marker 未保留'
 unset -f mv
-rootpxe_finalize_capture || fail '发布失败后未能从完整新暂存重试'
-pass 'SMB publish failure retains staging for retry'
+[[ -f "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/owner" ]] || fail '发布回执不确定时未保留目标锁'
+pass 'SMB publish failure retains staging and lock for inspection'
 
 # 锁不得抢占：并发 finalizer 必须保留双方数据并明确失败。
 setup_fixture
 mkdir -p "$target"
 printf 'old-image\n' >"$target/d1p1.img"
-mkdir -p "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks"
-mkdir "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks/repeat"
+mkdir -p "$ROOTPXE_TEST_STORAGE/images/.imports/.locks"
+mkdir "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat"
 rootpxe_finalize_capture && fail '已有 finalizer 锁被错误抢占'
 [[ ${rootpxe_finalize_capture_error_reason:-} == finalize_lock_unavailable ]] || fail '锁冲突未返回稳定原因'
 assert_file_text "$target/d1p1.img" 'old-image' '锁冲突修改了旧镜像'
@@ -199,14 +222,27 @@ mkdir "$ROOTPXE_TEST_STORAGE/images/.repeat.rootpxe-finalize.lock"
 rootpxe_finalize_capture && fail '旧版本 finalizer 锁被忽视'
 [[ ${rootpxe_finalize_capture_error_reason:-} == finalize_lock_unavailable ]] || fail '旧锁未明确拒绝'
 assert_file_text "$target/d1p1.img" 'old-image' '旧锁场景改变目标'
-[[ ! -e "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks/repeat" ]] || fail '旧锁场景创建了新锁'
+[[ ! -e "$ROOTPXE_TEST_STORAGE/images/.imports" ]] || fail '旧锁场景创建了新控制树'
 pass 'legacy finalizer lock is fail-closed'
+
+setup_fixture
+mkdir -p "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks"
+mkdir "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks/repeat"
+rootpxe_finalize_capture && fail '旧版导入锁被忽视'
+[[ ${rootpxe_finalize_capture_error_reason:-} == finalize_lock_unavailable && ! -e "$ROOTPXE_TEST_STORAGE/images/.imports" ]] || fail '旧版导入锁未只读拒绝'
+pass 'legacy import lock is read-only guarded'
 
 setup_fixture
 img='images/.ROOTPXE-IMPORTS/task'
 rootpxe_finalize_capture && fail '保留控制目录被当作公开镜像路径'
 [[ ${rootpxe_finalize_capture_error_reason:-} == unsafe_target_path ]] || fail '保留控制目录未返回安全路径错误'
 pass 'reserved import control path is rejected'
+
+setup_fixture
+img='images/.IMPORTS/task'
+rootpxe_finalize_capture && fail '新保留控制目录被当作公开镜像路径'
+[[ ${rootpxe_finalize_capture_error_reason:-} == unsafe_target_path ]] || fail '新保留目录未返回安全路径错误'
+pass 'new reserved import control path is rejected'
 
 # 词法路径互含与链接均不得进入 rename。此处 source 使用 img=dev，target 是其父目录。
 setup_fixture
@@ -307,16 +343,32 @@ assert_file_text "$source/d1p1.img" 'new-image' '跨文件系统场景修改了�
 unset -f stat
 pass 'cross-device finalization is rejected before move'
 
+# 锁内出现未知对象时必须在删除正式镜像前停止。
+setup_fixture
+mkdir -p "$target"
+printf 'old-image\n' >"$target/d1p1.img"
+saved_same_device=$(declare -f rootpxe_capture_paths_same_device)
+rootpxe_capture_paths_same_device() {
+    printf 'unknown\n' >"$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/foreign"
+    return 0
+}
+rootpxe_finalize_capture && fail '锁内未知文件未阻止目标替换'
+[[ ${rootpxe_finalize_capture_error_reason:-} == finalize_lock_unavailable ]] || fail '锁内未知文件未返回稳定失败原因'
+assert_file_text "$target/d1p1.img" 'old-image' '锁内未知文件时删除了旧镜像'
+[[ -f "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/owner" ]] || fail '未知锁现场未保留'
+eval "$saved_same_device"
+pass 'unknown lock member blocks publication before old tree changes'
+
 # finish 成功后只能删除属于当前任务的一个普通 marker，且同一锁保护。
 setup_fixture
 mkdir -p "$target"
 printf 'new-image\n' >"$target/d1p1.img"
 printf '3\n' >"$target/.rootpxe-capture-taskid"
-mkdir -p "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks"
-mkdir "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks/repeat"
+mkdir -p "$ROOTPXE_TEST_STORAGE/images/.imports/.locks"
+mkdir "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat"
 rootpxe_clear_capture_marker && fail 'marker 清理抢占了已有 finalizer 锁'
 assert_file_text "$target/.rootpxe-capture-taskid" '3' '锁冲突时 marker 被错误清理'
-rmdir "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks/repeat"
+rmdir "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat"
 rootpxe_clear_capture_marker || fail '当前任务 marker 未能安全清理'
 [[ ! -e $target/.rootpxe-capture-taskid ]] || fail '当前任务 marker 未被清理'
 
@@ -324,6 +376,39 @@ printf '2\n' >"$target/.rootpxe-capture-taskid"
 rootpxe_clear_capture_marker && fail 'foreign marker 被错误清理'
 assert_file_text "$target/.rootpxe-capture-taskid" '2' 'foreign marker 被删除或改变'
 pass 'marker clearing checks ownership and lock'
+
+setup_fixture
+mkdir -p "$target"
+printf 'new-image\n' >"$target/d1p1.img"
+printf '3\n' >"$target/.rootpxe-capture-taskid"
+saved_marker_match=$(declare -f rootpxe_capture_marker_matches_task)
+rootpxe_capture_marker_matches_task() {
+    [[ -f $1 && ! -L $1 && $(cat "$1") == "$2" ]] || return 1
+    printf 'unknown\n' >"$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/foreign"
+}
+rootpxe_clear_capture_marker && fail '归属检查后新增未知锁文件仍清理 marker'
+[[ ${rootpxe_capture_marker_clear_error_reason:-} == finalize_lock_unavailable ]] || fail '归属变化未返回稳定锁失败原因'
+assert_file_text "$target/.rootpxe-capture-taskid" '3' '归属变化后删除了 marker'
+[[ -f "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/owner" && -f "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/foreign" ]] || fail '归属变化后未保留锁现场'
+eval "$saved_marker_match"
+pass 'marker clearing rechecks lock immediately before removal'
+
+setup_fixture
+mkdir -p "$target"
+printf 'new-image\n' >"$target/d1p1.img"
+printf '3\n' >"$target/.rootpxe-capture-taskid"
+rm() {
+    if [[ $1 == -f && $2 == -- && $3 == "$target/.rootpxe-capture-taskid" ]]; then
+        command rm "$@"
+        return 70
+    fi
+    command rm "$@"
+}
+rootpxe_clear_capture_marker && fail 'marker 删除回执丢失时错误清除任务锁'
+[[ ${rootpxe_capture_marker_clear_error_reason:-} == marker_remove_failed ]] || fail 'marker 删除不确定未返回稳定原因'
+[[ -f "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/owner" ]] || fail 'marker 删除不确定时目标锁未保留'
+unset -f rm
+pass 'uncertain marker removal preserves owned lock'
 
 printf 'PASS: PXEOS capture finalize regression\n'
 )
