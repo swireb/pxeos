@@ -2,6 +2,11 @@
 . /usr/share/pxeos/lib/funcs.sh || exit 1
 rootpxe_task_log_initialize || printf '[WARN]  Task log: unavailable.\n' >&2
 . /bin/pxeos.checkin
+if [[ ${rootpxe_storage_only:-no} == yes ]]; then
+    . /bin/pxeos.mount
+    rootpxe_storage_recover_until_clean
+    exit $?
+fi
 rootpxe_download_cleanup_initialization_private() {
     killStatusReporter
     rootpxe_cleanup_session

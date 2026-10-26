@@ -1,23 +1,9 @@
 #!/bin/bash
-dots "Checking server disk space"
-getServerDiskSpaceUsage=$(df -h | grep "/storage" | sed -n '/dev/{s/  */ /gp}')
-echo "Done"
-
-dots "Server disk size total"
-serverDiskSizeTotal=$(echo "$getServerDiskSpaceUsage" | cut -d ' ' -f2)
-echo "$serverDiskSizeTotal"
-
-dots "Server disk size used"
-serverDiskSizeUsed=$(echo "$getServerDiskSpaceUsage" | cut -d ' ' -f3)
-echo "$serverDiskSizeUsed"
-
-dots "Server disk size used percentage"
-serverDiskSizeUsedPercent=$(echo "$getServerDiskSpaceUsage" | cut -d ' ' -f5)
-echo "$serverDiskSizeUsedPercent"
-
-dots "Server disk size available"
-serverDiskSizeAvailable=$(echo "$getServerDiskSpaceUsage" | cut -d ' ' -f4)
-[[ $serverDiskSizeAvailable == "0" ]] && serverDiskSizeAvailable="0M"
-echo "$serverDiskSizeAvailable"
-
+# The root disk controller does not statfs the NAS. Every actual create/write
+# is checked by the numeric-identity helper and retains failures as evidence.
+serverDiskSizeTotal=unknown
+serverDiskSizeUsed=unknown
+serverDiskSizeUsedPercent=unknown
+serverDiskSizeAvailable=unknown
+rootpxe_console_message INFO 'Storage capacity is checked during writing.'
 debugPause

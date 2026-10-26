@@ -99,8 +99,8 @@ pxeos_network_storage_regression.sh  # 合并的网络故障诊断、存储和�
 - 脚本及核对范围如下。
 
 ```text
-pxeos_capture_regression.sh  # 合并核对 capture 收尾、发布与进度管线。
-pxeos_capture_resume_regression.sh  # 核对 capture marker、恢复衔接和交接状态。
+pxeos_capture_regression.sh  # 核对捕获/恢复管线失败、完成回调、许可与源盘布局/extfs；原执行发布恢复矩阵见 storage controller Python 入口。
+pxeos_capture_resume_regression.sh  # 核对捕获元数据、私有副本清理及磁盘许可；不通过发现旧 marker 接管已发布代际。
 pxeos_restore_preflight_regression.sh  # 核对恢复制品的离线预检。
 pxeos_partition_regression.sh  # 合并的分区安全与布局回归。
 pxeos_layout_alignment_regression.sh  # 核对 4Kn 等扇区/布局对齐契约。
@@ -230,3 +230,28 @@ fixtures/lvm2-udev-sync-91b1dd3.patch
 # 对应回归脚本
 pxeos_lvm_udev_rules_regression.sh
 ```
+
+## 新网络存储测试源码与待验证边界
+
+2026-10-27本轮只编写/调整源码和测试源码，未运行测试、编译、静态检查、挂载、真实NAS或设备操作；下列入口是用户后续执行说明，没有RED/GREEN或通过结论。
+
+- `pxeos_storage_helper_test.py`使用本机C编译器、json-c/OpenSSL开发元数据及临时目录，编译并运行C fixture；覆盖有界流、对象回执、解析和身份syscall顺序。执行该Python文件会真实编译临时测试程序，不能把它当纯文本检查；本轮未执行。
+- `storage_helper_fixture.c`是配套本地隔离fixture，不构建Buildroot产物，不应挂载或访问真实NAS/块设备。身份顺序注入用例不能代替真实数值UID/GID权限验证。
+- `pxeos_storage_controller_test.py` 使用 Python、Bash、jq 和私有临时普通文件调用当前 `storage-io.sh` 控制流，以受控进程/回调替身核对原 owner/attempt、身份/能力拒绝、发布前各失败点、冻结 finish、只读收尾、原代际发布/回滚、只清原范围、等待 helper 后释放及失败不释放。旧 marker 或目录名不能认领已发布执行，越出原 shadow 的 payload 在 helper 命令前拒绝；SMB 挂载取消仍须等待实际子进程。该入口不编译 C，不访问真实 NAS 或块设备，不能代替原生 helper/身份验证。
+- `storage-test-support.sh` 是存储相关 shell/Python fixture 共用的测试支持文件，不是独立测试入口。它加载当前控制器、构造认证 JSON/owner/attempt/boot 上下文并限定私有工作区；仅在原生进程边界提供能力/连接/preflight 替身，在管线回归中以受限普通文件替代远端字节读写，保留真实 producer、压缩与 wait 控制流，不提供真实挂载或 NAS 变更。
+- `pxeos_capture_regression.sh` 保留捕获/恢复管线、完成回调、许可、源盘布局和 extfs 相关测试源码；`pxeos_capture_resume_regression.sh` 保留元数据校验、私有副本清理与许可测试源码。旧 MAC 暂存、shell 锁/finalize 和 marker 发现发布的旧矩阵已退出维护，当前原执行发布/恢复矩阵集中到 controller Python 入口。
+- `pxeos_network_storage_regression.sh` 聚合入口、Partclone 和多播等现有回归按各自范围保留；共同支持文件由需要当前存储上下文或管线边界的 fixture 引用。源码整理不表示任何套件已经运行，原生 C/helper fixture 继续独立维护。
+
+用户可在具备本机依赖的隔离环境从子模块根执行：
+
+```shell
+python3 -B tests/pxeos_storage_controller_test.py
+python3 -B tests/pxeos_storage_helper_test.py
+bash tests/pxeos_capture_regression.sh
+bash tests/pxeos_capture_resume_regression.sh
+bash tests/pxeos_network_storage_regression.sh
+bash tests/pxeos_partclone_progress_regression.sh
+bash tests/multicast-writeimage-regression.sh
+```
+
+离线fixture完成后仍须分别构建x64/x86/arm64，核对helper及依赖进入initramfs；再验证NFS3/4.0/4.1/4.2固定/auto、SMB2.1/3.0/3.0.2/3.1.1固定/auto、实际mountinfo/非guest、UID/GID 0及非root/无本地同名账号、只读根、原worker未停保护、可信同host跨boot恢复、所有producer失败和响应丢失。离线通过不能证明这些真实矩阵或吞吐结果。根项目待运行清单见[存储系统待验矩阵](../../../docs/存储系统.md#初始化边界与未验证事项)。

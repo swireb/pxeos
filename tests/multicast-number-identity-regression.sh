@@ -63,6 +63,10 @@ capability_v2() {
 setup_context() {
     accept_mode
     taskid=71 task_token=0123456789abcdef0123456789abcdef mac=aa:bb:cc:dd:ee:ff progress_attempt=4
+    rootpxe_storage_nonce=11111111111111111111111111111111 rootpxe_storage_worker_nonce=22222222222222222222222222222222
+    rootpxe_storage_boot_id=11111111-1111-1111-1111-111111111111 rootpxe_storage_sysuuid=33333333-3333-3333-3333-333333333333
+    export rootpxe_storage_nonce rootpxe_storage_worker_nonce rootpxe_storage_boot_id rootpxe_storage_sysuuid
+
     rootpxe_api=http://controller/ pxeapi=http://controller/ web=http://controller/
     rootpxe_multicast_manifest_file=$(mktemp /tmp/rootpxe-multicast-manifest.XXXXXX)
     printf '%s' '[{"artifactKey":"disk.img","paths":["disk.img"]}]' >"$rootpxe_multicast_manifest_file"
@@ -75,7 +79,7 @@ setup_context() {
         while (( $# )); do
             case $1 in -o) out=$2; shift 2;; --data-binary) request=${2#@}; shift 2;; *) url=$1; shift;; esac
         done
-        jq -e --arg id "$number" --arg key "$session_key_fixture" '.taskId == 71 and .progressAttempt == 4 and .sessionId == $id and (.sessionId|type) == "string" and .sessionKey == $key and .executionToken == "0123456789abcdef0123456789abcdef"' "$request" >/dev/null || { printf 'request identity assertion failed\n' >>"$request_log"; return 91; }
+        jq -e --arg id "$number" --arg key "$session_key_fixture" '.taskId == 71 and .progressAttempt == 4 and .attempt == 4 and .storageNonce == "11111111111111111111111111111111" and .workerNonce == "22222222222222222222222222222222" and .storageBootId == "11111111-1111-1111-1111-111111111111" and .sysuuid == "33333333-3333-3333-3333-333333333333" and .sessionId == $id and (.sessionId|type) == "string" and .sessionKey == $key and .executionToken == "0123456789abcdef0123456789abcdef"' "$request" >/dev/null || { printf 'request identity assertion failed\n' >>"$request_log"; return 91; }
         printf '%s\n' "${url##*/}" >>"$request_log"
         case $url in
             *join|*status) jq -cn --arg id "$response_number" --arg key "$response_key" '{sessionId:$id,sessionKey:$key,state:"RUNNING",currentSequence:2,member:{state:"RUNNING",selected:true}}' >"$out";;
@@ -111,6 +115,17 @@ context_mismatch() {
     if rootpxe_multicast_status; then echo 'old attempt context made a request' >&2; return 1; fi
     [[ ! -s $request_log ]]
     progress_attempt=4
+    local original_worker=$rootpxe_storage_worker_nonce original_nonce=$rootpxe_storage_nonce original_boot=$rootpxe_storage_boot_id
+    rootpxe_storage_worker_nonce=44444444444444444444444444444444
+    if rootpxe_multicast_status; then echo 'old worker context made a request' >&2; return 1; fi
+    [[ ! -s $request_log ]]
+    rootpxe_storage_worker_nonce=$original_worker rootpxe_storage_nonce=44444444444444444444444444444444
+    if rootpxe_multicast_status; then echo 'old reservation context made a request' >&2; return 1; fi
+    [[ ! -s $request_log ]]
+    rootpxe_storage_nonce=$original_nonce rootpxe_storage_boot_id=44444444-4444-4444-4444-444444444444
+    if rootpxe_multicast_status; then echo 'old boot context made a request' >&2; return 1; fi
+    [[ ! -s $request_log ]]
+    rootpxe_storage_boot_id=$original_boot
     task_token=different-current-task-token
     if rootpxe_multicast_status; then echo 'old token context made a request' >&2; return 1; fi
     [[ ! -s $request_log ]]
@@ -137,7 +152,7 @@ unicast_clears_context() {
     [[ ! -e $old_context && ! -e $old_secret ]]
     rootpxe_task_multicast_form_args
     [[ ${#rootpxe_task_multicast_args[@]} == 0 ]]
-    [[ $(rootpxe_task_multicast_json '{"taskId":71}') == '{"taskId":71}' ]]
+    rootpxe_task_multicast_json '{"taskId":71}' | jq -e '.taskId == 71 and (has("sessionId")|not) and (has("sessionKey")|not) and .storageNonce == "11111111111111111111111111111111" and .workerNonce == "22222222222222222222222222222222" and .attempt == 4' >/dev/null
     if rootpxe_multicast_status; then echo 'old multicast context survived unicast switch' >&2; return 1; fi
     [[ ! -s $request_log ]]
 }

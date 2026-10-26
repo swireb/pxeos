@@ -11,6 +11,8 @@ cleanup_fixture(){
     return "$cleanup_result"
 }
 trap cleanup_fixture EXIT
+. "$root/tests/storage-test-support.sh"
+storage_test_load
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 case $(uname -s) in MINGW*|MSYS*) rootpxe_ci_fixture_jq=$(command -v jq.exe); jq(){ "$rootpxe_ci_fixture_jq" -b "$@"; };; esac
 [[ -r $lib/cloud-init.sh ]] || fail 'NoCloud helper is missing'
@@ -243,6 +245,7 @@ rootpxe_apply_json_cloud_init '{}' || fail 'ordinary Linux must bypass'
 [[ -z ${cloudInitUserDataFile:-} && -z ${cloudInitNetworkConfigFile:-} ]] || fail 'stale private handle retained'
 checkin="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.checkin"
 awk '/^rootpxe_json_get_string\(\)/,/^checkin_rootpxe\(\)/{if($0 ~ /^checkin_rootpxe\(\)/) exit; print}' "$checkin" >"$tmp/parser"
+storage_test_patch_parser "$tmp/parser"
 . "$tmp/parser"
 rootpxe_deployment_identity_windows_hostname_capability_installed(){ return 1; }
 rootpxe_deployment_identity_windows_sysprep_capability_installed(){ return 1; }

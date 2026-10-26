@@ -23,10 +23,12 @@ fi
 "$jq_bin" --version >/dev/null 2>&1 || fail "需要真实 jq；请通过 JQ_BIN 指定可执行文件"
 
 tmp="$(mktemp -d)"
+. "$root/tests/storage-test-support.sh"
+storage_test_load
 trap 'rm -rf "$tmp"' EXIT
 awk '/^rootpxe_json_get_string\(\)/ { on=1 } /^checkin_rootpxe\(\)/ { on=0 } on { print }' "$checkin" \
     | sed "s|/tmp/pxeos.deployment-identity-policy.json|$tmp/pxeos.deployment-identity-policy.json|g" >"$tmp/checkin-json.sh"
-awk '/^rootpxe_validate_smb_export\(\)/ { on=1 } /^rootpxe_storage_path\(\)/ { on=0 } on { print }' "$funcs" >"$tmp/smb-validation.sh"
+awk '/^rootpxe_validate_smb_export\(\)/ { on=1 } on { print } on && /^}$/ { exit }' "$funcs" >"$tmp/smb-validation.sh"
 
 # The production script resolves jq through PATH.  This test provides a
 # one-command PATH wrapper without replacing jq's behavior.
@@ -53,17 +55,17 @@ rootpxe_multicast_runtime_ready() { return 1; }
 . "$tmp/checkin-json.sh"
 
 flat_smb='{"taskId":42,"type":"capture","pxeType":"up","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"changeHostname":false,"storage":"192.0.2.10:share/images","protocol":"smb","storageip":"192.0.2.10","exportPath":"share/images","smbUsername":"test-user","smbPassword":"pa%ss\\word","smbDomain":"WORKGROUP"}'
-rootpxe_apply_json_checkin "$flat_smb" || fail '平铺 SMB JSON 被拒绝'
+storage_test_apply_json_checkin "$flat_smb" || fail '平铺 SMB JSON 被拒绝'
 # Old servers do not advertise progressProtocolVersions, so PXEOS must retain
 # its existing v1 reporter instead of sending incomplete v2 snapshots.
 [[ ${rootpxe_partition_progress_enabled:-} == no && ${progress_attempt:-} == 1 ]] || fail '旧服务端响应错误启用了 v2 分区进度'
 v2_progress=$(jq '.progressProtocolVersions=[1,2] | .progressAttempt=4' <<<"$flat_smb")
-rootpxe_apply_json_checkin "$v2_progress" || fail '携带 v2 能力和 attempt 的响应被拒绝'
+storage_test_apply_json_checkin "$v2_progress" || fail '携带 v2 能力和 attempt 的响应被拒绝'
 [[ $rootpxe_partition_progress_enabled == yes && $progress_attempt == 4 ]] || fail 'v2 能力或 progress attempt 未被保留'
 bad_progress_attempt=$(jq '.progressProtocolVersions=[1,2] | .progressAttempt=0' <<<"$flat_smb")
-rootpxe_apply_json_checkin "$bad_progress_attempt" && fail '无效 progress attempt 被接受'
+storage_test_apply_json_checkin "$bad_progress_attempt" && fail '无效 progress attempt 被接受'
 unset v2_progress bad_progress_attempt
-rootpxe_apply_json_checkin "$flat_smb" || fail '平铺 SMB JSON 在 v2 校验后被拒绝'
+storage_test_apply_json_checkin "$flat_smb" || fail '平铺 SMB JSON 在 v2 校验后被拒绝'
 [[ $protocol == smb ]] || fail "平铺 protocol 解析错误: ${protocol@Q}"
 [[ $storage_server == 192.0.2.10 ]] || fail "平铺 server 解析错误: ${storage_server@Q}"
 [[ $storage_export == share/images && -z ${storage_share:-} ]] || fail '平铺 SMB 必须仅保留完整相对 exportPath'
@@ -79,301 +81,160 @@ export -p | grep -q 'smb_\(username\|password\|domain\)' && fail 'SMB 凭据不�
 
 for smb_export in _share share-name; do
     allowed_smb="{\"protocol\":\"smb\",\"storageip\":\"192.0.2.10\",\"exportPath\":\"$smb_export\",\"smbUsername\":\"test-user\",\"smbPassword\":\"test-pass\"}"
-    rootpxe_apply_json_checkin "$allowed_smb" || fail "合法 SMB exportPath 被拒绝: $smb_export"
+    storage_test_apply_json_checkin "$allowed_smb" || fail "合法 SMB exportPath 被拒绝: $smb_export"
     [[ $storage_export == "$smb_export" ]] || fail "合法 SMB exportPath 被改变: $smb_export"
 done
 
 conflicting_storage='{"protocol":"smb","storageip":"192.0.2.10","exportPath":"flat-share/images","smbUsername":"flat-user","smbPassword":"flat-pass","storage":{"protocol":"nfs","server":"192.0.2.99","export":"/nested-nfs","smb":{"username":"nested-user","password":"nested-pass"}}}'
-rootpxe_apply_json_checkin "$conflicting_storage" || fail '顶层 SMB 与嵌套 NFS 冲突响应被拒绝'
+storage_test_apply_json_checkin "$conflicting_storage" || fail '顶层 SMB 与嵌套 NFS 冲突响应被拒绝'
 [[ $protocol == smb && $storage_server == 192.0.2.10 && $storage_export == flat-share/images && $smb_username == flat-user && $smb_password == flat-pass ]] || fail '顶层 SMB 必须覆盖嵌套 NFS 和嵌套凭据'
 
-rootpxe_apply_json_checkin '{"wait":true,"message":"queued","retryAfterSec":5}' || fail '排队 JSON 被拒绝'
+storage_test_apply_json_checkin '{"wait":true,"message":"queued","retryAfterSec":5}' || fail '排队 JSON 被拒绝'
 [[ $waitFlag == 1 && -z $protocol && -z $storage_server && -z $storage_export && -z $smb_password ]] || fail '排队响应保留了前次存储或 SMB 凭据状态'
 
 nested_nfs='{"taskId":43,"type":"deploy","pxeType":"down","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":0,"storage":{"protocol":"nfs","server":"192.0.2.11","export":"/dept/images"}}'
-rootpxe_apply_json_checkin "$nested_nfs" || fail '嵌套 NFS JSON 被拒绝'
+storage_test_apply_json_checkin "$nested_nfs" || fail '嵌套 NFS JSON 被拒绝'
 [[ $protocol == nfs && $storage_server == 192.0.2.11 && $storage_export == /dept/images ]] || fail '嵌套 NFS 字段解析错误'
 [[ $shutdown == 0 ]] || fail 'JSON 0 被当作缺失'
 
 flat_nfs='{"taskId":44,"type":"deploy","pxeType":"down","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"storage":"192.0.2.12:/dept/images","protocol":"nfs","storageip":"192.0.2.12","exportPath":"/dept/images"}'
-rootpxe_apply_json_checkin "$flat_nfs" || fail '平铺 NFS JSON 被拒绝'
+storage_test_apply_json_checkin "$flat_nfs" || fail '平铺 NFS JSON 被拒绝'
 [[ $protocol == nfs && $storage_server == 192.0.2.12 && $storage_export == /dept/images ]] || fail '平铺 NFS 字段解析错误'
 
 nested_smb='{"taskId":45,"type":"capture","pxeType":"up","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"storage":{"protocol":"smb","server":"192.0.2.13","share":"/canonical-share","smb":{"username":"nested-user","password":"nested-pass"}}}'
-rootpxe_apply_json_checkin "$nested_smb" && fail '嵌套 SMB JSON 不得兼容'
+storage_test_apply_json_checkin "$nested_smb" && fail '嵌套 SMB JSON 不得兼容'
 
 flat_share_smb='{"taskId":46,"type":"capture","pxeType":"up","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"protocol":"smb","storageip":"192.0.2.14","exportPath":"wire-share","smbUsername":"wire-user","smbPassword":"wire-pass"}'
-rootpxe_apply_json_checkin "$flat_share_smb" || fail '单层 SMB share 被拒绝'
+storage_test_apply_json_checkin "$flat_share_smb" || fail '单层 SMB share 被拒绝'
 [[ $storage_export == wire-share ]] || fail '单层 SMB share 被改变'
 
 leading_slash_smb='{"protocol":"smb","storageip":"192.0.2.14","exportPath":"/share","smbUsername":"wire-user","smbPassword":"wire-pass"}'
-rootpxe_apply_json_checkin "$leading_slash_smb" && fail '带前导斜杠的 SMB exportPath 不得接受'
+storage_test_apply_json_checkin "$leading_slash_smb" && fail '带前导斜杠的 SMB exportPath 不得接受'
 
 unc_smb='{"protocol":"smb","storageip":"192.0.2.14","exportPath":"//server/share","smbUsername":"wire-user","smbPassword":"wire-pass"}'
-rootpxe_apply_json_checkin "$unc_smb" && fail 'UNC SMB exportPath 不得接受'
+storage_test_apply_json_checkin "$unc_smb" && fail 'UNC SMB exportPath 不得接受'
 
 dot_smb='{"protocol":"smb","storageip":"192.0.2.14","exportPath":".","smbUsername":"wire-user","smbPassword":"wire-pass"}'
-rootpxe_apply_json_checkin "$dot_smb" && fail '点 SMB exportPath 不得接受'
+storage_test_apply_json_checkin "$dot_smb" && fail '点 SMB exportPath 不得接受'
 
 traversal_smb='{"protocol":"smb","storageip":"192.0.2.14","exportPath":"share/../images","smbUsername":"wire-user","smbPassword":"wire-pass"}'
-rootpxe_apply_json_checkin "$traversal_smb" && fail '遍历 SMB exportPath 不得接受'
+storage_test_apply_json_checkin "$traversal_smb" && fail '遍历 SMB exportPath 不得接受'
 
 empty_segment_smb='{"protocol":"smb","storageip":"192.0.2.14","exportPath":"share//images","smbUsername":"wire-user","smbPassword":"wire-pass"}'
-rootpxe_apply_json_checkin "$empty_segment_smb" && fail '空段 SMB exportPath 不得接受'
+storage_test_apply_json_checkin "$empty_segment_smb" && fail '空段 SMB exportPath 不得接受'
 
 trailing_slash_smb='{"protocol":"smb","storageip":"192.0.2.14","exportPath":"share/images/","smbUsername":"wire-user","smbPassword":"wire-pass"}'
-rootpxe_apply_json_checkin "$trailing_slash_smb" && fail '尾随斜杠 SMB exportPath 不得接受'
+storage_test_apply_json_checkin "$trailing_slash_smb" && fail '尾随斜杠 SMB exportPath 不得接受'
 
 whitespace_smb='{"protocol":"smb","storageip":"192.0.2.14","exportPath":"share name","smbUsername":"wire-user","smbPassword":"wire-pass"}'
-rootpxe_apply_json_checkin "$whitespace_smb" && fail '含空白的 SMB exportPath 不得接受'
+storage_test_apply_json_checkin "$whitespace_smb" && fail '含空白的 SMB exportPath 不得接受'
 
 dangerous_smb='{"protocol":"smb","storageip":"192.0.2.14","exportPath":"share$bad","smbUsername":"wire-user","smbPassword":"wire-pass"}'
-rootpxe_apply_json_checkin "$dangerous_smb" && fail '含危险字符的 SMB exportPath 不得接受'
+storage_test_apply_json_checkin "$dangerous_smb" && fail '含危险字符的 SMB exportPath 不得接受'
 
 invalid_nfs_path='{"protocol":"nfs","storageip":"192.0.2.16","exportPath":"relative/path"}'
-rootpxe_apply_json_checkin "$invalid_nfs_path" && fail '相对 NFS export 不得接受'
+storage_test_apply_json_checkin "$invalid_nfs_path" && fail '相对 NFS export 不得接受'
 
 missing_server='{"protocol":"nfs","exportPath":"/dept/images"}'
-rootpxe_apply_json_checkin "$missing_server" && fail '缺少存储服务器不得接受'
+storage_test_apply_json_checkin "$missing_server" && fail '缺少存储服务器不得接受'
 
 missing_smb_credentials='{"protocol":"smb","storageip":"192.0.2.17","exportPath":"share"}'
-rootpxe_apply_json_checkin "$missing_smb_credentials" && fail '缺少 SMB 凭据不得接受'
+storage_test_apply_json_checkin "$missing_smb_credentials" && fail '缺少 SMB 凭据不得接受'
 
 missing_protocol='{"storage":"192.0.2.10:storage","storageip":"192.0.2.10","exportPath":"/storage"}'
-rootpxe_apply_json_checkin "$missing_protocol" && fail '缺少协议的 JSON 不得默认 NFS'
+storage_test_apply_json_checkin "$missing_protocol" && fail '缺少协议的 JSON 不得默认 NFS'
 
 unknown_protocol='{"storage":{"protocol":"ftp","server":"192.0.2.10","export":"/storage"}}'
-rootpxe_apply_json_checkin "$unknown_protocol" && fail '未知协议的 JSON 不得被接受'
+storage_test_apply_json_checkin "$unknown_protocol" && fail '未知协议的 JSON 不得被接受'
 
-# The legacy shell response still shares the same post-parse storage checks.
-# Run checkin_rootpxe from a path-rewritten fixture, with curl/dmidecode mocked.
-mkdir -p "$tmp/legacy-bin"
-cat >"$tmp/legacy-bin/curl" <<'EOF'
-#!/bin/bash
-task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"
-printf '%s\n200\n' "${MOCK_CHECKIN_BODY:?}"
-EOF
-cat >"$tmp/legacy-bin/dmidecode" <<'EOF'
-#!/bin/bash
-printf '%s\n' '00000000-0000-0000-0000-000000000000'
-EOF
-chmod +x "$tmp/legacy-bin/curl" "$tmp/legacy-bin/dmidecode"
+# Exercise the complete current JSON request/response path with the real
+# context validator and private credential writer. The native fixture can only
+# advertise capabilities or establish a joined preflight channel.
 : >"$tmp/proc-cmdline"
-sed -e 's|^rootpxe_source_core_library partition-funcs.sh.*|:|' \
-    -e 's|^rootpxe_source_core_library deployment-identity.sh.*|:|' \
-    -e 's|^rootpxe_source_core_library restore-preflight.sh.*|:|' \
-    -e 's|^rootpxe_source_core_library capture-recovery.sh.*|:|' \
-    -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" \
-    "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/legacy-funcs.sh"
-cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress.sh"
-cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
-cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
-cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-hostname.sh" "$tmp/linux-hostname.sh"
-sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
-printf '\nif declare -F task_log_test_emulate_pin_flags >/dev/null; then task_log_test_emulate_pin_flags; fi\n' >>"$tmp/log-paths.sh"
-for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
-    [[ ! -f $rootpxe_test_funcs_copy ]] || sed -i -e "s|/tmp/log|$tmp/log|g" -e "s|^rootpxe_log_paths_lib=.*|rootpxe_log_paths_lib=$tmp/log-paths.sh|" "$rootpxe_test_funcs_copy"
-done
-. "$root/tests/task-log-test-support.sh"
-cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/disk-health.sh" "$tmp/disk-health.sh"
-cat >"$tmp/legacy-runtime.sh" <<EOF
+sed -e "s|/usr/share/pxeos|$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos|g" \
+    -e "s|</proc/cmdline|<\"$tmp/proc-cmdline\"|" "$funcs" >"$tmp/current-funcs.sh"
 ismajordebug=0
-. "$tmp/legacy-funcs.sh"
-. "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/deployment-identity.sh"
-clearScreen() { :; }
-displayBanner() { :; }
-debugPause() { :; }
-verifyNetworkConnection() { :; }
-determineOS() { :; }
-dots() { :; }
-handleError() { return 97; }
+set +u; . "$tmp/current-funcs.sh"; set -u
+storage_test_install_native
+storage_test_pipeline_boundaries
+sed -n '/^checkin_rootpxe() {$/,/^}$/p' "$checkin" \
+    | sed -e "s|/tmp/pxeos.shutdown|$tmp/pxeos.shutdown|g" >"$tmp/current-checkin.sh"
+. "$tmp/current-checkin.sh"
+storage_test_patch_parser "$tmp/checkin-json.sh"
+. "$tmp/checkin-json.sh"
 rootpxe_deployment_identity_windows_hostname_capability_installed() { return 1; }
 rootpxe_deployment_identity_windows_sysprep_capability_installed() { return 1; }
-EOF
-sed -e "s|^\. /usr/share/pxeos/lib/funcs.sh|. \"$tmp/legacy-runtime.sh\"|" \
-    -e "s|^\. /usr/share/pxeos/lib/disk-health.sh$|. \"$tmp/disk-health.sh\"|" \
-    -e "s|/tmp/pxeos.shutdown|$tmp/pxeos.shutdown|g" \
-    -e "s|/tmp/pxeos.deployment-identity-policy.json|$tmp/pxeos.deployment-identity-policy.json|g" \
-    -e "s|/proc/cmdline|$tmp/proc-cmdline|g" \
-    "$checkin" >"$tmp/legacy-checkin.sh"
-legacy_body=$(cat <<'EOF'
-taskid=47
-osid=9
-img_format=5
-pigz_comp=-6
-shutdown=0
-type_b64=Y2FwdHVyZQ==
-pxe_type_b64=dXA=
-img_b64=aW1hZ2VzL2RlbW8=
-img_type_b64=cmF3
-img_partition_type_b64=YWxs
-storageip_b64=MTkyLjAuMi4yMA==
-protocol_b64=bmZz
-export_path_b64=L2xlZ2FjeQ==
-execution_token_b64=MDEyMzQ1Njc4OWFiY2RlZg==
-EOF
-)
-# shellcheck source=/dev/null
-capone=1; web='http://mock/'; taskid=47; task_token=0123456789abcdef; mac=001122334455; mc=''; chkdsk=0; deployed=''
-PATH="$tmp/legacy-bin:$PATH"
-export PATH MOCK_CHECKIN_BODY="$legacy_body"
-# shellcheck source=/dev/null
-. "$tmp/legacy-checkin.sh"
-# This Git Bash build rejects the production token-regex upper bound, which is
-# unrelated to legacy field parsing.  Keep the fixture focused on the parser
-# and post-parse storage validation rather than its already-covered identity
-# gate.
-rootpxe_require_task_context() { [[ -n ${task_token:-} ]]; }
-# Keep the credential helper in the fixture and make any unexpected SMB
-# creation visible. The legacy positive case below is NFS-only.
-rootpxe_prepare_smb_credentials() {
-    if [[ $protocol == smb ]]; then
-        : >"$tmp/legacy-smb-credential-attempt"
-        [[ -n ${smb_username:-} && -n ${smb_password:-} ]] || return 1
-        printf 'username=%s\npassword=%s\n' "$smb_username" "$smb_password" >"$tmp/json.credentials"
-        smb_credentials_file="$tmp/json.credentials"; export smb_credentials_file
-        rootpxe_clear_smb_plaintext
-        return 0
-    fi
-    rootpxe_clear_smb_plaintext
-    return 0
-}
-
-json_checkin_body='{"taskId":49,"executionToken":"0123456789abcdef","type":"capture","pxeType":"up","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"storage":"192.0.2.20:share/images","protocol":"smb","storageip":"192.0.2.20","exportPath":"share/images","smbUsername":"json-user","smbPassword":"json-pass"}'
-protocol=''; storage_server=''; storage_export=''; storageip=''; export_path=''; smb_username=''; smb_password=''; smb_domain=''
-rm -f "$tmp/legacy-smb-credential-attempt" "$tmp/json.credentials"
-MOCK_CHECKIN_BODY="$json_checkin_body"
-export MOCK_CHECKIN_BODY
-json_checkin_rc=0
-checkin_rootpxe || json_checkin_rc=$?
-trap 'rm -rf "$tmp"' EXIT INT TERM
-[[ $json_checkin_rc -eq 0 && $protocol == smb && $storage_export == share/images && -f $tmp/json.credentials && -z ${smb_password:-} ]] || fail '完整 JSON SMB checkin 未保持路径或未安全创建凭据'
-rootpxe_cleanup_smb_credentials
-rm -f "$tmp/legacy-smb-credential-attempt"
-MOCK_CHECKIN_BODY="$legacy_body"
-export MOCK_CHECKIN_BODY
-
-protocol=''; storage_server=''; storage_export=''; storage_share=''; storageip=''; export_path=''
-smb_username=''; smb_password=''; smb_domain=''
-legacy_checkin_rc=0
-checkin_rootpxe || legacy_checkin_rc=$?
-# checkin_rootpxe installs its runtime session-cleanup trap.  Restore the
-# fixture cleanup even when the mocked legacy response is rejected.
-trap 'rm -rf "$tmp"' EXIT INT TERM
-[[ $legacy_checkin_rc -eq 0 ]] || fail 'legacy checkin 响应被拒绝'
-[[ $protocol == nfs && $storage_server == 192.0.2.20 && $storage_export == /legacy ]] || fail 'legacy NFS 协议或 export 解析错误'
-[[ -z ${cloudInitUserDataFile:-} ]] || fail 'legacy checkin retained Cloud-init private data'
-[[ ! -e $tmp/legacy-smb-credential-attempt ]] || fail 'legacy NFS 不得创建 SMB 凭据'
-
-legacy_smb_body=$(cat <<'EOF'
-taskid=48
-osid=9
-img_format=5
-pigz_comp=-6
-shutdown=0
-type_b64=Y2FwdHVyZQ==
-pxe_type_b64=dXA=
-img_b64=aW1hZ2VzL2RlbW8=
-img_type_b64=cmF3
-img_partition_type_b64=YWxs
-storageip_b64=MTkyLjAuMi4yMA==
-protocol_b64=c21i
-export_path_b64=L3NoYXJl
-smb_username_b64=bGVnYWN5LXVzZXI=
-smb_password_b64=bGVnYWN5LXBhc3M=
-execution_token_b64=MDEyMzQ1Njc4OWFiY2RlZg==
-EOF
-)
-protocol=''; storage_server=''; storage_export=''; storageip=''; export_path=''; smb_username=''; smb_password=''; smb_domain=''
-rm -f "$tmp/legacy-smb-credential-attempt"
-MOCK_CHECKIN_BODY="$legacy_smb_body"
-export MOCK_CHECKIN_BODY
-legacy_smb_rc=0
-checkin_rootpxe || legacy_smb_rc=$?
-trap 'rm -rf "$tmp"' EXIT INT TERM
-[[ $legacy_smb_rc -ne 0 && ! -e $tmp/legacy-smb-credential-attempt ]] || fail 'legacy SMB 必须在凭据创建前拒绝'
-
-# Run the mount script from a path-rewritten fixture.  The mock records argv,
-# so this proves SMB is not silently sent through NFS and does not pin vers/sec.
-mkdir -p "$tmp/mount-bin" "$tmp/storage"
-cat >"$tmp/mount-bin/umount" <<'EOF'
-#!/bin/bash
-exit 0
-EOF
-cat >"$tmp/mount-bin/mount.cifs" <<'EOF'
-#!/bin/bash
-printf '%s\0' "$@" >"${MOCK_CIFS_ARGS:?}"
-EOF
-cat >"$tmp/mount-bin/mount" <<'EOF'
-#!/bin/bash
-printf '%s\0' "$@" >"${MOCK_NFS_ARGS:?}"
-EOF
-chmod +x "$tmp/mount-bin/umount" "$tmp/mount-bin/mount.cifs" "$tmp/mount-bin/mount"
-cat >"$tmp/mount-funcs.sh" <<'EOF'
-dots() { :; }
+rootpxe_send_disk_health() { return 0; }
+rootpxe_console_message() { :; }
 debugPause() { :; }
-handleError() { exit 97; }
-rootpxe_cleanup_smb_credentials() { rm -f -- "${smb_credentials_file:-}"; smb_credentials_file=''; }
-rootpxe_prepare_storage_layout() { return 0; }
-EOF
-awk '/^rootpxe_validate_smb_export\(\)/ { on=1 } /^rootpxe_storage_path\(\)/ { on=0 } on { print }' \
-    "$funcs" >"$tmp/mount-smb-validation.sh"
-printf '. "%s"\n' "$tmp/mount-smb-validation.sh" >>"$tmp/mount-funcs.sh"
-{ printf '. "%s/tests/task-log-test-support.sh"\n' "$root"; sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh"; } >"$tmp/mount-log-paths.sh"
-printf '. "%s"\n' "$tmp/mount-log-paths.sh" >>"$tmp/mount-funcs.sh"
-sed -e "1c\\. \"$tmp/mount-funcs.sh\"" \
-    -e "s|/tmp/mount-output|$tmp/mount-output|g" \
-    -e "s|/storage|$tmp/storage|g" \
-    "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.mount" >"$tmp/pxeos.mount"
-: >"$tmp/mount.credentials"
-PATH="$tmp/mount-bin:$PATH" \
-MOCK_CIFS_ARGS="$tmp/cifs.args" MOCK_NFS_ARGS="$tmp/nfs.args" \
-protocol=smb storage_server=192.0.2.20 storage_export=share/images smb_credentials_file="$tmp/mount.credentials" type=up capone=0 \
-bash "$tmp/pxeos.mount" || fail 'SMB mount fixture failed'
+dots() { :; }
+dmidecode() { printf '00000000-0000-0000-0000-000000000000\n'; }
+handleError() { printf 'fixture rejected: %s\n' "$*" >&2; exit 97; }
+json_checkin_body=$(storage_test_context_json '{"taskId":49,"executionToken":"11111111111111111111111111111111","type":"capture","pxeType":"up","img":"images/demo","imgType":"mps","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"protocol":"smb","storageip":"192.0.2.20","exportPath":"share/images","smbUsername":"json-user","smbPassword":"json-pass"}')
+rootpxe_task_curl() {
+    case ${@: -1} in
+        */storage/preflight) printf '%s\n' '{"success":true,"sequence":"0","nextSequence":"1"}' ;;
+        *) printf '%s\n200\n' "$MOCK_CHECKIN_BODY" ;;
+    esac
+}
+taskid=49 task_token=11111111111111111111111111111111 mac=001122334455 web=http://fixture.invalid/ pxeapi=http://fixture.invalid/ rootpxe_api=http://fixture.invalid/
+storage_test_reset_context
+MOCK_CHECKIN_BODY=$json_checkin_body
+checkin_rootpxe
+trap 'rootpxe_cleanup_session; rm -rf -- "$tmp"' EXIT
+trap - INT TERM
+[[ $protocol == smb && $storage_export == share/images && -f $smb_credentials_file && -z ${smb_password:-} ]] || fail 'current JSON checkin did not retain bound path/private credentials'
+credentials=$smb_credentials_file
+rootpxe_cleanup_smb_credentials
+[[ ! -e $credentials ]] || fail 'private credential file retained'
+# Both legacy NFS and SMB text are rejected before credential creation. No old
+# decoder or legacy-success fixture is retained.
+for retired in 'taskid=49 protocol_b64=bmZz export_path_b64=L2xlZ2FjeQ==' 'taskid=49 protocol_b64=c21i smb_password_b64=cHJpdmF0ZQ=='; do
+    status=0
+    ( MOCK_CHECKIN_BODY=$retired; checkin_rootpxe ) >"$tmp/retired.out" 2>&1 || status=$?
+    [[ $status != 0 ]] || fail 'legacy shell response was accepted'
+done
+
+# Native mount and preflight are real controller calls against a process that
+# performs no mount/syscall/network I/O. mount.cifs is only an argv recorder.
+mkdir -p "$tmp/mount-bin" "$tmp/storage"
+cat >"$tmp/mount-bin/mount.cifs" <<'CIFS'
+#!/usr/bin/env bash
+printf '%s\0' "$@" >"${MOCK_CIFS_ARGS:?}"
+CIFS
+chmod 700 "$tmp/mount-bin/mount.cifs"
+mountpoint() { return 1; }
+umount() { return 0; }
+sed -e "s|/storage|$tmp/storage|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.mount" >"$tmp/current-mount.sh"
+printf 'private\n' >"$tmp/mount.credentials"
+smb_credentials_file="$tmp/mount.credentials"
+export MOCK_CIFS_ARGS="$tmp/cifs.args"
+PATH="$tmp/mount-bin:$PATH"
+. "$tmp/current-mount.sh"
+rootpxe_storage_stop || fail 'native fixture was not joined'
 mapfile -d '' -t cifs_args <"$tmp/cifs.args"
-[[ ${cifs_args[0]} == '//192.0.2.20/share/images' && ${cifs_args[1]} == "$tmp/storage" ]] || fail 'SMB mount argv 未使用完整 share/subdir'
-[[ ${cifs_args[*]} != *vers=* && ${cifs_args[*]} != *sec=* ]] || fail 'SMB mount 不得固定 vers/sec 协商参数'
-[[ ! -e $tmp/nfs.args && ! -e $tmp/mount.credentials ]] || fail 'SMB 分支误走 NFS 或未清理凭据'
-
-# The sourced mount script must retain the caller cleanup trap.
-cat >"$tmp/mount-trap-wrapper.sh" <<EOF
-. "$tmp/mount-funcs.sh"
-private_file="$tmp/initialization.private"
-rootpxe_deployment_identity_cleanup_private() { rm -f -- "\${private_file:-}"; private_file=''; }
-rootpxe_cleanup_session() { rootpxe_cleanup_smb_credentials; rootpxe_deployment_identity_cleanup_private; }
-trap rootpxe_cleanup_session EXIT
-trap 'rootpxe_cleanup_session; exit 143' TERM
-. "$tmp/pxeos.mount"
-kill -TERM \$\$
-EOF
-chmod +x "$tmp/mount-trap-wrapper.sh"
-: >"$tmp/mount-trap.credentials"
-: >"$tmp/initialization.private"
-set +e
-PATH="$tmp/mount-bin:$PATH" MOCK_CIFS_ARGS="$tmp/cifs-trap.args" MOCK_NFS_ARGS="$tmp/nfs-trap.args" protocol=smb storage_server=192.0.2.20 storage_export=share/images smb_credentials_file="$tmp/mount-trap.credentials" type=up capone=0 bash "$tmp/mount-trap-wrapper.sh" >/dev/null 2>&1
-mount_trap_rc=$?
-set -e
-[[ $mount_trap_rc -eq 143 && ! -e $tmp/mount-trap.credentials && ! -e $tmp/initialization.private ]] || fail 'SMB mount 后 TERM 必须停止并清理两类私密文件'
-
-: >"$tmp/leading-slash.credentials"
-set +e
-PATH="$tmp/mount-bin:$PATH" MOCK_CIFS_ARGS="$tmp/cifs-leading-slash.args" MOCK_NFS_ARGS="$tmp/nfs-leading-slash.args" \
-protocol=smb storage_server=192.0.2.20 storage_export=/share smb_credentials_file="$tmp/leading-slash.credentials" type=up capone=0 bash "$tmp/pxeos.mount" >/dev/null 2>&1
-leading_slash_smb_rc=$?
-set -e
-[[ $leading_slash_smb_rc -eq 97 && ! -e $tmp/cifs-leading-slash.args && ! -e $tmp/leading-slash.credentials ]] || fail '带前导斜杠 SMB mount 必须拒绝、不调用挂载并清理凭据'
-
-set +e
-PATH="$tmp/mount-bin:$PATH" MOCK_CIFS_ARGS="$tmp/cifs-missing.args" MOCK_NFS_ARGS="$tmp/nfs-missing.args" \
-protocol='' storage_server=192.0.2.21 storage_export=/legacy type=up capone=0 bash "$tmp/pxeos.mount" >/dev/null 2>&1
-missing_protocol_rc=$?
-set -e
-[[ $missing_protocol_rc -eq 97 && ! -e $tmp/nfs-missing.args ]] || fail '非 Capone 缺协议不得猜测 NFS'
-
-PATH="$tmp/mount-bin:$PATH" MOCK_CIFS_ARGS="$tmp/cifs-capone.args" MOCK_NFS_ARGS="$tmp/nfs-capone.args" \
-protocol='' storage_server=192.0.2.22 storage_export=/legacy type=up capone=1 bash "$tmp/pxeos.mount" || fail 'Capone NFS 兼容分支失败'
-mapfile -d '' -t nfs_args <"$tmp/nfs-capone.args"
-[[ ${nfs_args[2]} == '192.0.2.22:/legacy' && ${nfs_args[3]} == "$tmp/storage" ]] || fail 'Capone NFS 未使用显式 server/export'
+[[ ${cifs_args[0]} == '//192.0.2.20/share/images' && ${cifs_args[1]} == "$tmp/storage" ]] || fail 'SMB UNC or mountpoint changed'
+[[ ${cifs_args[*]} == *serverino,vers=default* && ${cifs_args[*]} != *sec=* && ! -e $tmp/mount.credentials ]] || fail 'SMB policy mapping or credential cleanup changed'
+for capone in 0 1; do
+    status=0
+    ( protocol=''; . "$tmp/current-mount.sh" ) >"$tmp/no-protocol.out" 2>&1 || status=$?
+    [[ $status != 0 ]] || fail 'missing protocol guessed NFS'
+done
+status=0
+( unset rootpxe_storage_workspace; . "$tmp/current-mount.sh" ) >"$tmp/no-context.out" 2>&1 || status=$?
+[[ $status != 0 ]] || fail 'mount without authenticated context was accepted'
+# A sourced mount does not replace its caller's TERM/private-file trap.
+(
+    private_file="$tmp/initialization.private"; : >"$private_file"
+    rootpxe_cleanup_session() { rootpxe_cleanup_smb_credentials; rm -f -- "$private_file"; }
+    trap rootpxe_cleanup_session EXIT
+    trap 'rootpxe_cleanup_session; exit 143' TERM
+    printf private >"$tmp/trap.credentials"; smb_credentials_file="$tmp/trap.credentials"
+    . "$tmp/current-mount.sh"
+    rootpxe_storage_stop || exit 98
+    kill -TERM "$BASHPID"
+) >"$tmp/mount-trap.out" 2>&1 && fail 'TERM was ignored' || mount_trap_rc=$?
+[[ $mount_trap_rc == 143 && ! -e $tmp/trap.credentials && ! -e $tmp/initialization.private ]] || fail 'TERM did not preserve private cleanup'
 
 awk '/^rootpxe_error_response_reason\(\)/ { on=1 } /^rootpxe_directory_size_bytes\(\)/ { on=0 } on { print }' "$funcs" \
     | sed "s|/tmp/pxeos.failure_action|$tmp/pxeos.failure_action|g" >"$tmp/error-stage.sh"
@@ -811,6 +672,8 @@ export PATH=$tmp/mock:$PATH
 ismajordebug=0
 isdebug=0
 . $tmp/funcs.sh
+. "$root/tests/storage-test-support.sh"
+storage_test_pipeline_boundaries
 . "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/deployment-identity.sh"
 rootpxe_require_unused_target_disks() { :; } # 布局 writer 的设备全部为 mock。
 rootpxe_deployment_identity_windows_policy_enabled() { return 1; }

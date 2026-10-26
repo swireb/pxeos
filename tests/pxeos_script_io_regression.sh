@@ -134,8 +134,9 @@ test_core_libraries_fail_closed() {
     # Only the definition/import prefix is sourced; never the kernel args or
     # PXEOS entry point. Every companion is an ordinary fixture script.
     sed -n '1,/^rootpxe_partition_progress_initialize_runtime()/p' "$funcs" | sed '$d' | sed "s|/usr/share/pxeos/lib|$tmp/missing-installed|g" >"$tmp/core/funcs.sh"
-    for library in log-paths.sh partition-funcs.sh restore-preflight.sh capture-recovery.sh deployment-identity.sh cloud-init.sh linux-hostname.sh partclone-progress.sh task-http.sh; do printf ':\n' >"$tmp/core/$library"; done
-    for library in partition-funcs.sh restore-preflight.sh capture-recovery.sh deployment-identity.sh cloud-init.sh linux-hostname.sh partclone-progress.sh task-http.sh; do
+    printf '\nrootpxe_source_core_library storage-io.sh || return 1\n' >>"$tmp/core/funcs.sh"
+    for library in log-paths.sh partition-funcs.sh restore-preflight.sh capture-recovery.sh deployment-identity.sh cloud-init.sh linux-hostname.sh partclone-progress.sh task-http.sh storage-io.sh; do printf ':\n' >"$tmp/core/$library"; done
+    for library in partition-funcs.sh restore-preflight.sh capture-recovery.sh deployment-identity.sh cloud-init.sh linux-hostname.sh partclone-progress.sh task-http.sh storage-io.sh; do
         mv "$tmp/core/$library" "$tmp/core/$library.saved"
         status=0; ( . "$tmp/core/funcs.sh"; ) >"$tmp/core/out" 2>&1 || status=$?
         mv "$tmp/core/$library.saved" "$tmp/core/$library"

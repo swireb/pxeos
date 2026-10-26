@@ -23,6 +23,7 @@ sed -e '/partition-funcs\.sh/d' -e '/restore-preflight\.sh/d' -e '/capture-recov
 cp "$progress_lib" "$tmp/partclone-progress.sh"
 cp "$(dirname "$funcs")/log-paths.sh" "$tmp/log-paths.sh"
 cp "$(dirname "$funcs")/task-http.sh" "$tmp/task-http.sh"
+cp "$(dirname "$funcs")/storage-io.sh" "$tmp/storage-io.sh"
 cp "$(dirname "$funcs")/cloud-init.sh" "$tmp/cloud-init.sh"
 cp "$(dirname "$funcs")/linux-hostname.sh" "$tmp/linux-hostname.sh"
 download_functions="$tmp/download-functions.sh"

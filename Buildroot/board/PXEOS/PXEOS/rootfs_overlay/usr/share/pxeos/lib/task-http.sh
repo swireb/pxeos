@@ -4,6 +4,7 @@ rootpxe_task_curl() {
     (
         local request_dir argument value file native_status=0 request_http_status index=0 native_pid='' native_pending=no owned_pid_file=''
         local -a request_args=()
+        local has_form=no has_binary=no
         umask 077
         request_dir=$(mktemp -d /tmp/rootpxe-http.XXXXXX) || return 73
         trap 'if [[ $native_pending == yes ]]; then kill -TERM "$native_pid" 2>/dev/null || :; wait "$native_pid" 2>/dev/null || :; fi; if [[ -n $owned_pid_file && ! -L $owned_pid_file && $(cat "$owned_pid_file" 2>/dev/null) == "$native_pid" ]]; then rm -f -- "$owned_pid_file"; fi; rm -rf -- "$request_dir"' EXIT
@@ -11,6 +12,8 @@ rootpxe_task_curl() {
         trap 'exit 143' TERM
         while (( $# )); do
             argument=$1; shift
+            [[ $argument != --data-urlencode ]] || has_form=yes
+            [[ $argument != --data-binary ]] || has_binary=yes
             case $argument in
                 -L|--location|--location-trusted) continue ;;
                 --data-urlencode|--data-binary)
@@ -33,6 +36,9 @@ rootpxe_task_curl() {
             esac
             request_args+=("$argument")
         done
+        if [[ $has_form == yes && $has_binary == no && -n ${rootpxe_storage_nonce:-} ]]; then
+            request_args+=(--data-urlencode "storageNonce=$rootpxe_storage_nonce" --data-urlencode "workerNonce=$rootpxe_storage_worker_nonce" --data-urlencode "attempt=$progress_attempt" --data-urlencode "storageBootId=${rootpxe_storage_boot_id:-}" --data-urlencode "sysuuid=${rootpxe_storage_sysuuid:-}")
+        fi
         # header 文件与请求 body 同属此次调用，既不碰 stdin 也不落任务日志。
         : >"$request_dir/headers" || return 73
         if [[ -n ${rootpxe_task_curl_pid_file:-} ]]; then
@@ -75,6 +81,12 @@ rootpxe_task_multicast_form_args() {
 
 rootpxe_task_multicast_json() {
     local document=$1
+    if [[ -n ${rootpxe_storage_nonce:-} ]]; then
+        [[ ${progress_attempt:-} =~ ^[1-9][0-9]*$ && ${rootpxe_storage_worker_nonce:-} =~ ^[a-f0-9]{32}$ ]] || return 1
+        document=$(jq -c --arg storageNonce "$rootpxe_storage_nonce" --arg workerNonce "$rootpxe_storage_worker_nonce" \
+          --argjson attempt "$progress_attempt" --arg storageBootId "${rootpxe_storage_boot_id:-}" --arg sysuuid "${rootpxe_storage_sysuuid:-}" \
+          '. + {storageNonce:$storageNonce,workerNonce:$workerNonce,attempt:$attempt,storageBootId:$storageBootId,sysuuid:$sysuuid}' <<<"$document") || return 1
+    fi
     if [[ ${mc:-no} != yes ]]; then printf '%s' "$document"; return 0; fi
     rootpxe_task_multicast_identity_valid || return 1
     jq -c --arg sessionId "$multicastSessionId" --arg sessionKey "$multicastSessionKey" --argjson progressAttempt "$progress_attempt" \

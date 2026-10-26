@@ -89,6 +89,7 @@ contains "$tmp/layout.trace" 'layout-cleanup' 'layout readback cleanup was skipp
         rootpxe_capture_marker_clear_error_reason=marker_remove_failed
         return 1
     }
+    rootpxe_storage_recover_until_clean(){ printf 'storage-recovered\n' >>"$tmp/finish.trace"; }
     rootpxe_cleanup_task_json(){ printf 'task-json-cleanup\n' >>"$tmp/finish.trace"; }
     rootpxe_capture_resume_cleanup(){ printf 'capture-resume-cleanup\n' >>"$tmp/finish.trace"; }
     dots(){ printf 'dots:%s\n' "$*"; }
@@ -98,13 +99,14 @@ contains "$tmp/layout.trace" 'layout-cleanup' 'layout readback cleanup was skipp
     . "$overlay/bin/pxeos.imgcomplete"
 ) >"$tmp/finish.out" 2>&1 || fail 'capture marker warning changed successful finish'
 checks=$((checks+1))
-contains "$tmp/finish.out" '[WARN] Capture marker removal failed' 'marker cleanup warning did not use the short display'
+contains "$tmp/finish.out" '[WARN] Storage cleanup is not confirmed. Retrying the original execution.' 'marker cleanup warning did not use the short display'
 contains "$tmp/finish.out" '[INFO] Task complete.' 'marker cleanup warning hid task success'
 absent "$tmp/finish.out" 'CODE=' 'marker cleanup code leaked to the console'
 absent "$tmp/finish.out" '[ERROR]' 'marker cleanup warning became an error'
 absent "$tmp/finish.out" 'unexpected' 'marker warning changed error or wait policy'
 contains "$tmp/task.log" 'PXEOS_STAGE=finish_notify CODE=CAPTURE_MARKER_CLEAR_FAILED REASON=marker_remove_failed' 'marker raw diagnostic was lost'
 contains "$tmp/finish.args" 'result=success' 'marker warning changed the finish result'
+[[ $(grep -n -m1 storage-recovered "$tmp/finish.trace" | cut -d: -f1) -lt $(grep -n -m1 task-json-cleanup "$tmp/finish.trace" | cut -d: -f1) ]] || fail 'private context cleared before original storage recovery'
 contains "$tmp/finish.trace" 'task-json-cleanup' 'marker warning skipped task cleanup'
 contains "$tmp/finish.trace" 'capture-resume-cleanup' 'marker warning skipped resume cleanup'
 printf 'PXEOS message sources: %s checks, 0 failures\n' "$checks"

@@ -3,6 +3,7 @@
 # These substitutes are test-only; native Linux validates the real contract.
 if [[ -n ${root:-} && -n ${tmp:-} && -d $tmp ]]; then
     cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
+    cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/storage-io.sh" "$tmp/storage-io.sh"
 fi
 task_log_real_flock=$(type -P flock || true)
 flock() {

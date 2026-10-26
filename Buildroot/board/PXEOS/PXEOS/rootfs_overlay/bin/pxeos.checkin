@@ -114,10 +114,17 @@ rootpxe_apply_json_partition_inventory() {
 }
 
 rootpxe_write_checkin_json_payload() {
-    local output_file="$1" token_file capabilities identity_versions='[1]' old_umask result
+    local output_file="$1" token_file capabilities storage_capabilities storage_boot identity_versions='[1]' old_umask result
     [[ ${taskid:-} =~ ^[1-9][0-9]*$ && -n ${task_token:-} && -n ${lmac:-} ]] || return 1
     [[ -n $output_file && ! -L $output_file ]] || return 1
     capabilities=$(rootpxe_deployment_identity_capabilities_json) && rootpxe_deployment_identity_capabilities_valid "$capabilities" || return 1
+    rootpxe_storage_capabilities || return 1
+    storage_capabilities=$("$rootpxe_storage_helper" --capabilities) || return 1
+    storage_boot=$(cat /proc/sys/kernel/random/boot_id) || return 1
+    [[ $storage_boot =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]] || return 1
+    rootpxe_storage_boot_id=$storage_boot
+    rootpxe_storage_sysuuid=${sysuuid_local:-}
+    export rootpxe_storage_boot_id rootpxe_storage_sysuuid
     # Never put the execution token in jq's argv. Keep it in a short-lived,
     # owner-only file while jq constructs the owner-only curl request body.
     old_umask=$(umask)
@@ -132,7 +139,8 @@ rootpxe_write_checkin_json_payload() {
         --arg sysuuid "${sysuuid_local:-}" \
         --argjson versions "$identity_versions" \
         --argjson capabilities "$capabilities" \
-		'{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",cloudInitCapability:"linux-nocloud-v5",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities}' >"$output_file"
+        --argjson storageCapabilities "$storage_capabilities" --arg storageBootId "$storage_boot" \
+		'{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",cloudInitCapability:"linux-nocloud-v5",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities,storageProtocolVersions:[1],storageCapabilities:$storageCapabilities,storageBootId:$storageBootId}' >"$output_file"
 	result=$?
 	: >"$token_file"
 	rm -f -- "$token_file"
@@ -166,7 +174,11 @@ rootpxe_validate_json_storage() {
             [[ -n ${smb_username:-} && -n ${smb_password:-} ]] || return 1
             ;;
         nfs)
-            [[ ${storage_export:-} == /* && ${storage_export:-} != *'..'* && $storage_export != *$'\n'* && $storage_export != *$'\r'* ]] || return 1
+            [[ ${storage_export:-} == /* && $storage_export != *[[:cntrl:]]* && $storage_export != *\\* ]] || return 1
+            if [[ $storage_export != / ]]; then
+                IFS=/ read -r -a storage_root_parts <<<"${storage_export#/}"
+                for root_part in "${storage_root_parts[@]}"; do [[ -n $root_part && $root_part != . && $root_part != .. ]] || return 1; done
+            fi
             ;;
         *) return 1 ;;
     esac
@@ -263,6 +275,13 @@ rootpxe_apply_json_checkin() {
             ;;
         *) return 1 ;;
     esac
+    rootpxe_storage_apply_context "$document" || return 1
+    rootpxe_storage_only=$(jq -r 'if .storageOnly == true and .storageAccess.storageOnly == true then "yes" else "no" end' <<<"$document") || return 1
+    if [[ $rootpxe_storage_only == yes ]]; then
+        rootpxe_validate_json_storage || return 1
+        export taskid execution_token taskType pxe_type img protocol storage_server storage_export rootpxe_storage_only progress_attempt
+        return 0
+    fi
     rootpxe_json_assign_text "$document" hostName '.hostName // .host_name' || return 1
     rootpxe_json_assign "$document" changeHostname 'if has("changeHostname") then .changeHostname elif has("change_hostname") then .change_hostname else empty end' || return 1
     rootpxe_json_assign_text "$document" resumeStage '.resumeStage // .resume_stage' || return 1
@@ -299,7 +318,7 @@ checkin_rootpxe() {
     rootpxe_require_identity || handleError "RootPXE: invalid task identity ($0)"
     rootpxe_multicast_reset
     local sysuuid_local
-    sysuuid_local=$(dmidecode -s system-uuid)
+    sysuuid_local=$(dmidecode -s system-uuid 2>/dev/null || true)
     sysuuid_local=${sysuuid_local,,}
     local lmac
     # 按约定：使用服务端下发的任务主机 MAC（kernel cmdline 的 mac），不要在此处探测真实网卡
@@ -307,13 +326,9 @@ checkin_rootpxe() {
     local out checkin_payload_file
     local body
     local http_code
-    local line
-    local k
-    local v
     local waitFlag=""
     local waitMsg=""
     local retryAfterSec=5
-    local checkin_response_format=""
     local -a checkin_tls_args=(-ks)
     # 解析可能已生成私有任务文件，入口立即安装清理；信号必须停止任务。
     trap rootpxe_cleanup_session EXIT
@@ -370,57 +385,8 @@ checkin_rootpxe() {
             continue
         fi
         out=$body
-        if [[ $out == \{* ]]; then
-            checkin_response_format=json
-            rootpxe_apply_json_checkin "$out" || handleError "RootPXE checkin returned invalid JSON ($0)"
-        else
-            checkin_response_format=legacy
-            rootpxe_multicast_reset
-            # Only a non-JSON response enters the legacy compatibility parser.
-            while IFS= read -r line || [[ -n $line ]]; do
-            [[ -z $line ]] && continue
-            case $line in
-                error=*)
-                    handleError "RootPXE checkin rejected by server ($0)"
-                    ;;
-            esac
-            k="${line%%=*}"
-            v="${line#*=}"
-            [[ -z $k || $k == "$line" ]] && continue
-            case "$k" in
-                wait) [[ $v =~ ^[01]$ ]] || handleError "Invalid checkin wait value ($0)"; waitFlag="$v" ;;
-                message_b64)
-                    waitMsg=$(printf '%s' "$v" | base64 -d 2>/dev/null) || handleError "Invalid checkin message ($0)"
-                    [[ $waitMsg != *$'\n'* && $waitMsg != *$'\r'* ]] || handleError "Invalid checkin message ($0)"
-                    ;;
-                error_b64)
-                    errorMsg=$(printf '%s' "$v" | base64 -d 2>/dev/null) || handleError "Invalid checkin error ($0)"
-                    [[ $errorMsg != *$'\n'* && $errorMsg != *$'\r'* ]] || handleError "Invalid checkin error ($0)"
-                    handleError "RootPXE checkin rejected by server ($0)"
-                    ;;
-                retry_after_sec) [[ $v =~ ^[1-9][0-9]{0,2}$ ]] || handleError "Invalid retry delay ($0)"; retryAfterSec="$v" ;;
-                type_b64|pxe_type_b64|img_b64|img_type_b64|img_partition_type_b64|storage_b64|storageip_b64|protocol_b64|export_path_b64|host_name_b64|mac_b64|execution_token_b64|finish_action_b64)
-                    decoded=$(printf '%s' "$v" | base64 -d 2>/dev/null) || handleError "Invalid checkin encoding ($0)"
-                    [[ $decoded != *$'\n'* && $decoded != *$'\r'* ]] || handleError "Invalid checkin field ($0)"
-                    k=${k%_b64}
-                    if [[ $k == mac ]]; then
-                        reply_mac="$decoded"
-                    else
-                        printf -v "$k" '%s' "$decoded"; export "$k"
-                    fi
-                    ;;
-                taskid|osid|img_format|shutdown|api_version)
-                    [[ $v =~ ^[0-9]+$ ]] || handleError "Invalid numeric checkin field: $k ($0)"
-                    printf -v "$k" '%s' "$v"; export "$k"
-                    ;;
-                pigz_comp)
-                    [[ $v =~ ^-?[0-9]+$ ]] || handleError "Invalid numeric checkin field: pigz_comp ($0)"
-                    printf -v "$k" '%s' "$v"; export "$k"
-                    ;;
-                *) : ;; # 未知服务端字段绝不执行，也不进入环境
-            esac
-            done <<< "$out"
-        fi
+        [[ $out == \{* ]] || { handleError "RootPXE checkin requires a JSON response ($0)"; return 1; }
+        rootpxe_apply_json_checkin "$out" || handleError "RootPXE checkin returned invalid JSON ($0)"
         if [[ $waitFlag == "1" ]]; then
             [[ -z $waitMsg ]] && waitMsg="No open slots on server, waiting for queue"
             rootpxe_console_message INFO "$waitMsg"
@@ -444,6 +410,15 @@ checkin_rootpxe() {
     fi
     task_token=${execution_token:-${task_token:-}}; export task_token
     rootpxe_require_task_context || handleError "RootPXE: missing execution token ($0)"
+    if [[ ${rootpxe_storage_only:-no} == yes ]]; then
+        type=$pxe_type; pxeType=$type
+        [[ $taskType == capture || $taskType == deploy ]] && [[ $type == up || $type == down ]] || return 1
+        rootpxe_prepare_smb_credentials || return 1
+        export type pxeType taskType rootpxe_storage_only
+        # S99pxeos must not replay the old finishAction after storage recovery.
+        (umask 077; : >/tmp/pxeos.storage-recovery-only) || return 1
+        return 0
+    fi
     [[ -z ${osid:-} || $osid =~ ^[0-9]+$ ]] || handleError "Invalid OS id ($0)"
     [[ ${img_format:-} =~ ^[0-6]$ ]] || handleError "Invalid image format ($0)"
     [[ -z ${pigz_comp:-} ]] || rootpxe_validate_pigz_compression "$pigz_comp" "${img_format:-${imgFormat:-}}" || handleError "Invalid compression value ($0)"
@@ -463,11 +438,10 @@ checkin_rootpxe() {
     storage_server=${storage_server:-$storageip}
     [[ -n $storage_server ]] || handleError "Invalid storage server ($0)"
     if [[ $protocol == smb ]]; then
-        [[ $checkin_response_format == json ]] || { handleError "SMB requires a JSON checkin response ($0)"; return 1; }
         storage_export=$(rootpxe_validate_smb_export "${storage_export:-}") || handleError "Invalid SMB export path ($0)"
     else
         storage_export=${storage_export:-$export_path}
-        [[ $storage_export == /* && $storage_export != *'..'* ]] || handleError "Invalid NFS storage path ($0)"
+        rootpxe_validate_json_storage || handleError "Invalid NFS storage path ($0)"
     fi
     if ! rootpxe_prepare_smb_credentials; then
         handleError "RootPXE checkin returned invalid SMB credentials ($0)"
@@ -485,6 +459,6 @@ if [[ ! $capone -eq 1 ]]; then
     # This script is sourced by upload/download. A nonzero checkin result must
     # terminate that parent task so S99pxeos can perform the fixed safe reboot.
     [[ $checkin_rc -eq 0 ]] || exit "$checkin_rc"
-    rootpxe_stage checkin "PXEOS checkin completed"
+    [[ ${rootpxe_storage_only:-no} == yes ]] || rootpxe_stage checkin "PXEOS checkin completed"
 fi
-pxeos_checkin_runtime_setup
+[[ ${rootpxe_storage_only:-no} == yes ]] || pxeos_checkin_runtime_setup

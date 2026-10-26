@@ -160,15 +160,56 @@ cloud-init status --long
 - 2026-10-15：升级为三份原文私有链及手工元数据，允许空用户文件；恢复独立 Linux 离线改名并按四态路由，名称回执只证明配置注入或离线文件更新，不代表首启执行。
 - 2026-10-16：增加可选供应方配置，四文件集合完整纳入私有句柄、只读预检、标签、暂存发布和回滚；升级为 v5 冻结模板及 Windows 应答模板 v2，保留手工元数据和固定名称，客户端停止强制名称覆盖，模板只报告注入结果。
 
-## 抓取发布
+## 网络存储与抓取发布
 
-- 抓取先完整写入当前主机暂存目录，全部 writer 与元数据成功后才发布。目标锁内校验 marker、非空产物、安全路径与同设备关系，再删除旧目标整目录并重命名发布新目录，不再备份旧镜像。
-- 抓取与服务端导入共用目标父目录内的控制根和独占目标锁；锁内同步写入任务编号、操作类型、目标目录和独立认领标识，发布及释放前复核目录和归属文件。公开镜像路径不得包含保留控制目录名，大小写不敏感。旧版锁存在时只读拒绝新抓取，不自动迁移或删除；应先结束旧版会话，再成对更新服务端与 PXEOS 镜像，已运行的旧 PXEOS 不会自动获得新规则。
-- 默认存储布局只创建捕获暂存目录，已有历史备份保持原状。删除或发布失败不报告成功，新暂存尽可能保留；旧目录删除后若发布失败，无法回滚旧镜像，需从保留的新暂存重试。
-- 同任务已发布结果与完成回执继续支持重试，服务端确认后才清理任务 marker。服务端与 PXEOS 镜像须分别重新构建，旧 PXEOS 产物不会自动获得新行为。
+当前源码增加存储协议v1和固定C/json-c/OpenSSL helper，x64/x86/arm64 profile同步接入；必须重新构建并成对发布服务端与PXEOS。源码存在不等于三架构产物或真实NAS已验证，本轮未执行编译、测试、挂载或设备操作。
+
+```json
+{
+  "storageProtocolVersions": [1],
+  "storageCapabilities": {
+    "helper": true,
+    "numericIdentity": true,
+    "durablePublish": true
+  },
+  "storageBootId": "12345678-1234-4234-8234-123456789abc"
+}
+```
+
+上述为checkin能力示例，boot_id必须读取本次Linux启动事实，不能复用示例值。NFS和SMB都在任务准入推进前检查能力；旧端缺能力时拒绝，不回退root直接NAS I/O。受任务认证JSON的`storageAccess`包含version、execution owner、协议、server/exportPath/imagePath、版本策略及NFS身份；SMB凭据继续走私有认证响应和临时0600凭据文件，不写启动参数、普通日志或恢复副本。实际执行还绑定attempt、storageNonce、workerNonce和storageBootId。
+
+| 协议 | 配置策略 | 执行要求 |
+| --- | --- | --- |
+| NFS | auto、3、4.0、4.1、4.2 | AUTH_SYS；UID/GID双必填，0..4294967294，显式0合法。auto只在明确版本拒绝时按4.2→4.1→4.0→3回退 |
+| SMB | auto、2.1、3.0、3.0.2、3.1.1 | 只允许四方言，拒SMB1/2.0.2和guest/null；空域不补WORKGROUP，固定版本必须精确匹配 |
+
+服务端与PXEOS分别核验`configuredVersion/actualVersion`，两端auto结果可以不同；本执行、重连和恢复固定原实际版本，不再次auto。PXEOS从精确受控挂载的mountinfo核对来源、根与版本，不从普通mount退出码推测版本拒绝，不因权限/路径/认证/网络失败降级。
+
+NAS访问根预先存在。写任务才按需创建根下`dev/taskId/attempt`、`.imports/taskId/attempt`、`.locks/canonicalTargetKey`。部署、导出和多播读取不做写探针、不创建dev或写锁；路径逐分量核对，不跟随链接，不认领陌生对象。NAS管理员或独立客户端的外部修改仍会导致任务拒绝，公共锁不提供跨控制面或物理别名检测。
 
 ```text
-/storage/dev/<MAC>    #当前主机捕获暂存目录
-/storage/<image.path>    #镜像发布目录
-/storage/<目标父目录>/.imports/.locks/<目标目录名>/owner    #与导入共用的目标锁和归属文件
+/storage/dev/<任务编号>/<执行批次>/       # 捕获暂存
+/storage/.imports/<任务编号>/<执行批次>/  # 导入控制树
+/storage/.locks/<canonicalTargetKey>/owner
+/storage/<image.path>/                   # 正式镜像
 ```
+
+公开镜像路径拒绝顶层保留命名空间、绝对路径、点分量和越界，普通分量 `build..old` 合法。重复及父子目标拒绝；目标只读权限不能被根写探针阻断。旧固定 MAC 暂存、旧 `.imports/.locks`、旧 claim 或陌生目录不能自动认领、迁移、删除，也不能通过使用新锁位置绕开原保护。已运行旧 PXEOS 不会自动获得新合同，须结束旧会话后成对发布。
+
+抓取必须完整写入当前任务/批次暂存，全部 writer 与元数据成功并封存后才发布。发布、回滚及清理仅依原 owner、持久对象身份和逐阶段 ACK 授权；本执行的旧树仅用于恢复，不提供永久备份。只清理身份明确属于原批次的对象，未知内容或丢回执保留并等待安全恢复；不能仅按任务编号、marker 或最后一个管道退出码判定成功。finish 与后台收尾分离，工作者及 helper 真正退出、清理得到确认后才 release。
+
+helper固定入口为`rootpxe-storage-io --context-fd 3 --request-fd 4 --data-fd 5 --result-fd 6`。FD3来自root所有0600本地上下文；请求/ACK、数据和结果管道分离、有界。NFS普通存储进程先组→GID→UID→能力收敛→NoNewPrivs，之后才打开NAS；root块设备与压缩进程只通过本地FIFO交换数据，不把root已打开的NAS FD交给helper。NFS挂载使用单独固定入口，仅保留CAP_SYS_ADMIN和配置身份，不给挂载添加uid/gid参数。
+
+五回调位于`/service/pxeos/storage/preflight`、`publish-begin`、`publish-checkpoint`、`publish-complete`、`release`。preflight返回分页原目标清单、两端实际版本、rootFileId和原执行恢复信息；helper intent→created→result逐阶段经服务端持久后才ACK。全部producer成功退出后seal，publish-begin依据锁定任务所绑定镜像类型检查原捕获事实：n型必须提供originalSchema并通过结构及默认部署布局前置校验，其他类型可省略，客户端不能自行选择绑定类型；随后冻结原捕获事实和时间，再正式rename、finish、cleanup/helper join，最后release；不能以最后一个管道退出码代替整条流水结果。
+
+服务重启或PXEOS重启仅沿原owner/attempt恢复。必须确认原worker停止，或原token/MAC、同一非克隆可信宿主的稳定UUID、不同Linux boot_id和新认证checkin一致；这不是硬件远程证明。普通同boot任务不要求可靠DMI，无可靠DMI不能跨boot接管。storage-only只允许原代际发布/回滚/清理，禁止新磁盘许可和重复电源动作。未知证据保留内部保护，不按心跳或TTL抢占，不改变已完成历史。
+
+本页保留独立子仓所需的客户端合同；RootPXE 配置及完整待验矩阵另见根项目[存储系统](../../../docs/存储系统.md)。四版本NFS、四SMB方言、Windows共享宿主参考、恢复和吞吐尚未实测，不以版本选项或离线夹具声称兼容通过。
+
+### 多播与普通 checkin
+
+七条 `/service/pxeos/multicast/{join,prepare,ready,report,status,end,cancel}` 请求统一携带 `storageNonce`、`workerNonce`、`attempt`、`storageBootId`，并可选携带 `sysuuid` 作为稳定硬件见证。前四项必填；`attempt` 必须是严格正整数且等于 `progressAttempt`，小数、带后缀字符串、0 和负数均拒绝。旧 `worker` 或不匹配的 `boot/nonce` 值拒绝；body 继续拒绝未知字段。多播控制不承担跨 boot 接管，跨 boot 仅通过 storage preflight 的原执行恢复条件进入 storage-only；普通同 boot 任务没有可靠 DMI 时仍可工作。
+
+多播先取得域首锁和 task 锁，完成 storage 认证并持久提交后才进入 service/NAS；`end`、`cancel` 写入最终状态前再次封口。`ready` 仅允许 `pxeos` scope。普通首次 checkin 若尚未发放 storage reservation，可沿原 reservation 独立准入；一旦已执行 preflight，恢复只允许原代际 storage-only 路径，不发放新的磁盘许可。服务端 owner/目标占用返回409，协调不可用返回503，真实数据库错误返回500；checkin 只接受当前 JSON，不提供旧键值载荷兼容。
+
+本页记录源码合同和客户端边界，不代表构建或运行通过。shell/C 离线入口见本仓[测试说明](../tests/README.md)；仍须构建三架构产物并验收真实 NAS 权限、版本、原工作者未停保护、跨 boot 恢复和吞吐。RootPXE 数据库只支持匹配当前完整初始化目标的新空库，不提供旧库迁移。

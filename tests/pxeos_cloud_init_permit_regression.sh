@@ -11,6 +11,8 @@ cleanup_fixture(){
     return "$cleanup_result"
 }
 trap cleanup_fixture EXIT
+. "$root/tests/storage-test-support.sh"
+storage_test_load
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 case $(uname -s) in MINGW*|MSYS*) rootpxe_ci_fixture_jq=$(command -v jq.exe); jq(){ "$rootpxe_ci_fixture_jq" -b "$@"; };; esac
 body(){ sed -n "/^$1() {\$/,/^}\$/p" "$funcs"; }
@@ -74,6 +76,9 @@ for mode in network-only vendor-only single mpa; do
     checkin_copy="$tmp/checkin-$mode"
     awk '/^\. \/usr\/share\// {print ":"; next} /^pxeos_checkin_runtime_setup$/ {print ":"; next} {print}' "${funcs%/usr/share/*}/bin/pxeos.checkin" >"$checkin_copy"
     checkin_body=$(jq -c '.taskId=1 | .executionToken="private" | .pxeType="down" | .img="fixture" | .imgType="mps" | .imgPartitionType="all" | .imgFormat=5 | .compressionLevel=6 | .shutdown=false | .changeHostname=false | .protocol="nfs" | .storageip="192.0.2.1" | .exportPath="/fixture" | .deploymentIdentityPolicy={version:1,systemIdentity:{sysprep:false},cloudInit:true}' <<<"$payload")
+    checkin_body=$(storage_test_context_json "$checkin_body") || fail 'current storage fixture context'
+    storage_test_reset_context || fail 'isolated storage context cleanup'
+    storage_test_patch_parser "$checkin_copy"
     rootpxe_task_curl(){ printf '%s\n200' "$checkin_body"; }
     rootpxe_console_message(){ :; }
     rootpxe_require_identity(){ :; }
@@ -100,10 +105,11 @@ for mode in network-only vendor-only single mpa; do
     trap - INT TERM
     if [[ $mode == network-only ]]; then
         no_policy=$(jq -c 'del(.deploymentIdentityPolicy)' <<<"$checkin_body")
+        storage_test_reset_context || fail 'isolated missing-policy context cleanup'
         rootpxe_apply_json_checkin "$no_policy" >"$tmp/checkin-rejection" 2>&1 && fail 'real checkin accepted network payload without frozen identity policy'
         [[ ! -s $tmp/checkin-rejection ]] || fail 'real checkin rejection leaked network data'
         [[ -z ${cloudInitUserDataFile:-} && -z ${cloudInitNetworkConfigFile:-} && -z ${rootpxe_disk_permit_disk_map_file:-} && ! -e $fixture_root/var/lib/cloud/seed ]] || fail 'missing-policy checkin reached private handles, permission or installer'
-        rootpxe_apply_json_checkin "$checkin_body" || fail 'real checkin could not restore complete frozen policy'
+        storage_test_apply_json_checkin "$checkin_body" || fail 'real checkin could not restore complete frozen policy'
     fi
     imgType=$mode
     [[ $mode != network-only && $mode != vendor-only ]] || imgType=single

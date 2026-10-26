@@ -166,12 +166,15 @@ rootpxe_multicast_build_manifest() {
 rootpxe_multicast_context_begin() {
     local token=${task_token:-${execution_token:-}}
     [[ ${taskid:-} =~ ^[1-9][0-9]*$ && -n $token && -n ${mac:-} ]] && rootpxe_task_multicast_identity_valid || return 1
+    [[ ${rootpxe_storage_nonce:-} =~ ^[a-f0-9]{32}$ && ${rootpxe_storage_worker_nonce:-} =~ ^[a-f0-9]{32}$ && ${rootpxe_storage_boot_id:-} =~ ^[a-f0-9-]{36}$ ]] || return 1
     rm -f -- "${rootpxe_multicast_context_file:-}" "${rootpxe_multicast_secret_file:-}"
     umask 077
     rootpxe_multicast_secret_file=$(mktemp /tmp/rootpxe-multicast-token.XXXXXX) || return 1
     printf %s "$token" >"$rootpxe_multicast_secret_file" && chmod 600 "$rootpxe_multicast_secret_file" || return 1
     rootpxe_multicast_context_file=$(mktemp /tmp/rootpxe-multicast-context.XXXXXX) || return 1
-    jq -cn --argjson taskId "$taskid" --rawfile token "$rootpxe_multicast_secret_file" --arg mac "$mac" --argjson progressAttempt "$progress_attempt" --arg sessionId "$multicastSessionId" --arg sessionKey "$multicastSessionKey" '{taskId:$taskId,executionToken:$token,mac:$mac,progressAttempt:$progressAttempt,sessionId:$sessionId,sessionKey:$sessionKey}' >"$rootpxe_multicast_context_file" && chmod 600 "$rootpxe_multicast_context_file"
+    jq -cn --argjson taskId "$taskid" --rawfile token "$rootpxe_multicast_secret_file" --arg mac "$mac" --argjson progressAttempt "$progress_attempt" --arg sessionId "$multicastSessionId" --arg sessionKey "$multicastSessionKey" \
+        --arg storageNonce "$rootpxe_storage_nonce" --arg workerNonce "$rootpxe_storage_worker_nonce" --arg storageBootId "$rootpxe_storage_boot_id" --arg sysuuid "${rootpxe_storage_sysuuid:-}" \
+        '{taskId:$taskId,executionToken:$token,mac:$mac,progressAttempt:$progressAttempt,attempt:$progressAttempt,sessionId:$sessionId,sessionKey:$sessionKey,storageNonce:$storageNonce,workerNonce:$workerNonce,storageBootId:$storageBootId,sysuuid:$sysuuid}' >"$rootpxe_multicast_context_file" && chmod 600 "$rootpxe_multicast_context_file"
 }
 
 rootpxe_multicast_context_matches() {
@@ -179,7 +182,8 @@ rootpxe_multicast_context_matches() {
     [[ -r ${rootpxe_multicast_context_file:-} && ! -L ${rootpxe_multicast_context_file:-} && -r ${rootpxe_multicast_secret_file:-} && ! -L ${rootpxe_multicast_secret_file:-} ]] || return 1
     [[ $(cat "$rootpxe_multicast_secret_file") == "${task_token:-${execution_token:-}}" ]] || return 1
     jq -e --arg taskId "${taskid:-}" --arg mac "${mac:-}" --arg attempt "$progress_attempt" --arg sessionId "$multicastSessionId" --arg sessionKey "$multicastSessionKey" --rawfile token "$rootpxe_multicast_secret_file" \
-        '(.taskId|tostring) == $taskId and .mac == $mac and (.progressAttempt|tostring) == $attempt and .executionToken == $token and (.sessionId|type) == "string" and .sessionId == $sessionId and .sessionKey == $sessionKey' "$rootpxe_multicast_context_file" >/dev/null
+        --arg storageNonce "${rootpxe_storage_nonce:-}" --arg workerNonce "${rootpxe_storage_worker_nonce:-}" --arg storageBootId "${rootpxe_storage_boot_id:-}" --arg sysuuid "${rootpxe_storage_sysuuid:-}" \
+        '(.taskId|tostring) == $taskId and .mac == $mac and (.progressAttempt|tostring) == $attempt and (.attempt|tostring) == $attempt and .executionToken == $token and (.sessionId|type) == "string" and .sessionId == $sessionId and .sessionKey == $sessionKey and .storageNonce == $storageNonce and .workerNonce == $workerNonce and .storageBootId == $storageBootId and .sysuuid == $sysuuid' "$rootpxe_multicast_context_file" >/dev/null
 }
 
 rootpxe_multicast_response_matches_instance() {

@@ -1,5 +1,5 @@
 #!/bin/bash
-sysuuid=$(dmidecode -s system-uuid)
+sysuuid=$(dmidecode -s system-uuid 2>/dev/null || true)
 sysuuid=${sysuuid,,}
 rootpxe_api="${pxeapi:-$web}"
 rootpxe_require_task_context || handleError "RootPXE: invalid task context ($0)"
@@ -64,7 +64,8 @@ while true; do
         echo "Done"
         if ! rootpxe_clear_capture_marker; then
             rootpxe_task_console_failure WARN "PXEOS_STAGE=finish_notify CODE=CAPTURE_MARKER_CLEAR_FAILED REASON=${rootpxe_capture_marker_clear_error_reason:-marker_clear_failed}"
-            rootpxe_console_message WARN 'Marker retained for manual cleanup.'
+            rootpxe_console_message WARN 'Storage cleanup is not confirmed. Retrying the original execution.'
+            rootpxe_storage_recover_until_clean || exit 1
         fi
         rootpxe_cleanup_task_json
         rootpxe_capture_resume_cleanup

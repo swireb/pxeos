@@ -2,417 +2,8 @@
 # 合并后的 PXEOS 回归测试；每个原脚本在独立子 shell 中运行。
 set -euo pipefail
 
-# ===== 原脚本：tests/pxeos_capture_finalize_regression.sh =====
-(
-# 受控回归：重复 capture 的发布收尾只能在临时树中替换目录。
-# 所有 SMB/rename 故障由 shell mock 注入；绝不访问真实 /storage、磁盘或网络。
-set -euo pipefail
+# 当前发布/对象/恢复矩阵位于 pxeos_storage_controller_test.py；不再测试已退役的MAC暂存和shell锁。
 
-root="$(cd "$(dirname "$0")/.." && pwd)"
-. "$root/tests/task-http-test-support.sh"
-funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
-progress_lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh"
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
-
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
-pass() { printf 'PASS: %s\n' "$*"; }
-assert_file_text() { [[ -f $1 && $(<"$1") == "$2" ]] || fail "$3"; }
-
-# The production library has fixed /storage paths.  Substitute only in a
-# temporary test copy so the exercised functions use an isolated filesystem.
-sed \
-    -e 's|^rootpxe_source_core_library partition-funcs.sh.*|:|' \
-    -e 's|^rootpxe_source_core_library restore-preflight.sh.*|:|' \
-    -e 's|^rootpxe_source_core_library capture-recovery.sh.*|:|' \
-    -e 's|^rootpxe_source_core_library deployment-identity.sh.*|:|' \
-    -e 's|/storage|${ROOTPXE_TEST_STORAGE}|g' \
-    "$funcs" >"$tmp/funcs.sh"
-cp "$progress_lib" "$tmp/partclone-progress.sh"
-cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
-cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
-cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-hostname.sh" "$tmp/linux-hostname.sh"
-sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
-printf '\nif declare -F task_log_test_emulate_pin_flags >/dev/null; then task_log_test_emulate_pin_flags; fi\n' >>"$tmp/log-paths.sh"
-for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
-    [[ ! -f $rootpxe_test_funcs_copy ]] || sed -i -e "s|/tmp/log|$tmp/log|g" -e "s|^rootpxe_log_paths_lib=.*|rootpxe_log_paths_lib=$tmp/log-paths.sh|" "$rootpxe_test_funcs_copy"
-done
-. "$root/tests/task-log-test-support.sh"
-
-setup_fixture() {
-    ROOTPXE_TEST_STORAGE="$tmp/storage"
-    export ROOTPXE_TEST_STORAGE
-    rm -rf "$ROOTPXE_TEST_STORAGE"
-    source="$ROOTPXE_TEST_STORAGE/dev/001122334455"
-    target="$ROOTPXE_TEST_STORAGE/images/repeat"
-    backup="$ROOTPXE_TEST_STORAGE/backup/legacy-image"
-    mkdir -p "$source" "$(dirname "$target")"
-    printf 'new-image\n' >"$source/d1p1.img"
-    printf '3\n' >"$source/.rootpxe-capture-taskid"
-    type=up
-    taskid=3
-    task_token='test-token-0123456789'
-    mac='00:11:22:33:44:55'
-    macWinSafe=001122334455
-    img='images/repeat'
-    unset rootpxe_finalize_capture_error_reason rootpxe_finalize_capture_error_code
-}
-
-set +u
-source "$tmp/funcs.sh" 2>/dev/null
-set -u
-# This regression supplies isolated normalized context; task-context parsing is
-# exercised by its dedicated PXEOS checkin/runtime tests.
-rootpxe_require_task_context() { return 0; }
-
-# 首次与重复捕获均只依赖 dev 暂存，不自动创建 backup。
-setup_fixture
-rootpxe_capture_lock_acquire "$target" || fail '捕获目标锁不能独占建立'
-unset lock
-rootpxe_capture_lock_verify || fail '无调用者 lock 变量时归属校验失败'
-lock="$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat"
-assert_file_text "$lock/owner" $'task_id=3\noperation=capture\ntarget=repeat\nclaim_id='"$rootpxe_capture_lock_claim" '锁 owner 未写入可读归属'
-printf 'unexpected\n' >"$lock/unknown"
-rootpxe_capture_lock_verify && fail '锁内未知文件未阻止归属校验'
-rootpxe_capture_lock_release && fail '锁目录存在未知文件时错误释放'
-[[ -f "$lock/owner" && -f "$lock/unknown" ]] || fail '未知锁现场未保留'
-rm -f "$lock/unknown"
-rootpxe_capture_lock_release || fail '自有目标锁未能释放'
-setup_fixture
-rootpxe_capture_lock_acquire "$target" || fail '替换 owner 测试不能取得锁'
-owner="$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/owner"
-ln -- "$owner" "$tmp/owner-copy"
-rm -- "$owner"
-cp -- "$tmp/owner-copy" "$owner"
-rootpxe_capture_lock_release && fail '同内容不同对象 owner 被误认归属'
-[[ -f $owner ]] || fail '被替换的 owner 未保留现场'
-setup_fixture
-rootpxe_prepare_storage_layout || fail '捕获存储布局无法准备'
-[[ ! -e "$ROOTPXE_TEST_STORAGE/backup" ]] || fail '存储布局不应创建 backup'
-rootpxe_finalize_capture || fail '没有 backup 目录时首次 capture 未能安全发布'
-assert_file_text "$target/d1p1.img" 'new-image' '首次 capture 未发布新镜像'
-[[ ! -e "$ROOTPXE_TEST_STORAGE/backup" ]] || fail '首次 capture 不应创建 backup'
-[[ -d "$ROOTPXE_TEST_STORAGE/images/.imports/.locks" && ! -e "$ROOTPXE_TEST_STORAGE/images/.repeat.rootpxe-finalize.lock" ]] || fail '捕获没有使用统一导入控制目录中的目标锁'
-pass 'first capture publishes without a backup directory'
-
-# 旧目录必须完整删除后再发布整棵新树，旧文件和旧子目录不得混入。
-setup_fixture
-mkdir -p "$target/old-only"
-printf 'old-image\n' >"$target/d1p1.img"
-printf 'stale\n' >"$target/old-only/stale.img"
-printf 'new-metadata\n' >"$source/.rootpxe-partition-inventory.json"
-rootpxe_finalize_capture || fail '没有 backup 目录时重复 capture 被拒绝'
-assert_file_text "$target/d1p1.img" 'new-image' '新 capture 未发布为正式镜像'
-assert_file_text "$target/.rootpxe-partition-inventory.json" 'new-metadata' '新元数据未随目录发布'
-assert_file_text "$target/.rootpxe-capture-taskid" '3' '已发布镜像未保留当前任务标记'
-[[ ! -e "$target/old-only" && ! -e $source && ! -e "$ROOTPXE_TEST_STORAGE/backup" ]] || fail '重捕获遗留旧文件、暂存或备份'
-pass 'recapture replaces the whole directory without backup'
-
-# 历史 backup 内容不参与发布，发布和幂等重试均须原样保留。
-setup_fixture
-mkdir -p "$target" "$backup"
-printf 'old-image\n' >"$target/d1p1.img"
-printf 'historic-image\n' >"$backup/d1p1.img"
-rootpxe_finalize_capture || fail '历史 backup 不应阻止重捕获'
-rootpxe_finalize_capture || fail '同任务已发布镜像未能幂等确认'
-assert_file_text "$target/d1p1.img" 'new-image' '幂等确认改变了已发布镜像'
-assert_file_text "$backup/d1p1.img" 'historic-image' '重捕获修改了历史 backup'
-[[ $(find "$ROOTPXE_TEST_STORAGE/backup" -mindepth 1 -maxdepth 1 | wc -l) == 1 ]] || fail '重捕获创建了新备份'
-pass 'existing backups are untouched and publication is idempotent'
-
-# 目标上的任何 marker 都代表未确认的发布，不能被下一次 capture 覆盖。
-for target_taskid in 2 3; do
-    setup_fixture
-    mkdir -p "$target"
-    printf 'old-image\n' >"$target/d1p1.img"
-    printf '%s\n' "$target_taskid" >"$target/.rootpxe-capture-taskid"
-    rootpxe_finalize_capture && fail '未确认的 target marker 被错误覆盖'
-    [[ ${rootpxe_finalize_capture_error_reason:-} == target_marker_present ]] || fail 'target marker 未返回稳定原因'
-    assert_file_text "$target/d1p1.img" 'old-image' 'target marker 场景修改了旧镜像'
-    assert_file_text "$source/d1p1.img" 'new-image' 'target marker 场景修改了新 source'
-done
-pass 'unacknowledged target markers are rejected'
-
-# 新暂存归属无效时必须在删除旧目录前停止。
-setup_fixture
-mkdir -p "$target"
-printf 'old-image\n' >"$target/d1p1.img"
-printf '2\n' >"$source/.rootpxe-capture-taskid"
-rootpxe_finalize_capture && fail '无效 source marker 被错误发布'
-[[ ${rootpxe_finalize_capture_error_reason:-} == source_marker_invalid ]] || fail 'source marker 未返回稳定原因'
-assert_file_text "$target/d1p1.img" 'old-image' '无效 source marker 删除了旧镜像'
-assert_file_text "$source/d1p1.img" 'new-image' '无效 source marker 修改了新暂存'
-pass 'invalid source marker preserves the old image'
-
-# 模拟 SMB 删除失败：旧目录可能部分删除，新暂存必须完整保留且明确失败。
-setup_fixture
-mkdir -p "$target"
-printf 'old-image\n' >"$target/d1p1.img"
-rm() {
-    if [[ $1 == -rf && $2 == -- && $3 == "$target" ]]; then
-        return 70
-    fi
-    command rm "$@"
-}
-rootpxe_finalize_capture && fail '模拟 SMB 删除失败被误报成功'
-[[ ${rootpxe_finalize_capture_error_reason:-} == target_remove_failed ]] || fail 'SMB 删除失败未返回稳定原因'
-assert_file_text "$target/d1p1.img" 'old-image' 'SMB 删除失败后旧目标被改变'
-assert_file_text "$source/d1p1.img" 'new-image' 'SMB 删除失败后新暂存被改变'
-unset -f rm
-[[ -f "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/owner" ]] || fail '删除回执不确定时未保留目标锁'
-rootpxe_finalize_capture && fail '删除回执不确定时错误抢锁重试'
-[[ ${rootpxe_finalize_capture_error_reason:-} == finalize_lock_unavailable ]] || fail '不确定现场未阻止重试'
-pass 'SMB removal failure retains staging and lock for inspection'
-
-# 删除返回失败时，旧目录即使已部分改变也必须保留完整新暂存。
-setup_fixture
-mkdir -p "$target"
-printf 'old-image\n' >"$target/d1p1.img"
-printf 'old-extra\n' >"$target/stale.img"
-rm() {
-    if [[ $1 == -rf && $2 == -- && $3 == "$target" ]]; then
-        command rm -f -- "$target/stale.img"
-        return 70
-    fi
-    command rm "$@"
-}
-rootpxe_finalize_capture && fail '部分删除失败被误报成功'
-[[ ${rootpxe_finalize_capture_error_reason:-} == target_remove_failed ]] || fail '部分删除失败未返回稳定原因'
-assert_file_text "$source/d1p1.img" 'new-image' '部分删除失败损坏了新暂存'
-assert_file_text "$source/.rootpxe-capture-taskid" '3' '部分删除失败损坏了新暂存 marker'
-unset -f rm
-[[ -f "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/owner" ]] || fail '部分删除失败未保留目标锁'
-pass 'partial removal failure preserves staging and lock'
-
-# 旧目标已删除而发布失败时不保留旧镜像，新暂存仍供下次重试。
-setup_fixture
-mkdir -p "$target"
-printf 'old-image\n' >"$target/d1p1.img"
-mv() {
-    if [[ $1 == -T && $2 == "$source" && $3 == "$target" ]]; then
-        return 70
-    fi
-    command mv "$@"
-}
-rootpxe_finalize_capture && fail '模拟 SMB 发布失败被误报成功'
-[[ ${rootpxe_finalize_capture_error_reason:-} == publish_failed_source_retained ]] || fail 'SMB 发布失败未返回保留新暂存原因'
-[[ ! -e $target && ! -e "$ROOTPXE_TEST_STORAGE/backup" ]] || fail '发布失败后不应伪造正式目标或备份'
-assert_file_text "$source/d1p1.img" 'new-image' 'SMB 发布失败后新暂存未保留'
-assert_file_text "$source/.rootpxe-capture-taskid" '3' 'SMB 发布失败后新暂存 marker 未保留'
-unset -f mv
-[[ -f "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/owner" ]] || fail '发布回执不确定时未保留目标锁'
-pass 'SMB publish failure retains staging and lock for inspection'
-
-# 锁不得抢占：并发 finalizer 必须保留双方数据并明确失败。
-setup_fixture
-mkdir -p "$target"
-printf 'old-image\n' >"$target/d1p1.img"
-mkdir -p "$ROOTPXE_TEST_STORAGE/images/.imports/.locks"
-mkdir "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat"
-rootpxe_finalize_capture && fail '已有 finalizer 锁被错误抢占'
-[[ ${rootpxe_finalize_capture_error_reason:-} == finalize_lock_unavailable ]] || fail '锁冲突未返回稳定原因'
-assert_file_text "$target/d1p1.img" 'old-image' '锁冲突修改了旧镜像'
-assert_file_text "$source/d1p1.img" 'new-image' '锁冲突修改了新 source'
-pass 'finalizer lock is fail-closed'
-
-setup_fixture
-mkdir -p "$target"
-printf 'old-image\n' >"$target/d1p1.img"
-mkdir "$ROOTPXE_TEST_STORAGE/images/.repeat.rootpxe-finalize.lock"
-rootpxe_finalize_capture && fail '旧版本 finalizer 锁被忽视'
-[[ ${rootpxe_finalize_capture_error_reason:-} == finalize_lock_unavailable ]] || fail '旧锁未明确拒绝'
-assert_file_text "$target/d1p1.img" 'old-image' '旧锁场景改变目标'
-[[ ! -e "$ROOTPXE_TEST_STORAGE/images/.imports" ]] || fail '旧锁场景创建了新控制树'
-pass 'legacy finalizer lock is fail-closed'
-
-setup_fixture
-mkdir -p "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks"
-mkdir "$ROOTPXE_TEST_STORAGE/images/.rootpxe-imports/.locks/repeat"
-rootpxe_finalize_capture && fail '旧版导入锁被忽视'
-[[ ${rootpxe_finalize_capture_error_reason:-} == finalize_lock_unavailable && ! -e "$ROOTPXE_TEST_STORAGE/images/.imports" ]] || fail '旧版导入锁未只读拒绝'
-pass 'legacy import lock is read-only guarded'
-
-setup_fixture
-img='images/.ROOTPXE-IMPORTS/task'
-rootpxe_finalize_capture && fail '保留控制目录被当作公开镜像路径'
-[[ ${rootpxe_finalize_capture_error_reason:-} == unsafe_target_path ]] || fail '保留控制目录未返回安全路径错误'
-pass 'reserved import control path is rejected'
-
-setup_fixture
-img='images/.IMPORTS/task'
-rootpxe_finalize_capture && fail '新保留控制目录被当作公开镜像路径'
-[[ ${rootpxe_finalize_capture_error_reason:-} == unsafe_target_path ]] || fail '新保留目录未返回安全路径错误'
-pass 'new reserved import control path is rejected'
-
-# 词法路径互含与链接均不得进入 rename。此处 source 使用 img=dev，target 是其父目录。
-setup_fixture
-img='dev'
-rootpxe_finalize_capture && fail 'source/target 路径互含未被拒绝'
-[[ ${rootpxe_finalize_capture_error_reason:-} == source_target_overlap ]] || fail '路径互含未返回稳定原因'
-pass 'source target overlap is rejected'
-
-setup_fixture
-rm -rf "$target"
-mkdir -p "$(dirname "$target")"
-mkdir -p "$tmp/outside"
-ln -s "$tmp/outside" "$target"
-if [[ -L $target ]]; then
-    rootpxe_finalize_capture && fail '符号链接 target 未被拒绝'
-    [[ ${rootpxe_finalize_capture_error_reason:-} == unsafe_target_path ]] || fail '符号链接 target 未返回稳定原因'
-    pass 'symlink target is rejected'
-else
-    printf 'SKIP: symlink target requires a POSIX symlink-capable test filesystem\n'
-fi
-
-# The source tree, its `/storage/dev` ancestor, and its task marker must each
-# reject links. Git Bash on this host may emulate directory links, so never
-# count an unobservable link as coverage.
-setup_fixture
-rm -rf "$source"
-mkdir -p "$tmp/outside-source"
-ln -s "$tmp/outside-source" "$source"
-if [[ -L $source ]]; then
-    rootpxe_finalize_capture && fail '符号链接 source 未被拒绝'
-    [[ ${rootpxe_finalize_capture_error_reason:-} == unsafe_source_path ]] || fail '符号链接 source 未返回稳定原因'
-    pass 'symlink source is rejected'
-else
-    printf 'SKIP: symlink source requires a POSIX symlink-capable test filesystem\n'
-fi
-
-setup_fixture
-rm -rf "$ROOTPXE_TEST_STORAGE/dev"
-mkdir -p "$tmp/outside-dev"
-ln -s "$tmp/outside-dev" "$ROOTPXE_TEST_STORAGE/dev"
-if [[ -L $ROOTPXE_TEST_STORAGE/dev ]]; then
-    rootpxe_finalize_capture && fail '符号链接 source ancestor 未被拒绝'
-    [[ ${rootpxe_finalize_capture_error_reason:-} == unsafe_source_path ]] || fail '符号链接 source ancestor 未返回稳定原因'
-    pass 'symlink source ancestor is rejected'
-else
-    printf 'SKIP: symlink source ancestor requires a POSIX symlink-capable test filesystem\n'
-fi
-
-setup_fixture
-printf 'marker-target\n' >"$tmp/marker-target"
-rm -f "$source/.rootpxe-capture-taskid"
-ln -s "$tmp/marker-target" "$source/.rootpxe-capture-taskid"
-if [[ -L $source/.rootpxe-capture-taskid ]]; then
-    rootpxe_finalize_capture && fail '符号链接 source marker 未被拒绝'
-    [[ ${rootpxe_finalize_capture_error_reason:-} == source_marker_invalid ]] || fail '符号链接 source marker 未返回稳定原因'
-    pass 'symlink source marker is rejected'
-else
-    printf 'SKIP: symlink source marker requires a POSIX symlink-capable test filesystem\n'
-fi
-
-# Empty staging data cannot replace a valid image even when its task marker is valid.
-setup_fixture
-mkdir -p "$target"
-printf 'old-image\n' >"$target/d1p1.img"
-rm -f "$source/d1p1.img"
-rootpxe_finalize_capture && fail '零大小 capture source 被错误发布'
-[[ ${rootpxe_finalize_capture_error_reason:-} == source_payload_invalid ]] || fail '零大小 source 未返回稳定原因'
-assert_file_text "$target/d1p1.img" 'old-image' '零大小 source 删除了旧镜像'
-pass 'zero-size source is rejected'
-
-# find 即使先输出部分大小，随后失败也不能被命令替换或循环吞掉。
-setup_fixture
-find() {
-    printf '10\n'
-    return 1
-}
-rootpxe_finalize_capture && fail '部分 find 输出后的失败被错误发布'
-[[ ${rootpxe_finalize_capture_error_reason:-} == source_payload_invalid ]] || fail 'find 失败未返回 source payload 原因'
-[[ ! -e $target ]] || fail 'find 失败后创建了正式目标'
-unset -f find
-pass 'find failure is propagated before move'
-
-# EXDEV 会让 mv 回退为复制加删除，必须在任何迁移前拒绝。
-setup_fixture
-mkdir -p "$target"
-printf 'old-image\n' >"$target/d1p1.img"
-stat() {
-    if [[ $1 == -c && $2 == %d && $3 == "$source" ]]; then
-        printf '999999\n'
-        return 0
-    fi
-    command stat "$@"
-}
-rootpxe_finalize_capture && fail '跨文件系统 capture 被错误迁移'
-[[ ${rootpxe_finalize_capture_error_reason:-} == cross_device_capture_paths ]] || fail '跨文件系统未返回稳定原因'
-assert_file_text "$target/d1p1.img" 'old-image' '跨文件系统场景修改了旧镜像'
-assert_file_text "$source/d1p1.img" 'new-image' '跨文件系统场景修改了新 source'
-unset -f stat
-pass 'cross-device finalization is rejected before move'
-
-# 锁内出现未知对象时必须在删除正式镜像前停止。
-setup_fixture
-mkdir -p "$target"
-printf 'old-image\n' >"$target/d1p1.img"
-saved_same_device=$(declare -f rootpxe_capture_paths_same_device)
-rootpxe_capture_paths_same_device() {
-    printf 'unknown\n' >"$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/foreign"
-    return 0
-}
-rootpxe_finalize_capture && fail '锁内未知文件未阻止目标替换'
-[[ ${rootpxe_finalize_capture_error_reason:-} == finalize_lock_unavailable ]] || fail '锁内未知文件未返回稳定失败原因'
-assert_file_text "$target/d1p1.img" 'old-image' '锁内未知文件时删除了旧镜像'
-[[ -f "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/owner" ]] || fail '未知锁现场未保留'
-eval "$saved_same_device"
-pass 'unknown lock member blocks publication before old tree changes'
-
-# finish 成功后只能删除属于当前任务的一个普通 marker，且同一锁保护。
-setup_fixture
-mkdir -p "$target"
-printf 'new-image\n' >"$target/d1p1.img"
-printf '3\n' >"$target/.rootpxe-capture-taskid"
-mkdir -p "$ROOTPXE_TEST_STORAGE/images/.imports/.locks"
-mkdir "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat"
-rootpxe_clear_capture_marker && fail 'marker 清理抢占了已有 finalizer 锁'
-assert_file_text "$target/.rootpxe-capture-taskid" '3' '锁冲突时 marker 被错误清理'
-rmdir "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat"
-rootpxe_clear_capture_marker || fail '当前任务 marker 未能安全清理'
-[[ ! -e $target/.rootpxe-capture-taskid ]] || fail '当前任务 marker 未被清理'
-
-printf '2\n' >"$target/.rootpxe-capture-taskid"
-rootpxe_clear_capture_marker && fail 'foreign marker 被错误清理'
-assert_file_text "$target/.rootpxe-capture-taskid" '2' 'foreign marker 被删除或改变'
-pass 'marker clearing checks ownership and lock'
-
-setup_fixture
-mkdir -p "$target"
-printf 'new-image\n' >"$target/d1p1.img"
-printf '3\n' >"$target/.rootpxe-capture-taskid"
-saved_marker_match=$(declare -f rootpxe_capture_marker_matches_task)
-rootpxe_capture_marker_matches_task() {
-    [[ -f $1 && ! -L $1 && $(cat "$1") == "$2" ]] || return 1
-    printf 'unknown\n' >"$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/foreign"
-}
-rootpxe_clear_capture_marker && fail '归属检查后新增未知锁文件仍清理 marker'
-[[ ${rootpxe_capture_marker_clear_error_reason:-} == finalize_lock_unavailable ]] || fail '归属变化未返回稳定锁失败原因'
-assert_file_text "$target/.rootpxe-capture-taskid" '3' '归属变化后删除了 marker'
-[[ -f "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/owner" && -f "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/foreign" ]] || fail '归属变化后未保留锁现场'
-eval "$saved_marker_match"
-pass 'marker clearing rechecks lock immediately before removal'
-
-setup_fixture
-mkdir -p "$target"
-printf 'new-image\n' >"$target/d1p1.img"
-printf '3\n' >"$target/.rootpxe-capture-taskid"
-rm() {
-    if [[ $1 == -f && $2 == -- && $3 == "$target/.rootpxe-capture-taskid" ]]; then
-        command rm "$@"
-        return 70
-    fi
-    command rm "$@"
-}
-rootpxe_clear_capture_marker && fail 'marker 删除回执丢失时错误清除任务锁'
-[[ ${rootpxe_capture_marker_clear_error_reason:-} == marker_remove_failed ]] || fail 'marker 删除不确定未返回稳定原因'
-[[ -f "$ROOTPXE_TEST_STORAGE/images/.imports/.locks/repeat/owner" ]] || fail 'marker 删除不确定时目标锁未保留'
-unset -f rm
-pass 'uncertain marker removal preserves owned lock'
-
-printf 'PASS: PXEOS capture finalize regression\n'
-)
-# ===== 原脚本结束：tests/pxeos_capture_finalize_regression.sh =====
 
 # ===== 原脚本：tests/pxeos_pipeline_regression.sh =====
 (
@@ -427,6 +18,7 @@ funcs="$overlay/usr/share/pxeos/lib/funcs.sh"
 progress_lib="$overlay/usr/share/pxeos/lib/partclone-progress.sh"
 imgcomplete="$overlay/bin/pxeos.imgcomplete"
 tmp="$(mktemp -d)"
+. "$root/tests/storage-test-support.sh"
 ROOTPXE_PROGRESS_STATUS_FILE="$tmp/status.pxeos"
 export ROOTPXE_PROGRESS_STATUS_FILE
 trap 'rm -rf "$tmp"' EXIT
@@ -478,6 +70,7 @@ rootpxe_clear_capture_marker() {
 }
 rootpxe_cleanup_task_json() { : > "${MOCK_JSON_CLEARED:?}"; }
 rootpxe_capture_resume_cleanup() { :; }
+rootpxe_storage_recover_until_clean() { printf 'recovered\n' >>"${MOCK_JSON_CLEARED:?}.recovery"; }
 rootpxe_deployment_identity_policy_enabled() { [[ ${MOCK_IDENTITY:-no} == yes ]]; }
 rootpxe_console_message() { printf '%-7s %s\n' "[$1]" "$2"; }
 declare -A rootpxe_task_log_state=()
@@ -548,15 +141,16 @@ set -e
 if [[ $marker_warning_rc != 0 ]]; then tail -n 5 "$tmp/marker-warning.err" >&2; fi
 assert_eq "$marker_warning_rc" 0 'finish 确认后的 marker 清理失败不得变成业务失败'
 grep -Fq 'CODE=CAPTURE_MARKER_CLEAR_FAILED' "$tmp/task-console.log" || fail 'marker 清理失败必须保留原始稳定告警码'
-grep -Fq '[WARN]  Capture marker cleanup failed' "$tmp/marker-warning.out" || { cat "$tmp/marker-warning.out" >&2; fail 'marker 清理失败必须输出短告警'; }
+grep -Fq '[WARN]  Storage cleanup is not confirmed. Retrying the original execution.' "$tmp/marker-warning.out" || { cat "$tmp/marker-warning.out" >&2; fail 'marker 清理失败必须输出短告警'; }
 grep -Fxq 'Done' "$tmp/marker-warning.out" || fail 'finish 成功状态行必须在 marker 告警前结束'
 grep -Fqx '[INFO]  Task complete.' "$tmp/marker-warning.out" || fail 'Task complete 必须在 finish 确认流程结束后输出'
 done_line=$(grep -n -m1 -x 'Done' "$tmp/marker-warning.out" | cut -d: -f1)
-warning_line=$(grep -n -m1 -F '[WARN]  Capture marker cleanup failed' "$tmp/marker-warning.out" | cut -d: -f1)
+warning_line=$(grep -n -m1 -F '[WARN]  Storage cleanup is not confirmed. Retrying the original execution.' "$tmp/marker-warning.out" | cut -d: -f1)
 complete_line=$(grep -n -m1 -F '[INFO]  Task complete.' "$tmp/marker-warning.out" | cut -d: -f1)
 [[ $done_line =~ ^[1-9][0-9]*$ && $warning_line =~ ^[1-9][0-9]*$ && $complete_line =~ ^[1-9][0-9]*$ && $done_line -lt $warning_line && $warning_line -lt $complete_line ]] || fail 'finish状态、marker告警和Task Complete的输出顺序错误'
 [[ ! -e $tmp/marker-warning-cleared && -f $tmp/marker-warning-json-cleared ]] || fail 'marker 失败应保留 marker 并仍清理任务上下文'
-pass 'finish-confirmed marker cleanup failure is warning-only'
+[[ -f $tmp/marker-warning-json-cleared.recovery ]] || fail 'finish确认后的清理失败未沿原执行恢复'
+pass 'finish-confirmed cleanup failure recovers the original execution before completion'
 
 # capture 的压缩器失败时，后台 writer 的 wait 必须返回失败，不能被 split 的成功掩盖。
 cat > "$tmp/bin/nproc" <<'EOF'
@@ -594,6 +188,7 @@ done
 set +u
 PATH="$tmp/bin:$PATH"
 source "$tmp/funcs.sh" 2>/dev/null
+storage_test_pipeline_boundaries
 set -u
 imgFormat=2
 PIGZ_COMP=-6
@@ -633,6 +228,7 @@ export MOCK_ERROR_FILE="$tmp/capture-prepare-error" MOCK_CLONE_STARTED="$tmp/clo
 set +e
 (
     source "$tmp/funcs.sh" 2>/dev/null
+    storage_test_pipeline_boundaries
     handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 97; }
     getPartitionNumber() { part_number=1; }
     fsTypeSetting() { fstype=extfs; }
@@ -676,6 +272,7 @@ export MOCK_CLONE_STARTED="$tmp/telemetry-clone-started" MOCK_UPLOAD_FORMAT_CALL
 set +e
 (
     source "$tmp/funcs.sh" 2>/dev/null
+    storage_test_pipeline_boundaries
     handleError() { printf '%s\n' "$1" > "$tmp/capture-telemetry-error"; exit 98; }
     getPartitionNumber() { part_number=1; }
     fsTypeSetting() { fstype=extfs; }
@@ -735,6 +332,7 @@ export MOCK_ERROR_FILE="$tmp/capture-error"
 set +e
 (
     source "$tmp/funcs.sh" 2>/dev/null
+    storage_test_pipeline_boundaries
     handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 91; }
     getPartitionNumber() { part_number=1; }
     fsTypeSetting() { fstype=extfs; }
@@ -776,6 +374,7 @@ export MOCK_ERROR_FILE="$tmp/restore-error"
 set +e
 (
     source "$tmp/funcs.sh" 2>/dev/null
+    storage_test_pipeline_boundaries
     rootpxe_require_unused_target_disks() { :; } # 恢复 writer 使用模拟设备。
     handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 92; }
     imgFormat=5
@@ -821,6 +420,7 @@ rm -f /tmp/pigz1
 set +e
 (
     source "$tmp/funcs.sh" 2>/dev/null
+    storage_test_pipeline_boundaries
     : > "$MOCK_CAT_ARGS"
     rootpxe_require_unused_target_disks() { :; }
     ROOTPXE_PROGRESS_STATUS_FILE="$tmp/restore-progress"
@@ -862,6 +462,7 @@ rm -f /tmp/pigz1
 set +e
 (
     source "$tmp/funcs.sh" 2>/dev/null
+    storage_test_pipeline_boundaries
     handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 95; }
     rootpxe_require_unused_target_disks() { :; }
     ROOTPXE_PROGRESS_STATUS_FILE="$tmp/split-no-match-progress"
@@ -886,6 +487,7 @@ rm -f /tmp/pigz1
 set +e
 (
     source "$tmp/funcs.sh" 2>/dev/null
+    storage_test_pipeline_boundaries
     handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 96; }
     rootpxe_require_unused_target_disks() { :; }
     imgFormat=5
@@ -920,6 +522,7 @@ export MOCK_ERROR_FILE="$tmp/restore-source-error"
 set +e
 (
     source "$tmp/funcs.sh" 2>/dev/null
+    storage_test_pipeline_boundaries
     handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 93; }
     rootpxe_require_unused_target_disks() { :; }
     imgFormat=5

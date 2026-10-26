@@ -12,6 +12,8 @@ cleanup_fixture(){
     rm -rf -- "$tmp"
 }
 trap cleanup_fixture EXIT
+. "$root/tests/storage-test-support.sh"
+storage_test_load
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 case $(uname -s) in MINGW*|MSYS*) jq_real=$(command -v jq.exe); jq(){ "$jq_real" -b "$@"; };; esac
 . "$lib/cloud-init.sh"
@@ -27,6 +29,7 @@ for name in rootpxe_validate_windows_hostname rootpxe_resolve_casefold_directory
 done
 . "$tmp/functions"
 awk '/^rootpxe_json_get_string\(\)/,/^checkin_rootpxe\(\)/{if($0 ~ /^checkin_rootpxe\(\)/) exit; print}' "$checkin" >"$tmp/parser"
+storage_test_patch_parser "$tmp/parser"
 . "$tmp/parser"
 rootpxe_stage(){ :; }
 rootpxe_run_logged_typed_native(){ shift 2; "$@"; }
@@ -107,7 +110,7 @@ test_checkin(){
     write_linux_payload empty
     response=$(jq -c '.taskId=1 | .executionToken="private" | .pxeType="down" | .img="fixture" | .imgType="mps" | .imgPartitionType="all" | .imgFormat=5 | .compressionLevel=6 | .shutdown=false | .changeHostname=true | .hostName="ignored.management.fqdn" | .protocol="nfs" | .storageip="192.0.2.1" | .exportPath="/fixture" | .deploymentIdentityPolicy={version:1,systemIdentity:{sysprep:false},cloudInit:true}' <<<"$payload")
     rootpxe_linux_hostname_task_valid(){ fail 'Cloud template checked unused management hostname'; }
-    rootpxe_apply_json_checkin "$response" || fail 'frozen checkin rejected independent template names'
+    storage_test_apply_json_checkin "$response" || fail 'frozen checkin rejected independent template names'
     cmp -s "$tmp/meta" "$cloudInitMetaDataFile" || fail 'checkin rewrote fixed instance-id'
 }
 test_dispatch(){
