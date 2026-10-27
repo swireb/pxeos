@@ -180,7 +180,7 @@ pxeos_audit_regression.sh  # 离线核对审计项和关键源码/补丁约束�
 pxeos_hardening_regression.sh  # 以临时文件和 mock 覆盖加固相关失败路径。
 pxeos_manual_registration_regression.sh  # 以 endpoint、控制台和重启 mock 覆盖手工注册客户端。
 pxeos_mpa_permit_regression.sh  # 以临时文件覆盖 MPA 下载许可的本地分派。
-pxeos_usb_console_regression.sh  # 核对 USB 镜像控制台菜单与显示参数。
+pxeos_php_retirement_regression.sh  # 旧 PHP 运行时及产品 USB 制作/发布入口退役、本地诊断/badblocks mock 和强制 checkin 边界。
 ```
 
 ## 脚本审计回归（3）

@@ -14,23 +14,6 @@ if [[ -z $disks ]]; then
 fi
 echo "Done"
 debugPause
-dots "Checking in"
-res=""
-count=0
-sysuuid=$(dmidecode -s system-uuid)
-sysuuid=${sysuuid,,}
-while [[ $res != "##@GO" ]]; do
-    res=$(curl -Lks --data "sysuuid=${sysuuid}&mac=$mac" ${web}service/Pre_Stage1.php 2>/dev/null)
-    if [[ $count -ge 10 ]]; then
-        echo "Failed"
-        debugPause
-        handleError "Could not checkin. ($0)\n   Args Passed: $*"
-    fi
-    let count+=1
-    usleep 5000000
-done
-echo "Done"
-debugPause
 for disk in $disks; do
     dots "Disk device surface test for $disk"
     usleep 2000000

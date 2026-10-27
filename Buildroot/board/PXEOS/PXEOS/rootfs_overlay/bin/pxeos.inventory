@@ -1,5 +1,4 @@
 #!/bin/bash
-[[ $mode == +(*capone*) ]] && return
 . /usr/share/pxeos/lib/funcs.sh || exit 1
 [[ $deployed -eq 1 ]] && . /bin/pxeos.checkin
 rootpxe_api="${pxeapi:-$web}"

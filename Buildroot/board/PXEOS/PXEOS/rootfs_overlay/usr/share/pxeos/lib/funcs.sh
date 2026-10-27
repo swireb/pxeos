@@ -293,7 +293,7 @@ REG_LOCAL_MACHINE_XP="/ntfs/WINDOWS/system32/config/system"
 [[ -z $ismajordebug ]] && ismajordebug=0
 rootpxe_kernel_key_allowed() {
     case "$1" in
-        web|pxeapi|taskid|task_token|token|mac|type|img|imgpath|osid|imgType|imgPartitionType|imgFormat|PIGZ_COMP|storage|storageip|storage_server|storage_export|export_path|protocol|hostName|changeHostname|shutdown|mc|pct|capone|nombr|fdrive|mode|boottype|deployed|isdebug|ismajordebug|chkdsk|keymap|manual_token|manual_spki_pin|manual_arch|manual_platform) return 0 ;;
+        web|pxeapi|taskid|task_token|token|mac|type|img|imgpath|osid|imgType|imgPartitionType|imgFormat|PIGZ_COMP|storage|storageip|storage_server|storage_export|export_path|protocol|hostName|changeHostname|shutdown|mc|pct|nombr|fdrive|mode|deployed|isdebug|ismajordebug|chkdsk|keymap|manual_token|manual_spki_pin|manual_arch|manual_platform) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -311,24 +311,6 @@ rootpxe_import_kernel_args() {
     export task_token
 }
 rootpxe_import_kernel_args
-rootpxe_import_usb_hinfo() {
-    local line key value
-    [[ ${boottype:-} == usb && -f /tmp/hinfo.txt ]] || return 0
-    while IFS= read -r line || [[ -n $line ]]; do
-        line=${line#export }; line=${line#declare -x }
-        [[ $line == *=* ]] || continue
-        key=${line%%=*}; value=${line#*=}
-        rootpxe_kernel_key_allowed "$key" || continue
-        if [[ $value == \"*\" || $value == \'*\' ]]; then
-            quote=${value:0:1}; [[ ${value: -1} == "$quote" ]] || continue
-            value=${value:1:${#value}-2}
-        fi
-        [[ $value != *\"* && $value != *\'* && $value != *'`'* && $value != *'$('* ]] || continue
-        [[ $value != *$'\n'* && $value != *$'\r'* ]] || continue
-        printf -v "$key" '%s' "$value"; export "$key"
-    done </tmp/hinfo.txt
-}
-rootpxe_import_usb_hinfo
 
 rootpxe_normalize_mac() {
     local value=${1//:/}; value=${value,,}
@@ -6084,7 +6066,6 @@ completeTasking() {
             ;;
         down)
             rootpxe_progress_data_phase_active && rootpxe_stage restore "deploy write finished, running completion"
-            [[ $capone -eq 1 ]] && exit 0
             if rootpxe_deployment_identity_policy_enabled; then
                 rootpxe_deployment_identity_request_plan "$hd" || handleError "PXEOS_STAGE=deployment_identity_plan CODE=IDENTITY_PLAN_REJECTED"
             fi

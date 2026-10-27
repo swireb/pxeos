@@ -5,7 +5,6 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
 build="$root/build.sh"
 filesystem_lvm_patch="$root/patch/filesystem/lvm2-udev-sync.patch"
-usb="$root/create-usb-image.sh"
 realtek="$root/KernelPackages/drivers/net/ethernet/realtek/Makefile"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
@@ -22,9 +21,6 @@ grep -Fq 'LVM2_DEPENDENCIES += udev' "$filesystem_lvm_patch" || fail 'LVM udev p
 grep -Fq '"$PROJECT_DIRECTORY/Buildroot/"' "$build" || fail 'Buildroot source input is not anchored to project directory'
 grep -Fq 'return 1' "$build" || fail 'build artifact failure cannot propagate'
 grep -Fq 'CONFIG_R8127' "$realtek" || fail 'R8127 make target missing'
-grep -Fq -- '--boot-assets' "$usb" || fail 'USB assets option missing'
-grep -Fq 'memtest.bin' "$usb" || fail 'USB asset contract missing memtest'
-grep -Fq 'file -b --mime-type' "$usb" || fail 'USB asset validation missing'
 
 # Exercise the real selectors with regular-file paths and command mocks only.
 tmp=$(mktemp -d)
@@ -60,21 +56,6 @@ imgFormat=5; imgLegacy=''; imgFormat=5; storage=mock; img=image
 rootpxe_partclone_progress_term=xterm; rootpxe_partclone_progress_args=(); rootpxe_partclone_progress_stderr_target="$tmp/partclone.err"
 rm -f /tmp/pigz1; writeImage "$tmp/split/f.*" /dev/mock no; rm -f /tmp/pigz1
 [[ $(<"$split_args") == $"$tmp/split/f.000"$'\n'"$tmp/split/f.001"$'\n'"$tmp/split/f.010" ]] || fail 'unordered compgen fragments were not sorted'
-
-# USB validation must fail before its first destructive image command.
-mkdir -p "$tmp/mock-bin" "$tmp/assets"
-cat >"$tmp/mock-bin/dd" <<'EOF'
-#!/usr/bin/env bash
-touch "${ROOTPXE_USB_DD_CALLED:?}"
-EOF
-chmod +x "$tmp/mock-bin/dd"
-ROOTPXE_USB_DD_CALLED="$tmp/dd-called" PATH="$tmp/mock-bin:$PATH" "$usb" https://release.invalid --boot-assets "$tmp/assets" >/dev/null 2>&1 && fail 'missing boot assets accepted'
-[[ ! -e $tmp/dd-called ]] || fail 'missing boot assets reached dd'
-for asset in memdisk memtest.bin ipxe.krn ipxe.efi; do printf 'not html but invalid efi\n' >"$tmp/assets/$asset"; done
-ROOTPXE_USB_DD_CALLED="$tmp/dd-called" PATH="$tmp/mock-bin:$PATH" "$usb" https://release.invalid --boot-assets "$tmp/assets" >/dev/null 2>&1 && fail 'invalid EFI accepted'
-[[ ! -e $tmp/dd-called ]] || fail 'invalid EFI reached dd'
-ROOTPXE_USB_DD_CALLED="$tmp/dd-called" PATH="$tmp/mock-bin:$PATH" "$usb" https://release.invalid --boot-assets >/dev/null 2>&1 && fail 'missing --boot-assets value accepted'
-[[ ! -e $tmp/dd-called ]] || fail 'missing --boot-assets value reached dd'
 
 # The extracted build helper must leave an already-applied patch unchanged and
 # reject a conflicting patch without performing a reverse application.

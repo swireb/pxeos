@@ -453,12 +453,10 @@ checkin_rootpxe() {
     debugPause
 }
 
-if [[ ! $capone -eq 1 ]]; then
-    checkin_rootpxe
-    checkin_rc=$?
-    # This script is sourced by upload/download. A nonzero checkin result must
-    # terminate that parent task so S99pxeos can perform the fixed safe reboot.
-    [[ $checkin_rc -eq 0 ]] || exit "$checkin_rc"
-    [[ ${rootpxe_storage_only:-no} == yes ]] || rootpxe_stage checkin "PXEOS checkin completed"
-fi
+checkin_rootpxe
+checkin_rc=$?
+# This script is sourced by upload/download. A nonzero checkin result must
+# terminate that parent task so S99pxeos can perform the fixed safe reboot.
+[[ $checkin_rc -eq 0 ]] || exit "$checkin_rc"
+[[ ${rootpxe_storage_only:-no} == yes ]] || rootpxe_stage checkin "PXEOS checkin completed"
 [[ ${rootpxe_storage_only:-no} == yes ]] || pxeos_checkin_runtime_setup

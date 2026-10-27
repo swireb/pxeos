@@ -135,7 +135,7 @@ for iface in $ifaces; do
     for retry in $(seq 3); do
         pxeos_network_acquire_dhcp "$iface"
         ustat="$?"
-        # RootPXE/PXEOS 连通性统一探测 /health（不再兼容 index.php）
+        # RootPXE/PXEOS 连通性统一探测 /pxe/v1/health
         cstat=1
         if [[ -n $pxeapi ]]; then
             curl -Ikfso /dev/null "${pxeapi}health" --connect-timeout 5

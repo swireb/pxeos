@@ -1529,11 +1529,9 @@ awk '/^handleError\(\)/ { copy = 1 } /^# Re-reads the partition table/ { exit } 
 printf '. "%s"\n' "$tmp/redact.sh" >>"$tmp/handlers.sh"
 awk '/^displayBanner\(\)/ { copy = 1 } /^# Gets all system mac addresses except for loopback/ { exit } copy' "$funcs" >"$tmp/banner.sh"
 awk '/^pxeos_init_message\(\)/ { copy = 1 } /^# SSH/ { exit } copy' "$overlay/etc/init.d/S99pxeos" >"$tmp/init-console.sh"
-awk '/^display_registration_response\(\)/ { copy = 1 } /^disks=/{ exit } copy' "$overlay/bin/pxeos.auto.reg" >"$tmp/auto-registration-response.sh"
 [[ -s $tmp/console.sh ]] || fail 'console formatter was not extracted'
 [[ -s $tmp/banner.sh ]] || fail 'console banner was not extracted'
 [[ -s $tmp/init-console.sh ]] || fail 'init console formatter was not extracted'
-[[ -s $tmp/auto-registration-response.sh ]] || fail 'automatic registration response formatter was not extracted'
 must_not_have "$tmp/handlers.sh" '/proc/cmdline'
 
 (
@@ -1542,15 +1540,6 @@ must_not_have "$tmp/handlers.sh" '/proc/cmdline'
 ) >"$tmp/init-console.out"
 [[ $(cat "$tmp/init-console.out") == '[WARN]  Init formatter test.' ]] || fail 'init console formatter must match the common level/body layout'
 must_fit "$(cat "$tmp/init-console.out")"
-
-(
-    . "$tmp/console.sh"
-    . "$tmp/auto-registration-response.sh"
-    display_registration_response $'#!ok\nregistered'
-) >"$tmp/auto-registration-response.out"
-grep -Fqx '[INFO]  Server response: #!ok' "$tmp/auto-registration-response.out" || fail 'automatic registration must render the first response line safely'
-grep -Fqx '[INFO]  Server response: registered' "$tmp/auto-registration-response.out" || fail 'automatic registration must render every response line safely'
-
 
 (
     . "$tmp/console.sh"
@@ -1752,18 +1741,15 @@ must_have "$overlay/bin/pxeos.sysinfo" "rootpxe_console_message INFO 'Network in
 must_have "$overlay/bin/pxeos.sysinfo" 'rootpxe_console_message INFO "Network: $blNicOk."'
 must_have "$overlay/bin/pxeos.sysinfo" 'rootpxe_console_message INFO "Disk device: $blHddOk."'
 must_have "$overlay/bin/pxeos.sysinfo" 'rootpxe_console_message INFO "System MAC address: $mac"'
-must_have "$overlay/bin/pxeos.auto.reg" 'rootpxe_console_message INFO "Server response: $response_line"'
 must_have "$overlay/bin/pxeos.man.reg" 'pinnedpubkey "$manual_spki_pin"'
 must_have "$overlay/bin/pxeos.man.reg" 'DIALOG_ESC=10 DIALOG_ERROR=255'
 must_have "$overlay/bin/pxeos.man.reg" '${pxeapi%/}/manual/$action'
 must_have "$overlay/bin/pxeos.man.reg" 'manual_token'
-must_not_have "$overlay/bin/pxeos.auto.reg" 'echo "$res"'
 must_not_have "$overlay/bin/pxeos.man.reg" 'hostnameloop.php'
 must_not_have "$overlay/bin/pxeos.man.reg" 'auto.register.php'
-must_not_have "$overlay/bin/pxeos.auto.reg" 'Host registration completed.'
 must_not_have "$overlay/bin/pxeos.man.reg" 'Host registration completed.'
 must_have "$overlay/bin/pxeos.surfacetest" 'dots "Locating disk devices"'
-must_have "$overlay/bin/pxeos.surfacetest" 'dots "Checking in"'
+must_not_have "$overlay/bin/pxeos.surfacetest" 'service/Pre_Stage1.php'
 must_have "$overlay/bin/pxeos.photorec" 'dots "Creating file system mount point"'
 must_have "$overlay/bin/pxeos.checkmount" 'dots "Checking mounted file system"'
 must_have "$overlay/bin/pxeos.checkmountdrivesize" 'dots "Checking server disk space"'

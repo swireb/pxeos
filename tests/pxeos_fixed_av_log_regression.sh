@@ -67,6 +67,15 @@ expected=$(printf 'EICAR FOUND token=scan-secret\nsecond FOUND\n')
 check test "$found" = "$expected"
 ! pxeos_av_found_lines "$tmp/mount.raw" | grep -q FOUND || fail mixed-found-source
 
+# Execute the production post-scan summary. Infected paths remain in the
+# private diagnostic log; the removed PHP callback and response file are gone.
+! grep -q 'service/av.php\|/tmp/avstat' "$av" || fail retired-php-reporting
+rootpxe_console_message() { printf '[%s] %s\n' "$1" "$2"; }
+scan_log="$tmp/scan.raw"
+summary=$(eval "$(awk '/^        cnt=\$\(pxeos_av_found_lines/ {copy=1} copy && /pxeos_av_diag_finish/ {exit} copy {print}' "$av")")
+check test "$summary" = '[INFO] Infected files: 2.'
+! grep -q 'scan-secret\|EICAR' <<<"$summary" || fail raw-scan-content-leaked
+
 # Exercise the real fixed-log publisher and the task-level new-file boundary
 # in a private substituted directory.
 unset -f rootpxe_log_raw_file rootpxe_log_publish
