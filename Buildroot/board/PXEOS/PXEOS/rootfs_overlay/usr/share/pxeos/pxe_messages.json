@@ -51,7 +51,8 @@
     "failed": "任务失败",
     "cancelled": "任务已取消",
     "superseded": "任务已替换",
-    "aborted": "任务已终止"
+    "aborted": "任务已终止",
+    "storage": "连接镜像存储"
   },
   "codes": {
     "CAPTURE_BINDING_CHANGED": "抓取磁盘绑定已变化",
@@ -262,7 +263,22 @@
     "LEGACY_GPT_BOOT_WRITE_FAILED": "写入 GPT 引导信息失败",
     "LEGACY_MBR_BOOT_WRITE_FAILED": "写入 MBR 引导信息失败",
     "LEGACY_PARTITION_READBACK_FAILED": "分区复检失败",
-    "LEGACY_CACHE_SETTING_FAILED": "设置磁盘缓存失败"
+    "LEGACY_CACHE_SETTING_FAILED": "设置磁盘缓存失败",
+    "STORAGE_CONTEXT_REQUIRED": "缺少存储执行上下文",
+    "STORAGE_MOUNTPOINT_UNAVAILABLE": "无法创建存储挂载目录",
+    "STORAGE_MOUNTPOINT_UNSAFE": "存储挂载目录不安全",
+    "STORAGE_NFS_MOUNT_FAILED": "挂载 NFS 镜像存储失败",
+    "STORAGE_PREFLIGHT_FAILED": "存储预检失败",
+    "STORAGE_PREFLIGHT_REQUIRED": "缺少存储预检结果",
+    "STORAGE_PREVIOUS_MOUNT_BUSY": "先前的存储挂载仍被占用",
+    "STORAGE_PROTOCOL_INVALID": "存储协议无效",
+    "STORAGE_READ_PREPARE_FAILED": "准备读取镜像存储失败",
+    "STORAGE_SERVER_INVALID": "存储服务器地址无效",
+    "STORAGE_SMB_CREDENTIALS_REQUIRED": "缺少 SMB 存储访问凭据",
+    "STORAGE_SMB_MOUNT_FAILED": "挂载 SMB 镜像存储失败",
+    "STORAGE_SMB_VERSION_INVALID": "SMB 存储协议版本无效",
+    "STORAGE_TASK_TYPE_INVALID": "存储任务类型无效",
+    "STORAGE_WRITE_PREPARE_FAILED": "准备写入镜像存储失败"
   },
   "reasons": {
     "artifact_set_is_not_safe_or_complete": "镜像文件不完整或未通过安全检查",
@@ -592,7 +608,8 @@
       "failed": "Task failed",
       "cancelled": "Task cancelled",
       "superseded": "Task replaced",
-      "aborted": "Task stopped"
+      "aborted": "Task stopped",
+      "storage": "Connecting image storage"
     },
     "codes": {
       "CAPTURE_BINDING_CHANGED": "Capture disk binding changed",
@@ -803,7 +820,22 @@
       "LEGACY_GPT_BOOT_WRITE_FAILED": "GPT boot data write failed",
       "LEGACY_MBR_BOOT_WRITE_FAILED": "MBR boot data write failed",
       "LEGACY_PARTITION_READBACK_FAILED": "Partition readback failed",
-      "LEGACY_CACHE_SETTING_FAILED": "Disk cache setting failed"
+      "LEGACY_CACHE_SETTING_FAILED": "Disk cache setting failed",
+      "STORAGE_CONTEXT_REQUIRED": "Storage execution context required",
+      "STORAGE_MOUNTPOINT_UNAVAILABLE": "Storage mount directory unavailable",
+      "STORAGE_MOUNTPOINT_UNSAFE": "Unsafe storage mount directory",
+      "STORAGE_NFS_MOUNT_FAILED": "NFS image storage mount failed",
+      "STORAGE_PREFLIGHT_FAILED": "Storage preflight failed",
+      "STORAGE_PREFLIGHT_REQUIRED": "Storage preflight result required",
+      "STORAGE_PREVIOUS_MOUNT_BUSY": "Previous storage mount is busy",
+      "STORAGE_PROTOCOL_INVALID": "Invalid storage protocol",
+      "STORAGE_READ_PREPARE_FAILED": "Storage read preparation failed",
+      "STORAGE_SERVER_INVALID": "Invalid storage server address",
+      "STORAGE_SMB_CREDENTIALS_REQUIRED": "SMB storage credentials required",
+      "STORAGE_SMB_MOUNT_FAILED": "SMB image storage mount failed",
+      "STORAGE_SMB_VERSION_INVALID": "Invalid SMB storage protocol version",
+      "STORAGE_TASK_TYPE_INVALID": "Invalid storage task type",
+      "STORAGE_WRITE_PREPARE_FAILED": "Storage write preparation failed"
     },
     "reasons": {
       "artifact_set_is_not_safe_or_complete": "Image files are incomplete or unsafe",
