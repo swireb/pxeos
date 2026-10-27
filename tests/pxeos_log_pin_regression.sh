@@ -8,6 +8,9 @@ tmp=$(mktemp -d /tmp/pxeos-log-pin-test.XXXXXX)
 trap 'rm -rf -- "$tmp"' EXIT
 . "$root/tests/task-log-test-support.sh"
 task_log_test_load_helpers "$lib/funcs.sh"
+# No sampler exists in this fixture; load the real empty-reporter branch.
+eval "$(sed -n '/^killStatusReporter() {/,/^}/p' "$lib/funcs.sh")"
+statusReporter=''
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 rootpxe_task_log_initialize
 pin=${rootpxe_task_log_state[pin]:-}
@@ -50,7 +53,8 @@ rootpxe_task_log_release_pin
 rootpxe_task_log_valid && fail released-pin-still-ready
 reset_line=$(grep -nF 'rootpxe_reset_disk_permit_retry_state || return 1' "$lib/funcs.sh" | cut -d: -f1)
 release_line=$(grep -nF 'rootpxe_task_log_release_pin || true' "$lib/funcs.sh" | cut -d: -f1)
-exec_line=$(grep -nF 'exec /bin/pxeos' "$lib/funcs.sh" | cut -d: -f1)
+exec_line=$(grep -nE '^[[:space:]]*exec /bin/pxeos[[:space:]]*$' "$lib/funcs.sh" | cut -d: -f1)
+[[ $exec_line =~ ^[0-9]+$ ]] || fail retry-exec-not-unique
 [[ $reset_line -lt $release_line && $release_line -lt $exec_line ]] || fail retry-release-order
 # Run the complete current queued branch. Only the terminal exec boundary is
 # replaced, so the real pin release and original permit-reset ordering run.

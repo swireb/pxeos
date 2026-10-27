@@ -139,7 +139,7 @@ check test "$(wc -c <"$log")" -le 4194304
 check grep -Fq 'LATEST ERROR CODE=LATEST_FAIL' "$log"
 callback=$(rootpxe_bound_callback_message "$(printf '%0270000d' 0)")
 check test "$(printf '%s' "$callback" | wc -c)" -le 262144
-check bash -c '[[ $1 == *"TRUNCATED: Task log:"* ]]' _ "$callback"
+check grep -Fq "TRUNCATED: Task log:" <<<"$callback"
 # 替换成 symlink 不得继续写，也不能伪报真实路径。
 printf sentinel >"$tmp/other"; rm "$log"; ln -s "$tmp/other" "$log"
 [[ -L $log ]] || printf 'NOTE: emulated symlink tests replacement inode rejection, not native Linux symlinks.\n' >&2
