@@ -362,7 +362,7 @@ pxeos.sysinfo
 
 ```text
 mode=manreg                         # 启动手动注册模式
-pxeapi=https://.../service/pxeos/    # 必须传入的 HTTPS 控制 URL
+pxeapi=https://.../pxe/v1/    # 必须传入的 HTTPS 控制 URL
 manual_token                        # 必须传入的手动令牌
 manual_spki_pin                     # 必须传入的 SPKI pin
 sha256//<base64-sha256>             # SPKI pin 的严格格式

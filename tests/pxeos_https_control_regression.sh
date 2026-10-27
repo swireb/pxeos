@@ -30,11 +30,12 @@ curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_arg
 mc=yes multicastSessionId=1 multicastSessionKey=mc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa progress_attempt=1
 printf '{}' >"$tmp/request.json"
 
-rootpxe_api=https://192.0.2.30:9443/service/pxeos/
+rootpxe_api=https://192.0.2.30:9443/pxe/v1/
 rootpxe_multicast_http_post join "$tmp/request.json"
 grep -Fqx -- '-k' "$tmp/curl.args" || { echo 'FAIL: HTTPS multicast request did not use curl -k' >&2; exit 1; }
+grep -Fqx -- 'https://192.0.2.30:9443/pxe/v1/multicast/join' "$tmp/curl.args" || { echo 'FAIL: multicast request did not use the supplied versioned control base' >&2; exit 1; }
 
-rootpxe_api=http://192.0.2.30/service/pxeos/
+rootpxe_api=http://192.0.2.30/pxe/v1/
 rootpxe_multicast_http_post join "$tmp/request.json"
 if grep -Fqx -- '-k' "$tmp/curl.args"; then
     echo 'FAIL: HTTP multicast request unexpectedly used curl -k' >&2
@@ -66,7 +67,7 @@ EOF
 chmod +x "$tmp/bin/curl"
 export ROOTPXE_TEST_CURL_PID_FILE="$tmp/actual-curl.pid"
 PATH="$tmp/bin:$PATH"
-rootpxe_api=https://192.0.2.30:9443/service/pxeos/
+rootpxe_api=https://192.0.2.30:9443/pxe/v1/
 rootpxe_multicast_http_dir="$monitor_dir"
 set +e
 rootpxe_multicast_http_post join "$tmp/request.json" &

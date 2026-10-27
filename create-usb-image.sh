@@ -84,7 +84,7 @@ EOF
 echo Create the grub configuration file
 cat > /mnt/boot/grub/grub.cfg << 'EOF'
 
-set mypxeosip=http://change-this-to-your-rootpxe-ip
+set mypxeosip=https://change-this-to-your-rootpxe-ip:9443
 set myimage=/boot/bzImage
 set myinits=/boot/init.xz
 set myloglevel=4
@@ -94,7 +94,7 @@ insmod all_video
 menuentry "1. PXEOS Image Deploy/Capture" {
  set gfxpayload=1024x768,auto
  echo loading the kernel
- linux  $myimage loglevel=$myloglevel initrd=init.xz root=/dev/ram0 rw ramdisk_size=275000 keymap= web=$mypxeosip/service/pxeos/ boottype=usb consoleblank=0 rootfstype=ext4 fbcon=font:VGA8x16
+ linux  $myimage loglevel=$myloglevel initrd=init.xz root=/dev/ram0 rw ramdisk_size=275000 keymap= web=$mypxeosip/pxe/v1/ pxeapi=$mypxeosip/pxe/v1/ boottype=usb consoleblank=0 rootfstype=ext4 fbcon=font:VGA8x16
  echo loading the virtual hard drive
  initrd $myinits
  echo booting kernel...
@@ -103,7 +103,7 @@ menuentry "1. PXEOS Image Deploy/Capture" {
 menuentry "2. Perform Full Host Registration and Inventory" {
  set gfxpayload=1024x768,auto
  echo loading the kernel
- linux  $myimage loglevel=$myloglevel initrd=init.xz root=/dev/ram0 rw ramdisk_size=275000 keymap= web=$mypxeosip/service/pxeos/ boottype=usb consoleblank=0 rootfstype=ext4 mode=manreg fbcon=font:VGA8x16
+ linux  $myimage loglevel=$myloglevel initrd=init.xz root=/dev/ram0 rw ramdisk_size=275000 keymap= web=$mypxeosip/pxe/v1/ pxeapi=$mypxeosip/pxe/v1/ boottype=usb consoleblank=0 rootfstype=ext4 mode=manreg fbcon=font:VGA8x16
  echo loading the virtual hard drive
  initrd $myinits
  echo booting kernel...
@@ -112,7 +112,7 @@ menuentry "2. Perform Full Host Registration and Inventory" {
 menuentry "3. Quick Registration and Inventory" {
  set gfxpayload=1024x768,auto
  echo loading the kernel
- linux  $myimage loglevel=$myloglevel initrd=init.xz root=/dev/ram0 rw ramdisk_size=275000 keymap= web=$mypxeosip/service/pxeos/ boottype=usb consoleblank=0 rootfstype=ext4 mode=autoreg fbcon=font:VGA8x16
+ linux  $myimage loglevel=$myloglevel initrd=init.xz root=/dev/ram0 rw ramdisk_size=275000 keymap= web=$mypxeosip/pxe/v1/ pxeapi=$mypxeosip/pxe/v1/ boottype=usb consoleblank=0 rootfstype=ext4 mode=autoreg fbcon=font:VGA8x16
  echo loading the virtual hard drive
  initrd $myinits
  echo booting kernel...
@@ -121,7 +121,7 @@ menuentry "3. Quick Registration and Inventory" {
 menuentry "4. Client System Information (Compatibility)" {
  set gfxpayload=1024x768,auto
  echo loading the kernel
- linux  $myimage loglevel=$myloglevel initrd=init.xz root=/dev/ram0 rw ramdisk_size=275000 keymap= web=$mypxeosip/service/pxeos/ boottype=usb consoleblank=0 rootfstype=ext4 mode=sysinfo fbcon=font:VGA8x16
+ linux  $myimage loglevel=$myloglevel initrd=init.xz root=/dev/ram0 rw ramdisk_size=275000 keymap= web=$mypxeosip/pxe/v1/ pxeapi=$mypxeosip/pxe/v1/ boottype=usb consoleblank=0 rootfstype=ext4 mode=sysinfo fbcon=font:VGA8x16
  echo loading the virtual hard drive
  initrd $myinits
  echo booting kernel...

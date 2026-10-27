@@ -76,7 +76,7 @@ contains "$tmp/layout.trace" 'layout-cleanup' 'layout readback cleanup was skipp
 
 (
     type=up rootpxe_capture_resume_published=1 mc=no
-    pxeapi=https://example.invalid/service/pxeos/ web=https://example.invalid/service/pxeos/
+    pxeapi=https://example.invalid/pxe/v1/ web=https://example.invalid/pxe/v1/
     taskid=9 task_token=fixture-only-token mac=001122334455
     rootpxe_require_task_context(){ return 0; }
     dmidecode(){ printf 'fixture-system-uuid\n'; }

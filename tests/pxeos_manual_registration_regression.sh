@@ -179,7 +179,7 @@ PXEOS_TEST_STATE="$tmp/state" \
 PXEOS_TEST_REQUESTS="$tmp/requests" \
 PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" \
 PXEOS_TEST_RUNTIME_DIR="$tmp/runtime-dir" \
-PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/service/pxeos/' mac='00:11:22:33:44:55' manual_token='boot-token' \
+PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/pxe/v1/' mac='00:11:22:33:44:55' manual_token='boot-token' \
 manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" \
 bash "$client"
 rc=$?
@@ -209,7 +209,7 @@ runtime_dir=$(<"$tmp/runtime-dir")
 rm -rf "$tmp/state" "$tmp/requests" "$tmp/handoff"; mkdir "$tmp/state" "$tmp/requests"
 : >"$tmp/reboot.log"; : >"$tmp/poweroff.log"; : >"$tmp/dialog.log"
 set +e
-PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" PXEOS_TEST_TASK=capture PXEOS_MANREG_TTY="$tmp/tty" PXEOS_TEST_DIALOG_LOG="$tmp/dialog.log" PXEOS_TEST_CURL_ARGS="$tmp/curl-args.log" PXEOS_TEST_STATE="$tmp/state" PXEOS_TEST_REQUESTS="$tmp/requests" PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" PXEOS_TEST_POWEROFF_LOG="$tmp/poweroff.log" PXEOS_TEST_RUNTIME_DIR="$tmp/runtime-dir" PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/service/pxeos/' mac='00:11:22:33:44:55' manual_token='boot-token' manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" bash "$client"
+PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" PXEOS_TEST_TASK=capture PXEOS_MANREG_TTY="$tmp/tty" PXEOS_TEST_DIALOG_LOG="$tmp/dialog.log" PXEOS_TEST_CURL_ARGS="$tmp/curl-args.log" PXEOS_TEST_STATE="$tmp/state" PXEOS_TEST_REQUESTS="$tmp/requests" PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" PXEOS_TEST_POWEROFF_LOG="$tmp/poweroff.log" PXEOS_TEST_RUNTIME_DIR="$tmp/runtime-dir" PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/pxe/v1/' mac='00:11:22:33:44:55' manual_token='boot-token' manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" bash "$client"
 rc=$?
 set -e
 [[ $rc -eq 20 ]] || fail "capture handoff exited $rc, want 20"
@@ -225,7 +225,7 @@ run_none_completion_case() {
   local power_scenario=$1
   rm -rf "$tmp/state" "$tmp/requests" "$tmp/handoff"; mkdir "$tmp/state" "$tmp/requests"
   : >"$tmp/reboot.log"; : >"$tmp/poweroff.log"; : >"$tmp/dialog.log"
-  PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" PXEOS_TEST_TASK=none PXEOS_TEST_POWER_SCENARIO="$power_scenario" PXEOS_MANREG_TTY="$tmp/tty" PXEOS_TEST_DIALOG_LOG="$tmp/dialog.log" PXEOS_TEST_CURL_ARGS="$tmp/curl-args.log" PXEOS_TEST_STATE="$tmp/state" PXEOS_TEST_REQUESTS="$tmp/requests" PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" PXEOS_TEST_POWEROFF_LOG="$tmp/poweroff.log" PXEOS_TEST_RUNTIME_DIR="$tmp/runtime-dir" PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/service/pxeos/' mac='00:11:22:33:44:55' manual_token='boot-token' manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" bash "$client"
+  PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" PXEOS_TEST_TASK=none PXEOS_TEST_POWER_SCENARIO="$power_scenario" PXEOS_MANREG_TTY="$tmp/tty" PXEOS_TEST_DIALOG_LOG="$tmp/dialog.log" PXEOS_TEST_CURL_ARGS="$tmp/curl-args.log" PXEOS_TEST_STATE="$tmp/state" PXEOS_TEST_REQUESTS="$tmp/requests" PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" PXEOS_TEST_POWEROFF_LOG="$tmp/poweroff.log" PXEOS_TEST_RUNTIME_DIR="$tmp/runtime-dir" PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/pxe/v1/' mac='00:11:22:33:44:55' manual_token='boot-token' manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" bash "$client"
   [[ $(jq -r '.taskType' "$tmp/requests/confirm.1.json") == none ]] || fail "$power_scenario did not reach confirmation"
   [[ $(<"$tmp/state/commit") == 1 ]] || fail "$power_scenario repeated the completed commit"
   [[ ! -e $tmp/state/cancel ]] || fail "$power_scenario submitted an unexpected cancellation"
@@ -265,7 +265,7 @@ printf '{"cancelled":true}' >"$out"; printf '200'
 EOF
 chmod +x "$tmp/bin/dialog" "$tmp/bin/curl"
 rm -f "$tmp/reboot.log" "$tmp/state/cancel"
-PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" PXEOS_MANREG_TTY="$tmp/tty" PXEOS_TEST_DIALOG_LOG="$tmp/dialog.log" PXEOS_TEST_CURL_ARGS="$tmp/curl-args.log" PXEOS_TEST_STATE="$tmp/state" PXEOS_TEST_REQUESTS="$tmp/requests" PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/service/pxeos/' mac='00:11:22:33:44:55' manual_token='boot-token' manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" bash "$client"
+PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" PXEOS_MANREG_TTY="$tmp/tty" PXEOS_TEST_DIALOG_LOG="$tmp/dialog.log" PXEOS_TEST_CURL_ARGS="$tmp/curl-args.log" PXEOS_TEST_STATE="$tmp/state" PXEOS_TEST_REQUESTS="$tmp/requests" PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/pxe/v1/' mac='00:11:22:33:44:55' manual_token='boot-token' manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" bash "$client"
 [[ $(<"$tmp/state/cancel") == 2 ]] || fail 'cancel failure was not retried'
 [[ $(wc -l <"$tmp/reboot.log") -eq 1 ]] || fail 'successful cancellation did not reboot once'
 
@@ -288,7 +288,7 @@ printf '200'
 EOF
 chmod +x "$tmp/bin/curl"
 rm -f "$tmp/reboot.log" "$tmp/poweroff.log" "$tmp/state/cancel" "$tmp/state/power-menu"
-PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" PXEOS_TEST_POWER_ACTION=poweroff PXEOS_MANREG_TTY="$tmp/tty" PXEOS_TEST_DIALOG_LOG="$tmp/dialog.log" PXEOS_TEST_CURL_ARGS="$tmp/curl-args.log" PXEOS_TEST_STATE="$tmp/state" PXEOS_TEST_REQUESTS="$tmp/requests" PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" PXEOS_TEST_POWEROFF_LOG="$tmp/poweroff.log" PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/service/pxeos/' mac='00:11:22:33:44:55' manual_token='boot-token' manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" bash "$client"
+PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" PXEOS_TEST_POWER_ACTION=poweroff PXEOS_MANREG_TTY="$tmp/tty" PXEOS_TEST_DIALOG_LOG="$tmp/dialog.log" PXEOS_TEST_CURL_ARGS="$tmp/curl-args.log" PXEOS_TEST_STATE="$tmp/state" PXEOS_TEST_REQUESTS="$tmp/requests" PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" PXEOS_TEST_POWEROFF_LOG="$tmp/poweroff.log" PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/pxe/v1/' mac='00:11:22:33:44:55' manual_token='boot-token' manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" bash "$client"
 [[ ! -s $tmp/reboot.log && $(wc -l <"$tmp/poweroff.log") -eq 1 ]] || fail 'completed registration-only cancellation did not require an explicit power action'
 [[ $(<"$tmp/state/cancel") == 1 && $(<"$tmp/state/power-menu") == 1 ]] || fail 'completed cancellation was retried instead of opening the power menu'
 grep -Fq 'Registration completed. Select an action.' "$tmp/dialog.log" || fail 'completed registration-only cancellation did not show the power menu'
@@ -390,7 +390,7 @@ run_case() {
   local scenario=$1 expected_rc=$2 rc runtime
   rm -rf -- "$tmp/state" "$tmp/requests"; mkdir "$tmp/state" "$tmp/requests"; : >"$tmp/reboot.log"; : >"$tmp/poweroff.log"; : >"$tmp/dialog.log"; : >"$tmp/curl-args.log"; : >"$tmp/runtime-dir"
   set +e
-  PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" PXEOS_TEST_SCENARIO="$scenario" PXEOS_MANREG_TTY="$tmp/tty" PXEOS_TEST_DIALOG_LOG="$tmp/dialog.log" PXEOS_TEST_CURL_ARGS="$tmp/curl-args.log" PXEOS_TEST_STATE="$tmp/state" PXEOS_TEST_REQUESTS="$tmp/requests" PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" PXEOS_TEST_POWEROFF_LOG="$tmp/poweroff.log" PXEOS_TEST_RUNTIME_DIR="$tmp/runtime-dir" PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/service/pxeos/' mac='00:11:22:33:44:55' manual_token='boot-token' manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" bash "$client"
+  PATH="$tmp/bin:/usr/bin:/bin:/c/Windows/system32" PXEOS_TEST_SCENARIO="$scenario" PXEOS_MANREG_TTY="$tmp/tty" PXEOS_TEST_DIALOG_LOG="$tmp/dialog.log" PXEOS_TEST_CURL_ARGS="$tmp/curl-args.log" PXEOS_TEST_STATE="$tmp/state" PXEOS_TEST_REQUESTS="$tmp/requests" PXEOS_TEST_REBOOT_LOG="$tmp/reboot.log" PXEOS_TEST_POWEROFF_LOG="$tmp/poweroff.log" PXEOS_TEST_RUNTIME_DIR="$tmp/runtime-dir" PXEOS_MANREG_HANDOFF_DIR="$tmp/handoff" pxeapi='https://192.0.2.1:9443/pxe/v1/' mac='00:11:22:33:44:55' manual_token='boot-token' manual_spki_pin="sha256//$(printf 'A%.0s' {1..43})=" bash "$client"
   rc=$?
   set -e
   [[ $rc -eq $expected_rc ]] || fail "$scenario exited $rc, want $expected_rc"

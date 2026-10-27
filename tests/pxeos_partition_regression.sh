@@ -2184,7 +2184,7 @@ run_request() {
     local permit_response="$1" status_response="$2" target_id="${3:-disk-serial-1}"
     local request_log="$tmp/request.log"
     taskid=7 task_token='test-token-0123456789' mac='00:0c:29:ae:cc:4f'
-    pxeapi='https://rootpxe.invalid/api/'
+    pxeapi='https://rootpxe.invalid/console/'
     curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
         case " $* " in
             *disk-permit*) printf '%s\n' "$*" >>"$request_log"; [[ $permit_response == __CURL_TRANSPORT_FAILURE__ ]] && return 7; printf '%s' "$permit_response" ;;
@@ -2287,7 +2287,7 @@ set -e
 set +e
 (
     taskid=7 task_token='test-token-0123456789' mac='00:0c:29:ae:cc:4f'
-    pxeapi='https://rootpxe.invalid/api/'
+    pxeapi='https://rootpxe.invalid/console/'
     curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
         case " $* " in
             *disk-permit*) printf '%s' "$forbidden" ;;
@@ -2322,7 +2322,7 @@ grep -Fqx '[INFO]  Server code: DISK_PERMIT_TASK_REJECTED.' "$tmp/attention.out"
 set +e
 (
     taskid=7 task_token='test-token-0123456789' mac='00:0c:29:ae:cc:4f'
-    pxeapi='https://rootpxe.invalid/api/'
+    pxeapi='https://rootpxe.invalid/console/'
     curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
         case " $* " in
             *disk-permit*) printf '%s' "$unknown_code" ;;
@@ -2352,7 +2352,7 @@ set -e
 set +e
 (
     taskid=7 task_token='test-token-0123456789' mac='00:0c:29:ae:cc:4f'
-    pxeapi='https://rootpxe.invalid/api/'
+    pxeapi='https://rootpxe.invalid/console/'
     counter="$tmp/retry-count"
     : >"$counter"
     curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";

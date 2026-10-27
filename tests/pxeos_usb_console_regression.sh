@@ -6,6 +6,9 @@ script="$root/create-usb-image.sh"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 grep -Fq 'insmod all_video' "$script" || fail '缺少 all_video'
+grep -Fq 'set mypxeosip=https://change-this-to-your-rootpxe-ip:9443' "$script" || fail 'USB 控制基址必须使用 HTTPS'
+grep -Fq 'web=$mypxeosip/pxe/v1/ pxeapi=$mypxeosip/pxe/v1/' "$script" || fail 'USB 必须生成新版控制面基址'
+if grep -Eq '/service/(pxeos|ipxe)/|/api/ext/' "$script"; then fail 'USB 不得生成退役控制路径'; fi
 for entry in '1. PXEOS Image Deploy/Capture' '2. Perform Full Host Registration and Inventory' '3. Quick Registration and Inventory' '4. Client System Information (Compatibility)' '6. PXEOS Debug Kernel'; do
     block=$(awk -v entry="$entry" '$0 == "menuentry \"" entry "\" {" { inside=1 } inside { print } inside && $0 == "}" { exit }' "$script")
     [ -n "$block" ] || fail "找不到 PXEOS 条目: $entry"

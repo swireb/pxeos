@@ -200,7 +200,7 @@ NAS访问根预先存在。写任务才按需创建根下`dev/taskId/attempt`、
 
 helper固定入口为`rootpxe-storage-io --context-fd 3 --request-fd 4 --data-fd 5 --result-fd 6`。FD3来自root所有0600本地上下文；请求/ACK、数据和结果管道分离、有界。NFS普通存储进程先组→GID→UID→能力收敛→NoNewPrivs，之后才打开NAS；root块设备与压缩进程只通过本地FIFO交换数据，不把root已打开的NAS FD交给helper。NFS挂载使用单独固定入口，仅保留CAP_SYS_ADMIN和配置身份，不给挂载添加uid/gid参数。
 
-五回调位于`/service/pxeos/storage/preflight`、`publish-begin`、`publish-checkpoint`、`publish-complete`、`release`。preflight返回分页原目标清单、两端实际版本、rootFileId和原执行恢复信息；helper intent→created→result逐阶段经服务端持久后才ACK。全部producer成功退出后seal，publish-begin依据锁定任务所绑定镜像类型检查原捕获事实：n型必须提供originalSchema并通过结构及默认部署布局前置校验，其他类型可省略，客户端不能自行选择绑定类型；随后冻结原捕获事实和时间，再正式rename、finish、cleanup/helper join，最后release；不能以最后一个管道退出码代替整条流水结果。
+五回调位于`/pxe/v1/storage/preflight`、`publish-begin`、`publish-checkpoint`、`publish-complete`、`release`。preflight返回分页原目标清单、两端实际版本、rootFileId和原执行恢复信息；helper intent→created→result逐阶段经服务端持久后才ACK。全部producer成功退出后seal，publish-begin依据锁定任务所绑定镜像类型检查原捕获事实：n型必须提供originalSchema并通过结构及默认部署布局前置校验，其他类型可省略，客户端不能自行选择绑定类型；随后冻结原捕获事实和时间，再正式rename、finish、cleanup/helper join，最后release；不能以最后一个管道退出码代替整条流水结果。
 
 服务重启或PXEOS重启仅沿原owner/attempt恢复。必须确认原worker停止，或原token/MAC、同一非克隆可信宿主的稳定UUID、不同Linux boot_id和新认证checkin一致；这不是硬件远程证明。普通同boot任务不要求可靠DMI，无可靠DMI不能跨boot接管。storage-only只允许原代际发布/回滚/清理，禁止新磁盘许可和重复电源动作。未知证据保留内部保护，不按心跳或TTL抢占，不改变已完成历史。
 
@@ -208,7 +208,7 @@ helper固定入口为`rootpxe-storage-io --context-fd 3 --request-fd 4 --data-fd
 
 ### 多播与普通 checkin
 
-七条 `/service/pxeos/multicast/{join,prepare,ready,report,status,end,cancel}` 请求统一携带 `storageNonce`、`workerNonce`、`attempt`、`storageBootId`，并可选携带 `sysuuid` 作为稳定硬件见证。前四项必填；`attempt` 必须是严格正整数且等于 `progressAttempt`，小数、带后缀字符串、0 和负数均拒绝。旧 `worker` 或不匹配的 `boot/nonce` 值拒绝；body 继续拒绝未知字段。多播控制不承担跨 boot 接管，跨 boot 仅通过 storage preflight 的原执行恢复条件进入 storage-only；普通同 boot 任务没有可靠 DMI 时仍可工作。
+七条 `/pxe/v1/multicast/{join,prepare,ready,report,status,end,cancel}` 请求统一携带 `storageNonce`、`workerNonce`、`attempt`、`storageBootId`，并可选携带 `sysuuid` 作为稳定硬件见证。前四项必填；`attempt` 必须是严格正整数且等于 `progressAttempt`，小数、带后缀字符串、0 和负数均拒绝。旧 `worker` 或不匹配的 `boot/nonce` 值拒绝；body 继续拒绝未知字段。多播控制不承担跨 boot 接管，跨 boot 仅通过 storage preflight 的原执行恢复条件进入 storage-only；普通同 boot 任务没有可靠 DMI 时仍可工作。
 
 多播先取得域首锁和 task 锁，完成 storage 认证并持久提交后才进入 service/NAS；`end`、`cancel` 写入最终状态前再次封口。`ready` 仅允许 `pxeos` scope。普通首次 checkin 若尚未发放 storage reservation，可沿原 reservation 独立准入；一旦已执行 preflight，恢复只允许原代际 storage-only 路径，不发放新的磁盘许可。服务端 owner/目标占用返回409，协调不可用返回503，真实数据库错误返回500；checkin 只接受当前 JSON，不提供旧键值载荷兼容。
 

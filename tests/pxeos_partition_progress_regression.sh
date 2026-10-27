@@ -181,7 +181,7 @@ test_curl_args="$tmp/curl.args"
 curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"; printf '%s\n' "$*" >>"$test_curl_args"; return 0; }
 task_token=0123456789abcdef
 mac=00:11:22:33:44:55
-pxeapi=https://server/service/pxeos/
+pxeapi=https://server/pxe/v1/
 type=up
 rootpxe_partition_progress_flush
 assert_eq "$(jq -r '.items[]|select(.key=="d1:p1")|.status' "$tmp/snapshot.json")" completed 'flush must preserve final partition completion'
