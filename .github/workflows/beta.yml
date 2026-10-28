@@ -3,21 +3,10 @@ name: Build Beta
 on:
   workflow_dispatch:
     inputs:
-      arm64:
-        type: boolean
-        default: true
-        required: false
-        description: "arm64"
-      x64:
-        type: boolean
-        default: true
-        required: false
-        description: "x64"
-      x86:
-        type: boolean
-        default: true
-        required: false
-        description: "x86"
+      server_version:
+        type: string
+        required: true
+        description: "要求完全一致的 RootPXE 服务端版本（例如 1.0.1）"
 
 permissions:
   contents: read
@@ -27,27 +16,12 @@ defaults:
     shell: bash
 
 jobs:
-  input_checks:
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Validate selected architectures
-        env:
-          ARM64: ${{ inputs.arm64 }}
-          X64: ${{ inputs.x64 }}
-          X86: ${{ inputs.x86 }}
-        run: |
-          if [[ "$ARM64" != "true" && "$X64" != "true" && "$X86" != "true" ]]; then
-            echo "No architectures selected."
-            exit 1
-          fi
-
   release_metadata:
-    needs: input_checks
     runs-on: ubuntu-24.04
     outputs:
       release_name: ${{ steps.naming.outputs.release_name }}
       tag_name: ${{ steps.naming.outputs.tag_name }}
+      server_version: ${{ steps.naming.outputs.server_version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -55,9 +29,12 @@ jobs:
         id: naming
         env:
           GH_TOKEN: ${{ github.token }}
+          PXEOS_REQUIRED_SERVER_VERSION: ${{ inputs.server_version }}
         run: |
           set -euo pipefail
           source ./build_version.sh
+          rootpxe_build_validate_server_version "$PXEOS_REQUIRED_SERVER_VERSION"
+          printf 'server_version=%s\n' "$PXEOS_REQUIRED_SERVER_VERSION" >> "$GITHUB_OUTPUT"
           [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]] || { echo 'Invalid GitHub run marker.' >&2; exit 1; }
           release_stamp=$(TZ=Asia/Shanghai date '+%y%m%d-%H%M')
           release_name="Beta-${release_stamp}"
@@ -69,12 +46,12 @@ jobs:
           printf 'release_name=%s\ntag_name=%s\n' "$release_name" "$tag_name" >> "$GITHUB_OUTPUT"
 
   download_filesystem_packages:
-    needs: [input_checks, release_metadata]
+    needs: release_metadata
 
-    if: ${{ inputs.arm64 || inputs.x64 || inputs.x86 }}
     runs-on: ubuntu-24.04
     env:
       PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
+      PXEOS_REQUIRED_SERVER_VERSION: ${{ needs.release_metadata.outputs.server_version }}
 
     steps:
       - name: Checkout code
@@ -92,12 +69,12 @@ jobs:
         run: ./build.sh -i --fs-download-only
 
   build_kernel_arm64:
-    needs: [input_checks, release_metadata]
+    needs: release_metadata
 
-    if: ${{ inputs.arm64 }}
     runs-on: ubuntu-24.04
     env:
       PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
+      PXEOS_REQUIRED_SERVER_VERSION: ${{ needs.release_metadata.outputs.server_version }}
 
     steps:
       - name: Checkout code
@@ -119,12 +96,12 @@ jobs:
           retention-days: 1
 
   build_kernel_x86:
-    needs: [input_checks, release_metadata]
+    needs: release_metadata
 
-    if: ${{ inputs.x86 }}
     runs-on: ubuntu-24.04
     env:
       PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
+      PXEOS_REQUIRED_SERVER_VERSION: ${{ needs.release_metadata.outputs.server_version }}
 
     steps:
       - name: Checkout code
@@ -146,12 +123,12 @@ jobs:
           retention-days: 1
 
   build_kernel_x64:
-    needs: [input_checks, release_metadata]
+    needs: release_metadata
 
-    if: ${{ inputs.x64 }}
     runs-on: ubuntu-24.04
     env:
       PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
+      PXEOS_REQUIRED_SERVER_VERSION: ${{ needs.release_metadata.outputs.server_version }}
 
     steps:
       - name: Checkout code
@@ -173,12 +150,12 @@ jobs:
           retention-days: 1
 
   build_initrd_arm64:
-    needs: [input_checks, release_metadata, download_filesystem_packages]
+    needs: [release_metadata, download_filesystem_packages]
 
-    if: ${{ inputs.arm64 }}
     runs-on: ubuntu-24.04
     env:
       PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
+      PXEOS_REQUIRED_SERVER_VERSION: ${{ needs.release_metadata.outputs.server_version }}
 
     steps:
       - name: Checkout code
@@ -224,12 +201,12 @@ jobs:
           retention-days: 30
 
   build_initrd_x86:
-    needs: [input_checks, release_metadata, download_filesystem_packages]
+    needs: [release_metadata, download_filesystem_packages]
 
-    if: ${{ inputs.x86 }}
     runs-on: ubuntu-24.04
     env:
       PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
+      PXEOS_REQUIRED_SERVER_VERSION: ${{ needs.release_metadata.outputs.server_version }}
 
     steps:
       - name: Checkout code
@@ -275,12 +252,12 @@ jobs:
           retention-days: 30
 
   build_initrd_x64:
-    needs: [input_checks, release_metadata, download_filesystem_packages]
+    needs: [release_metadata, download_filesystem_packages]
 
-    if: ${{ inputs.x64 }}
     runs-on: ubuntu-24.04
     env:
       PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
+      PXEOS_REQUIRED_SERVER_VERSION: ${{ needs.release_metadata.outputs.server_version }}
 
     steps:
       - name: Checkout code
@@ -328,7 +305,6 @@ jobs:
   release:
     needs:
       [
-        input_checks,
         release_metadata,
         download_filesystem_packages,
         build_kernel_arm64,
@@ -339,15 +315,11 @@ jobs:
         build_initrd_x64,
       ]
 
-    if: |
-      always() &&
-      !contains(needs.*.result, 'failure') &&
-      !contains(needs.*.result, 'cancelled')
-
     runs-on: ubuntu-24.04
     env:
       RELEASE_NAME: ${{ needs.release_metadata.outputs.release_name }}
       TAG_NAME: ${{ needs.release_metadata.outputs.tag_name }}
+      PXEOS_REQUIRED_SERVER_VERSION: ${{ needs.release_metadata.outputs.server_version }}
     permissions:
       contents: write
     concurrency:
@@ -370,11 +342,11 @@ jobs:
           echo "LINUX_KERNEL_VER=$(sed -n -e 's/^.*KERNEL_VERSION=//p' build.sh | cut -d\' -f 2)" >> "$GITHUB_ENV"
           echo "BUILDROOT_VER=$(sed -n -e 's/^.*BUILDROOT_VERSION=//p' build.sh | cut -d\' -f 2)" >> "$GITHUB_ENV"
 
-      - name: Generate beta download manifest
+      - name: Generate beta historical download manifest
         env:
           RELEASE_TAG: ${{ env.TAG_NAME }}
         run: |
-          python3 scripts/generate-pxeos-manifest.py --input-dir distribution-files --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --download-channel beta --output distribution-files/pxeos.json
+          python3 scripts/generate-pxeos-manifest.py --input-dir distribution-files --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --required-server-version "$PXEOS_REQUIRED_SERVER_VERSION" --output distribution-files/pxeos.json --require-all
 
       - name: Run final sha256 checksum
         run: |
@@ -397,6 +369,8 @@ jobs:
           body: |
             PXEOS beta release.
             Back up existing boot files before use.
+            - 内核版本（PXEOS）：${{ env.TAG_NAME }}
+            - 对应服务端版本：${{ env.PXEOS_REQUIRED_SERVER_VERSION }}（必须完全一致）
             - Linux kernel: ${{ env.LINUX_KERNEL_VER }}
             - Buildroot: ${{ env.BUILDROOT_VER }}
           tag_name: ${{ env.TAG_NAME }}
@@ -406,6 +380,13 @@ jobs:
           files: |
             distribution-files/*
 
+      - name: Generate beta channel download manifest
+        env:
+          RELEASE_TAG: ${{ env.TAG_NAME }}
+        run: |
+          mkdir -p channel-files
+          python3 scripts/generate-pxeos-manifest.py --input-dir distribution-files --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --download-channel beta --required-server-version "$PXEOS_REQUIRED_SERVER_VERSION" --output channel-files/pxeos.json --require-all
+
       - name: Publish beta download manifest
         env:
           GH_TOKEN: ${{ github.token }}
@@ -414,5 +395,5 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --channel beta \
             --target "$GITHUB_SHA" \
-            --manifest distribution-files/pxeos.json \
+            --manifest channel-files/pxeos.json \
             --resource-dir distribution-files

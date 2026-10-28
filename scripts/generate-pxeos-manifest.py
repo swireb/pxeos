@@ -30,6 +30,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--repo", required=True)
     parser.add_argument("--tag", required=True)
+    parser.add_argument("--required-server-version", required=True)
     parser.add_argument("--download-channel", choices=("latest", "beta"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--require-all", action="store_true")
@@ -52,8 +53,10 @@ def asset(path: Path, repository: str, channel: str) -> dict[str, str]:
 
 
 def generate(
-    input_dir: Path, repository: str, tag: str, channel: str | None, require_all: bool
-) -> dict[str, list[dict[str, object]]]:
+    input_dir: Path, repository: str, tag: str, channel: str | None, require_all: bool, required_server_version: str
+) -> dict[str, object]:
+    if not re.fullmatch(r"(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})", required_server_version) or any(int(part) > 65535 for part in required_server_version.split(".")):
+        raise ValueError("--required-server-version must have three components in 0..65535 without leading zeros or suffixes")
     if not REPOSITORY_PATTERN.fullmatch(repository):
         raise ValueError("--repo must be an owner/repository reference")
     if not TAG_PATTERN.fullmatch(tag) or tag in MUTABLE_ALIASES:
@@ -86,13 +89,13 @@ def generate(
 
     if missing:
         raise ValueError("missing complete kernel/initrd pairs for: " + ", ".join(missing))
-    return {"kernels": kernels}
+    return {"requiredServerVersion": required_server_version, "kernels": kernels}
 
 
 def main() -> int:
     args = parse_arguments()
     try:
-        manifest = generate(args.input_dir, args.repo, args.tag, args.download_channel, args.require_all)
+        manifest = generate(args.input_dir, args.repo, args.tag, args.download_channel, args.require_all, args.required_server_version)
     except (OSError, ValueError) as error:
         print(f"pxeos manifest: {error}", file=sys.stderr)
         return 1

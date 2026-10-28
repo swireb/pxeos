@@ -287,7 +287,7 @@ class WorkflowVersionTests(unittest.TestCase):
                     fake_gh.chmod(0o755)
                     naming = step_run(job_block(workflow, "release_metadata"), "Select canonical release metadata")
                     env = os.environ | {
-                        "GITHUB_OUTPUT": bash_path(outputs), "DATE_LOG": bash_path(date_log),
+                        "PXEOS_REQUIRED_SERVER_VERSION": "1.0.1", "GITHUB_OUTPUT": bash_path(outputs), "DATE_LOG": bash_path(date_log),
                         "GH_BIN": bash_path(fake_gh), "GH_LOG": bash_path(gh_log),
                         "GITHUB_REPOSITORY": "swireb/pxeos", "GITHUB_RUN_ID": "1234567890", "GITHUB_RUN_ATTEMPT": "2",
                         "BASE_TAG": f"{prefix}-261014-0101", "COLLISION": collision, "TZ": "America/New_York",
@@ -299,7 +299,7 @@ class WorkflowVersionTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     metadata = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
                     canonical = f"{prefix}-261014-0101" + ("-1234567890-2" if collision == "true" else "")
-                    self.assertEqual(metadata, {"release_name": f"{prefix}-261014-0101", "tag_name": canonical})
+                    self.assertEqual(metadata, {"server_version": "1.0.1", "release_name": f"{prefix}-261014-0101", "tag_name": canonical})
                     self.assertEqual(date_log.read_text().splitlines(), ["Asia/Shanghai"])
                     self.assertNotRegex(gh_log.read_text(), r"POST|PATCH|UPLOAD|DELETE")
                     for arch, kernel, initrd in (("x64", "bzImage", "init.xz"), ("x86", "bzImage32", "init_32.xz"), ("arm64", "arm_Image", "arm_init.cpio.gz")):
@@ -315,7 +315,7 @@ class WorkflowVersionTests(unittest.TestCase):
                         (workdir / initrd).write_bytes(copied.read_bytes())
                     for channel in (None, "latest" if prefix == "Release" else "beta"):
                         output = workdir / f"{channel or 'history'}.json"
-                        command = [sys.executable, str(GENERATOR), "--input-dir", str(workdir), "--repo", "swireb/pxeos", "--tag", canonical, "--output", str(output), "--require-all"]
+                        command = [sys.executable, str(GENERATOR), "--required-server-version", "1.0.1", "--input-dir", str(workdir), "--repo", "swireb/pxeos", "--tag", canonical, "--output", str(output), "--require-all"]
                         if channel:
                             command.extend(("--download-channel", channel))
                         result = subprocess.run(command, text=True, capture_output=True)

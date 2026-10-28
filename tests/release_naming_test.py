@@ -107,9 +107,9 @@ class WorkflowNamingAndArchitectureTests(unittest.TestCase):
             (ROOT / ".github" / "workflows" / "beta.yml").read_text(encoding="utf-8"),
         )
 
-    def test_release_has_no_dispatch_options_and_fixed_release_metadata(self) -> None:
+    def test_release_has_server_version_input_and_fixed_release_metadata(self) -> None:
         release, _ = self.workflows()
-        self.assertNotIn("workflow_dispatch:\n    inputs:", release)
+        self.assertIn("workflow_dispatch:\n    inputs:\n      server_version:", release)
         self.assertIn("name: Build Release", release)
         self.assertIn('release_name="Release-${release_stamp}"', release)
         self.assertIn("--channel latest", release)
@@ -122,45 +122,19 @@ class WorkflowNamingAndArchitectureTests(unittest.TestCase):
             self.assertNotIn("pxeos-latest.json", workflow)
             self.assertNotIn("pxeos-beta.json", workflow)
 
-    def test_beta_architecture_inputs_gate_complete_pairs_and_release(self) -> None:
+    def test_beta_builds_all_architectures_and_requires_complete_release(self) -> None:
         _, beta = self.workflows()
+        self.assertNotIn("input_checks:", beta)
+        self.assertNotIn("type: boolean", beta)
         for arch in ("arm64", "x64", "x86"):
-            self.assertIn(f"      {arch}:\n        type: boolean", beta)
-            self.assertIn(f'description: "{arch}"', beta)
-            self.assertIn(f"if: ${{{{ inputs.{arch} }}}}", beta)
             self.assertIn(f"build_kernel_{arch}:", beta)
             self.assertIn(f"build_initrd_{arch}:", beta)
-        self.assertNotIn("publish_beta", beta)
-        self.assertNotIn("inputs.kernel_arm64", beta)
-        self.assertIn("No architectures selected", beta)
-        self.assertIn("!contains(needs.*.result, 'failure')", beta)
-        self.assertIn("!contains(needs.*.result, 'cancelled')", beta)
-        self.assertIn("        download_filesystem_packages,", beta)
+            self.assertNotIn(f"inputs.{arch}", beta)
+        self.assertIn("--require-all", beta)
         self.assertIn("prerelease: true", beta)
         self.assertIn("make_latest: 'false'", beta)
-        self.assertIn("- name: Get versions from build.sh", beta)
-        self.assertIn("Back up existing boot files before use.", beta)
         self.assertIn("${{ env.LINUX_KERNEL_VER }}", beta)
         self.assertIn("${{ env.BUILDROOT_VER }}", beta)
-
-    def test_beta_input_validation_covers_all_architecture_combinations(self) -> None:
-        beta = self.workflows()[1]
-        validation = step_run(job_block(beta, "input_checks"), "Validate selected architectures")
-        for arm64, x64, x86 in product((False, True), repeat=3):
-            selected = {"arm64": arm64, "x64": x64, "x86": x86}
-            with self.subTest(selected=selected):
-                result = subprocess.run(
-                    [BASH, "-c", validation],
-                    text=True,
-                    capture_output=True,
-                    env=os.environ | {arch.upper(): str(value).lower() for arch, value in selected.items()},
-                )
-                self.assertEqual(result.returncode == 0, any(selected.values()), result.stderr)
-                for arch in selected:
-                    kernel = beta.split(f"  build_kernel_{arch}:\n", 1)[1].split("\n  build_", 1)[0]
-                    initrd = beta.split(f"  build_initrd_{arch}:\n", 1)[1].split("\n  build_", 1)[0]
-                    self.assertIn("if: ${{ inputs.%s }}" % arch, kernel)
-                    self.assertIn("if: ${{ inputs.%s }}" % arch, initrd)
 
     def test_timestamp_run_blocks_sample_shanghai_time_once(self) -> None:
         for workflow, prefix in zip(self.workflows(), ("Release", "Beta")):
@@ -181,7 +155,7 @@ class WorkflowNamingAndArchitectureTests(unittest.TestCase):
                     capture_output=True,
                     cwd=ROOT,
                     env=os.environ | {
-                        "GITHUB_OUTPUT": git_bash_path(env_file),
+                        "PXEOS_REQUIRED_SERVER_VERSION": "1.0.1", "GITHUB_OUTPUT": git_bash_path(env_file),
                         "DATE_LOG": git_bash_path(date_log),
                         "GITHUB_REPOSITORY": "swireb/pxeos",
                         "GITHUB_RUN_ID": "1234",
@@ -194,6 +168,7 @@ class WorkflowNamingAndArchitectureTests(unittest.TestCase):
                 self.assertEqual(
                     env_file.read_text(encoding="utf-8").splitlines(),
                     [
+                        "server_version=1.0.1",
                         f"release_name={prefix}-261002-1530",
                         f"tag_name={prefix}-261002-1530",
                     ],

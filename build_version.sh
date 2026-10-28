@@ -41,3 +41,25 @@ rootpxe_build_stamp_version() {
     # version 已经过 ASCII 白名单校验，不能注入 Shell 或 sed 表达式。
     sed -i "s/^export initversion=.*$/export initversion=$version/" "$funcs_file"
 }
+
+# 与 RootPXE VERSION 相同：三段 0..65535，无前导零、前缀或后缀。
+rootpxe_build_validate_server_version() {
+    local version="${1-}" component
+    [[ $version =~ ^(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})$ ]] || {
+        echo 'Invalid PXEOS_REQUIRED_SERVER_VERSION; expected three components in 0..65535 without leading zeros or suffixes.' >&2
+        return 1
+    }
+    local -a components
+    IFS=. read -r -a components <<< "$version"
+    for component in "${components[@]}"; do
+        (( 10#$component <= 65535 )) || { echo 'Invalid PXEOS_REQUIRED_SERVER_VERSION; component exceeds 65535.' >&2; return 1; }
+    done
+}
+
+rootpxe_build_resolve_server_version() {
+    if [[ ! -v PXEOS_REQUIRED_SERVER_VERSION && ${1:-y} != n && -t 0 && ${GITHUB_ACTIONS:-false} != true ]]; then
+        read -r -p '请输入要求完全一致的 RootPXE 服务端版本（例如 1.0.1）：' PXEOS_REQUIRED_SERVER_VERSION || return 1
+    fi
+    rootpxe_build_validate_server_version "${PXEOS_REQUIRED_SERVER_VERSION-}" || return 1
+    export PXEOS_REQUIRED_SERVER_VERSION
+}

@@ -53,8 +53,11 @@ try:
     document = json.loads(manifest_path.read_text(encoding="utf-8"))
 except (OSError, json.JSONDecodeError) as error:
     raise SystemExit(f"invalid manifest: {error}")
-if set(document) != {"kernels"} or not isinstance(document["kernels"], list):
-    raise SystemExit("manifest must contain only a kernels list")
+if set(document) != {"requiredServerVersion", "kernels"} or not isinstance(document["kernels"], list):
+    raise SystemExit("manifest must contain requiredServerVersion and a kernels list")
+required = document["requiredServerVersion"]
+if not isinstance(required, str) or not re.fullmatch(r"(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})", required) or any(int(part) > 65535 for part in required.split(".")):
+    raise SystemExit("invalid requiredServerVersion")
 mapping = {"x86": ("bzImage32", "init_32.xz"), "x64": ("bzImage", "init.xz"), "arm64": ("arm_Image", "arm_init.cpio.gz")}
 tag_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 seen = set()
@@ -76,14 +79,17 @@ for entry in document["kernels"]:
                 hasher.update(chunk)
         if hasher.hexdigest() != asset["sha256"]:
             raise SystemExit("manifest hash does not match a local resource")
-if channel == "latest" and seen != set(mapping):
-    raise SystemExit("latest manifest must contain all three architectures")
-print("empty" if not document["kernels"] else "ready")
+if (channel == "latest" or document["kernels"]) and seen != set(mapping):
+    raise SystemExit("channel manifest must contain all three architectures")
+versions = {entry["version"] for entry in document["kernels"]}
+if len(versions) > 1:
+    raise SystemExit("channel manifest must use one PXEOS version")
+print("" if not document["kernels"] else "PXEOS 下载频道清单。\n- 内核版本（PXEOS）：" + next(iter(versions)) + "\n- 对应服务端版本：" + required + "（必须完全一致）")
 PY
 ) || exit $?
 
 # 一个空清单不移动固定 tag，也不创建空频道 release。
-if [[ $manifest_state == empty ]]; then
+if [[ -z $manifest_state ]]; then
     echo "skip $channel: manifest has no complete kernel/initrd pair"
     exit 0
 fi
@@ -174,7 +180,7 @@ fi
 if [[ $release_exists == true ]]; then
     "$gh_bin" api --method PATCH "$release_endpoint/$release_id" \
         -f name="$title" \
-        -f body="PXEOS download manifest for this channel." \
+        -f body="$manifest_state" \
         -F prerelease="$prerelease" \
         -f make_latest="$make_latest"
 else
@@ -182,7 +188,7 @@ else
         -f tag_name="$channel" \
         -f target_commitish="$target" \
         -f name="$title" \
-        -f body="PXEOS download manifest for this channel." \
+        -f body="$manifest_state" \
         -F prerelease="$prerelease" \
         -f make_latest="$make_latest"
 fi

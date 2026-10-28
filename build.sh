@@ -21,6 +21,7 @@ Usage() {
     echo -e "\t\t-n --noconfirm (optional) Build systems without confirmation."
     echo -e "\t\t-i --install-dep (optional) Attempt to install dependencies."
     echo -e "\t\t-v --verbose (optional) Show make output on screen for filesystem builds as well as write it to the log file."
+    echo -e "\t\t   --server-version VERSION (required for builds) Exact RootPXE server version, or PXEOS_REQUIRED_SERVER_VERSION."
     echo -e "\t\t   --fs-download-only (optional) Only download Buildroot source packages for each filesystem."
     echo -e "\t\t-h --help -? Display this message."
     exit 0
@@ -28,10 +29,9 @@ Usage() {
 [[ -n "$arch" ]] && unset "$arch"
 
 shortopts="?hkfnia:p:v"
-longopts="help,kernel-only,filesystem-only,noconfirm,install-dep,arch:,path:,verbose,fs-download-only"
+longopts="help,kernel-only,filesystem-only,noconfirm,install-dep,arch:,path:,verbose,fs-download-only,server-version:"
 
-optargs=$(getopt -o "$shortopts" -l "$longopts" -n "$0" -- "$@")
-[[ $? -ne 0 ]] && Usage
+optargs=$(getopt -o "$shortopts" -l "$longopts" -n "$0" -- "$@") || exit 2
 
 eval set -- "$optargs"
 
@@ -55,6 +55,10 @@ while :; do
         -i | --install-dep)
             installDep="y"
             shift
+            ;;
+        --server-version)
+            PXEOS_REQUIRED_SERVER_VERSION=$2
+            shift 2
             ;;
         --fs-download-only)
             fsDownloadOnly="y"
@@ -99,6 +103,10 @@ done
 
 # 一次确定版本，所有架构共用；CI 缺失或非法版本必须早于依赖/下载失败。
 rootpxe_build_resolve_version || exit 1
+# 仅下载源包不生成发行产物，无需服务端绑定。
+if [[ $fsDownloadOnly != y ]]; then
+    rootpxe_build_resolve_server_version "$confirm" || exit 1
+fi
 
 if ! checkDependencies; then
     exit 1

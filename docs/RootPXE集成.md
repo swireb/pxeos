@@ -215,3 +215,13 @@ helper固定入口为`rootpxe-storage-io --context-fd 3 --request-fd 4 --data-fd
 多播先取得域首锁和 task 锁，完成 storage 认证并持久提交后才进入 service/NAS；`end`、`cancel` 写入最终状态前再次封口。`ready` 仅允许 `pxeos` scope。普通首次 checkin 若尚未发放 storage reservation，可沿原 reservation 独立准入；一旦已执行 preflight，恢复只允许原代际 storage-only 路径，不发放新的磁盘许可。服务端 owner/目标占用返回409，协调不可用返回503，真实数据库错误返回500；checkin 只接受当前 JSON，不提供旧键值载荷兼容。
 
 本页记录源码合同和客户端边界，不代表构建或运行通过。shell/C 离线入口见本仓[测试说明](../tests/README.md)；仍须构建三架构产物并验收真实 NAS 权限、版本、原工作者未停保护、跨 boot 恢复和吞吐。RootPXE 数据库只支持匹配当前完整初始化目标的新空库，不提供旧库迁移。
+
+## 发布清单与服务端版本
+
+`pxeos.json` 顶层必需 `requiredServerVersion`，同清单全部架构共用，要求与真实编译运行的 RootPXE 服务端版本完全一致。格式为三段 0..65535、无前导零、前缀或后缀；例如 `1.0.1` 不允许 `1.0.0`、`1.0.2` 或 `dev` 下载安装或更新。内核条目的 `version` 继续表示 PXEOS 历史 tag，与服务端版本分开。
+
+Build Release/Build Beta 运行时仅选择 branch 并输入要求服务端版本，固定构建全架构。构建脚本接收 `PXEOS_REQUIRED_SERVER_VERSION` 或 `--server-version`，普通交互缺失会询问，`-n` 无确认模式及非交互缺失在依赖和下载前拒绝；仅下载源包可不绑定。历史附件清单固定历史 tag，latest/beta 清单固定频道，所有清单与发布说明使用同一已校验输入。
+
+RootPXE 在管理下载入口校验兼容性，返回 HTTP 409 与 `kernel_server_version_mismatch`，不下载制品、不发更新确认且保留旧内核；旧清单缺失声明需重新发布。该检查不增加 PXEOS 运行时协议或禁用已安装内核，既有 GitHub 发布也不会因改代码而被回填版本。
+
+旧服务端二进制的严格 JSON 解码可能将带新字段的清单报告为“清单格式无效”，不会自动拥有新版升级提示。未来发布需要包含本版本校验实现的服务端与明确声明 `requiredServerVersion` 的内核清单配套；不能据此声称旧服务端已经支持新清单。

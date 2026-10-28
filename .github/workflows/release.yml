@@ -2,6 +2,11 @@ name: Build Release
 
 on:
   workflow_dispatch:
+    inputs:
+      server_version:
+        type: string
+        required: true
+        description: "要求完全一致的 RootPXE 服务端版本（例如 1.0.1）"
 
 permissions:
   contents: read
@@ -16,6 +21,7 @@ jobs:
     outputs:
       release_name: ${{ steps.naming.outputs.release_name }}
       tag_name: ${{ steps.naming.outputs.tag_name }}
+      server_version: ${{ steps.naming.outputs.server_version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -23,9 +29,12 @@ jobs:
         id: naming
         env:
           GH_TOKEN: ${{ github.token }}
+          PXEOS_REQUIRED_SERVER_VERSION: ${{ inputs.server_version }}
         run: |
           set -euo pipefail
           source ./build_version.sh
+          rootpxe_build_validate_server_version "$PXEOS_REQUIRED_SERVER_VERSION"
+          printf 'server_version=%s\n' "$PXEOS_REQUIRED_SERVER_VERSION" >> "$GITHUB_OUTPUT"
           [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]] || { echo 'Invalid GitHub run marker.' >&2; exit 1; }
           release_stamp=$(TZ=Asia/Shanghai date '+%y%m%d-%H%M')
           release_name="Release-${release_stamp}"
@@ -41,6 +50,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
+      PXEOS_REQUIRED_SERVER_VERSION: ${{ needs.release_metadata.outputs.server_version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -59,6 +69,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
+      PXEOS_REQUIRED_SERVER_VERSION: ${{ needs.release_metadata.outputs.server_version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -80,6 +91,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
+      PXEOS_REQUIRED_SERVER_VERSION: ${{ needs.release_metadata.outputs.server_version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -101,6 +113,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
+      PXEOS_REQUIRED_SERVER_VERSION: ${{ needs.release_metadata.outputs.server_version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -122,6 +135,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
+      PXEOS_REQUIRED_SERVER_VERSION: ${{ needs.release_metadata.outputs.server_version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -164,6 +178,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
+      PXEOS_REQUIRED_SERVER_VERSION: ${{ needs.release_metadata.outputs.server_version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -206,6 +221,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
+      PXEOS_REQUIRED_SERVER_VERSION: ${{ needs.release_metadata.outputs.server_version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -258,6 +274,7 @@ jobs:
     env:
       RELEASE_NAME: ${{ needs.release_metadata.outputs.release_name }}
       TAG_NAME: ${{ needs.release_metadata.outputs.tag_name }}
+      PXEOS_REQUIRED_SERVER_VERSION: ${{ needs.release_metadata.outputs.server_version }}
     permissions:
       contents: write
     concurrency:
@@ -280,7 +297,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ env.TAG_NAME }}
         run: |
-          python3 scripts/generate-pxeos-manifest.py --input-dir distribution-files --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --output distribution-files/pxeos.json --require-all
+          python3 scripts/generate-pxeos-manifest.py --input-dir distribution-files --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --required-server-version "$PXEOS_REQUIRED_SERVER_VERSION" --output distribution-files/pxeos.json --require-all
       - name: Run final sha256 checksum
         run: |
           cd distribution-files
@@ -300,6 +317,8 @@ jobs:
           name: ${{ env.RELEASE_NAME }}
           body: |
             PXEOS System Release
+            - 内核版本（PXEOS）：${{ env.TAG_NAME }}
+            - 对应服务端版本：${{ env.PXEOS_REQUIRED_SERVER_VERSION }}（必须完全一致）
             - Linux kernel: ${{ env.LINUX_KERNEL_VER }}
             - Buildroot: ${{ env.BUILDROOT_VER }}
           tag_name: ${{ env.TAG_NAME }}
@@ -325,7 +344,7 @@ jobs:
           RELEASE_TAG: ${{ env.TAG_NAME }}
         run: |
           mkdir -p channel-files
-          python3 scripts/generate-pxeos-manifest.py --input-dir distribution-files --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --download-channel latest --output channel-files/pxeos.json --require-all
+          python3 scripts/generate-pxeos-manifest.py --input-dir distribution-files --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --download-channel latest --required-server-version "$PXEOS_REQUIRED_SERVER_VERSION" --output channel-files/pxeos.json --require-all
       - name: Publish latest download manifest
         env:
           GH_TOKEN: ${{ github.token }}
