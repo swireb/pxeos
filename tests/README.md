@@ -2,6 +2,25 @@
 
 - 本目录保存 PXEOS 的定向回归脚本。测试未被 CI 工作流显式调用，不等于它没有价值：许多脚本用于本地复现、发布前核对或具备特定工具链的环境验证。每个脚本均应单独运行；此目录不提供一键执行全部测试的入口。
 
+## 部署、捕获和多播审计集合
+
+`pxeos_lifecycle_audit_regression.sh` 只组合本次三类任务审计涉及的 HTTP、存储控制器/helper、数据管线、身份初始化、进度与多播回归，不包含全部目录测试或 Buildroot 构建。它串行执行，每项最多 300 秒，并检查共享 slice 的内存事件；未处理的缺命令诊断即使退出 0 也按失败记录。
+
+```shell
+/home/sysadmin/.codex/bin/codex-build-test bash tests/pxeos_lifecycle_audit_regression.sh
+```
+
+部署分区/增长及消息显示契约另行补充执行，不计入上述 25 项集合：
+
+```shell
+/home/sysadmin/.codex/bin/codex-build-test bash tests/pxeos_partition_regression.sh
+/home/sysadmin/.codex/bin/codex-build-test bash tests/pxeos_message_contract_regression.sh
+```
+
+分区套件要求 GNU awk（`gawk` 和 `awk` 均应使用 GNU 实现）；native FATgrow 子项还需显式提供 `PXEOS_FATGROW_TEST_BINARY` 和 `PXEOS_FATGROW_TEST_SOURCE`，缺少时会明确报告 SKIP。
+
+该集合需要 Bash、Python、jq、timeout 及存储 helper fixture 所需本机 C/json-c/OpenSSL 开发依赖。每项结果及日志目录由入口返回；失败、超时或缺依赖不能当作通过。真实 NAS、目标磁盘、UDP 传输与首启仍须按主仓[全流程审计](../../../docs/部署捕获多播全流程审计.md)补验。
+
 ## 测试边界
 
 - 静态契约：读取源码、配置或补丁，核对固定字符串、顺序、清单和构建配置。

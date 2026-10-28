@@ -1354,7 +1354,11 @@ rootpxe_require_unused_target_disks() { :; }
 rootpxe_test_real_jq() {
     local arg converted=()
     for arg in "$@"; do
-        [[ -e $arg ]] && converted+=("$(cygpath -w "$arg")") || converted+=("$arg")
+        if [[ -e $arg ]] && command -v cygpath >/dev/null 2>&1; then
+            converted+=("$(cygpath -w "$arg")")
+        else
+            converted+=("$arg")
+        fi
     done
     MSYS_NO_PATHCONV=1 "$real_jq" "${converted[@]}"
 }
@@ -2131,6 +2135,11 @@ awk '/^rootpxe_console_message\(\)/ { copy = 1 } /^# Appends dots/ { exit } copy
 awk '/^dots\(\)/ { copy = 1 } /^# Enables write caching/ { exit } copy' "$funcs" >"$tmp/dots.sh"
 awk '/^rootpxe_request_disk_permit\(\)/ { copy = 1 } /^rootpxe_error_wait_for_retry\(\)/ { exit } copy' "$funcs" >"$tmp/permit.sh"
 
+# This HTTP/permit matrix isolates host capability discovery; real capability
+# construction and validation are covered by the template/identity suites.
+rootpxe_deployment_identity_capabilities_json() { printf '%s\n' '["hostname"]'; }
+rootpxe_deployment_identity_capabilities_valid() { [[ $1 == '["hostname"]' ]]; }
+
 # PXEOS carries jq, while the host Git Bash used by this offline harness does
 # not.  This controlled substitute accepts only the JSON fields below.  It is
 # not a jq integration test: it preserves jq -e false status and typed boolean
@@ -2221,6 +2230,7 @@ unknown_code=$'{"error":"do-not-show","code":"DISK_PERMIT_UNRECOGNIZED"}\n403'
 
 # Red/green behavioral matrix: only task-status JSON confirmation may return 10.
 expect_status 0 run_request "$success" "$running"
+grep -Fq -- 'deploymentIdentityCapabilities=["hostname"]' "$tmp/request.log" || fail 'fixture capability array was not sent in the permit request'
 hashed_target='sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 hashed_success=$'{"granted":true,"targetId":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","operation":"deploy_write"}\n200'
 expect_status 0 run_request "$hashed_success" "$running" "$hashed_target"

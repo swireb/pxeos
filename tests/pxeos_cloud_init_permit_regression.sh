@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 root=$(cd "$(dirname "$0")/.." && pwd)
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
 tmp=$(mktemp -d /tmp/pxeos-cloud-init-permit.XXXXXX)
@@ -27,6 +28,26 @@ case $(uname -s) in MINGW*|MSYS*)
     rootpxe_ci_is_root(){ return 0; }
     rootpxe_ci_stat(){ local owner=0 mode=700; [[ -d $1 ]] || mode=600; case $1 in /tmp/rootpxe-cloud-init.*|/tmp/rootpxe-cloud-meta.*|/tmp/rootpxe-cloud-network.*|/tmp/rootpxe-cloud-vendor.*) owner=$EUID;; esac; printf '%s:0:%s:%s\n' "$owner" "$mode" "$(command stat -c '%h' -- "$1")"; }
 ;; esac
+# All target roots are private ordinary fixture files. A non-root Linux
+# runner cannot chown them to image UID 0; emulate only that target metadata
+# boundary, retaining real payload ownership/inode/hash checks and file I/O.
+if [[ $EUID != 0 && ${OSTYPE:-} != msys* && ${OSTYPE:-} != cygwin* ]]; then
+    rootpxe_ci_is_root(){ [[ $EUID == 0 || ( -n ${fixture_root:-} && ( ${root:-} == "$fixture_root" || ${root:-} == "$fixture_root/"* ) ) ]]; }
+    rootpxe_ci_stat(){
+        local info
+        info=$(command stat -c '%u:%g:%a:%h' -- "$1") || return 1
+        if [[ -n ${fixture_root:-} && ( $1 == "$fixture_root" || $1 == "$fixture_root/"* ) ]]; then
+            printf '0:0:%s\n' "${info#*:*:}"
+        else printf '%s\n' "$info"; fi
+    }
+    chown(){
+        local target=${@: -1}
+        if [[ $1 == 0:0 && -n ${fixture_root:-} && -O $target && ! -L $target && ( $target == "$fixture_root" || $target == "$fixture_root/"* ) ]]; then
+            return 0
+        fi
+        command chown "$@"
+    }
+fi
 rootpxe_require_task_context(){ return 0; }
 rootpxe_storage_path(){ printf '%s\n' "$tmp"; }
 readlink(){ if [[ $1 == -f && ${@: -1} == /dev/fixture* ]]; then printf '%s\n' "${@: -1}"; else command readlink "$@"; fi; }
@@ -74,7 +95,7 @@ for mode in network-only vendor-only single mpa; do
     payload=$(jq -cn --arg data "$userdata" --arg hash "$hash" --arg meta "$metadata" --arg metaHash "$meta_hash" --arg network "$network" --arg networkHash "$network_hash" --arg vendor "$vendor" --arg vendorHash "$vendor_hash" '{type:"deploy",osid:50,cloudInitUserData:$data,cloudInitUserDataSha256:$hash,cloudInitMetaData:$meta,cloudInitMetaDataSha256:$metaHash,cloudInitNetworkConfig:$network,cloudInitNetworkConfigSha256:$networkHash,cloudInitVendorData:$vendor,cloudInitVendorDataSha256:$vendorHash}')
     # source 真实 checkin 主流程，只替换绝对库位置、控制面与设备盘点边界。
     checkin_copy="$tmp/checkin-$mode"
-    awk '/^\. \/usr\/share\// {print ":"; next} /^pxeos_checkin_runtime_setup$/ {print ":"; next} {print}' "${funcs%/usr/share/*}/bin/pxeos.checkin" >"$checkin_copy"
+    awk '/^\. \/usr\/share\// {print ":"; next} /(^|[[:space:]])pxeos_checkin_runtime_setup$/ {print ":"; next} {print}' "${funcs%/usr/share/*}/bin/pxeos.checkin" >"$checkin_copy"
     checkin_body=$(jq -c '.taskId=1 | .executionToken="private" | .pxeType="down" | .img="fixture" | .imgType="mps" | .imgPartitionType="all" | .imgFormat=5 | .compressionLevel=6 | .shutdown=false | .changeHostname=false | .protocol="nfs" | .storageip="192.0.2.1" | .exportPath="/fixture" | .deploymentIdentityPolicy={version:1,systemIdentity:{sysprep:false},cloudInit:true}' <<<"$payload")
     checkin_body=$(storage_test_context_json "$checkin_body") || fail 'current storage fixture context'
     storage_test_reset_context || fail 'isolated storage context cleanup'

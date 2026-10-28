@@ -3,7 +3,7 @@ set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 . "$root/tests/task-http-test-support.sh"
 lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/multicast.sh"
-JQ=/c/Windows/System32/jq.exe
+JQ=${JQ_BIN:-$(command -v jq || true)}
 [[ -x $JQ && -r $lib ]] || { echo 'FAIL: real jq or multicast library missing' >&2; exit 1; }
 jq() { "$JQ" "$@"; }
 sleep() { :; }
@@ -13,6 +13,10 @@ trap 'rm -rf -- "$tmp"' EXIT
 session=9223372036854775807
 session_key=mc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 stream=cccccccccccccccccccccccccccccccc
+rootpxe_storage_nonce=11111111111111111111111111111111
+rootpxe_storage_worker_nonce=22222222222222222222222222222222
+rootpxe_storage_boot_id=11111111-1111-1111-1111-111111111111
+rootpxe_storage_sysuuid=33333333-3333-3333-3333-333333333333
 curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}";
   local out='' url='' arg body=''
   while (( $# )); do

@@ -5,6 +5,8 @@ funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/func
 multicast="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/multicast.sh"
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
+. "$root/tests/storage-test-support.sh"
+storage_test_pipeline_boundaries
 write=$(awk '/^writeImage\(\)/ {on=1} on {print} on && /^}$/ {exit}' "$funcs")
 [[ -n $write && -r $multicast ]] || exit 1
 case_run() (

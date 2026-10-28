@@ -6,6 +6,8 @@ lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib"
 funcs="$lib/funcs.sh"
 checkin="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.checkin"
 tmp=$(mktemp -d /tmp/pxeos-template-injection.XXXXXX)
+sed "s|/tmp/pxeos.data-phase|$tmp/data-phase|g" "$lib/partclone-progress.sh" >"$tmp/phase-gate.sh"
+. "$tmp/phase-gate.sh"
 cleanup_fixture(){
     [[ $tmp =~ ^/tmp/pxeos-template-injection\.[A-Za-z0-9]{6}$ && -d $tmp && ! -L $tmp ]] || return 1
     rootpxe_cloud_init_cleanup_private || return 1

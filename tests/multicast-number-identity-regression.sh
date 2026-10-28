@@ -176,13 +176,13 @@ setup_callback_recorder() {
     : >"$callback_log"
     curl() {
         task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"
-        local argument value url='' body='' id='' instance='' attempt='' with_code=no
+        local argument value url='' body='' id='' instance='' attempt='' phase='' with_code=no
         while (( $# )); do
             argument=$1; shift
             case $argument in
                 --data-urlencode)
                     value=$1; shift
-                    case $value in sessionId=*) id=${value#*=};; sessionKey=*) instance=${value#*=};; progressAttempt=*) attempt=${value#*=};; esac;;
+                    case $value in sessionId=*) id=${value#*=};; sessionKey=*) instance=${value#*=};; progressAttempt=*) attempt=${value#*=};; stage=*) phase=${value#*=};; esac;;
                 --data-binary) body=$1; shift; [[ $body != @* ]] || body=$(cat "${body#@}");;
                 -w) with_code=yes; shift;;
                 *) url=$argument;;
@@ -192,6 +192,9 @@ setup_callback_recorder() {
             jq -e --arg id "$number" --arg key "$session_key_fixture" '.sessionId == $id and (.sessionId|type) == "string" and .sessionKey == $key and .progressAttempt == 4' <<<"$body" >/dev/null || { echo "bad ${url##*/}" >>"$callback_log"; return 91; }
         elif [[ $id != "$number" || $instance != "$session_key_fixture" || $attempt != 4 ]]; then
             echo "bad ${url##*/}" >>"$callback_log"; return 91
+        fi
+        if [[ $url == */progress && $phase != restore ]]; then
+            echo "bad progress stage=$phase" >>"$callback_log"; return 91
         fi
         echo "ok ${url##*/}" >>"$callback_log"
         case $url in
@@ -211,10 +214,16 @@ setup_callback_recorder() {
 ordinary_form_callbacks() {
     setup_callback_recorder
     local funcs="$overlay/usr/share/pxeos/lib/funcs.sh" name
+    # Use the same phase gate as production, bound to a private marker. A
+    # missing dependency used to fall through the if and silently send init.
+    sed "s|/tmp/pxeos.data-phase|$tmp/data-phase|g" "$overlay/usr/share/pxeos/lib/partclone-progress.sh" >"$tmp/phase-gate.sh"
+    . "$tmp/phase-gate.sh"
     for name in rootpxe_stage rootpxe_partition_progress_send_snapshot rootpxe_task_status_confirms_disk_permit_cancellation; do load_function "$funcs" "$name"; done
     rootpxe_stage restore 'fixture progress'
     printf '%s' '{"version":2,"items":[]}' >"$tmp/snapshot.json"
     type=down
+    rootpxe_partclone_progress_run_id=multicast-wire-fixture
+    printf '%s\n' "$(rootpxe_progress_data_phase_identity)" >"$tmp/data-phase"
     rootpxe_partition_progress_send_snapshot "$tmp/snapshot.json"
     rootpxe_task_status_confirms_disk_permit_cancellation
     . "$overlay/usr/share/pxeos/lib/disk-health.sh"
