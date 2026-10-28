@@ -65,7 +65,7 @@ while true; do
         if ! rootpxe_clear_capture_marker; then
             rootpxe_task_console_failure WARN "PXEOS_STAGE=finish_notify CODE=CAPTURE_MARKER_CLEAR_FAILED REASON=${rootpxe_capture_marker_clear_error_reason:-marker_clear_failed}"
             rootpxe_console_message WARN 'Storage cleanup is not confirmed. Retrying the original execution.'
-            rootpxe_storage_recover_until_clean || exit 1
+            rootpxe_storage_recover_until_clean || exit $?
         fi
         rootpxe_cleanup_task_json
         rootpxe_capture_resume_cleanup

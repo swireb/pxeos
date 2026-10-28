@@ -58,7 +58,9 @@ exec_line=$(grep -nE '^[[:space:]]*exec /bin/pxeos[[:space:]]*$' "$lib/funcs.sh"
 [[ $reset_line -lt $release_line && $release_line -lt $exec_line ]] || fail retry-release-order
 # Run the complete current queued branch. Only the terminal exec boundary is
 # replaced, so the real pin release and original permit-reset ordering run.
-eval "$(sed -n '/^rootpxe_error_report() {/,/^}/p' "$lib/funcs.sh")"
+for name in rootpxe_failure_begin rootpxe_failure_remaining rootpxe_error_report; do
+    eval "$(sed -n "/^$name() {/,/^}/p" "$lib/funcs.sh" | sed "s|/tmp/pxeos.failure_action|$tmp/failure_action|g")"
+done
 eval "$(sed -n '/^rootpxe_error_wait_for_retry() {/,/^}/p' "$lib/funcs.sh" | sed -e "s|/tmp/pxeos.failure_action|$tmp/failure_action|g" -e 's|exec /bin/pxeos|rootpxe_pin_test_exec /bin/pxeos|')"
 for release_failure in no yes; do
     (

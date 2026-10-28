@@ -239,6 +239,15 @@ rootpxe_apply_json_checkin() {
     [[ $progress_attempt =~ ^[1-9][0-9]*$ ]] || return 1
     rootpxe_partition_progress_enabled=$(jq -r 'if ((.progressProtocolVersions // []) | index(2)) then "yes" else "no" end' <<<"$document" 2>/dev/null) || return 1
     rootpxe_json_assign_text "$document" execution_token '.executionToken // .execution_token' || return 1
+    local failure_policy
+    failure_policy=$(jq -er '
+      (if has("failureWaitSec") then .failureWaitSec else 600 end) as $wait |
+      (if has("failureAction") then .failureAction else "reboot" end) as $action |
+      if ($wait|type) == "number" and ($wait|floor) == $wait and $wait >= 60 and $wait <= 3600
+        and ($action == "reboot" or $action == "shutdown")
+      then [$wait,$action]|@tsv else error("invalid failure policy") end' <<<"$document") || return 1
+    IFS=$'\t' read -r rootpxe_failure_wait_sec rootpxe_failure_action <<<"$failure_policy"
+    export rootpxe_failure_wait_sec rootpxe_failure_action
     rootpxe_json_assign_text "$document" taskType '.type' || return 1
     rootpxe_json_assign_text "$document" pxe_type '.pxeType // .pxe_type' || return 1
     rootpxe_json_assign_text "$document" reply_mac '.mac' || return 1

@@ -52,13 +52,106 @@ rootpxe_storage_apply_context() {
     export rootpxe_storage_workspace rootpxe_storage_nonce rootpxe_storage_worker_nonce rootpxe_storage_stage rootpxe_storage_lock
 }
 
+# Only server-owned diagnostic values may cross the response boundary into
+# task logs. Never retain an arbitrary error, response body or unknown field.
+rootpxe_storage_log_rejection() {
+    local endpoint=$1 status=$2 document=$3 diagnostic_event=${4:-} reason='' safe_error='' event_context='' message
+    case $endpoint in preflight|publish-begin|publish-checkpoint|publish-complete|release) ;; *) endpoint=storage ;; esac
+    [[ $status =~ ^[1-5][0-9]{2}$ ]] || status=000
+    reason=$(jq -ers 'if length == 1 and (.[0]|type == "object") then .[0].reasonCode | strings else empty end' <<<"$document" 2>/dev/null) || reason=''
+    case $reason in
+        STORAGE_ATTEMPT_BINDING_MISMATCH|STORAGE_BOOT_ID_INVALID|STORAGE_BOOT_ID_MISMATCH|\
+        STORAGE_BOOT_RECONCILIATION_REQUIRED|STORAGE_CALLBACK_BINDING_REJECTED|STORAGE_CHECKPOINT_CONNECTION_PIN_INVALID|\
+        STORAGE_CHECKPOINT_CREATED_FILE_ID_MISMATCH|STORAGE_CHECKPOINT_CREATED_KIND_MISMATCH|STORAGE_CHECKPOINT_CREATED_NODE_MISSING|\
+        STORAGE_CHECKPOINT_CREATED_SIZE_MISMATCH|STORAGE_CHECKPOINT_DESTINATION_EXISTS|STORAGE_CHECKPOINT_DIRECTORY_KIND_INVALID|\
+        STORAGE_CHECKPOINT_DIRECTORY_UNOWNED|STORAGE_CHECKPOINT_EVENT_JSON_INVALID|STORAGE_CHECKPOINT_EVENT_SIZE_INVALID|\
+        STORAGE_CHECKPOINT_EVENT_STAGE_INVALID|STORAGE_CHECKPOINT_EVENT_TRAILING_DATA|STORAGE_CHECKPOINT_EXECUTION_MISMATCH|\
+        STORAGE_CHECKPOINT_INSPECT_FAILED|STORAGE_CHECKPOINT_MUTATION_NOT_AUTHORIZED|STORAGE_CHECKPOINT_OWNER_ALREADY_REMOVED|\
+        STORAGE_CHECKPOINT_OWNER_CONTENT_CHANGED|STORAGE_CHECKPOINT_OWNER_INCOMPLETE|STORAGE_CHECKPOINT_OWNER_METADATA_CHANGED|\
+        STORAGE_CHECKPOINT_OWNER_MISSING|STORAGE_CHECKPOINT_OWNER_READ_FAILED|STORAGE_CHECKPOINT_PARENT_IDENTITY_CHANGED|\
+        STORAGE_CHECKPOINT_PATH_NOT_ALLOWED|STORAGE_CHECKPOINT_PATH_OBSERVATION_MISSING|STORAGE_CHECKPOINT_READ_HASH_MISMATCH|\
+        STORAGE_CHECKPOINT_READ_IDENTITY_CHANGED|STORAGE_CHECKPOINT_READ_NODE_MISSING|STORAGE_CHECKPOINT_RECEIPT_SIZE_INVALID|\
+        STORAGE_CHECKPOINT_REMOVE_RESULT_INVALID|STORAGE_CHECKPOINT_RENAME_INSPECT_FAILED|STORAGE_CHECKPOINT_RENAME_LEDGER_INVALID|\
+        STORAGE_CHECKPOINT_RENAME_NOT_AUTHORIZED|STORAGE_CHECKPOINT_RENAME_RESULT_INVALID|STORAGE_CHECKPOINT_RENAME_SOURCE_REMAINS|\
+        STORAGE_CHECKPOINT_RENAME_TREE_CHANGED|STORAGE_CHECKPOINT_RESULT_FILE_ID_MISMATCH|STORAGE_CHECKPOINT_RESULT_KIND_MISMATCH|\
+        STORAGE_CHECKPOINT_RESULT_NODE_MISSING|STORAGE_CHECKPOINT_RESULT_SIZE_MISMATCH|STORAGE_CHECKPOINT_ROOT_IDENTITY_CHANGED|\
+        STORAGE_CHECKPOINT_SEAL_INVALID|STORAGE_CHECKPOINT_SEQUENCE_INVALID|STORAGE_CHECKPOINT_SEQUENCE_MISMATCH|\
+        STORAGE_CHECKPOINT_SOURCE_IDENTITY_CHANGED|STORAGE_CHECKPOINT_STAGE_PATHS_REMAIN|STORAGE_CHECKPOINT_TARGET_CHANGED|\
+        STORAGE_CHECKPOINT_TARGET_INSPECT_FAILED|STORAGE_CHECKPOINT_TRANSACTION_REJECTED|STORAGE_CHECKPOINT_WRITE_PATH_EXISTS|\
+        STORAGE_CHECKPOINT_WRITE_RECEIPT_INVALID|STORAGE_CONFIG_REVISION_MISMATCH|STORAGE_CONNECTION_PIN_INVALID|\
+        STORAGE_HOST_MAC_INVALID|STORAGE_HOST_MAC_MISMATCH|STORAGE_HOST_UUID_MISMATCH|\
+        STORAGE_NONCE_BINDING_MISMATCH|STORAGE_PREFLIGHT_CONNECTION_PIN_INVALID|STORAGE_PREFLIGHT_HOST_FACTS_INVALID|\
+        STORAGE_PREFLIGHT_KERNEL_CONNECTION_CHANGED|STORAGE_PREFLIGHT_KERNEL_CONNECTION_INVALID|STORAGE_PREFLIGHT_LEGACY_LOCK_PRESENT|\
+        STORAGE_PREFLIGHT_OFFSET_INVALID|STORAGE_PREFLIGHT_RECEIPT_INVALID|STORAGE_PREFLIGHT_RECEIPT_MISSING|\
+        STORAGE_PREFLIGHT_RESUME_REJECTED|STORAGE_PREFLIGHT_ROOT_FILE_ID_MISMATCH|STORAGE_PREFLIGHT_ROOT_INSPECT_FAILED|\
+        STORAGE_PREFLIGHT_TARGET_INSPECT_FAILED|STORAGE_PREFLIGHT_TASK_BINDING_INVALID|STORAGE_PREFLIGHT_TRANSACTION_REJECTED|\
+        STORAGE_PREFLIGHT_WORKER_INVALID|STORAGE_PUBLISH_BEGIN_STATE_INVALID|STORAGE_PUBLISH_COMPLETE_STATE_INVALID|\
+        STORAGE_PUBLISH_FINISH_PROOF_INVALID|STORAGE_PUBLISH_METADATA_INVALID|STORAGE_PUBLISH_STAGE_INSPECT_FAILED|\
+        STORAGE_PUBLISH_STAGE_REMAINS|STORAGE_PUBLISH_TARGET_CHANGED|STORAGE_PUBLISH_TRANSACTION_REJECTED|\
+        STORAGE_PUBLISH_TREE_INVALID|STORAGE_RECEIPT_INVALID|STORAGE_REJECTED|\
+        STORAGE_RELEASE_ABSENT_AUTH_REJECTED|STORAGE_RELEASE_OWNED_PATHS_REMAIN|STORAGE_RELEASE_PATHS_REMAIN|\
+        STORAGE_RELEASE_PATH_INSPECT_FAILED|STORAGE_RELEASE_PENDING_EVENT|STORAGE_RELEASE_ROOT_IDENTITY_CHANGED|\
+        STORAGE_RELEASE_TARGET_INSPECT_FAILED|STORAGE_RELEASE_TARGET_NOT_RESTORED|STORAGE_RELEASE_UNMUTATED_REJECTED|\
+        STORAGE_RELEASE_WORKER_NOT_STOPPED|STORAGE_REQUEST_TASK_INVALID|STORAGE_RESUME_CONNECTION_PIN_INVALID|\
+        STORAGE_RESUME_INSPECT_FAILED|STORAGE_RESUME_OWNED_IDENTITY_CHANGED|STORAGE_RESUME_OWNER_CONTENT_CHANGED|\
+        STORAGE_RESUME_OWNER_METADATA_CHANGED|STORAGE_RESUME_OWNER_READ_FAILED|STORAGE_RESUME_PARENT_IDENTITY_CHANGED|\
+        STORAGE_RESUME_PENDING_RECONCILIATION_FAILED|STORAGE_RESUME_ROOT_IDENTITY_CHANGED|STORAGE_RESUME_SEQUENCE_EXHAUSTED|\
+        STORAGE_RESUME_WORKER_STOP_UNPROVEN|STORAGE_TARGET_BINDING_MISMATCH|STORAGE_TASK_AUTH_REJECTED|\
+        STORAGE_TASK_BINDING_MISMATCH|STORAGE_TRANSACTION_RECEIPT_CHANGED|STORAGE_TRANSACTION_REJECTED|\
+        STORAGE_WORKER_BINDING_MISMATCH|STORAGE_WORKER_SCOPE_MISMATCH|STORAGE_WORKER_UNAVAILABLE) ;;
+        *) reason=STORAGE_REJECTED ;;
+    esac
+    safe_error=$(jq -ers 'if length == 1 and (.[0]|type == "object") then .[0].error | strings else empty end' <<<"$document" 2>/dev/null) || safe_error=''
+    case $safe_error in
+        '存储执行绑定或检查点无效，已停止本次操作'|'存储执行绑定已失效'|'存储配置或路径无效'|\
+        '存储目录包含链接、特殊文件、跨文件系统路径或目录环'|'远端文件或目录已改变'|\
+        '远端协议响应无效或超出安全上限'|'存储访问被拒绝，请检查存储访问凭证'|\
+        '存储为只读，无法写入'|'远端不支持所需存储协议'|'存储网络连接或读取失败') ;;
+        *) safe_error='存储请求未成功，已停止本次操作' ;;
+    esac
+    if [[ $endpoint == publish-checkpoint ]]; then
+        event_context=$(jq -ers '
+          if length == 1 and (.[0]|type == "object") then .[0] |
+            [ (if (.sequence|type == "string") then
+                 if (.sequence|length <= 20 and test("^[1-9][0-9]*$") and (explode|all(.[]; . >= 48 and . <= 57)))
+                 then "sequence=" + .sequence else empty end else empty end),
+              (if (.event|IN("intent","created","result")) then "phase=" + .event else empty end),
+              (if (.operation|IN("stat","list","read","seal","write","mkdir-owned","rename-owned","remove-owned"))
+               then "operation=" + .operation else empty end) ] | join(" ")
+          else empty end' <<<"$diagnostic_event" 2>/dev/null) || event_context=''
+    fi
+    message="PXEOS_STAGE=storage endpoint=$endpoint HTTP $status reasonCode=$reason error=$safe_error"
+    [[ -z $event_context ]] || message+=" $event_context"
+    if declare -F rootpxe_task_log_append >/dev/null 2>&1; then
+        rootpxe_task_log_append "$message" >/dev/null 2>&1 || true
+    fi
+    printf 'Storage request failed (HTTP %s). Check task log.\n' "$status" >&2
+    return 0
+}
+
 rootpxe_storage_call() {
-    local endpoint=$1 response; shift
-    response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 --max-filesize 8388608 \
+    local endpoint=$1 response request_result http_status diagnostic_event='' argument native_status=0 request_timeout=30 connect_timeout=10 remaining; shift
+    if [[ $endpoint == publish-checkpoint ]]; then
+        for argument in "$@"; do
+            [[ $argument != event=* ]] || diagnostic_event=${argument#event=}
+        done
+    fi
+    if [[ -n ${rootpxe_failure_deadline:-} ]]; then
+        remaining=$(rootpxe_failure_remaining) || return 2
+        (( remaining >= request_timeout )) || request_timeout=$remaining
+        (( remaining >= connect_timeout )) || connect_timeout=$remaining
+    fi
+    request_result=$(rootpxe_task_curl -ks --write-out '\n%{http_code}' --connect-timeout "$connect_timeout" --max-time "$request_timeout" --max-filesize 8388608 \
       --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" \
       --data-urlencode "attempt=$progress_attempt" --data-urlencode "storageNonce=$rootpxe_storage_nonce" \
-      --data-urlencode "workerNonce=$rootpxe_storage_worker_nonce" "$@" "${pxeapi:-$web}storage/$endpoint") || return 1
-    jq -e '.success == true' >/dev/null <<<"$response" || return 1
+      --data-urlencode "workerNonce=$rootpxe_storage_worker_nonce" "$@" "${pxeapi:-$web}storage/$endpoint") || native_status=$?
+    http_status=${request_result##*$'\n'}
+    response=${request_result%$'\n'*}
+    if (( native_status != 0 )) || [[ $request_result != *$'\n'* || ! $http_status =~ ^2[0-9]{2}$ ]] ||
+       ! jq -se 'length == 1 and (.[0] | type == "object" and .success == true)' >/dev/null 2>&1 <<<"$response"; then
+        rootpxe_storage_log_rejection "$endpoint" "$http_status" "$response" "$diagnostic_event" || true
+        return 1
+    fi
     printf '%s\n' "$response"
 }
 
@@ -143,8 +236,12 @@ rootpxe_storage_mount_smb() (
 )
 
 rootpxe_storage_start() {
-    local direction ready initial_data anchor_request anchor_result previous_sequence response_sequence context="$rootpxe_storage_workspace/context.json"
+    local direction ready initial_data anchor_request anchor_result previous_sequence response_sequence read_timeout=30 remaining context="$rootpxe_storage_workspace/context.json"
     [[ -z ${rootpxe_storage_pid:-} ]] || return 1
+    if [[ -n ${rootpxe_failure_deadline:-} ]]; then
+        remaining=$(rootpxe_failure_remaining) || return 2
+        (( remaining >= read_timeout )) || read_timeout=$remaining
+    fi
     direction=$(jq -r '.direction' "$context") || return 1
     # These FIFOs belong to this private controller instance. Remove only its
     # previous local IPC endpoints after the original child has been waited.
@@ -166,7 +263,15 @@ rootpxe_storage_start() {
     exec {rootpxe_storage_request_fd}>"$rootpxe_storage_workspace/request"
     exec {rootpxe_storage_result_fd}<"$rootpxe_storage_workspace/result"
     exec {anchor_request}>&-; exec {anchor_result}>&-
-    if ! IFS= read -r -t 30 -u "$rootpxe_storage_result_fd" ready; then
+    if [[ -n ${rootpxe_failure_deadline:-} ]]; then
+        if ! remaining=$(rootpxe_failure_remaining); then
+            kill -TERM "$rootpxe_storage_pid" 2>/dev/null || true
+            [[ -z ${initial_data:-} ]] || exec {initial_data}>&-
+            rootpxe_storage_stop || true; return 2
+        fi
+        read_timeout=$(( remaining < 30 ? remaining : 30 ))
+    fi
+    if ! IFS= read -r -t "$read_timeout" -u "$rootpxe_storage_result_fd" ready; then
         kill -TERM "$rootpxe_storage_pid" 2>/dev/null || true
         [[ -z ${initial_data:-} ]] || exec {initial_data}>&-
         rootpxe_storage_stop || true; return 1
@@ -224,11 +329,14 @@ rootpxe_storage_local_payload() {
 # The data writer is connected before the command; no helper holds a write end
 # of its own read FIFO. Every fixed write must reach EOF at its declared size.
 rootpxe_storage_exec() (
-    local operation=$1 path=$2 argument=${3:-} mode=${4:-} sequence command event phase response data_pid='' data_status=0 write_fd='' expected key
+    local operation=$1 path=$2 argument=${3:-} mode=${4:-} sequence command event phase response data_pid='' data_status=0 write_fd='' expected key read_timeout remaining
     trap 'if [[ -n $data_pid ]]; then kill -TERM "$data_pid" 2>/dev/null || true; while :; do wait "$data_pid" 2>/dev/null || true; kill -0 "$data_pid" 2>/dev/null || break; done; fi; [[ -z $write_fd ]] || exec {write_fd}>&-' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
     trap 'exit 129' HUP
+    if [[ -n ${rootpxe_failure_deadline:-} ]]; then
+        remaining=$(rootpxe_failure_remaining) || return 2
+    fi
     exec {command_lock}>"$rootpxe_storage_workspace/command.lock"; flock -x "$command_lock" || return 1
     sequence=$(cat "$rootpxe_storage_workspace/next-sequence") || return 1
     [[ $sequence =~ ^[1-9][0-9]*$ && ${#sequence} -le 20 ]] || return 1
@@ -250,7 +358,13 @@ rootpxe_storage_exec() (
         exec {write_fd}>&-; write_fd=''
     fi
     printf '%s\n' "$command" >&"$rootpxe_storage_request_fd" || return 1
-    while IFS= read -r -t 30 -u "$rootpxe_storage_result_fd" event; do
+    while :; do
+        read_timeout=30
+        if [[ -n ${rootpxe_failure_deadline:-} ]]; then
+            remaining=$(rootpxe_failure_remaining) || break
+            (( remaining >= read_timeout )) || read_timeout=$remaining
+        fi
+        IFS= read -r -t "$read_timeout" -u "$rootpxe_storage_result_fd" event || break
         phase=$(jq -r '.event' <<<"$event") || break
         if [[ $phase == progress ]]; then
             jq -e '.stage|IN("read","write","readback")' >/dev/null <<<"$event" || break
@@ -458,7 +572,12 @@ rootpxe_storage_change_direction() {
 }
 
 rootpxe_storage_finish_original() {
-    local response size
+    local response size request_timeout=30 connect_timeout=10 remaining
+    if [[ -n ${rootpxe_failure_deadline:-} ]]; then
+        remaining=$(rootpxe_failure_remaining) || return 2
+        (( remaining >= request_timeout )) || request_timeout=$remaining
+        (( remaining >= connect_timeout )) || connect_timeout=$remaining
+    fi
     jq -e '.finish.digest|test("^[a-f0-9]{64}$")' "$rootpxe_storage_workspace/preflight.json" >/dev/null || return 1
     size=$(jq -er '.finish.sizeBytes | strings' "$rootpxe_storage_workspace/preflight.json") || return 1
     jq -c '.finish.partitionInventory' "$rootpxe_storage_workspace/preflight.json" >"$rootpxe_storage_workspace/frozen-inventory.json" || return 1
@@ -467,7 +586,7 @@ rootpxe_storage_finish_original() {
         jq -c '.finish.originalSchema' "$rootpxe_storage_workspace/preflight.json" >"$rootpxe_storage_workspace/frozen-schema.json" || return 1
         facts+=(--data-urlencode "originalSchema@$rootpxe_storage_workspace/frozen-schema.json")
     fi
-    response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 \
+    response=$(rootpxe_task_curl -ks --connect-timeout "$connect_timeout" --max-time "$request_timeout" \
       --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" \
       --data-urlencode result=success "${facts[@]}" "${pxeapi:-$web}finish") || return 1
     jq -e '.success == true' >/dev/null <<<"$response"
@@ -521,8 +640,9 @@ rootpxe_storage_recover_once() {
 }
 
 rootpxe_storage_recover_until_clean() {
-    local worker
+    local worker remaining
     [[ ${rootpxe_storage_released:-no} != yes ]] || return 0
+    rootpxe_failure_begin || return 1
     # Do not signal only the last pipeline command and call it stopped. Closing
     # the helper causes FIFO errors to reach every bounded writer pipeline;
     # wait for each parent pipeline, which waits for its own producer/compressor.
@@ -534,7 +654,7 @@ rootpxe_storage_recover_until_clean() {
     done
     writer_pids=()
     rootpxe_storage_reconcile=yes
-    while :; do
+    while remaining=$(rootpxe_failure_remaining); do
         # A prior release may already have committed while its reply was
         # lost. Ask for its strictly authenticated acknowledgement before
         # reopening a helper against an operation that no longer exists.
@@ -547,8 +667,11 @@ rootpxe_storage_recover_until_clean() {
         rootpxe_storage_stop || true
         rootpxe_storage_reconcile=yes
         rootpxe_console_message WARN 'Storage recovery is not confirmed. Retrying in 5s.'
-        sleep 5
+        remaining=$(rootpxe_failure_remaining) || break
+        sleep "$(( remaining < 5 ? remaining : 5 ))"
     done
+    rootpxe_console_message WARN 'Storage recovery timed out. Remote protection remains held for the original execution.'
+    return 2
 }
 
 # Only an administrator-requested new attempt crosses this boundary. Same
@@ -583,6 +706,7 @@ rootpxe_storage_quiesce() {
 rootpxe_storage_failure_cleanup() {
     rootpxe_storage_failure_response=''
     [[ -n ${rootpxe_storage_workspace:-} && ${rootpxe_storage_released:-no} != yes ]] || return 0
+    rootpxe_failure_begin || return 1
     local response='' report_status=0
     # Join the old worker before waiting for the service to acknowledge this
     # exact failure. Network/5xx uncertainty must not release its owner first.
@@ -592,13 +716,14 @@ rootpxe_storage_failure_cleanup() {
     else
         report_status=$?
     fi
+    (( report_status != 2 )) || return 2
     # Rejection is not acknowledgement. Still perform the original verified
     # cleanup so a failed member never retains a live local writer.
     if rootpxe_storage_call release --data-urlencode workerStopped=true >/dev/null; then
         rootpxe_storage_released=yes
     else
         [[ -f $rootpxe_storage_workspace/ready.json ]] || return 1
-        rootpxe_storage_recover_until_clean || return 1
+        rootpxe_storage_recover_until_clean || return $?
     fi
     [[ ${rootpxe_storage_recovery_completed:-no} != yes ]] || return 0
     (( report_status == 0 )) || return "$report_status"

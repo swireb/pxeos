@@ -141,7 +141,7 @@ fi
 
 pxeos
 rc=$?
-if [[ -f /tmp/pxeos.storage-recovery-only && ! -L /tmp/pxeos.storage-recovery-only && -O /tmp/pxeos.storage-recovery-only ]]; then
+if [[ $rc -eq 0 && -f /tmp/pxeos.storage-recovery-only && ! -L /tmp/pxeos.storage-recovery-only && -O /tmp/pxeos.storage-recovery-only ]]; then
     pxeos_init_message INFO "Storage recovery ended with code: $rc. No disk or power action will be repeated."
     exit "$rc"
 fi

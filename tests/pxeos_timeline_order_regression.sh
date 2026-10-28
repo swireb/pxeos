@@ -247,7 +247,9 @@ grep -q '^request-finished$' "$trace" || fail reporter_handoff_left_request_runn
 
 # The real error->queued->exec branch must stop an owned reporter first;
 # exec itself does not invoke the entry's EXIT cleanup trap.
-eval "$(sed -n '/^rootpxe_error_report() {/,/^}/p' "$funcs")"
+for name in rootpxe_failure_begin rootpxe_failure_remaining rootpxe_error_report; do
+    eval "$(sed -n "/^$name() {/,/^}/p" "$funcs" | sed "s|/tmp/pxeos.failure_action|$tmp/failure_action|g")"
+done
 sed -n '/^rootpxe_error_wait_for_retry() {/,/^}/p' "$funcs" |
     sed -e "s#/tmp/pxeos.failure_action#$tmp/failure_action#g" \
         -e 's#exec /bin/pxeos#printf "exec\\n" >>"$trace"; return 77#' >"$tmp/error-wait.sh"

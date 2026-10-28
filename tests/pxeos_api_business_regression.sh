@@ -100,6 +100,16 @@ storage_test_apply_json_checkin "$nested_nfs" || fail '嵌套 NFS JSON 被拒绝
 flat_nfs='{"taskId":44,"type":"deploy","pxeType":"down","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"storage":"192.0.2.12:/dept/images","protocol":"nfs","storageip":"192.0.2.12","exportPath":"/dept/images"}'
 storage_test_apply_json_checkin "$flat_nfs" || fail '平铺 NFS JSON 被拒绝'
 [[ $protocol == nfs && $storage_server == 192.0.2.12 && $storage_export == /dept/images ]] || fail '平铺 NFS 字段解析错误'
+[[ $rootpxe_failure_wait_sec == 600 && $rootpxe_failure_action == reboot ]] || fail '旧 checkin 缺少失败策略时未兼容 600 秒和重启'
+configured_failure_policy=$(jq -c '.failureWaitSec=120 | .failureAction="shutdown"' <<<"$flat_nfs")
+storage_test_apply_json_checkin "$configured_failure_policy" || fail '有效 checkin 失败策略被拒绝'
+[[ $rootpxe_failure_wait_sec == 120 && $rootpxe_failure_action == shutdown ]] || fail 'checkin 失败策略未保存'
+for change in '.failureWaitSec="60"' '.failureWaitSec=null' '.failureWaitSec=59' '.failureWaitSec=3601' '.failureWaitSec=60.5' '.failureAction=null' '.failureAction=""' '.failureAction="continue"'; do
+    invalid_failure_policy=$(jq -c "$change" <<<"$flat_nfs")
+    storage_test_apply_json_checkin "$invalid_failure_policy" && fail '非法 checkin 失败策略被接受'
+done
+storage_test_apply_json_checkin "$flat_nfs" || fail '旧 checkin 失败策略缺省兼容被拒绝'
+[[ $rootpxe_failure_wait_sec == 600 && $rootpxe_failure_action == reboot ]] || fail '旧 checkin 继承了之前的失败策略'
 
 nested_smb='{"taskId":45,"type":"capture","pxeType":"up","img":"images/demo","imgType":"raw","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"storage":{"protocol":"smb","server":"192.0.2.13","share":"/canonical-share","smb":{"username":"nested-user","password":"nested-pass"}}}'
 storage_test_apply_json_checkin "$nested_smb" && fail '嵌套 SMB JSON 不得兼容'
@@ -173,7 +183,7 @@ handleError() { printf 'fixture rejected: %s\n' "$*" >&2; exit 97; }
 json_checkin_body=$(storage_test_context_json '{"taskId":49,"executionToken":"11111111111111111111111111111111","type":"capture","pxeType":"up","img":"images/demo","imgType":"mps","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"protocol":"smb","storageip":"192.0.2.20","exportPath":"share/images","smbUsername":"json-user","smbPassword":"json-pass"}')
 rootpxe_task_curl() {
     case ${@: -1} in
-        */storage/preflight) printf '%s\n' '{"success":true,"sequence":"0","nextSequence":"1"}' ;;
+        */storage/preflight) printf '%s\n200' '{"success":true,"sequence":"0","nextSequence":"1"}' ;;
         *) printf '%s\n200\n' "$MOCK_CHECKIN_BODY" ;;
     esac
 }
@@ -296,18 +306,23 @@ curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_arg
     esac
 }
 taskid=77; task_token=0123456789abcdef; mac=001122334455; pxeapi='http://mock/service/'
+failure_clock=100
+date() { printf '%s\n' "$failure_clock"; }
+sleep() { failure_clock=$((failure_clock + $1)); }
+rootpxe_failure_wait_sec=60
+unset rootpxe_failure_started_at rootpxe_failure_deadline rootpxe_failure_policy_confirmed rootpxe_failure_report_rejected
 set +e
 rootpxe_error_wait_for_retry 'capture failed' TEST_ERROR >>"$error_report_output" 2>&1
 error_report_status=$?
 set -e
-[[ $error_report_status -eq 1 && $(cat "$error_report_calls") == 1 ]] || fail 'identity conflict was retried or accepted'
+[[ $error_report_status -eq 2 && $failure_clock == 160 && $(cat "$error_report_calls") == 1 ]] || fail 'identity conflict was retried, accepted or skipped failure wait'
 grep -Fqx '[ERROR]  Error report rejected (HTTP 409). Stopping task.' "$error_report_output" \
     || fail 'error report rejection must include the HTTP status and controlled error'
 grep -Fqx '[ERROR]  server rejected' "$error_report_output" || fail 'controlled error reason missing'
 ! grep -Fq 'server-secret' "$error_report_output" || fail 'error report response leaked a sensitive server field'
 ! grep -Fq 'hidden' "$error_report_output" || fail 'error report response leaked an uncontrolled server field'
 unset -f curl
-unset -f curl sleep rootpxe_require_task_context rootpxe_console_message test_error_stage_field
+unset -f curl sleep date rootpxe_require_task_context rootpxe_console_message test_error_stage_field
 
 printf 'PASS: PXEOS real-jq JSON checkin regression\n'
 )
@@ -1544,6 +1559,9 @@ awk '/^dots\(\)/ { copy = 1 } /^# Enables write caching/ { exit } copy' "$funcs"
 awk '/^rootpxe_redact_diagnostic\(\)/ { copy = 1 } /^# Return at most/ { exit } copy' "$funcs" >"$tmp/redact.sh"
 awk '/^handleError\(\)/ { copy = 1 } /^# Re-reads the partition table/ { exit } copy' "$funcs" >"$tmp/handlers.sh"
 printf '. "%s"\n' "$tmp/redact.sh" >>"$tmp/handlers.sh"
+sed -n '/^rootpxe_failure_begin() {/,/^}/p' "$funcs" |
+    sed "s|/tmp/pxeos.failure_action|$tmp/failure_action|g" >"$tmp/failure-window.sh"
+printf '. "%s"\n' "$tmp/failure-window.sh" >>"$tmp/handlers.sh"
 awk '/^displayBanner\(\)/ { copy = 1 } /^# Gets all system mac addresses except for loopback/ { exit } copy' "$funcs" >"$tmp/banner.sh"
 awk '/^pxeos_init_message\(\)/ { copy = 1 } /^# SSH/ { exit } copy' "$overlay/etc/init.d/S99pxeos" >"$tmp/init-console.sh"
 [[ -s $tmp/console.sh ]] || fail 'console formatter was not extracted'
@@ -1730,8 +1748,8 @@ must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  Error report not conf
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" '[WARN]  Error report rejected (HTTP $http_status): $response_reason. Retrying in 5s.'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" "rootpxe_console_message ERROR 'Task paused. Error reported to RootPXE.'"
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" "rootpxe_console_message INFO 'Select Retry in the web UI to resume.'"
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message INFO "Timeout: ${wait}s. Timeout action: $action."'
-must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message WARN "Wait timed out. Timeout action: $action."'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message INFO "Timeout: ${rootpxe_failure_wait_sec}s from first failure. Timeout action: $rootpxe_failure_action."'
+must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_console_message WARN "Wait timed out. Timeout action: $rootpxe_failure_action."'
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" "rootpxe_console_message INFO 'Retry requested. Resuming task.'"
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" "rootpxe_console_message INFO 'Task deleted or aborted. Stopping PXEOS.'"
 must_have "$overlay/usr/share/pxeos/lib/funcs.sh" 'rootpxe_task_console_failure ERROR "$safe_str"'
@@ -1816,7 +1834,7 @@ for line in \
     '[WARN]  System will reboot in 60s.' \
     '[INFO]  Continuing in 60s.' \
     '[INFO]  Select Retry in the web UI to resume.' \
-    '[INFO]  Timeout: 3600s. Timeout action: shutdown.' \
+    '[INFO]  Timeout: 3600s from first failure. Timeout action: shutdown.' \
     '[WARN]  Wait timed out. Timeout action: shutdown.' \
     '[INFO]  Retry requested. Resuming task.' \
     '[INFO]  Task deleted or aborted. Stopping PXEOS.'; do

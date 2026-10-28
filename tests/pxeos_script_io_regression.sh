@@ -26,7 +26,7 @@ handleError() { printf 'mock-error:%s\n' "$*" >&2; exit 77; }
 debugPause() { :; }
 statusReporter=''
 load killStatusReporter || exit 1
-for name in rootpxe_cleanup_session rootpxe_cleanup_smb_credentials rootpxe_clear_smb_plaintext rootpxe_cleanup_task_json rootpxe_prepare_smb_credentials runPartprobe restoreGRUB rootpxe_task_console_failure rootpxe_redact_diagnostic rootpxe_utf8_safe_prefix rootpxe_console_message rootpxe_error_response_reason rootpxe_error_report rootpxe_error_wait_for_retry; do load "$name" || exit 1; done
+for name in rootpxe_cleanup_session rootpxe_cleanup_smb_credentials rootpxe_clear_smb_plaintext rootpxe_cleanup_task_json rootpxe_prepare_smb_credentials runPartprobe restoreGRUB rootpxe_task_console_failure rootpxe_redact_diagnostic rootpxe_utf8_safe_prefix rootpxe_console_message rootpxe_error_response_reason rootpxe_failure_begin rootpxe_failure_remaining rootpxe_error_report rootpxe_error_wait_for_retry; do load "$name" || exit 1; done
 for name in rootpxe_register_derived_layout_file rootpxe_cleanup_derived_layout_files; do
     if grep -q "^$name() {" "$funcs"; then load "$name" || exit 1; fi
 done
@@ -249,16 +249,16 @@ test_error_json_types() {
     }
     ( rootpxe_error_wait_for_retry fixture CODE console_shown ) >/dev/null 2>&1 || status=$?
     [[ $status == 2 && ! -e $tmp/slept && $(cat "$tmp/failure_action") == shutdown ]] || fail 'spaced typed JSON not accepted/parsed' || return 1
-    # A string accepted flag must retry instead of arming the timeout.
+    # A string accepted flag cannot replace the checkin failure policy.
     rm -f "$tmp/failure_action" "$tmp/slept"
     curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"; printf '{"accepted":"true","waitSec":60,"failureAction":"shutdown"}\n200'; }
     status=0; ( rootpxe_error_wait_for_retry fixture CODE console_shown ) >/dev/null 2>&1 || status=$?
-    [[ $status == 95 && -e $tmp/slept && ! -e $tmp/failure_action ]] || fail 'nonboolean accepted armed timeout'
+    [[ $status == 95 && -e $tmp/slept && $(cat "$tmp/failure_action") == reboot ]] || fail 'nonboolean accepted changed failure policy'
     rm -f "$tmp/failure_action" "$tmp/reset-permit" "$tmp/slept"
     local TASK_HTTP_TEST_STATUS=302
     curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"; printf '{"accepted":true,"waitSec":60,"failureAction":"shutdown","status":"queued"}\n200'; }
     status=0; ( rootpxe_error_wait_for_retry fixture CODE console_shown ) >/dev/null 2>&1 || status=$?
-    [[ $status == 95 && ! -e $tmp/failure_action && ! -e $tmp/reset-permit ]] || fail '302 malicious body accepted/resumed' || return 1
+    [[ $status == 95 && $(cat "$tmp/failure_action") == reboot && ! -e $tmp/reset-permit ]] || fail '302 malicious body accepted/resumed' || return 1
     TASK_HTTP_TEST_STATUS=200
     curl() {
         task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"

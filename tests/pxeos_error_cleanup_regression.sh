@@ -6,7 +6,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 . "$root/tests/task-http-test-support.sh"
-for function in rootpxe_redact_diagnostic rootpxe_utf8_safe_prefix rootpxe_error_response_reason rootpxe_error_report rootpxe_error_wait_for_retry handleError; do
+for function in rootpxe_redact_diagnostic rootpxe_utf8_safe_prefix rootpxe_error_response_reason rootpxe_failure_begin rootpxe_failure_remaining rootpxe_error_report rootpxe_error_wait_for_retry handleError; do
     eval "$(sed -n "/^$function() {/,/^}/p" "$lib/funcs.sh" | sed "s|/tmp/pxeos.failure_action|$tmp/failure_action|g")"
 done
 . "$lib/storage-io.sh"
@@ -20,7 +20,8 @@ rootpxe_storage_recover_until_clean() { fail 'unexpected storage recovery'; }
 taskid=41 task_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa mac=aabbccddeeff
 pxeapi=http://fixture/ web='' mc=no rootpxe_storage_workspace="$tmp/workspace"
 rootpxe_storage_nonce=nonce rootpxe_storage_worker_nonce=worker progress_attempt=2
-date() { printf '100\n'; }
+clock=100
+date() { printf '%s\n' "$clock"; }
 sleep() { : >"$tmp/unexpected-sleep"; fail 'unexpected retry sleep'; }
 curl() {
     task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"
@@ -57,17 +58,19 @@ status=0
 ( rootpxe_error_wait_for_retry failure CODE console_shown '{"accepted":true,"waitSec":60}' ) >"$tmp/retry-console" 2>&1 || status=$?
 [[ $status == 88 && $(cat "$tmp/retry-events") == $'reset\nunpin\nexec' ]] || fail 'UI retry did not start a fresh PXEOS execution'
 
-# A true identity conflict must stop, expose only the controlled reason and
-# never start the accepted-report timeout or send task-status requests.
+# A permanent identity rejection is not resent or polled. The first failure's
+# checkin policy still provides a finite wait before the failure power action.
 rm -f "$tmp/failure_action" "$tmp/events"
 curl() {
     task_http_test_decode_curl_args "$@"
     printf 'error\n' >>"$tmp/events"
     printf '{"accepted":false,"error":"存储执行绑定已失效 token=%s\\u001b\\n","token":"hidden-secret","detail":"private-detail"}\n409' "$task_token"
 }
+sleep() { clock=$((clock + $1)); }
+rootpxe_failure_wait_sec=60
 status=0
 ( rootpxe_error_wait_for_retry failure CODE console_shown ) >"$tmp/conflict" 2>&1 || status=$?
-[[ $status == 1 && ! -e $tmp/failure_action && $(cat "$tmp/events") == error ]] || fail '409 was retried or accepted'
+[[ $status == 2 && $(cat "$tmp/failure_action") == reboot && $(cat "$tmp/events") == error ]] || fail '409 was retried, accepted or skipped the failure wait'
 grep -Fq 'HTTP 409' "$tmp/conflict" && grep -Fq '存储执行绑定已失效' "$tmp/conflict" || fail '409 Chinese reason missing'
 ! grep -Eq "hidden-secret|private-detail|$task_token" "$tmp/conflict" || fail '409 response leaked uncontrolled fields or credentials'
 for rejected_status in 403 404; do
@@ -75,7 +78,7 @@ for rejected_status in 403 404; do
     curl() { task_http_test_decode_curl_args "$@"; printf 'error\n' >>"$tmp/events"; printf '{"error":"task no longer belongs to this client"}\n%s' "$rejected_status"; }
     status=0
     ( rootpxe_error_wait_for_retry failure CODE console_shown ) >"$tmp/permanent-rejection" 2>&1 || status=$?
-    [[ $status == 1 && $(cat "$tmp/events") == error && ! -e $tmp/failure_action && ! -e $tmp/unexpected-sleep ]] || fail "permanent HTTP $rejected_status was retried or accepted"
+    [[ $status == 2 && $(cat "$tmp/events") == error && $(cat "$tmp/failure_action") == reboot && ! -e $tmp/unexpected-sleep ]] || fail "permanent HTTP $rejected_status was retried, accepted or skipped the failure wait"
 done
 reason=$(LC_ALL=C rootpxe_error_response_reason '{"error":"存储执行绑定已失效 token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u001b"}')
 [[ $reason == *'存储执行绑定已失效'* && $reason != *$'\033'* && $reason != *"$task_token"* ]] || fail 'C locale reason lost Chinese or leaked controls/credentials'
@@ -98,10 +101,10 @@ status=0
 rootpxe_storage_failure_cleanup failure || status=$?
 [[ $status == 1 && -z ${rootpxe_storage_failure_response:-} ]] || fail 'failed cleanup published an acknowledgement'
 
-# Network and 5xx remain transient; only a later real acknowledgement may
-# arm the local timeout.
+# Network and 5xx retry only inside the original failure window.
 rm -f "$tmp/events" "$tmp/failure_action"
-sleep() { printf 'sleep\n' >>"$tmp/events"; }
+unset rootpxe_failure_started_at rootpxe_failure_deadline rootpxe_failure_policy_confirmed rootpxe_failure_report_rejected
+sleep() { clock=$((clock + $1)); printf 'sleep\n' >>"$tmp/events"; }
 curl() {
     task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"
     if [[ $* == *'/task-status'* ]]; then printf '{"status":"deleted"}'; return; fi
@@ -126,6 +129,6 @@ eval "$(sed -n '/^rootpxe_console_message() {/,/^}/p' "$lib/funcs.sh")"
 curl() { task_http_test_decode_curl_args "$@"; printf '{"error":"%s"}\n409' "$long_reason"; }
 status=0
 ( LC_ALL=C rootpxe_error_wait_for_retry failure CODE console_shown ) >"$tmp/chinese-console" 2>&1 || status=$?
-[[ $status == 1 ]] || fail 'Chinese identity conflict was accepted'
+[[ $status == 2 ]] || fail 'Chinese identity conflict did not reach the failure deadline'
 python3 -c 'import pathlib,sys; data=pathlib.Path(sys.argv[1]).read_bytes(); data.decode("utf-8", "strict")' "$tmp/chinese-console" || fail 'console split Chinese UTF-8'
 printf 'PASS: error cleanup acknowledgement reuse, released status wait, genuine 409 and stale acknowledgement\n'

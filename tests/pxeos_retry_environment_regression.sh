@@ -34,13 +34,15 @@ fi
 printf 'new-attempt-accepted\n' >"$PXEOS_CHILD_RESULT"
 rm -rf -- "$rootpxe_storage_workspace"
 CHILD
-for name in rootpxe_error_response_reason rootpxe_error_wait_for_retry rootpxe_reset_disk_permit_retry_state; do
+for name in rootpxe_failure_begin rootpxe_failure_remaining rootpxe_error_response_reason rootpxe_error_wait_for_retry rootpxe_reset_disk_permit_retry_state; do
     eval "$(sed -n "/^$name() {/,/^}/p" "$lib/funcs.sh" | sed -e "s|/tmp/pxeos.failure_action|$tmp/failure_action|g" -e "s|exec /bin/pxeos|exec bash '$tmp/new-attempt.sh'|")"
 done
 rootpxe_require_task_context() { :; }; rootpxe_bound_callback_message() { printf '%s' "$1"; }
 rootpxe_console_message() { :; }; killStatusReporter() { :; }; rootpxe_task_log_release_pin() { :; }
 rootpxe_clear_disk_permit() { :; }
-date() { printf '100\n'; }
+clock=100
+date() { printf '%s\n' "$clock"; }
+sleep() { clock=$((clock + $1)); }
 curl() { task_http_test_decode_curl_args "$@"; printf '{"status":"queued"}'; }
 for blocked in unreleased unstopped helper-pid; do
     status=0
@@ -52,7 +54,7 @@ for blocked in unreleased unstopped helper-pid; do
         esac
         rootpxe_error_wait_for_retry failure CODE console_shown '{"accepted":true,"waitSec":60}'
     ) >"$tmp/blocked-console" 2>&1 || status=$?
-    [[ $status == 1 && ! -e $tmp/child-result && -r $old_workspace/context.json ]] || fail "unsafe retry crossed exec: $blocked"
+    [[ $status == 2 && ! -e $tmp/child-result && -r $old_workspace/context.json ]] || fail "unsafe retry crossed exec or skipped failure wait: $blocked"
 done
 status=0
 ( rootpxe_error_wait_for_retry failure CODE console_shown '{"accepted":true,"waitSec":60}' ) >"$tmp/console" 2>&1 || status=$?
