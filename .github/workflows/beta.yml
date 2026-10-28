@@ -6,7 +6,7 @@ on:
       server_version:
         type: string
         required: true
-        description: "要求完全一致的 RootPXE 服务端版本（例如 1.0.1）"
+        description: "Server Version"
 
 permissions:
   contents: read
