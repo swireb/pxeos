@@ -1,6 +1,6 @@
 #!/bin/bash
 
-[[ -z $KERNEL_VERSION ]] && KERNEL_VERSION='6.18.38'
+[[ -z $KERNEL_VERSION ]] && KERNEL_VERSION='6.18.59'
 [[ -z $BUILDROOT_VERSION ]] && BUILDROOT_VERSION='2026.02.1'
 
 declare -ar ARCHITECTURES=("x64" "x86" "arm64")

@@ -11,7 +11,7 @@
 #include <sys/mount.h>
 #include <unistd.h>
 
-/* Linux 6.18.38 cifs_ioctl.h: only the target tcon metadata ABI, no key IOCTL. */
+/* Linux 6.18.59 cifs_ioctl.h: only the target tcon metadata ABI, no key IOCTL. */
 struct rx_tcon {uint32_t tid;uint64_t session;} __attribute__((packed));
 #define RX_GET_TCON _IOR(0xCF,12,struct rx_tcon)
 static char *read_bounded(const char *path,size_t limit){int fd=open(path,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)return NULL;char *b=malloc(limit+1);if(!b){close(fd);return NULL;}size_t n=0;for(;;){if(n==limit){char extra;if(read(fd,&extra,1)!=0){free(b);close(fd);return NULL;}break;}ssize_t r=read(fd,b+n,limit-n);if(r<0&&errno==EINTR)continue;if(r<0){free(b);close(fd);return NULL;}if(!r)break;n+=(size_t)r;}close(fd);b[n]=0;return b;}

@@ -369,10 +369,10 @@ case "${1:-}" in
     *) printf 'Usage: %s [--arm64-initrd|--qemu]\n' "$0" >&2; exit 2 ;;
 esac
 
-expect_line "$ROOT_DIR/build.sh" "[[ -z \$KERNEL_VERSION ]] && KERNEL_VERSION='6.18.38'"
+expect_line "$ROOT_DIR/build.sh" "[[ -z \$KERNEL_VERSION ]] && KERNEL_VERSION='6.18.59'"
 for fs in fsx86.config fsx64.config fsarm64.config; do
-    expect_line "$ROOT_DIR/configs/$fs" 'BR2_DEFAULT_KERNEL_VERSION="6.18.38"'
-    expect_line "$ROOT_DIR/configs/$fs" 'BR2_DEFAULT_KERNEL_HEADERS="6.18.38"'
+    expect_line "$ROOT_DIR/configs/$fs" 'BR2_DEFAULT_KERNEL_VERSION="6.18.59"'
+    expect_line "$ROOT_DIR/configs/$fs" 'BR2_DEFAULT_KERNEL_HEADERS="6.18.59"'
     expect_line "$ROOT_DIR/configs/$fs" 'BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_18=y'
     expect_line "$ROOT_DIR/configs/$fs" '# BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12 is not set'
     for minor in 13 14 15 16 17 18; do

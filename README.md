@@ -90,7 +90,7 @@ export PXEOS_REQUIRED_SERVER_VERSION=1.0.1
 
 ```text
 # 内核源码归档
-linux-6.18.38.tar.xz
+linux-6.18.59.tar.xz
 # 优先与备用下载域名
 cdn.kernel.org
 www.kernel.org
@@ -378,7 +378,7 @@ BR2_PACKAGE_LIBCURL_CURL
 
 - [安全配置](docs/安全配置.md)：默认 Root 凭据与敏感信息边界。
 - [上游同步](docs/上游同步.md)：历史构建/CI 与 FOG 官方提交同步记录。
-- [硬件兼容性](docs/硬件兼容性.md)：Linux 6.18.38、ARM64、Realtek、r8169、ASPM 与构建验证边界。
+- [硬件兼容性](docs/硬件兼容性.md)：Linux 6.18.59、ARM64、Realtek、r8169、ASPM 与构建验证边界。
 - [RootPXE 集成](docs/RootPXE集成.md)：Schema、布局、LVM、主机名、NVMe、permit 与重试闭环。
 - [故障处理](docs/故障处理.md)：capture/restore、attention、finish 与联调清单。
 - [文档格式](docs/文档格式.md)：现有文档格式规范。
