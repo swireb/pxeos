@@ -58,6 +58,7 @@ exec_line=$(grep -nE '^[[:space:]]*exec /bin/pxeos[[:space:]]*$' "$lib/funcs.sh"
 [[ $reset_line -lt $release_line && $release_line -lt $exec_line ]] || fail retry-release-order
 # Run the complete current queued branch. Only the terminal exec boundary is
 # replaced, so the real pin release and original permit-reset ordering run.
+eval "$(sed -n '/^rootpxe_error_report() {/,/^}/p' "$lib/funcs.sh")"
 eval "$(sed -n '/^rootpxe_error_wait_for_retry() {/,/^}/p' "$lib/funcs.sh" | sed -e "s|/tmp/pxeos.failure_action|$tmp/failure_action|g" -e 's|exec /bin/pxeos|rootpxe_pin_test_exec /bin/pxeos|')"
 for release_failure in no yes; do
     (
@@ -67,6 +68,8 @@ for release_failure in no yes; do
         pxeapi=https://example.invalid/; web=$pxeapi; taskid=1; task_token=FAKE_PIN_TOKEN; mac=00:00:00:00:00:00; mc=no
         rootpxe_require_task_context(){ return 0; }
         rootpxe_console_message(){ :; }
+        # The storage/new-process boundary has its own real-exec regression.
+        rootpxe_storage_reset_retry_state(){ :; }
         rootpxe_reset_disk_permit_retry_state(){ printf RESET >"$tmp/retry-order"; }
         curl(){ task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"; case "${*: -1}" in *task-status) printf '%s' '{"status":"queued"}' ;; *error) printf '%s\n200' '{"accepted":true,"waitSec":60}' ;; *) return 90 ;; esac; }
         if [[ $release_failure == yes ]]; then rootpxe_task_log_release_pin(){ return 1; }; fi

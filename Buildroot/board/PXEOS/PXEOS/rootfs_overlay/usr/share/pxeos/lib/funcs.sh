@@ -3292,20 +3292,16 @@ rootpxe_capture_note_partition_shrunk() {
 
 rootpxe_error_response_reason() {
     local response="$1" reason
-    reason=$(printf '%s' "$response" | sed -n 's/.*"error"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-    reason=$(printf '%s' "$reason" | tr -cd '[:print:] ' | cut -c1-160)
-    printf '%s' "$reason"
+    reason=$(jq -r 'if type == "object" and (.error | type) == "string" then .error else empty end' <<<"$response" 2>/dev/null) || return 0
+    reason=$(rootpxe_redact_diagnostic "$reason") || return 0
+    reason=$(printf '%s' "$reason" | LC_ALL=C tr -d '[:cntrl:]')
+    rootpxe_utf8_safe_prefix "$reason" 160
 }
 
-rootpxe_error_wait_for_retry() {
-    # exec /bin/pxeos below does not run EXIT traps. Stop the old sampler
-    # before reporting an error or admitting a new retry in this process.
-    killStatusReporter
-    local message code="${2:-PXEOS_ERROR}" api="${pxeapi:-$web}" response raw_response http_status response_reason wait action deadline now status stage="" stage_count=0 stage_invalid=0 stage_match stage_remainder stage_value
+rootpxe_error_report() {
+    rootpxe_error_report_response=''
+    local message code="${2:-PXEOS_ERROR}" api="${pxeapi:-$web}" response='' raw_response http_status response_reason reason_line stage='' stage_count=0 stage_invalid=0 stage_match stage_remainder stage_value
     local -a error_args
-    if [[ ${3:-} != console_shown ]]; then
-        rootpxe_task_console_failure ERROR "$1"
-    fi
     rootpxe_require_task_context || return 1
     [[ -n $api ]] || return 1
     message=$(rootpxe_bound_callback_message "$1") || return 1
@@ -3334,7 +3330,6 @@ rootpxe_error_wait_for_retry() {
     rootpxe_task_multicast_form_args || return 1
     error_args+=("${rootpxe_task_multicast_args[@]}")
     [[ $stage_count -eq 1 && $stage_invalid -eq 0 ]] && error_args+=(--data-urlencode "stage=$stage")
-    # Do not arm the local timeout until the service confirms persistence.
     while :; do
         raw_response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 -w '\n%{http_code}' \
             "${error_args[@]}" "${api}error" 2>/dev/null) || {
@@ -3349,6 +3344,15 @@ rootpxe_error_wait_for_retry() {
         [[ $http_status =~ ^[0-9]{3}$ ]] || { http_status=000; response=$raw_response; }
         [[ $http_status =~ ^2 ]] && jq -e 'type == "object" and .accepted == true' >/dev/null 2>&1 <<<"$response" && break
         response_reason=$(rootpxe_error_response_reason "$response")
+        if [[ $http_status == 4[0-9][0-9] && $http_status != 408 && $http_status != 429 ]]; then
+            rootpxe_console_message ERROR "Error report rejected (HTTP $http_status). Stopping task."
+            while [[ -n $response_reason ]]; do
+                reason_line=$(rootpxe_utf8_safe_prefix "$response_reason" 72)
+                rootpxe_console_message ERROR "$reason_line"
+                response_reason=${response_reason#"$reason_line"}
+            done
+            return 1
+        fi
         if [[ -n $response_reason ]]; then
             printf '%s\n' \
                 "[WARN]  Error report rejected (HTTP $http_status): $response_reason. Retrying in 5s." \
@@ -3358,8 +3362,28 @@ rootpxe_error_wait_for_retry() {
                 "[WARN]  Error report not confirmed (HTTP $http_status). Retrying in 5s." \
                 "[INFO]  SSH is available for troubleshooting."
         fi
+        response=''
         sleep 5
     done
+    rootpxe_error_report_response=$response
+}
+
+rootpxe_error_wait_for_retry() {
+    # exec below does not run EXIT traps; stop the old sampler before any
+    # error reporting, polling or admission of an administrator retry.
+    killStatusReporter
+    local response=${4:-} wait action deadline now status api="${pxeapi:-$web}"
+    if [[ ${3:-} != console_shown ]]; then
+        rootpxe_task_console_failure ERROR "$1"
+    fi
+    rootpxe_require_task_context || return 1
+    [[ -n $api ]] || return 1
+    if ! jq -e 'type == "object" and .accepted == true' >/dev/null 2>&1 <<<"$response"; then
+        rootpxe_error_report "$1" "${2:-PXEOS_ERROR}" || return 1
+        response=$rootpxe_error_report_response
+    fi
+    local -a rootpxe_task_multicast_args=()
+    rootpxe_task_multicast_form_args || return 1
     wait=$(jq -r 'if (.waitSec | type) == "number" and (.waitSec | floor) == .waitSec and .waitSec >= 60 and .waitSec <= 3600 then .waitSec else 600 end' <<<"$response") || wait=600
     action=$(jq -r 'if .failureAction == "shutdown" then "shutdown" else "reboot" end' <<<"$response") || action=reboot
     printf '%s\n' "$action" > /tmp/pxeos.failure_action
@@ -3384,6 +3408,7 @@ rootpxe_error_wait_for_retry() {
         status=$(jq -er 'if type == "object" and (.status | type) == "string" then .status else empty end' <<<"$status" 2>/dev/null) || status=''
         if [[ ${mc:-no} != yes && $status == queued ]]; then
             rootpxe_console_message INFO 'Retry requested. Resuming task.'
+            rootpxe_storage_reset_retry_state || return 1
             rootpxe_reset_disk_permit_retry_state || return 1
             rootpxe_task_log_release_pin || true
             exec /bin/pxeos
@@ -6180,7 +6205,7 @@ correctVistaMBR() {
 #
 # $1 is the string to inform what went wrong
 handleError() {
-    local str="$1" safe_str
+    local str="$1" safe_str error_response=''
     local parts=""
     local part=""
     safe_str=$(rootpxe_redact_diagnostic "$str")
@@ -6212,8 +6237,9 @@ handleError() {
         if [[ -n ${rootpxe_storage_workspace:-} && ${rootpxe_storage_released:-no} != yes ]]; then
             rootpxe_storage_failure_cleanup "$safe_str" || exit 1
             if [[ ${rootpxe_storage_recovery_completed:-no} == yes ]]; then exit 0; fi
+            error_response=${rootpxe_storage_failure_response:-}
         fi
-        rootpxe_error_wait_for_retry "$safe_str" "PXEOS_ERROR" console_shown
+        rootpxe_error_wait_for_retry "$safe_str" "PXEOS_ERROR" console_shown "$error_response"
         return_code=$?
         exit "$return_code"
     fi

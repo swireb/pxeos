@@ -247,12 +247,14 @@ grep -q '^request-finished$' "$trace" || fail reporter_handoff_left_request_runn
 
 # The real error->queued->exec branch must stop an owned reporter first;
 # exec itself does not invoke the entry's EXIT cleanup trap.
+eval "$(sed -n '/^rootpxe_error_report() {/,/^}/p' "$funcs")"
 sed -n '/^rootpxe_error_wait_for_retry() {/,/^}/p' "$funcs" |
     sed -e "s#/tmp/pxeos.failure_action#$tmp/failure_action#g" \
         -e 's#exec /bin/pxeos#printf "exec\\n" >>"$trace"; return 77#' >"$tmp/error-wait.sh"
 . "$tmp/error-wait.sh"
 rootpxe_require_task_context(){ return 0; }
 rootpxe_bound_callback_message(){ printf '%s' "$1"; }
+rootpxe_storage_reset_retry_state(){ printf 'storage-reset\n' >>"$trace"; }
 rootpxe_reset_disk_permit_retry_state(){ printf 'permit-reset\n' >>"$trace"; }
 rootpxe_task_log_release_pin(){ :; }
 rootpxe_task_curl(){
@@ -278,6 +280,7 @@ for owned in yes no; do
     [[ $result == 77 ]] || { printf 'error-wait result=%s\n' "$result" >&2; cat "$trace" >&2; fail error_retry_did_not_reach_exec; }
     if [[ $owned == yes ]]; then before reporter-stopped callback || fail error_callback_preceded_reporter_stop; fi
     before callback permit-reset || fail error_retry_reordered_status_check
+    before storage-reset permit-reset || fail old_storage_context_survived_new_attempt
     before permit-reset exec || fail error_retry_reordered_permit_reset
     [[ -z $statusReporter ]] || fail error_retry_retained_reporter_pid
 done

@@ -535,6 +535,13 @@ rootpxe_storage_recover_until_clean() {
     writer_pids=()
     rootpxe_storage_reconcile=yes
     while :; do
+        # A prior release may already have committed while its reply was
+        # lost. Ask for its strictly authenticated acknowledgement before
+        # reopening a helper against an operation that no longer exists.
+        if rootpxe_storage_call release --data-urlencode workerStopped=true >/dev/null; then
+            rootpxe_storage_released=yes
+            return 0
+        fi
         if rootpxe_storage_start && rootpxe_storage_recover_once; then return 0; fi
         [[ -z ${rootpxe_storage_pid:-} ]] || kill -TERM "$rootpxe_storage_pid" 2>/dev/null || true
         rootpxe_storage_stop || true
@@ -542,6 +549,18 @@ rootpxe_storage_recover_until_clean() {
         rootpxe_console_message WARN 'Storage recovery is not confirmed. Retrying in 5s.'
         sleep 5
     done
+}
+
+# Only an administrator-requested new attempt crosses this boundary. Same
+# attempt storage recovery must retain its exact execution identity.
+rootpxe_storage_reset_retry_state() {
+    if [[ -n ${rootpxe_storage_workspace:-} ]]; then
+        [[ ${rootpxe_storage_released:-no} == yes && ${rootpxe_storage_stopped:-no} == yes && -z ${rootpxe_storage_pid:-} ]] || return 1
+    fi
+    rootpxe_cleanup_task_json || return 1
+    rootpxe_deployment_identity_cleanup_private || return 1
+    unset rootpxe_storage_workspace rootpxe_storage_nonce rootpxe_storage_worker_nonce rootpxe_storage_stage rootpxe_storage_lock
+    unset rootpxe_storage_published capture_size_bytes rootpxe_final_capture_path
 }
 
 rootpxe_capture_resume_published() {
@@ -562,21 +581,26 @@ rootpxe_storage_quiesce() {
 }
 
 rootpxe_storage_failure_cleanup() {
+    rootpxe_storage_failure_response=''
     [[ -n ${rootpxe_storage_workspace:-} && ${rootpxe_storage_released:-no} != yes ]] || return 0
-    # This may mark the original task attention but cannot revoke its NAS
-    # occupancy. Only the protected original sealed publication can resume it.
-    rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 \
-      --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" \
-      --data-urlencode errorCode=PXEOS_STORAGE_INTERRUPTED --data-urlencode "message=${1:-存储执行已停止，正在安全收尾}" \
-      "${pxeapi:-$web}error" >/dev/null 2>&1 || true
+    local response='' report_status=0
+    # Join the old worker before waiting for the service to acknowledge this
+    # exact failure. Network/5xx uncertainty must not release its owner first.
     rootpxe_storage_quiesce
-    # A lost preflight response is not proof of no mutation. Only the server's
-    # conditional true-NULL branch may release this unauthorised execution.
+    if rootpxe_error_report "${1:-存储执行已停止，正在安全收尾}" PXEOS_STORAGE_INTERRUPTED; then
+        response=$rootpxe_error_report_response
+    else
+        report_status=$?
+    fi
+    # Rejection is not acknowledgement. Still perform the original verified
+    # cleanup so a failed member never retains a live local writer.
     if rootpxe_storage_call release --data-urlencode workerStopped=true >/dev/null; then
         rootpxe_storage_released=yes
-        return 0
+    else
+        [[ -f $rootpxe_storage_workspace/ready.json ]] || return 1
+        rootpxe_storage_recover_until_clean || return 1
     fi
-    [[ -f $rootpxe_storage_workspace/ready.json ]] || return 1
-    rootpxe_storage_recover_until_clean
+    [[ ${rootpxe_storage_recovery_completed:-no} != yes ]] || return 0
+    (( report_status == 0 )) || return "$report_status"
+    rootpxe_storage_failure_response=$response
 }
-

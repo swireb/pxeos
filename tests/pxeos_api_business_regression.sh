@@ -236,8 +236,14 @@ status=0
 ) >"$tmp/mount-trap.out" 2>&1 && fail 'TERM was ignored' || mount_trap_rc=$?
 [[ $mount_trap_rc == 143 && ! -e $tmp/trap.credentials && ! -e $tmp/initialization.private ]] || fail 'TERM did not preserve private cleanup'
 
+# The complete checkin fixture above replaced the transport. Error fixtures
+# below mock native curl and must use the production private-body wrapper.
+. "$root/tests/task-http-test-support.sh"
 awk '/^rootpxe_error_response_reason\(\)/ { on=1 } /^rootpxe_directory_size_bytes\(\)/ { on=0 } on { print }' "$funcs" \
     | sed "s|/tmp/pxeos.failure_action|$tmp/pxeos.failure_action|g" >"$tmp/error-stage.sh"
+for function in rootpxe_redact_diagnostic rootpxe_utf8_safe_prefix; do
+    eval "$(sed -n "/^$function() {/,/^}/p" "$funcs")"
+done
 rootpxe_require_task_context() { return 0; }
 rootpxe_console_message() { :; }
 sleep() { :; }
@@ -294,9 +300,10 @@ set +e
 rootpxe_error_wait_for_retry 'capture failed' TEST_ERROR >>"$error_report_output" 2>&1
 error_report_status=$?
 set -e
-[[ $error_report_status -eq 2 ]] || fail 'error diagnostic fixture did not pause safely'
-grep -Fqx '[WARN]  Error report rejected (HTTP 409): server rejected. Retrying in 5s.' "$error_report_output" \
+[[ $error_report_status -eq 1 && $(cat "$error_report_calls") == 1 ]] || fail 'identity conflict was retried or accepted'
+grep -Fqx '[ERROR]  Error report rejected (HTTP 409). Stopping task.' "$error_report_output" \
     || fail 'error report rejection must include the HTTP status and controlled error'
+grep -Fqx '[ERROR]  server rejected' "$error_report_output" || fail 'controlled error reason missing'
 ! grep -Fq 'server-secret' "$error_report_output" || fail 'error report response leaked a sensitive server field'
 ! grep -Fq 'hidden' "$error_report_output" || fail 'error report response leaked an uncontrolled server field'
 unset -f curl
@@ -424,8 +431,12 @@ printf 'sleep:%s\n' "$1" >>"$LAYOUT_SLEEP_TRACE"
 EOF
 cat >$tmp/mock/flock <<'EOF'
 #!/usr/bin/env bash
-shift
-exec "$@"
+if [[ $1 == /dev/* ]]; then
+    printf '%s\n' "$*" >>"${LAYOUT_FLOCK_TRACE:?}"
+    shift
+    exec "$@"
+fi
+exec "${LAYOUT_REAL_FLOCK:?}" "$@"
 EOF
 cat >$tmp/mock/sfdisk <<'EOF'
 #!/usr/bin/env bash
@@ -661,6 +672,11 @@ for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do
     [[ ! -f $rootpxe_test_funcs_copy ]] || sed -i -e "s|/tmp/log|$tmp/log|g" -e "s|^rootpxe_log_paths_lib=.*|rootpxe_log_paths_lib=$tmp/log-paths.sh|" "$rootpxe_test_funcs_copy"
 done
 . "$root/tests/task-log-test-support.sh"
+# Keep real descriptor locks for private logs, but route the synthetic disk
+# lock through this fixture. No mock /dev path is opened by native flock.
+LAYOUT_REAL_FLOCK=$task_log_real_flock; export LAYOUT_REAL_FLOCK
+LAYOUT_FLOCK_TRACE=$tmp/layout-flock-trace; export LAYOUT_FLOCK_TRACE
+task_log_real_flock=$tmp/mock/flock
 : >$tmp/cmdline
 : >$tmp/mount-trace
 MOUNT_TRACE=$tmp/mount-trace; export MOUNT_TRACE
@@ -1197,6 +1213,7 @@ LAYOUT_EXPECT_DISK=/dev/sda
 # not materialize a d1.deployment.partitions file.
 rootpxe_deployment_layout_changed=no
 rootpxe_apply_deployment_layout /dev/sda $layout_template || fail layout-apply-nvme-to-sata
+grep -Fqx '/dev/sda sfdisk --no-reread --no-tell-kernel /dev/sda' "$LAYOUT_FLOCK_TRACE" || fail layout-write-must-use-mock-disk-lock
 [[ -z ${rootpxe_deployment_partition_file:-} ]] || fail default-layout-must-not-materialize-deployment-table
 layout_apply_assert_table /dev/sda "$layout_applied" || fail layout-apply-nvme-to-sata-rewritten-table
 grep -Fqx -- '--no-reread --no-tell-kernel /dev/sda' "$LAYOUT_SFDISK_ARGS" || fail layout-sfdisk-write-must-disable-implicit-kernel-reread
@@ -1752,7 +1769,8 @@ must_have "$overlay/bin/pxeos.surfacetest" 'dots "Locating disk devices"'
 must_not_have "$overlay/bin/pxeos.surfacetest" 'service/Pre_Stage1.php'
 must_have "$overlay/bin/pxeos.photorec" 'dots "Creating file system mount point"'
 must_have "$overlay/bin/pxeos.checkmount" 'dots "Checking mounted file system"'
-must_have "$overlay/bin/pxeos.checkmountdrivesize" 'dots "Checking server disk space"'
+must_have "$overlay/bin/pxeos.checkmountdrivesize" "rootpxe_console_message INFO 'Storage capacity is checked during writing.'"
+must_not_have "$overlay/bin/pxeos.checkmountdrivesize" 'dots "Checking server disk space"'
 must_have "$overlay/bin/pxeos.chntpw" 'dots "Mounting Windows file system"'
 must_have "$overlay/bin/pxeos.chpass" 'dots "Creating chntpw mount point"'
 must_have "$overlay/bin/pxeos.chpass" 'dots "Using disk device"'

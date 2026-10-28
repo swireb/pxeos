@@ -9,6 +9,40 @@ LIB = Path(__file__).parents[1] / "Buildroot/board/PXEOS/PXEOS/rootfs_overlay/us
 
 
 class StorageControllerTests(unittest.TestCase):
+    def test_completed_capture_recovery_outweighs_earlier_error_rejection(self):
+        result = self.run_controller('''
+            rootpxe_storage_quiesce() { :; }
+            rootpxe_error_report() { rootpxe_error_report_response=''; return 1; }
+            rootpxe_storage_call() { return 1; }
+            rootpxe_storage_recover_until_clean() { rootpxe_storage_recovery_completed=yes; }
+            : >"$tmp/ready.json"
+            rootpxe_storage_failure_cleanup failure
+        ''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_lost_release_ack_does_not_restart_helper_or_preflight(self):
+        result = self.run_controller('''
+            rootpxe_storage_stop() { printf 'stop\\n' >>"$tmp/events"; }
+            rootpxe_storage_call() { [[ $1 == release ]] || exit 86; printf 'release\\n' >>"$tmp/events"; }
+            rootpxe_storage_start() { printf 'unexpected helper restart\\n' >&2; exit 88; }
+            rootpxe_storage_released=no
+            rootpxe_storage_recover_until_clean
+            [[ $rootpxe_storage_released == yes && $(cat "$tmp/events") == $'stop\\nrelease' ]]
+        ''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unclean_release_still_uses_original_recovery(self):
+        result = self.run_controller('''
+            rootpxe_storage_stop() { printf 'stop\\n' >>"$tmp/events"; }
+            rootpxe_storage_call() { [[ $1 == release ]] || exit 86; printf 'release-rejected\\n' >>"$tmp/events"; return 1; }
+            rootpxe_storage_start() { printf 'start\\n' >>"$tmp/events"; }
+            rootpxe_storage_recover_once() { printf 'recover\\n' >>"$tmp/events"; rootpxe_storage_released=yes; }
+            rootpxe_storage_released=no
+            rootpxe_storage_recover_until_clean
+            [[ $(cat "$tmp/events") == $'stop\\nrelease-rejected\\nstart\\nrecover' ]]
+        ''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def run_controller(self, script):
         with tempfile.TemporaryDirectory() as directory:
             controller = Path(directory) / "controller.sh"
@@ -31,13 +65,18 @@ class StorageControllerTests(unittest.TestCase):
         result = self.run_controller('''
             export rootpxe_storage_workspace
             mount.cifs() {
-                exec python3 -c 'import os, pathlib, signal, sys, time; p=pathlib.Path(os.environ["rootpxe_storage_workspace"]); signal.signal(signal.SIGTERM, lambda *_: sys.exit(23)); (p/"mount-pid").write_text(str(os.getpid())); time.sleep(60)'
+                exec python3 -c 'import os, pathlib, signal, sys, time; p=pathlib.Path(os.environ["rootpxe_storage_workspace"]); signal.signal(signal.SIGTERM, lambda *_: sys.exit(23)); (p/"supervisor-pid").write_text(str(os.getppid())); (p/"mount-pid").write_text(str(os.getpid())); time.sleep(60)'
             }
             rootpxe_storage_mount_smb //fixture/share /storage -o ro & controller=$!
             for _ in {1..100}; do [[ ! -f $rootpxe_storage_workspace/mount-pid ]] || break; sleep .01; done
             [[ -f $rootpxe_storage_workspace/mount-pid ]] || exit 81
             child=$(cat "$rootpxe_storage_workspace/mount-pid")
-            kill -TERM "$controller"
+            supervisor=$(cat "$rootpxe_storage_workspace/supervisor-pid")
+            [[ $supervisor =~ ^[1-9][0-9]*$ && $supervisor != "$child" ]] || exit 83
+            # Bash adds a launcher when a () function is backgrounded. The
+            # mount child's PPID identifies the process that installed traps.
+            [[ $(ps -o ppid= -p "$child" | tr -d ' ') == "$supervisor" ]] || exit 84
+            kill -TERM "$supervisor"
             status=0; wait "$controller" || status=$?
             [[ $status -ne 0 ]] || exit 82
             ! kill -0 "$child" 2>/dev/null

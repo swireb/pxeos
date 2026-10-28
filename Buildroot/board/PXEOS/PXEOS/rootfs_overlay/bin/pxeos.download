@@ -32,11 +32,7 @@ parts=""
 part=""
 imagePath=$(rootpxe_storage_path "${img:-}") || handleError "Invalid image path ($0)"
 rootpxe_validate_fixed_image_lvm_inventory "$imagePath" || handleError "PXEOS_STAGE=layout_validation CODE=FIXED_IMAGE_LVM_INVENTORY_INVALID REASON=missing_or_lvm_raw_inventory"
-origmac=$mac
-mac=$(getMACAddresses | base64)
 . /bin/pxeos.inventory "true"
-mac="$origmac"
-origmac=""
 layPartSize="-1s"
 progress_mode=partclone
 if [[ ${imgLegacy:-${imgFormat:-}} == 1 ]]; then
