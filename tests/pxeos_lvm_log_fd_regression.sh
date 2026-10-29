@@ -16,7 +16,7 @@ task_pin=${rootpxe_task_log_state[pin]}; task_identity=${rootpxe_task_log_state[
 foreign=''
 pvs(){
     printf '%s\n' "$*" >"$tmp/argv"
-    for descriptor in "$task_pin" "${rootpxe_mutation_owner_pin:-}" "${rootpxe_boot_pin:-}" "$foreign"; do
+    for descriptor in "$task_pin" "${rootpxe_mutation_owner_pin:-}" "${rootpxe_boot_pin:-}" "${rootpxe_storage_request_fd:-}" "${rootpxe_storage_result_fd:-}" "${rootpxe_storage_data_fd:-}" "$foreign"; do
         [[ -z $descriptor || ! -e /proc/self/fd/$descriptor ]] || printf 'File descriptor %s leaked on pvs invocation.\n' "$descriptor" >&2
     done
     [[ ${real_warning:-no} != yes ]] || printf 'REAL_LVM_WARNING\n' >&2
@@ -29,6 +29,59 @@ rc=0; rootpxe_lvm_capture_report "$tmp/query.json" pvs --reportformat json -o pv
 grep -Fqx '{"report":[{"pv":[]}]}' "$tmp/query.json" || bad query-json-changed
 rootpxe_log_pin_valid "$task_pin" "$task_identity" || bad parent-pin-closed
 [[ ${rootpxe_task_log_state[pin]} == "$task_pin" ]] || bad parent-state-changed
+# The storage controller keeps only its three private IPC endpoints. LVM
+# must lose those child copies while the parent keeps exchanging FIFO data.
+rootpxe_storage_workspace="$tmp/storage"
+mkdir -m 700 "$rootpxe_storage_workspace"
+mkfifo -m 600 "$rootpxe_storage_workspace/"{request,result,data}
+exec {request_anchor}<>"$rootpxe_storage_workspace/request"
+exec {result_anchor}<>"$rootpxe_storage_workspace/result"
+exec {data_anchor}<>"$rootpxe_storage_workspace/data"
+exec {rootpxe_storage_request_fd}>"$rootpxe_storage_workspace/request"
+exec {rootpxe_storage_result_fd}<"$rootpxe_storage_workspace/result"
+exec {rootpxe_storage_data_fd}<"$rootpxe_storage_workspace/data"
+rc=0; rootpxe_lvm_capture_report "$tmp/storage-query.json" pvs || rc=$?
+[[ $rc == 0 ]] || bad storage-ipc-causes-strict-query-rejection
+printf 'REQUEST\n' >&"$rootpxe_storage_request_fd"
+IFS= read -r -t 1 -u "$request_anchor" fifo_value || bad parent-request-fd-closed
+[[ ${fifo_value:-} == REQUEST ]] || bad parent-request-data-changed
+printf 'RESULT\n' >&"$result_anchor"
+IFS= read -r -t 1 -u "$rootpxe_storage_result_fd" fifo_value || bad parent-result-fd-closed
+[[ ${fifo_value:-} == RESULT ]] || bad parent-result-data-changed
+printf 'DATA\n' >&"$data_anchor"
+IFS= read -r -t 1 -u "$rootpxe_storage_data_fd" fifo_value || bad parent-data-fd-closed
+[[ ${fifo_value:-} == DATA ]] || bad parent-read-data-changed
+# A different descriptor for the exact same FIFO is not controller-owned.
+exec {foreign}<"$rootpxe_storage_workspace/request"
+rc=0; rootpxe_lvm_capture_report "$tmp/storage-foreign.json" pvs || rc=$?
+[[ $rc != 0 && -e /proc/self/fd/$foreign ]] || bad same-fifo-foreign-closed-or-hidden
+exec {foreign}<&-; foreign=''
+# A known numeric slot reused for a regular file must also remain visible.
+saved_request_fd=$rootpxe_storage_request_fd
+exec {rootpxe_storage_request_fd}>&-
+printf REUSED >"$tmp/storage-reused"
+exec {rootpxe_storage_request_fd}<"$tmp/storage-reused"
+[[ $rootpxe_storage_request_fd == "$saved_request_fd" ]] || bad storage-reuse-fixture-not-exercised
+rootpxe_lvm_native pvs >"$tmp/storage-reused.json" 2>"$tmp/storage-reused.err"
+grep -q "descriptor $rootpxe_storage_request_fd leaked" "$tmp/storage-reused.err" || bad reused-storage-fd-closed
+[[ -e /proc/self/fd/$rootpxe_storage_request_fd ]] || bad reused-storage-parent-fd-closed
+# FIFO type alone is insufficient when the slot now names another pipe.
+mkfifo -m 600 "$tmp/storage-other-fifo"
+exec {other_anchor}<>"$tmp/storage-other-fifo"
+exec {rootpxe_storage_request_fd}<&-
+exec {rootpxe_storage_request_fd}<"$tmp/storage-other-fifo"
+[[ $rootpxe_storage_request_fd == "$saved_request_fd" ]] || bad other-fifo-reuse-fixture-not-exercised
+rootpxe_lvm_native pvs >"$tmp/storage-other.json" 2>"$tmp/storage-other.err"
+grep -q "descriptor $rootpxe_storage_request_fd leaked" "$tmp/storage-other.err" || bad other-fifo-storage-fd-closed
+[[ -e /proc/self/fd/$rootpxe_storage_request_fd ]] || bad other-fifo-parent-fd-closed
+exec {other_anchor}>&-
+exec {rootpxe_storage_request_fd}<&-
+exec {rootpxe_storage_result_fd}<&-
+exec {rootpxe_storage_data_fd}<&-
+exec {request_anchor}>&-
+exec {result_anchor}>&-
+exec {data_anchor}>&-
+unset rootpxe_storage_workspace rootpxe_storage_request_fd rootpxe_storage_result_fd rootpxe_storage_data_fd
 real_warning=yes; rc=0; rootpxe_lvm_capture_report "$tmp/warning.json" pvs || rc=$?
 [[ $rc != 0 ]] || bad real-stderr-ignored
 real_warning=no

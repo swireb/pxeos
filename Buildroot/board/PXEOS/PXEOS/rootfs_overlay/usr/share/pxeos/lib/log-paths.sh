@@ -46,7 +46,7 @@ rootpxe_lvm_command_valid() {
 rootpxe_lvm_native() {
     rootpxe_lvm_command_valid "${1:-}" || return 127
     (
-        local rootpxe_lvm_pin rootpxe_lvm_pin_identity
+        local rootpxe_lvm_pin rootpxe_lvm_pin_identity rootpxe_lvm_channel rootpxe_lvm_fd_name rootpxe_lvm_fd
         if [[ $(declare -p rootpxe_log_owned_pin_state 2>/dev/null) == 'declare -A '* ]]; then
             for rootpxe_lvm_pin in "${!rootpxe_log_owned_pin_state[@]}"; do
                 rootpxe_lvm_pin_identity=${rootpxe_log_owned_pin_state[$rootpxe_lvm_pin]}
@@ -54,6 +54,19 @@ rootpxe_lvm_native() {
                 # descriptors and real native stderr remain visible to LVM.
                 if rootpxe_log_pin_readonly "$rootpxe_lvm_pin" "$rootpxe_lvm_pin_identity"; then
                     rootpxe_log_pin_release "$rootpxe_lvm_pin" "$rootpxe_lvm_pin_identity" || true
+                fi
+            done
+        fi
+        # The controller's live storage IPC belongs to the parent, not LVM.
+        # Match each known endpoint before closing only this child's copy.
+        if [[ -n ${rootpxe_storage_workspace:-} ]]; then
+            for rootpxe_lvm_channel in request result data; do
+                rootpxe_lvm_fd_name="rootpxe_storage_${rootpxe_lvm_channel}_fd"
+                rootpxe_lvm_fd=${!rootpxe_lvm_fd_name:-}
+                if [[ $rootpxe_lvm_fd =~ ^[1-9][0-9]*$ && -p /proc/self/fd/$rootpxe_lvm_fd &&
+                    /proc/self/fd/$rootpxe_lvm_fd -ef $rootpxe_storage_workspace/$rootpxe_lvm_channel ]] &&
+                    (( rootpxe_lvm_fd >= 3 )); then
+                    exec {rootpxe_lvm_fd}<&- || true
                 fi
             done
         fi
