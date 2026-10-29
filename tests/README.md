@@ -2,15 +2,15 @@
 
 - 本目录保存 PXEOS 的定向回归脚本。测试未被 CI 工作流显式调用，不等于它没有价值：许多脚本用于本地复现、发布前核对或具备特定工具链的环境验证。每个脚本均应单独运行；此目录不提供一键执行全部测试的入口。
 
-## 部署、捕获和多播审计集合
+## 部署和捕获审计集合
 
-`pxeos_lifecycle_audit_regression.sh` 只组合本次三类任务审计涉及的 HTTP、存储控制器/helper、数据管线、身份初始化、进度与多播回归，不包含全部目录测试或 Buildroot 构建。它串行执行，每项最多 300 秒，并检查共享 slice 的内存事件；未处理的缺命令诊断即使退出 0 也按失败记录。
+`pxeos_lifecycle_audit_regression.sh` 只组合本次任务审计涉及的 HTTP、存储控制器/helper、数据管线、身份初始化、进度回归，不包含全部目录测试或 Buildroot 构建。它串行执行，每项最多 300 秒，并检查共享 slice 的内存事件；未处理的缺命令诊断即使退出 0 也按失败记录。
 
 ```shell
 /home/sysadmin/.codex/bin/codex-build-test bash tests/pxeos_lifecycle_audit_regression.sh
 ```
 
-部署分区/增长及消息显示契约另行补充执行，不计入上述 25 项集合：
+部署分区/增长及消息显示契约另行补充执行，不计入上述集合：
 
 ```shell
 /home/sysadmin/.codex/bin/codex-build-test bash tests/pxeos_partition_regression.sh
@@ -19,7 +19,7 @@
 
 分区套件要求 GNU awk（`gawk` 和 `awk` 均应使用 GNU 实现）；native FATgrow 子项还需显式提供 `PXEOS_FATGROW_TEST_BINARY` 和 `PXEOS_FATGROW_TEST_SOURCE`，缺少时会明确报告 SKIP。
 
-该集合需要 Bash、Python、jq、timeout 及存储 helper fixture 所需本机 C/json-c/OpenSSL 开发依赖。每项结果及日志目录由入口返回；失败、超时或缺依赖不能当作通过。真实 NAS、目标磁盘、UDP 传输与首启仍须按主仓[全流程审计](../../../docs/部署捕获多播全流程审计.md)补验。
+该集合需要 Bash、Python、jq、timeout 及存储 helper fixture 所需本机 C/json-c/OpenSSL 开发依赖。每项结果及日志目录由入口返回；失败、超时或缺依赖不能当作通过。真实 NAS、目标磁盘与首启仍须另行补验。
 
 ## 测试边界
 
@@ -93,25 +93,15 @@ pxeos_partition_regression.sh
 PXEOS_FATGROW_TEST_*
 ```
 
-## 多播、网络与控制面（11）
+## 网络与控制面（2）
 
 - 脚本及核对范围如下。
 
 ```text
-multicast-callback-session-regression.sh  # 核对多播回调会话与磁盘许可绑定。
-multicast-capability.test.sh  # 以命令 mock 核对 udp-receiver 能力探测和传输模式限制。
-multicast-deadline-regression.sh  # 以真实 jq 和临时请求核对多播截止时间处理。
-multicast-error-diagnostics.test.sh  # 以 curl mock 核对多播错误诊断输出。
-multicast-monitor-http-cancel-regression.sh  # 核对 watchdog 故障、接收进程终止和状态清理。
-multicast-number-identity-regression.sh  # 真实jq核对有符号64位上限编号的文本往返、非法编号和JSON数字拒绝、第二版能力、环境及私有上下文、七类专用请求、普通回调完整身份、错响应拒绝、切单播清理、路径穿越保护及已确认空磁盘返回值。
-multicast-protocol-regression.sh  # 核对多播协议请求与会话字段；当前脚本硬编码 /c/Windows/System32/jq.exe。
-multicast-writeimage-regression.sh  # 核对多播写入失败、进程终止和 FIFO 清理。
-pxeos_multicast_architecture_regression.sh  # 核对多架构多播接收依赖、内核能力和构建映射。
-pxeos_https_control_regression.sh  # 以 jq 和临时文件核对 HTTPS 参数、请求截止、脱敏和 curl PID 清理。
 pxeos_network_storage_regression.sh  # 合并的网络故障诊断、存储和相关离线回归。
+pxeos_task_identity_regression.sh  # 核对普通 JSON/form 存储身份、捕获协议、初始化回调和确认空磁盘结果。
 ```
 
-- 编号回归在Git Bash与原生jq可执行；若探测到Cygwin正则引擎不支持既有512次重复上限，仅在抽取fixture中把令牌上界缩窄到255，测试令牌为32字符，全部身份和HTTP断言保留，生产校验不改。这不等于已运行Linux或BusyBox，真实权限、设备及已构建PXEOS仍需独立验证。
 
 ## 捕获、恢复、存储与分区（18）
 
@@ -125,7 +115,7 @@ pxeos_partition_regression.sh  # 合并的分区安全与布局回归。
 pxeos_layout_alignment_regression.sh  # 核对 4Kn 等扇区/布局对齐契约。
 pxeos_disk_health_regression.sh  # 核对磁盘健康盘点及上报接口。
 pxeos_partition_progress_regression.sh  # 核对分区计划、进度 flush 与 LVM 事实。
-pxeos_timeline_order_regression.sh  # 使用临时普通文件和真实入口的安全叶级替身，核对准备心跳、pending计划先发、真实零进度开始、单播和多播部署各镜像类型、MBR-only、初始化续跑、重试/执行身份隔离，以及停止采样并等待在途HTTP替身子进程后才结束数据阶段；不访问真实磁盘或网络，不重排历史事件。
+pxeos_timeline_order_regression.sh  # 使用临时普通文件和真实入口的安全叶级替身，核对准备心跳、pending计划先发、真实零进度开始、部署各镜像类型、MBR-only、初始化续跑、重试/执行身份隔离，以及停止采样并等待在途HTTP替身子进程后才结束数据阶段；不访问真实磁盘或网络，不重排历史事件。
 pxeos_partclone_progress_regression.sh  # 核对 Partclone 文本模式 stderr 进度适配。
 pxeos_partclone_vt_progress_regression.sh  # 核对 Partclone VT/VCSA 快照进度解析。
 pxeos_lvm_console_regression.sh  # 核对 LVM 控制台激活与消息处理。
@@ -209,7 +199,7 @@ pxeos_php_retirement_regression.sh  # 旧 PHP 运行时及产品 USB 制作/发�
 ```text
 pxeos_script_audit_regression.sh  # 提取局部函数，以命令替身覆盖扩展分区、SATA/NVMe 名称碰撞、坏分区 dump、旧 Windows 分片、printf、控制字符及数组作用域、恢复格式与选择、时间显示、hash 前置门禁、磁盘容量、假钟倒计时、压缩参数、主机名、库存与 LVM probe 清理、算术错误传播和存储空间列。
 pxeos_script_io_regression.sh  # 以临时普通文件核对 NFS/SMB 的 EXIT/INT/TERM 四份 Cloud-init 私有文件清理及自有派生计划清理、umask/trap 保留、缺库及 source 失败、入口停止、有限设备重读、raw 引导区逻辑字节、GPT backup 与 raw 区分及坏 raw 在清表前拒绝、日志折行、严格 JSON 响应、任务库存/磁盘健康/非镜像完成的 HTTP 失败门禁，以及大于 2^31 和接近 GPT 安全整数上界的 LBA 精确读回。设备重读和写入只调用函数替身，不执行真实 sfdisk、nvme 或 LVM。
-pxeos_task_http_regression.sh  # 以 curl 替身核对私有 form/JSON 文件原始字节、无附加换行、curl 参数和 stdin、EOF、真实返回码、重定向拒绝及成功/失败/信号/临时目录失败后的清理。多播真实 mock curl PID 和取消继续由 pxeos_https_control_regression.sh 等现有回归覆盖。
+pxeos_task_http_regression.sh  # 以 curl 替身核对私有 form/JSON 文件原始字节、无附加换行、curl 参数和 stdin、EOF、真实返回码、重定向拒绝及成功/失败/信号/临时目录失败后的清理。
 ```
 
 - Git Bash 可显式补齐工具路径及设备字符串转换边界，例如：
@@ -259,7 +249,7 @@ pxeos_lvm_udev_rules_regression.sh
 - `pxeos_storage_controller_test.py` 使用 Python、Bash、jq 和私有临时普通文件调用当前 `storage-io.sh` 控制流，以受控进程/回调替身核对原 owner/attempt、身份/能力拒绝、发布前各失败点、冻结 finish、只读收尾、原代际发布/回滚、只清原范围、等待 helper 后释放及失败不释放。旧 marker 或目录名不能认领已发布执行，越出原 shadow 的 payload 在 helper 命令前拒绝；SMB 挂载取消仍须等待实际子进程。该入口不编译 C，不访问真实 NAS 或块设备，不能代替原生 helper/身份验证。
 - `storage-test-support.sh` 是存储相关 shell/Python fixture 共用的测试支持文件，不是独立测试入口。它加载当前控制器、构造认证 JSON/owner/attempt/boot 上下文并限定私有工作区；仅在原生进程边界提供能力/连接/preflight 替身，在管线回归中以受限普通文件替代远端字节读写，保留真实 producer、压缩与 wait 控制流，不提供真实挂载或 NAS 变更。
 - `pxeos_capture_regression.sh` 保留捕获/恢复管线、完成回调、许可、源盘布局和 extfs 相关测试源码；`pxeos_capture_resume_regression.sh` 保留元数据校验、私有副本清理与许可测试源码。旧 MAC 暂存、shell 锁/finalize 和 marker 发现发布的旧矩阵已退出维护，当前原执行发布/恢复矩阵集中到 controller Python 入口。
-- `pxeos_network_storage_regression.sh` 聚合入口、Partclone 和多播等现有回归按各自范围保留；共同支持文件由需要当前存储上下文或管线边界的 fixture 引用。源码整理不表示任何套件已经运行，原生 C/helper fixture 继续独立维护。
+- `pxeos_network_storage_regression.sh` 聚合入口、Partclone 等现有回归按各自范围保留；共同支持文件由需要当前存储上下文或管线边界的 fixture 引用。源码整理不表示任何套件已经运行，原生 C/helper fixture 继续独立维护。
 
 用户可在具备本机依赖的隔离环境从子模块根执行：
 
@@ -270,7 +260,7 @@ bash tests/pxeos_capture_regression.sh
 bash tests/pxeos_capture_resume_regression.sh
 bash tests/pxeos_network_storage_regression.sh
 bash tests/pxeos_partclone_progress_regression.sh
-bash tests/multicast-writeimage-regression.sh
+bash tests/pxeos_task_identity_regression.sh
 ```
 
 离线fixture完成后仍须分别构建x64/x86/arm64，核对helper及依赖进入initramfs；再验证NFS3/4.0/4.1/4.2固定/auto、SMB2.1/3.0/3.0.2/3.1.1固定/auto、实际mountinfo/非guest、UID/GID 0及非root/无本地同名账号、只读根、原worker未停保护、可信同host跨boot恢复、所有producer失败和响应丢失。离线通过不能证明这些真实矩阵或吞吐结果。根项目待运行清单见[存储系统待验矩阵](../../../docs/存储系统.md#初始化边界与未验证事项)。

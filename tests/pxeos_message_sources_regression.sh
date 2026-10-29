@@ -75,11 +75,10 @@ contains "$tmp/stage.trace" 'layout_apply|Deployment layout readback mismatch: p
 contains "$tmp/layout.trace" 'layout-cleanup' 'layout readback cleanup was skipped'
 
 (
-    type=up rootpxe_capture_resume_published=1 mc=no
+    type=up rootpxe_capture_resume_published=1
     pxeapi=https://example.invalid/pxe/v1/ web=https://example.invalid/pxe/v1/
     taskid=9 task_token=fixture-only-token mac=001122334455
     rootpxe_require_task_context(){ return 0; }
-    rootpxe_task_multicast_form_args(){ rootpxe_task_multicast_args=(); }
     dmidecode(){ printf 'fixture-system-uuid\n'; }
     rootpxe_deployment_identity_policy_enabled(){ return 1; }
     rootpxe_task_curl(){

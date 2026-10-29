@@ -25,6 +25,20 @@ fi
 tmp="$(mktemp -d)"
 . "$root/tests/storage-test-support.sh"
 storage_test_load
+# Parser fixtures keep capture coverage using the current direct protocol.
+# The complete helper/mount scenario below represents deployment storage I/O.
+storage_test_apply_json_checkin() {
+    local document
+    document=$(storage_test_context_json "$1") || return 1
+    document=$(jq -c 'if .type == "capture" then
+      .captureProtocol="mac-direct-v1" |
+      .captureAccess={captureProtocol:"mac-direct-v1",attempt:.progressAttempt,
+        storageNonce:.storageAccess.execution.nonce,nfsUid:0,nfsGid:0,
+        nfsVersion:"auto",smbVersion:"auto"}
+      else . end' <<<"$document") || return 1
+    storage_test_reset_context || return 1
+    rootpxe_apply_json_checkin "$document"
+}
 trap 'rm -rf "$tmp"' EXIT
 awk '/^rootpxe_json_get_string\(\)/ { on=1 } /^checkin_rootpxe\(\)/ { on=0 } on { print }' "$checkin" \
     | sed "s|/tmp/pxeos.deployment-identity-policy.json|$tmp/pxeos.deployment-identity-policy.json|g" >"$tmp/checkin-json.sh"
@@ -44,10 +58,6 @@ export PATH
 # shellcheck source=/dev/null
 . "$tmp/smb-validation.sh"
 # shellcheck source=/dev/null
-# The extracted checkin parser is tested independently from the multicast
-# library. Its dedicated protocol tests cover the real parser below.
-rootpxe_multicast_apply_transport_mode() { rootpxe_multicast_reset() { :; }; mc=no; }
-rootpxe_multicast_runtime_ready() { return 1; }
 # shellcheck source=/dev/null
 . "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh"
 . "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-hostname.sh"
@@ -180,7 +190,7 @@ debugPause() { :; }
 dots() { :; }
 dmidecode() { printf '00000000-0000-0000-0000-000000000000\n'; }
 handleError() { printf 'fixture rejected: %s\n' "$*" >&2; exit 97; }
-json_checkin_body=$(storage_test_context_json '{"taskId":49,"executionToken":"11111111111111111111111111111111","type":"capture","pxeType":"up","img":"images/demo","imgType":"mps","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"protocol":"smb","storageip":"192.0.2.20","exportPath":"share/images","smbUsername":"json-user","smbPassword":"json-pass"}')
+json_checkin_body=$(storage_test_context_json '{"taskId":49,"executionToken":"11111111111111111111111111111111","type":"deploy","pxeType":"down","img":"images/demo","imgType":"mps","imgPartitionType":"all","osid":9,"imgFormat":5,"compressionLevel":6,"shutdown":false,"protocol":"smb","storageip":"192.0.2.20","exportPath":"share/images","smbUsername":"json-user","smbPassword":"json-pass"}')
 rootpxe_task_curl() {
     case ${@: -1} in
         */storage/preflight) printf '%s\n200' '{"success":true,"sequence":"0","nextSequence":"1"}' ;;
@@ -681,6 +691,7 @@ cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-hostname.sh" "$tmp/linux-hostname.sh"
+cp "$overlay/usr/share/pxeos/lib/capture-direct.sh" "$tmp/capture-direct.sh"
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
 printf '\nif declare -F task_log_test_emulate_pin_flags >/dev/null; then task_log_test_emulate_pin_flags; fi\n' >>"$tmp/log-paths.sh"
 for rootpxe_test_funcs_copy in "$tmp/funcs.sh" "$tmp/legacy-funcs.sh"; do

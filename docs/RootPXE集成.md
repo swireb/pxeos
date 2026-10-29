@@ -25,19 +25,6 @@ osTypeId=50
 /var/lib/cloud/seed/nocloud/vendor-data
 ```
 
-## 手动多播会话
-
-- 手动多播需要第二版会话能力和匹配的服务端；旧版客户端必须重新构建并发布PXEOS后升级，不会静默改为单播。普通单播仍沿用原执行身份合同。
-- 首次认证JSON报到取得公开编号与不可复用实例键，后续专用控制、许可、阶段、进度、异常、初始化、库存、状态和完成请求共同携带二者及当前尝试号。编号始终为严格正十进制文本，最大为9223372036854775807，不经过shell整数或JSON数值转换。
-- 私有请求上下文冻结任务、执行令牌、MAC、尝试号和会话身份；任一不一致时不发专用请求，错实例响应不保存为当前状态。同一进程改为单播时清除旧会话环境与私有上下文，不把旧身份附在单播请求中。
-- 队列或连带清理任务的主机清理允许公开编号重新从1分配，历史和旧回调依靠不可复用实例键隔离；取消、单删和清理事件不复位。字段、迁移与跨进程限制统一见根项目[通信消息规范](../../../docs/RootPXE与PXEOS通信消息规范.md)。
-
-```text
-deploymentIdentityCapabilities=["manual-multicast-session-v2"]
-multicastSessionId="1"
-multicastSessionKey="mc-0123456789abcdef0123456789abcdef0123456789abcdef"
-```
-
 ## 准备 Linux 镜像
 
 - 镜像管理员在制镜系统中安装、启用 Cloud-init，并确认 NoCloud 数据源及所需原生模块可用。使用发行版支持的配置和服务启用方法；PXEOS 不安装软件、不执行目标程序、不代替原生 YAML 合并或服务状态验证。
@@ -189,7 +176,7 @@ cloud-init status --long
 
 部署的服务端与 PXEOS 继续分别核验 `configuredVersion/actualVersion`，helper 的版本与访问身份检查保持原链路。捕获使用当前认证 checkin 下发的 NFS/SMB 版本策略及 SMB 凭据挂载真实 NAS，不启动 shadow/helper writer。
 
-NAS 访问根预先存在；捕获按需创建根下 `dev` 和本机去冒号 MAC 目录，准备时只清空自己的 MAC 暂存（包括隐藏文件），不读、校验或快照旧正式镜像。导入仍使用原控制树和锁，部署、导出、多播读取行为不变。
+NAS 访问根预先存在；捕获按需创建根下 `dev` 和本机去冒号 MAC 目录，准备时只清空自己的 MAC 暂存（包括隐藏文件），不读、校验或快照旧正式镜像。导入仍使用原控制树和锁，部署、导出读取行为不变。
 
 ```text
 /storage/dev/<去冒号MAC>/                 # 捕获真实数据与元数据；缺失自动创建
@@ -204,15 +191,13 @@ NAS 访问根预先存在；捕获按需创建根下 `dev` 和本机去冒号 MA
 
 发布边界前可中止捕获：服务端保留 cancelled 任务，客户端先停止并 wait 全部 producer、压缩器、writer，卸载本次 XFS 预检自建的临时 rw 挂载，再通过原 error 回调确认 `workerStopped=true` 后释放。停止或卸载未确认时不得释放；Retry/删除继续拒绝。停止确认后 Retry 创建新 attempt，重新 checkin、清自己的 MAC 暂存并从源盘完整捕获；捕获失败或中止前不触碰旧正式目标。进入 publishing 后不接受中止，避免半次覆盖丢失 finish 权限。
 
-部署保留 `rootpxe-storage-io --context-fd 3 --request-fd 4 --data-fd 5 --result-fd 6`、原 `storageAccess` 和存储回调认证链。导入、导出、多播及其恢复合同不随捕获变更。已有旧捕获 receipt 和旧目录须按其真实现场证据另行安全处理，不能作为新 `mac-direct-v1` 协商或新捕获的完成依据。
+部署保留 `rootpxe-storage-io --context-fd 3 --request-fd 4 --data-fd 5 --result-fd 6`、原 `storageAccess` 和存储回调认证链。导入、导出及其恢复合同不随捕获变更。已有旧捕获 receipt 和旧目录须按其真实现场证据另行安全处理，不能作为新 `mac-direct-v1` 协商或新捕获的完成依据。
 
 本页记录源码合同；NFS 多版本、SMB 多方言及吞吐仍需分别实测，离线 fixture 不代表这些矩阵全部通过。当前脚本现场更新也不等于三架构启动镜像已重新打包发布。
 
-### 多播与普通 checkin
+### 普通 checkin
 
-七条 `/pxe/v1/multicast/{join,prepare,ready,report,status,end,cancel}` 请求统一携带 `storageNonce`、`workerNonce`、`attempt`、`storageBootId`，并可选携带 `sysuuid` 作为稳定硬件见证。前四项必填；`attempt` 必须是严格正整数且等于 `progressAttempt`，小数、带后缀字符串、0 和负数均拒绝。旧 `worker` 或不匹配的 `boot/nonce` 值拒绝；body 继续拒绝未知字段。多播控制不承担跨 boot 接管，跨 boot 仅通过 storage preflight 的原执行恢复条件进入 storage-only；普通同 boot 任务没有可靠 DMI 时仍可工作。
-
-多播先取得域首锁和 task 锁，完成 storage 认证并持久提交后才进入 service/NAS；`end`、`cancel` 写入最终状态前再次封口。`ready` 仅允许 `pxeos` scope。部署首次 checkin 若尚未发放 storage reservation，可沿原 reservation 独立准入；一旦已执行 preflight，恢复只允许原代际 storage-only 路径，不发放新的磁盘许可。捕获使用上文独立协议与新 attempt 重捕获流程。服务端 owner/目标占用返回409，协调不可用返回503，真实数据库错误返回500；checkin 只接受当前 JSON，不提供旧键值载荷兼容。
+部署首次 checkin 若尚未发放 storage reservation，可沿原 reservation 独立准入；一旦已执行 preflight，恢复只允许原代际 storage-only 路径，不发放新的磁盘许可。捕获使用上文独立协议与新 attempt 重捕获流程。服务端 owner/目标占用返回409，协调不可用返回503，真实数据库错误返回500；checkin 只接受当前 JSON，不提供旧键值载荷兼容。
 
 本页记录源码合同和客户端边界，不代表构建或运行通过。shell/C 离线入口见本仓[测试说明](../tests/README.md)；仍须构建三架构产物并验收真实 NAS 权限、版本、原工作者未停保护、跨 boot 恢复和吞吐。RootPXE 数据库只支持匹配当前完整初始化目标的新空库，不提供旧库迁移。
 

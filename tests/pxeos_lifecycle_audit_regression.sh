@@ -38,8 +38,7 @@ for test in \
     pxeos_mpa_permit_regression pxeos_partition_progress_regression pxeos_partclone_progress_regression \
     pxeos_timeline_order_regression pxeos_task_log_regression pxeos_log_pin_regression \
     pxeos_cloud_init_protocol_regression pxeos_cloud_init_permit_regression pxeos_template_injection_regression \
-    multicast-number-identity-regression multicast-protocol-regression multicast-deadline-regression \
-    multicast-callback-session-regression multicast-monitor-http-cancel-regression multicast-writeimage-regression; do
+    pxeos_task_identity_regression; do
     run_case "$test" bash "tests/$test.sh"
 done
 run_case pxeos_storage_controller python3 -B tests/pxeos_storage_controller_test.py

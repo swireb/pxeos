@@ -54,7 +54,7 @@ rootpxe_validate_runtime_img_format() { return 0; }; rootpxe_partclone_progress_
 rootpxe_console_message() { :; }; zstdmt() { command cat; }; partclone.restore() { command cat >/dev/null; }
 imgFormat=5; imgLegacy=''; imgFormat=5; storage=mock; img=image
 rootpxe_partclone_progress_term=xterm; rootpxe_partclone_progress_args=(); rootpxe_partclone_progress_stderr_target="$tmp/partclone.err"
-rm -f /tmp/pigz1; writeImage "$tmp/split/f.*" /dev/mock no; rm -f /tmp/pigz1
+rm -f /tmp/pigz1; writeImage "$tmp/split/f.*" /dev/mock; rm -f /tmp/pigz1
 [[ $(<"$split_args") == $"$tmp/split/f.000"$'\n'"$tmp/split/f.001"$'\n'"$tmp/split/f.010" ]] || fail 'unordered compgen fragments were not sorted'
 
 # The extracted build helper must leave an already-applied patch unchanged and

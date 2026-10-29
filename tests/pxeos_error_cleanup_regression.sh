@@ -18,7 +18,7 @@ killStatusReporter() { :; }; rootpxe_storage_quiesce() { printf 'quiesce\n' >>"$
 rootpxe_storage_call() { printf '%s\n' "$1" >>"$tmp/events"; : >"$tmp/released"; }
 rootpxe_storage_recover_until_clean() { fail 'unexpected storage recovery'; }
 taskid=41 task_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa mac=aabbccddeeff
-pxeapi=http://fixture/ web='' mc=no rootpxe_storage_workspace="$tmp/workspace"
+pxeapi=http://fixture/ web='' rootpxe_storage_workspace="$tmp/workspace"
 rootpxe_storage_nonce=nonce rootpxe_storage_worker_nonce=worker progress_attempt=2
 clock=100
 date() { printf '%s\n' "$clock"; }

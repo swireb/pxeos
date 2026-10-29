@@ -90,7 +90,6 @@ test_download_session_cleanup() {
             rootpxe_register_derived_layout_file "$rootpxe_resolved_lvm_layout_file" || exit 9
             rootpxe_cleanup_deployment_partition_file() { :; }
             rootpxe_deployment_identity_cleanup_private() { rm -f "$marker/private"; }
-            rootpxe_multicast_cleanup() { : >"$marker/multicast-cleaned"; }
             smb_username=user smb_password=password smb_domain=''
             rootpxe_prepare_smb_credentials || exit 9
             sed -n '/^trap rootpxe_download_cleanup_initialization_private EXIT$/,/^trap .* TERM$/p' "$overlay/bin/pxeos.download" >"$marker/traps"
@@ -100,7 +99,7 @@ test_download_session_cleanup() {
         ) || status=$?
         case $signal in EXIT) expected=0 ;; INT) expected=130 ;; TERM) expected=143 ;; esac
         [[ $status == "$expected" ]] || fail "$protocol $signal exit=$status expected=$expected" || return 1
-        [[ ! -e $marker/layout && -e $marker/script && ! -e $marker/private && ! -e $marker/continued-after-signal && -e $marker/multicast-cleaned ]] || fail "$protocol $signal omitted session cleanup or removed foreign script" || return 1
+        [[ ! -e $marker/layout && -e $marker/script && ! -e $marker/private && ! -e $marker/continued-after-signal ]] || fail "$protocol $signal omitted private cleanup or removed foreign script" || return 1
         while IFS= read -r owned_data; do [[ ! -e $owned_data ]] || fail "$protocol $signal retained private Cloud-init data" || return 1; done <"$marker/owned-data-path"
         while IFS= read -r owned_path; do [[ ! -e $owned_path ]] || fail "$protocol $signal retained owned derived layout" || return 1; done <"$marker/owned-derived-paths"
     done; done
@@ -231,7 +230,7 @@ test_console_failure_width() {
     ! grep -Fq "$task_token" "$tmp/console" "$tmp/details" || fail 'failure summary leaked token'
 }
 test_error_json_types() {
-    local taskid=1 task_token=fixture-token mac=fixture-mac pxeapi=https://example.invalid/ web='' mc=no call_index=0 status=0
+    local taskid=1 task_token=fixture-token mac=fixture-mac pxeapi=https://example.invalid/ web='' call_index=0 status=0
     rootpxe_require_task_context() { :; }
     rootpxe_bound_callback_message() { printf '%s' "$1"; }
     rootpxe_console_message() { :; }

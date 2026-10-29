@@ -5,7 +5,7 @@ RUN_CHKDSK=""
 OS_ID_WIN7=5
 OS_ID_WIN8=6
 # The direct manual-registration handoff has only task identity before checkin.
-# Do not derive OS, partition, multicast, or disk state from absent old kernel
+# Do not derive OS, partition, or disk state from absent old kernel
 # arguments; authenticated checkin supplies those values first.
 pxeos_checkin_runtime_setup() {
     local arg
@@ -30,11 +30,6 @@ pxeos_checkin_runtime_setup() {
     sockets=$(grep "physical id" /proc/cpuinfo|sort -u|wc -l)
     arch=$(uname -m)
     [[ ${chkdsk:-0} -eq 1 ]] && RUN_CHKDSK="-x"
-    case ${mc:-} in
-        yes) method="UDPCAST" ;;
-        bt) method="Torrent-CAST" ;;
-        *) method="" ;;
-    esac
     debugPause
     verifyNetworkConnection
     dots "Checking Operating System"
@@ -231,7 +226,6 @@ rootpxe_apply_json_checkin() {
         # protocol, path, or SMB credentials.
         protocol="" storage_server="" storage_export=""
         smb_username="" smb_password="" smb_domain=""
-        rootpxe_multicast_reset
         rootpxe_cloud_init_cleanup_private || return 1
         export protocol storage_server storage_export
         return 0
@@ -318,7 +312,6 @@ rootpxe_apply_json_checkin() {
         rootpxe_linux_hostname_task_valid || return 1
     fi
     rootpxe_apply_json_partition_inventory "$document" || return 1
-    rootpxe_multicast_apply_transport_mode "$document" || return 1
     rootpxe_validate_json_storage || return 1
     # Layout/schema are untrusted JSON data. Store canonical form in 0600 files;
     # they are never printed or made kernel arguments.
@@ -334,7 +327,7 @@ rootpxe_apply_json_checkin() {
         chmod 600 "$originalSchemaFile"
     fi
     rootpxe_apply_json_cloud_init "$document" || return 1
-    export taskid execution_token taskType pxe_type img img_type img_partition_type osid img_format pigz_comp shutdown protocol storage_server storage_export hostName changeHostname resumeStage schemaRevision schemaHash deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash deploymentIdentityPolicyFile multicastTransportMode multicastSessionId multicastSessionKey multicastWaitTimeoutSec mc
+    export taskid execution_token taskType pxe_type img img_type img_partition_type osid img_format pigz_comp shutdown protocol storage_server storage_export hostName changeHostname resumeStage schemaRevision schemaHash deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash deploymentIdentityPolicyFile
 }
 
 checkin_rootpxe() {
@@ -342,7 +335,6 @@ checkin_rootpxe() {
     rootpxe_cloud_init_cleanup_private || return 1
     rootpxe_console_message INFO 'Checking in with RootPXE.'
     rootpxe_require_identity || handleError "RootPXE: invalid task identity ($0)"
-    rootpxe_multicast_reset
     local sysuuid_local
     sysuuid_local=$(dmidecode -s system-uuid 2>/dev/null || true)
     sysuuid_local=${sysuuid_local,,}

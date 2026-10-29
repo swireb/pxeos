@@ -60,7 +60,7 @@ rootpxe_validate_image_sector_metadata(){ :; }
 rootpxe_nvme_format_scope_prepare(){ :; }
 rootpxe_task_curl(){ printf '{"granted":true,"targetId":"%s","operation":"%s"}\n200' "$rootpxe_planned_target_id" "$rootpxe_planned_disk_operation"; }
 rootpxe_fixed_restore_disk_facts(){ printf '1|4096\n'; }
-pxeapi=https://fixture.invalid/ taskid=1 task_token=private mac=001122334455 type=down mc=no
+pxeapi=https://fixture.invalid/ taskid=1 task_token=private mac=001122334455 type=down
 printf 'sector-size: 512\n' >"$tmp/d1.partitions"
 printf 'fixture' >"$tmp/d1.mbr"
 for mode in network-only vendor-only single mpa; do
@@ -103,9 +103,6 @@ for mode in network-only vendor-only single mpa; do
     rootpxe_task_curl(){ printf '%s\n200' "$checkin_body"; }
     rootpxe_console_message(){ :; }
     rootpxe_require_identity(){ :; }
-    rootpxe_multicast_reset(){ :; }
-    rootpxe_multicast_apply_transport_mode(){ :; }
-    rootpxe_multicast_runtime_ready(){ return 1; }
     rootpxe_deployment_identity_windows_hostname_capability_installed(){ return 1; }
     rootpxe_deployment_identity_windows_sysprep_capability_installed(){ return 1; }
     rootpxe_deployment_identity_linux_hostname_capability_installed(){ return 0; } # 仅模拟已配齐工具的PXEOS，非宿主MSYS能力。

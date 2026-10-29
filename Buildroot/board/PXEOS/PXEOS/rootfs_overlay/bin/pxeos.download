@@ -10,7 +10,6 @@ fi
 rootpxe_download_cleanup_initialization_private() {
     killStatusReporter
     rootpxe_cleanup_session
-    rootpxe_multicast_cleanup
 }
 # The private initialization payload remains needed through finish reporting,
 # then must be removed on both normal completion and every task exit/signal.
@@ -88,10 +87,10 @@ putDataBack() {
     [[ $imgFormat -eq 1 || $imgLegacy -eq 1 ]] \
         && rootpxe_console_message INFO 'Image format: Partimage.' \
         || rootpxe_console_message INFO 'Image format: Partclone.'
-    [[ $mc == yes ]] || usleep 3000000
+    usleep 3000000
     case $imgType in
         dd)
-            restorePartition "$hd" 1 "$imagePath/${img}*" "$mc"
+            restorePartition "$hd" 1 "$imagePath/${img}*"
             ;;
         n|mps|mpa)
             [[ $imgType == +(n|mps) ]] && disks="$hd"
@@ -106,7 +105,7 @@ putDataBack() {
                     [[ ! -d $imagePath ]] && handleError "Fatal Error: could not locate file ($0)\n   Args Passed: $*"
                     ;;
             esac
-            performRestore "$disks" "$imagePath" "$imgPartitionType" "$mc"
+            performRestore "$disks" "$imagePath" "$imgPartitionType"
             ;;
     esac
 }
@@ -179,15 +178,6 @@ rootpxe_validate_restore_artifacts "$imagePath" "$imgType" "$imgPartitionType" "
 if [[ ${imgType:-} == [Nn] && -n ${rootpxe_resolved_lvm_layout_file:-} ]]; then
     rootpxe_lvm_preflight_restore_groups "$imagePath" "$hd" || handleError "PXEOS_STAGE=restore_preflight CODE=LVM_EARLY_PREFLIGHT_FAILED REASON=group_metadata_payload_or_host_conflict"
 fi
-if [[ ${mc:-no} == yes ]]; then
-    rootpxe_multicast_build_manifest "$imagePath" || handleError "PXEOS_STAGE=restore_preflight CODE=MULTICAST_MANIFEST_INVALID REASON=artifact_set_is_not_safe_or_complete"
-    rootpxe_multicast_join || handleError "PXEOS_STAGE=restore_preflight CODE=MULTICAST_JOIN_FAILED REASON=controller_join_rejected"
-    # A WAITING response is deliberately non-destructive: no disk permit or
-    # partition write is requested until the server freezes this member into
-    # the RUNNING roster.  A reconnect reuses this same session and READY join.
-    rootpxe_multicast_wait_for_selection || handleError "PXEOS_STAGE=restore_preflight CODE=MULTICAST_MEMBER_NOT_SELECTED REASON=session_did_not_freeze_this_client"
-    rootpxe_multicast_watchdog_start || handleError "PXEOS_STAGE=restore_preflight CODE=MULTICAST_STATUS_MONITOR_FAILED REASON=unable_to_start_session_heartbeat"
-fi
 if [[ ${imgType:-} == mpa ]]; then
     rootpxe_plan_mpa_disk_permits "$imagePath" || handleError "PXEOS_STAGE=permit CODE=${rootpxe_nvme_format_scope_code:-MPA_TARGET_MAPPING_INVALID} REASON=${rootpxe_nvme_format_scope_reason:-unable_to_bind_complete_target_disk_set}"
 else
@@ -218,7 +208,6 @@ while :; do
             ;;
     esac
 done
-[[ ${mc:-no} != yes ]] || rootpxe_multicast_session_guard || handleError "PXEOS_STAGE=permit CODE=MULTICAST_SESSION_CANCELLED REASON=session_watchdog_stopped_before_disk_write"
 rootpxe_bind_granted_deploy_targets || handleError "PXEOS_STAGE=permit CODE=DISK_PERMIT_BINDING_CHANGED REASON=target_disk_identity_or_operation_mismatch"
 # Freeze system-initialization data after every target has an active permit.
 # The plan contains no disk or filesystem identifiers.
@@ -237,7 +226,6 @@ fi
 case ${imgType:-} in
     [Nn]|mps|dd) enableWriteCache "$hd" ;;
 esac
-[[ ${mc:-no} != yes ]] || rootpxe_multicast_session_guard || handleError "PXEOS_STAGE=init CODE=MULTICAST_SESSION_CANCELLED REASON=session_watchdog_stopped_before_layout"
 [[ $nombr -eq 1 ]] && rootpxe_console_message INFO 'Skipping partition layout: single-partition restore.' || preparePartitions
 if [[ ${imgType:-} == [Nn] ]]; then
     unset rootpxe_nvme_reformatted_disk
@@ -255,7 +243,6 @@ if [[ ${imgType:-} == [Nn] ]]; then
     rootpxe_restore_deployment_boot_code "$hd" 1 "$imagePath" "$originalSchemaFile" || handleError "PXEOS_STAGE=layout_apply CODE=BOOT_CODE_RESTORE_FAILED REASON=boot_code_metadata_invalid"
 fi
 [[ $nombr -ne 1 ]] && rootpxe_stage prepare_partitions "partition layout prepared"
-[[ ${mc:-no} != yes ]] || rootpxe_multicast_session_guard || handleError "PXEOS_STAGE=prepare_partitions CODE=MULTICAST_SESSION_CANCELLED REASON=session_watchdog_stopped_during_layout"
 # Build one immutable, full plan only after the permitted target layout exists.
 # Raw dd remains a single disk item because it has no safe internal boundaries.
 case ${imgType:-} in
@@ -274,11 +261,5 @@ if [[ $imgPartitionType != mbr ]]; then
     fi
 else
     rootpxe_console_message INFO 'Skipping partition restore: MBR only.'
-fi
-if [[ ${mc:-no} == yes ]]; then
-    rootpxe_multicast_session_guard || handleError "PXEOS_STAGE=restore CODE=MULTICAST_SESSION_CANCELLED REASON=session_watchdog_stopped_during_data_phase"
-    # completed here is this member's data barrier only; final task completion
-    # remains governed by the normal imgcomplete task-finish protocol.
-    rootpxe_multicast_end || handleError "PXEOS_STAGE=restore CODE=MULTICAST_END_FAILED REASON=controller_data_barrier_not_reached"
 fi
 completeTasking

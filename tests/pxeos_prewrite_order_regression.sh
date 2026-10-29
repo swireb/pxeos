@@ -59,7 +59,7 @@ for scenario in matching format_allowed format_failed; do
         rootpxe_apply_deployment_layout() { printf 'table-write\n' >>"$trace"; }
         rootpxe_restore_deployment_boot_code() { printf 'boot-write\n' >>"$trace"; }
         rootpxe_console_message() { :; }
-        type=down; imgType=n; mc=no; nombr=0; hd=/dev/mock0; disks=/dev/mock0
+        type=down; imgType=n; nombr=0; hd=/dev/mock0; disks=/dev/mock0
         sector_metadata=mock.partitions; originalSchemaFile=mock.schema; deploymentLayoutFile=mock.layout; imagePath=mock.image
         . "$tmp/normal-write-snippet"
     ) || status=$?

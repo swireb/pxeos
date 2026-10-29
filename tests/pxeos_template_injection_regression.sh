@@ -35,8 +35,6 @@ storage_test_patch_parser "$tmp/parser"
 . "$tmp/parser"
 rootpxe_stage(){ :; }
 rootpxe_run_logged_typed_native(){ shift 2; "$@"; }
-rootpxe_multicast_apply_transport_mode(){ :; }
-rootpxe_multicast_runtime_ready(){ return 1; }
 rootpxe_deployment_identity_windows_hostname_capability_installed(){ return 0; }
 rootpxe_deployment_identity_windows_sysprep_capability_installed(){ return 0; }
 rootpxe_deployment_identity_linux_hostname_capability_installed(){ return 0; }

@@ -17,7 +17,6 @@ awk '/^rootpxe_partition_progress_initialize_runtime\(\)/ {copy=1} /^REG_LOCAL_M
 . "$tmp/helpers.sh"
 trace="$tmp/trace"; : >"$trace"
 rootpxe_stage(){ printf 'stage:%s:%s\n' "$1" "$2" >>"$trace"; }
-rootpxe_task_multicast_form_args(){ rootpxe_task_multicast_args=(); }
 rootpxe_task_curl(){ printf 'request:%s\n' "$*" >>"$trace"; }
 type=up taskid=71 progress_attempt=1 task_token=0123456789abcdef mac=aa:bb:cc:dd:ee:ff pxeapi=http://fixture/
 rootpxe_partition_progress_enabled=yes
@@ -75,27 +74,12 @@ rootpxe_partition_progress_item d1:p1 preparing 0 '准备写入'
 rootpxe_progress_report_once
 ! grep -q 'stage=restore\|stage=capture' "$trace" || fail pending_plan_started_copy
 assert_eq "$(find "$tmp/events" -name 'event-*.json' | wc -l | tr -d ' ')" 1 prepare_queue_consumed_before_real_start
-rootpxe_task_multicast_form_args(){ return 1; }
 rootpxe_partition_progress_current_item d1:p1
 rm -f -- "$tmp/snapshot.json"
-: >"$trace"
-rootpxe_progress_report_once
-[[ ! -s $trace ]] || fail invalid_multicast_identity_sent_a_request
-rootpxe_task_multicast_form_args(){ rootpxe_task_multicast_args=(); }
-
-# Use the production multicast form builder: never duplicate the retry field.
-. <(sed -n '/^rootpxe_task_multicast_number_valid()/,$p' "$overlay/usr/share/pxeos/lib/task-http.sh")
-mc=yes multicastSessionId=1 multicastSessionKey=mc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 last_heartbeat_sent=0
 : >"$trace"
 rootpxe_progress_send_heartbeat "$(date +%s)"
-assert_eq "$(grep -o 'progressAttempt=1' "$trace" | wc -l | tr -d ' ')" 1 multicast_heartbeat_duplicated_attempt
-grep -q 'sessionId=1' "$trace" || fail multicast_heartbeat_lost_session_identity
-multicastSessionKey=invalid last_heartbeat_sent=0
-: >"$trace"
-rootpxe_progress_send_heartbeat "$(date +%s)"
-[[ ! -s $trace ]] || fail invalid_multicast_heartbeat_sent_request
-mc=no
+assert_eq "$(grep -o 'progressAttempt=1' "$trace" | wc -l | tr -d ' ')" 1 heartbeat_duplicated_attempt
 for progress_mode in partclone partimage; do
     : >"$trace"
     rootpxe_progress_report_once
@@ -145,12 +129,6 @@ rootpxe_require_single_disk_layout_metadata(){ :; }
 rootpxe_validate_deployment_layout(){ printf 'layout-check\n' >>"$trace"; }
 rootpxe_validate_growth_capability(){ :; }
 rootpxe_validate_restore_artifacts(){ :; }
-rootpxe_multicast_build_manifest(){ printf 'manifest\n' >>"$trace"; }
-rootpxe_multicast_join(){ printf 'join\n' >>"$trace"; }
-rootpxe_multicast_wait_for_selection(){ printf 'selection\n' >>"$trace"; }
-rootpxe_multicast_watchdog_start(){ :; }
-rootpxe_multicast_session_guard(){ :; }
-rootpxe_multicast_end(){ printf 'data-barrier\n' >>"$trace"; }
 rootpxe_plan_mpa_disk_permits(){ rootpxe_mpa_permit_is_batch=yes; rootpxe_mpa_permit_args=(fixture deploy_write); }
 rootpxe_plan_deploy_disk_operation(){ rootpxe_planned_target_id=fixture; rootpxe_planned_disk_operation=deploy_write; }
 rootpxe_wait_for_disk_permit(){ printf 'permit\n' >>"$trace"; }
@@ -168,25 +146,22 @@ rootpxe_restore_lvm_volumes(){ rootpxe_partition_progress_current_item 'd1:p1:lv
 blockdev(){ printf '1024\n'; }
 handleError(){ printf 'failed\n' >>"$trace"; exit 77; }
 before(){ local a b; a=$(grep -nF "$1" "$trace" | head -n1 | cut -d: -f1); b=$(grep -nF "$2" "$trace" | head -n1 | cut -d: -f1); [[ -n $a && -n $b && $a -lt $b ]]; }
-for mc in no yes; do
-    for imgType in n mps mpa dd; do
-        (
-            rootpxe_partition_progress_enabled=yes type=down imgPartitionType=all nombr=0
-            originalSchemaFile="$tmp/schema" deploymentLayoutFile="$tmp/layout" rootpxe_resolved_layout_file="$tmp/resolved" rootpxe_resolved_lvm_layout_file='' resumeStage=''
-            rootpxe_partition_progress_initialize_runtime
-            : >"$trace"
-            . "$tmp/download-body.sh"
-            before 'storage mounted' permit || fail deployment_storage_after_permit
-            before permit plan:pending || fail deployment_plan_before_permit
-            before plan:pending stage:restore:progress=0 || fail deployment_copy_before_plan
-            before stage:restore:progress=0 copy || fail deployment_missing_real_zero
-            before stopped 'deploy write finished' || fail deployment_end_before_stop
-            [[ $mc != yes ]] || before selection permit || fail multicast_permit_before_selection
-        )
-    done
+for imgType in n mps mpa dd; do
+    (
+        rootpxe_partition_progress_enabled=yes type=down imgPartitionType=all nombr=0
+        originalSchemaFile="$tmp/schema" deploymentLayoutFile="$tmp/layout" rootpxe_resolved_layout_file="$tmp/resolved" rootpxe_resolved_lvm_layout_file='' resumeStage=''
+        rootpxe_partition_progress_initialize_runtime
+        : >"$trace"
+        . "$tmp/download-body.sh"
+        before 'storage mounted' permit || fail deployment_storage_after_permit
+        before permit plan:pending || fail deployment_plan_before_permit
+        before plan:pending stage:restore:progress=0 || fail deployment_copy_before_plan
+        before stage:restore:progress=0 copy || fail deployment_missing_real_zero
+        before stopped 'deploy write finished' || fail deployment_end_before_stop
+    )
 done
 (
-    mc=no imgType=n type=down imgPartitionType=mbr nombr=0 resumeStage='' rootpxe_partition_progress_enabled=yes
+    imgType=n type=down imgPartitionType=mbr nombr=0 resumeStage='' rootpxe_partition_progress_enabled=yes
     originalSchemaFile="$tmp/schema" deploymentLayoutFile="$tmp/layout" rootpxe_resolved_layout_file="$tmp/resolved" rootpxe_resolved_lvm_layout_file=''
     rootpxe_partition_progress_initialize_runtime
     : >"$trace"
@@ -195,7 +170,7 @@ done
 )
 for resumeStage in cloud_init customizing_hostname; do
     (
-        mc=no imgType=n type=down changeHostname=true rootpxe_partition_progress_enabled=yes
+        imgType=n type=down changeHostname=true rootpxe_partition_progress_enabled=yes
         rootpxe_clear_disk_permit(){ :; }
         rootpxe_disk_stable_identity(){ printf fixture; }
         rootpxe_record_disk_permit_binding(){ :; }
@@ -267,7 +242,6 @@ rootpxe_task_curl(){
         *) return 1;;
     esac
 }
-mc=no
 for owned in yes no; do
     : >"$trace"
     statusReporter=''

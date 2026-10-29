@@ -74,9 +74,7 @@ while [[ -z $res ]]; do
     dots "Attempting to send inventory"
     inventory_args=(--data "$poststring")
     if [[ $task_mode -eq 1 ]]; then
-        rootpxe_task_multicast_form_args || handleError "RootPXE: inventory multicast context is invalid ($0)"
         inventory_args+=(--data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac")
-        inventory_args+=("${rootpxe_task_multicast_args[@]}")
     fi
     res=$("${rootpxe_inventory_transport[@]}" \
         "${inventory_args[@]}" \

@@ -19,9 +19,6 @@ rootpxe_source_core_library task-http.sh || return 1
 rootpxe_message_format_lib=/usr/share/pxeos/lib/message-format.sh
 [[ -r $rootpxe_message_format_lib ]] || rootpxe_message_format_lib="$(dirname "${BASH_SOURCE[0]}")/message-format.sh"
 [[ ! -r $rootpxe_message_format_lib ]] || . "$rootpxe_message_format_lib"
-rootpxe_multicast_lib=/usr/share/pxeos/lib/multicast.sh
-[[ -r $rootpxe_multicast_lib ]] || rootpxe_multicast_lib="$(dirname "${BASH_SOURCE[0]}")/multicast.sh"
-[[ -r $rootpxe_multicast_lib ]] && . "$rootpxe_multicast_lib"
 rootpxe_display_metadata_lib=/usr/share/pxeos/lib/display-metadata.sh
 [[ -r $rootpxe_display_metadata_lib ]] || rootpxe_display_metadata_lib="$(dirname "${BASH_SOURCE[0]}")/display-metadata.sh"
 [[ -r $rootpxe_display_metadata_lib ]] && . "$rootpxe_display_metadata_lib"
@@ -230,9 +227,7 @@ rootpxe_partition_progress_send_snapshot() {
     fi
     api_base="${pxeapi:-${web:-}}"
     [[ -n $api_base ]] || return 0
-    local -a rootpxe_task_multicast_args=()
-    rootpxe_task_multicast_form_args || return 0
-    rootpxe_task_curl -ks --connect-timeout 3 --max-time "$max_time" --data-urlencode "taskid=$taskid" --data-urlencode "token=${task_token:-${execution_token:-}}" --data-urlencode "mac=$mac" --data-urlencode "progressProtocol=2" --data-urlencode "stage=$stage" --data-urlencode "snapshot=$payload" "${rootpxe_task_multicast_args[@]}" "${api_base}progress" >/dev/null 2>&1 || true
+    rootpxe_task_curl -ks --connect-timeout 3 --max-time "$max_time" --data-urlencode "taskid=$taskid" --data-urlencode "token=${task_token:-${execution_token:-}}" --data-urlencode "mac=$mac" --data-urlencode "progressProtocol=2" --data-urlencode "stage=$stage" --data-urlencode "snapshot=$payload" "${api_base}progress" >/dev/null 2>&1 || true
     return 0
 }
 rootpxe_partition_progress_flush() {
@@ -293,7 +288,7 @@ REG_LOCAL_MACHINE_XP="/ntfs/WINDOWS/system32/config/system"
 [[ -z $ismajordebug ]] && ismajordebug=0
 rootpxe_kernel_key_allowed() {
     case "$1" in
-        web|pxeapi|taskid|task_token|token|mac|type|img|imgpath|osid|imgType|imgPartitionType|imgFormat|PIGZ_COMP|storage|storageip|storage_server|storage_export|export_path|protocol|hostName|changeHostname|shutdown|mc|pct|nombr|fdrive|mode|deployed|isdebug|ismajordebug|chkdsk|keymap|manual_token|manual_spki_pin|manual_arch|manual_platform) return 0 ;;
+        web|pxeapi|taskid|task_token|token|mac|type|img|imgpath|osid|imgType|imgPartitionType|imgFormat|PIGZ_COMP|storage|storageip|storage_server|storage_export|export_path|protocol|hostName|changeHostname|shutdown|pct|nombr|fdrive|mode|deployed|isdebug|ismajordebug|chkdsk|keymap|manual_token|manual_spki_pin|manual_arch|manual_platform) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -2282,7 +2277,7 @@ rootpxe_restore_lvm_volumes_single() {
             restored_lvs=$((restored_lvs + 1)); continue
         fi
         rootpxe_partition_progress_item "$rootpxe_partition_progress_restore_key" preparing 0 "准备写入逻辑卷"
-        writeImage "$image_path/$lv_artifact" "/dev/$vg/$lv_name" "${mc:-no}" || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_IMAGE_RESTORE_FAILED "lv_${lv_name}_${lv_fs}"; return 1; }
+        writeImage "$image_path/$lv_artifact" "/dev/$vg/$lv_name" || { rm -f "$lv_list"; rootpxe_restore_lvm_fail LVM_LV_IMAGE_RESTORE_FAILED "lv_${lv_name}_${lv_fs}"; return 1; }
         rootpxe_partition_progress_item "$rootpxe_partition_progress_restore_key" finalizing 100 "逻辑卷写入完成，正在校验"
         if [[ $lv_fs == xfs ]] && ! rootpxe_xfs_restore_postcheck "/dev/$vg/$lv_name"; then
             case ${rootpxe_xfs_restore_error:-post_restore_inconsistent} in
@@ -2986,12 +2981,10 @@ rootpxe_set_disk_permit_protocol_error() {
 # status endpoint and accept only explicit JSON terminal states.
 rootpxe_task_status_confirms_disk_permit_cancellation() {
     local api="${pxeapi:-${web:-}}" response body http_code status
-    local -a rootpxe_task_multicast_args=()
     [[ -n $api ]] || return 1
-    rootpxe_task_multicast_form_args || return 1
     response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 \
         --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
-        --data-urlencode "mac=$mac" "${rootpxe_task_multicast_args[@]}" -w $'\n%{http_code}' "${api}task-status" 2>/dev/null) || return 1
+        --data-urlencode "mac=$mac" -w $'\n%{http_code}' "${api}task-status" 2>/dev/null) || return 1
     http_code=${response##*$'\n'}
     body=${response%$'\n'*}
     command -v jq >/dev/null 2>&1 || return 1
@@ -3006,22 +2999,18 @@ rootpxe_task_status_confirms_disk_permit_cancellation() {
 # operation.  A successful HTTP response alone is never sufficient.
 rootpxe_request_disk_permit_for_target() {
     local target_id="$1" operation="$2" api response body http_code granted echoed_target echoed_operation capabilities
-    local -a rootpxe_permit_attempt_args=()
     # Return values: 0 granted; 10 confirmed cancellation; 11 retry; 12 deny/protocol.
     rootpxe_clear_disk_permit
     rootpxe_require_task_context || return 11
     api="${pxeapi:-${web:-}}"
     [[ -n $api ]] || return 11
     capabilities=$(rootpxe_deployment_identity_capabilities_json) && rootpxe_deployment_identity_capabilities_valid "$capabilities" || return 12
-    local -a rootpxe_task_multicast_args=()
-    rootpxe_task_multicast_form_args || return 12
-    rootpxe_permit_attempt_args=("${rootpxe_task_multicast_args[@]}")
     response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 \
         --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
         --data-urlencode "mac=$mac" --data-urlencode "targetId=$target_id" \
         --data-urlencode "operation=$operation" --data-urlencode "cloudInitCapability=linux-nocloud-v5" \
         --data-urlencode 'deploymentIdentityProtocolVersions=[1]' --data-urlencode "deploymentIdentityCapabilities=$capabilities" \
-        "${rootpxe_permit_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
+        -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
     http_code=${response##*$'\n'}
     body=${response%$'\n'*}
     [[ $http_code =~ ^[0-9]{3}$ ]] || { rootpxe_set_disk_permit_protocol_error unknown; return 12; }
@@ -3138,13 +3127,9 @@ rootpxe_request_disk_permit_batch() {
     done
     [[ $(printf '%s\n' "${ids[@]}" | sort -u | wc -l) -eq ${#ids[@]} ]] || return 12
     request=$(printf '%s\n' "${items[@]}" | jq -cs .) || return 12
-    local -a rootpxe_permit_batch_attempt_args=()
-    local -a rootpxe_task_multicast_args=()
-    rootpxe_task_multicast_form_args || return 12
-    rootpxe_permit_batch_attempt_args=("${rootpxe_task_multicast_args[@]}")
     response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "targets=$request" --data-urlencode "cloudInitCapability=linux-nocloud-v5" \
         --data-urlencode 'deploymentIdentityProtocolVersions=[1]' --data-urlencode "deploymentIdentityCapabilities=$capabilities" \
-        "${rootpxe_permit_batch_attempt_args[@]}" -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
+        -w $'\n%{http_code}' "${api}disk-permit" 2>/dev/null) || return 11
     http_code=${response##*$'\n'}; body=${response%$'\n'*}
     [[ $http_code =~ ^[0-9]{3}$ ]] || { rootpxe_set_disk_permit_protocol_error unknown; return 12; }
     [[ $http_code =~ ^5[0-9][0-9]$ ]] && return 11
@@ -3358,9 +3343,6 @@ rootpxe_error_report() {
         --data-urlencode "mac=$mac" --data-urlencode "errorCode=$code"
         --data-urlencode "message=$message"
     )
-    local -a rootpxe_task_multicast_args=()
-    rootpxe_task_multicast_form_args || return 1
-    error_args+=("${rootpxe_task_multicast_args[@]}")
     [[ $stage_count -eq 1 && $stage_invalid -eq 0 ]] && error_args+=(--data-urlencode "stage=$stage")
     while :; do
         remaining=$(rootpxe_failure_remaining) || return 2
@@ -3428,17 +3410,13 @@ rootpxe_error_wait_for_retry() {
         rootpxe_failure_begin "$response" || return 1
         report_confirmed=yes
     fi
-    local -a rootpxe_task_multicast_args=()
-    rootpxe_task_multicast_form_args || return 1
     if [[ $report_confirmed == yes ]]; then
         rootpxe_console_message ERROR 'Task paused. Error reported to RootPXE.'
     else
         rootpxe_console_message WARN 'Error report is not confirmed. Waiting for the configured failure action.'
     fi
     rootpxe_console_message INFO 'SSH is available for troubleshooting.'
-    if [[ ${mc:-no} == yes ]]; then
-        rootpxe_console_message INFO 'Manual multicast session failed on this client; wait for administrator action.'
-    elif [[ $report_confirmed == yes && ( -z ${rootpxe_storage_workspace:-} || ( ${rootpxe_storage_released:-no} == yes && ${rootpxe_storage_stopped:-no} == yes && -z ${rootpxe_storage_pid:-} ) ) ]]; then
+    if [[ $report_confirmed == yes && ( -z ${rootpxe_storage_workspace:-} || ( ${rootpxe_storage_released:-no} == yes && ${rootpxe_storage_stopped:-no} == yes && -z ${rootpxe_storage_pid:-} ) ) ]]; then
         rootpxe_console_message INFO 'Select Retry in the web UI to resume.'
     else
         rootpxe_console_message WARN 'Retry is unavailable until error reporting and storage cleanup are confirmed.'
@@ -3455,10 +3433,10 @@ rootpxe_error_wait_for_retry() {
             request_timeout=$(( remaining < 20 ? remaining : 20 ))
             status=$(rootpxe_task_curl -ks --connect-timeout "$(( remaining < 10 ? remaining : 10 ))" --max-time "$request_timeout" \
                 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
-                --data-urlencode "mac=$mac" "${rootpxe_task_multicast_args[@]}" "${api}task-status" 2>/dev/null) || status=''
+                --data-urlencode "mac=$mac" "${api}task-status" 2>/dev/null) || status=''
         fi
         status=$(jq -er 'if type == "object" and (.status | type) == "string" then .status else empty end' <<<"$status" 2>/dev/null) || status=''
-        if [[ ${mc:-no} != yes && $status == queued ]]; then
+        if [[ $status == queued ]]; then
             if [[ -z ${rootpxe_storage_workspace:-} || ( ${rootpxe_storage_released:-no} == yes && ${rootpxe_storage_stopped:-no} == yes && -z ${rootpxe_storage_pid:-} ) ]]; then
                 rootpxe_console_message INFO 'Retry requested. Resuming task.'
                 rootpxe_storage_reset_retry_state || return 1
@@ -3499,8 +3477,6 @@ rootpxe_stage() {
     rootpxe_require_task_context || return 1
     local api="${pxeapi:-$web}"
     [[ -z $api ]] && return 0
-    local -a rootpxe_task_multicast_args=()
-    rootpxe_task_multicast_form_args || return 1
     rootpxe_task_curl -ks --max-time 20 \
         --data-urlencode "taskid=$taskid" \
         --data-urlencode "token=$task_token" \
@@ -3508,7 +3484,6 @@ rootpxe_stage() {
         --data-urlencode "stage=$st" \
         --data-urlencode "status=running" \
         --data-urlencode "message=$msg" \
-        "${rootpxe_task_multicast_args[@]}" \
         "${api}stage" >/dev/null 2>&1 || true
 }
 
@@ -4831,70 +4806,39 @@ countPartTypes() {
 #
 # $1 = Source File
 # $2 = Target
-# $3 = mc task or not (not required)
 writeImage()  {
     local file="$1"
     local target="$2"
-    local mc="$3"
     local source_pid=""
     local source_exitcode=0
     local source_file=""
     local source_files=()
-    local multicast_monitor_pid="" multicast_key="" multicast_monitor_failed=no restore_pid="" decompressor_pid="" decoder_fifo=""
     [[ -z $target ]] && handleError "No target to place image passed (${FUNCNAME[0]})"
     rootpxe_validate_runtime_img_format || handleError "PXEOS_STAGE=restore CODE=IMAGE_FORMAT_INVALID REASON=unsupported_or_missing_format"
     local format
     format=$(rootpxe_effective_img_format) || return 1
     local exitcode=0 progress_decoder=0 progress_enabled=no
     rootpxe_write_image_stop_local() {
-        local p
-        if [[ $mc == yes ]]; then
-            rootpxe_multicast_stop_runtime
-        else
-            for p in "$restore_pid" "$decompressor_pid" "$source_pid"; do
-                [[ $p =~ ^[0-9]+$ ]] && kill "$p" >/dev/null 2>&1 || true
-            done
-            for p in "$restore_pid" "$decompressor_pid" "$source_pid"; do
-                [[ $p =~ ^[0-9]+$ ]] && wait "$p" >/dev/null 2>&1 || true
-            done
-        fi
+        [[ $source_pid =~ ^[0-9]+$ ]] && kill "$source_pid" >/dev/null 2>&1 || true
+        [[ $source_pid =~ ^[0-9]+$ ]] && wait "$source_pid" >/dev/null 2>&1 || true
         [[ $progress_enabled == yes ]] && rootpxe_partclone_progress_abort >/dev/null 2>&1 || true
         rm -f -- /tmp/pigz1 >/dev/null 2>&1 || true
-        [[ -z $decoder_fifo ]] || rm -f -- "$decoder_fifo" >/dev/null 2>&1 || true
     }
     rootpxe_write_image_fail() {
-        local reason=$1 report="${2:-}"
-        [[ -n $report ]] || report=no
+        local reason=$1
         rootpxe_write_image_stop_local
-        if [[ $mc == yes ]]; then
-            rootpxe_multicast_local_failure=yes
-            [[ $report == yes ]] && rootpxe_multicast_report false >/dev/null 2>&1 || true
-            rootpxe_multicast_cleanup
-        fi
         handleError "$reason"
-    }
-    rootpxe_write_image_wait_child() {
-        local pid=$1 child_status=0
-        [[ $pid =~ ^[0-9]+$ ]] || return 1
-        while kill -0 "$pid" >/dev/null 2>&1; do
-            sleep 1
-        done
-        wait "$pid" || child_status=$?
-        return "$child_status"
     }
     rootpxe_require_unused_target_disks "$target" || return 1
     mkfifo /tmp/pigz1 || handleError "PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_SETUP_FAILED REASON=unable_to_create_restore_fifo"
-    [[ $mc != yes ]] || rootpxe_multicast_runtime_begin /tmp/pigz1 || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_SETUP_FAILED REASON=unable_to_register_multicast_restore_fifo"
-    if [[ $mc != yes ]]; then
-        [[ -n $file ]] || rootpxe_write_image_fail "No source file passed (${FUNCNAME[0]})\n   Args Passed: $*"
-        # Validate every split source before the progress decoder or reader is
-        # started, so an early failure cannot leave either FIFO endpoint open.
-        mapfile -t source_files < <(compgen -G "$file" | LC_ALL=C sort)
-        [[ ${#source_files[@]} -gt 0 ]] || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_UNAVAILABLE REASON=image_source_glob_has_no_regular_files"
-        for source_file in "${source_files[@]}"; do
-            [[ -f $source_file && -r $source_file ]] || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_UNAVAILABLE REASON=image_source_is_not_readable"
-        done
-    fi
+    [[ -n $file ]] || rootpxe_write_image_fail "No source file passed (${FUNCNAME[0]})\n   Args Passed: $*"
+    # Validate every split source before the progress decoder or reader is
+    # started, so an early failure cannot leave either FIFO endpoint open.
+    mapfile -t source_files < <(compgen -G "$file" | LC_ALL=C sort)
+    [[ ${#source_files[@]} -gt 0 ]] || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_UNAVAILABLE REASON=image_source_glob_has_no_regular_files"
+    for source_file in "${source_files[@]}"; do
+        [[ -f $source_file && -r $source_file ]] || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_UNAVAILABLE REASON=image_source_is_not_readable"
+    done
     case $format in
         0|2|3|4|5|6)
             if ! rootpxe_partclone_progress_start; then
@@ -4911,72 +4855,14 @@ writeImage()  {
         rootpxe_partition_progress_item "$rootpxe_partition_progress_restore_key" running 0 "开始写入"
         rootpxe_partition_progress_current_item "$rootpxe_partition_progress_restore_key"
     fi
-    case $mc in
-        yes)
-            multicast_key=$(rootpxe_multicast_key_from_restore_source "$file" "$imagePath") || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=MULTICAST_ARTIFACT_INVALID REASON=restore_source_not_in_manifest_root"
-            rootpxe_multicast_prepare_stream "$multicast_key" || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=MULTICAST_PREPARE_FAILED REASON=controller_stream_rejected"
-            [[ ${rootpxe_multicast_receiver_timeout_sec:-} =~ ^[0-9]+$ ]] && (( rootpxe_multicast_receiver_timeout_sec >= 2 )) || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=MULTICAST_PREPARE_FAILED REASON=controller_receiver_timeout_invalid"
-            udp-receiver --nokbd --portbase "$rootpxe_multicast_port_base" --mcast-rdv-address "$rootpxe_multicast_address" --ttl "$rootpxe_multicast_ttl" --start-timeout "$rootpxe_multicast_receiver_timeout_sec" --receive-timeout "$rootpxe_multicast_receiver_timeout_sec" >/tmp/pigz1 2>/dev/null &
-            source_pid="$!"
-            rootpxe_multicast_receiver_pid=$source_pid
-            if [[ -n ${rootpxe_multicast_receiver_pid_file:-} ]]; then
-                printf '%s\n' "$source_pid" >"$rootpxe_multicast_receiver_pid_file"
-            fi
-            rootpxe_multicast_ready || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=MULTICAST_READY_FAILED REASON=controller_ready_rejected"
-            # The session watchdog begins before the disk permit and remains
-            # live through layout, initialization and every artifact.  It is
-            # not coupled to an individual receiver process.
-            rootpxe_multicast_session_guard || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=MULTICAST_STATUS_FAILED REASON=session_watchdog_rejected" yes
-            ;;
-        *)
-            rootpxe_storage_read_files "${source_files[@]}" >/tmp/pigz1 &
-            source_pid="$!"
-            ;;
-    esac
+    rootpxe_storage_read_files "${source_files[@]}" >/tmp/pigz1 &
+    source_pid="$!"
     case $format in
         5|6) rootpxe_console_message INFO 'Imaging with Partclone (zstd).' ;;
         3|4) rootpxe_console_message INFO 'Imaging with Partclone (uncompressed).' ;;
         1) rootpxe_console_message INFO 'Imaging with Partimage (gzip).' ;;
         0|2) rootpxe_console_message INFO 'Imaging with Partclone (gzip).' ;;
     esac
-    if [[ $mc == yes ]]; then
-    case $format in
-        0|1|2|5|6)
-            umask 077
-            decoder_fifo=$(mktemp /tmp/rootpxe-multicast-decode.XXXXXX) || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_SETUP_FAILED REASON=unable_to_create_decoder_fifo"
-            rm -f -- "$decoder_fifo" || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_SETUP_FAILED REASON=unable_to_prepare_decoder_fifo"
-            mkfifo "$decoder_fifo" || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_SETUP_FAILED REASON=unable_to_create_decoder_fifo"
-            [[ $mc != yes ]] || rootpxe_multicast_decoder_fifo=$decoder_fifo
-            case $format in
-                5|6) zstdmt -dc </tmp/pigz1 >"$decoder_fifo" & ;;
-                *) pigz -dc </tmp/pigz1 >"$decoder_fifo" & ;;
-            esac
-            decompressor_pid=$!
-            [[ $mc != yes ]] || rootpxe_multicast_decompressor_pid=$decompressor_pid
-            ;;
-    esac
-    case $format in
-        1) partimage restore "$target" stdin -f3 -b <"${decoder_fifo:-/tmp/pigz1}" 2>/tmp/status.pxeos & ;;
-        *) LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.restore "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -O "$target" -f 1 <"${decoder_fifo:-/tmp/pigz1}" 2>"$rootpxe_partclone_progress_stderr_target" & ;;
-    esac
-    restore_pid=$!
-    [[ $mc != yes ]] || rootpxe_multicast_decoder_pid=$restore_pid
-    if rootpxe_write_image_wait_child "$restore_pid"; then
-        exitcode=0
-    else
-        exitcode=$?
-    fi
-    [[ $exitcode -ne 0 ]] && rootpxe_write_image_stop_local
-    if [[ -n $decompressor_pid ]]; then
-        if rootpxe_write_image_wait_child "$decompressor_pid"; then
-            :
-        else
-            decompressor_exitcode=$?
-            [[ $exitcode -ne 0 ]] || exitcode=$decompressor_exitcode
-        fi
-    fi
-    [[ $exitcode -ne 0 ]] && rootpxe_write_image_stop_local
-    else
     case $format in
         5|6) if ( set -o pipefail; zstdmt -dc </tmp/pigz1 | LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.restore "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -O "$target" -f 1 2>"$rootpxe_partclone_progress_stderr_target" ); then exitcode=0; else exitcode=$?; fi ;;
         3|4) if ( set -o pipefail; cat </tmp/pigz1 | LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.restore "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -O "$target" -f 1 2>"$rootpxe_partclone_progress_stderr_target" ); then exitcode=0; else exitcode=$?; fi ;;
@@ -4984,40 +4870,22 @@ writeImage()  {
         0|2) if ( set -o pipefail; pigz -dc </tmp/pigz1 | LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.restore "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -O "$target" -f 1 2>"$rootpxe_partclone_progress_stderr_target" ); then exitcode=0; else exitcode=$?; fi ;;
     esac
     [[ $exitcode -ne 0 ]] && rootpxe_write_image_stop_local
-    fi
     if [[ $progress_enabled == yes ]]; then
         rootpxe_partclone_progress_wait || progress_decoder=$?
     fi
-    if [[ $mc == yes ]]; then
-        if rootpxe_write_image_wait_child "$source_pid"; then
-            source_exitcode=0
-        else
-            source_exitcode=$?
-        fi
+    if wait "$source_pid"; then
+        source_exitcode=0
     else
-        if wait "$source_pid"; then
-            source_exitcode=0
-        else
-            source_exitcode=$?
-        fi
+        source_exitcode=$?
     fi
-    [[ -s ${rootpxe_multicast_monitor_failure_file:-} ]] && multicast_monitor_failed=yes
-    [[ $mc != yes ]] || rootpxe_multicast_stop_stream
     if [[ $exitcode -ne 0 ]]; then
-        rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_FAILED REASON=image_decoder_or_writer_failed" yes
+        rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_FAILED REASON=image_decoder_or_writer_failed"
     fi
     if [[ $progress_decoder -ne 0 ]]; then
-        rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_PROGRESS_FAILED REASON=partclone_stderr_decoder_failed" yes
+        rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_PROGRESS_FAILED REASON=partclone_stderr_decoder_failed"
     fi
     if [[ $source_exitcode -ne 0 ]]; then
-        rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_FAILED REASON=image_transport_or_storage_reader_failed" yes
-    fi
-    if [[ $multicast_monitor_failed == yes ]]; then
-        rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=MULTICAST_STATUS_FAILED REASON=controller_status_monitor_rejected" yes
-    fi
-    if [[ $mc == yes ]]; then
-        rootpxe_multicast_report true || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=MULTICAST_REPORT_FAILED REASON=controller_report_rejected"
-        rootpxe_multicast_wait_sequence || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=MULTICAST_SEQUENCE_FAILED REASON=controller_did_not_advance"
+        rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_FAILED REASON=image_transport_or_storage_reader_failed"
     fi
     rm -rf /tmp/pigz1 >/dev/null 2>&1
 }
@@ -6270,7 +6138,6 @@ handleError() {
     # A fetched initialization payload may contain an XML credential or a
     # password hash.  Remove it before any retry wait, diagnostics, or reboot.
     declare -F rootpxe_deployment_identity_cleanup_private >/dev/null 2>&1 && rootpxe_deployment_identity_cleanup_private
-    [[ ${mc:-no} == yes ]] && rootpxe_multicast_local_failure=yes
     rootpxe_task_console_failure ERROR "$safe_str"
     rootpxe_failure_begin || exit 1
     #
@@ -7081,7 +6948,6 @@ restorePartition() {
     local part="$1"
     local disk_number="$2"
     local imagePath="$3"
-    local mc="$4"
     local split='' format
     format=$(rootpxe_effective_img_format) || return 1
     if [[ $format -eq 6 || $format -eq 4 || $format -eq 2 ]]; then
@@ -7192,7 +7058,7 @@ restorePartition() {
     fi
     rootpxe_partition_progress_restore_key="$progress_key"
     rootpxe_partition_progress_item "$rootpxe_partition_progress_restore_key" preparing 0 "准备写入"
-    writeImage "$imgpart" "$part" "$mc"
+    writeImage "$imgpart" "$part"
     if [[ $imgType == dd ]]; then
         rootpxe_partition_progress_item "$rootpxe_partition_progress_restore_key" completed 100 "整盘写入完成"
         rootpxe_partition_progress_clear_current_item
@@ -7266,7 +7132,6 @@ prepareResizeDownloadPartitions() {
 # $1 is the disks
 # $2 is the image path
 # $3 is the image partition type (either all or partition number)
-# $4 is the flag to say whether this is multicast or not
 rootpxe_expansion_fixed_partitions() {
     local fixed_partitions="$1" schema_file="${originalSchemaFile:-}" resolved_file="${rootpxe_resolved_layout_file:-}"
     local expanded_partitions candidate filtered=""
@@ -7419,7 +7284,6 @@ performRestore() {
     local disk=""
     local imagePath="$2"
     local imgPartitionType="$3"
-    local mc="$4"
     [[ -z $disks ]] && handleError "No disks passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $imagePath ]] && handleError "No image path passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $imgPartitionType ]] && handleError "No partition type passed (${FUNCNAME[0]})\n   Args Passed: $*"
@@ -7453,7 +7317,7 @@ performRestore() {
         for restorepart in $restoreparts; do
             getPartitionNumber "$restorepart"
             [[ $imgType =~ [Nn] ]] && tmpEBRFileName "$disk_number" "$part_number"
-            restorePartition "$restorepart" "$disk_number" "$imagePath" "$mc"
+            restorePartition "$restorepart" "$disk_number" "$imagePath"
             [[ $imgType =~ [Nn] ]] && restoreEBR "$restorepart" "$tmpebrfilename"
             if [[ $imgType =~ [Nn] ]]; then
                 if [[ $expansion_plan_active == yes ]]; then

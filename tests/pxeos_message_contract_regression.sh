@@ -52,8 +52,6 @@ unset -f jq
 # A diagnostic stage callback must retain its technical metadata unchanged.
 eval "$(sed -n '/^rootpxe_stage() {$/,/^}$/p' "$funcs")"
 rootpxe_require_task_context(){ return 0; }
-# This fixture exercises a unicast callback with no multicast identity.
-rootpxe_task_multicast_form_args(){ rootpxe_task_multicast_args=(); }
 taskid=9 task_token=fixture-only mac=001122334455 pxeapi=https://example.invalid/pxe/v1/
 callback_message='' callback_stage=''
 rootpxe_task_curl(){

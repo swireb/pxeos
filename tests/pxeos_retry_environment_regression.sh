@@ -11,7 +11,7 @@ ismajordebug=0
 . "$lib/funcs.sh"
 rootpxe_storage_capabilities() { :; }
 taskid=41 task_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa mac=aabbccddeeff
-taskType=capture progress_attempt=2 mc=no pxeapi=http://fixture/
+taskType=capture progress_attempt=2 pxeapi=http://fixture/
 old_document=$(storage_test_context_json '{"taskId":41,"type":"capture","progressAttempt":2,"protocol":"nfs","storageip":"fixture","exportPath":"/images"}')
 rootpxe_storage_apply_context "$old_document" || fail 'old context fixture invalid'
 old_workspace=$rootpxe_storage_workspace

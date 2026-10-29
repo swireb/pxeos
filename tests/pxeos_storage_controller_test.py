@@ -36,7 +36,6 @@ class StorageControllerTests(unittest.TestCase):
             rootpxe_console_message() { :; }
             rootpxe_require_task_context() { :; }
             rootpxe_bound_callback_message() { printf '%s' "$1"; }
-            rootpxe_task_multicast_form_args() { rootpxe_task_multicast_args=(); }
             rootpxe_task_curl() { return 7; }
             rootpxe_failure_wait_sec=60 rootpxe_failure_action=shutdown
             taskid=41 task_token=fixture mac=fixture pxeapi=http://fixture/
@@ -58,7 +57,6 @@ class StorageControllerTests(unittest.TestCase):
                     rootpxe_task_console_failure() { :; }
                     rootpxe_bound_callback_message() { printf '%s' "$1"; }
                     rootpxe_error_response_reason() { :; }
-                    rootpxe_task_multicast_form_args() { rootpxe_task_multicast_args=(); }
                     killStatusReporter() { :; }
                     rootpxe_task_curl() {
                         [[ $* == *'/error'* ]] || { : >"$tmp/unexpected-poll"; exit 91; }
@@ -66,7 +64,7 @@ class StorageControllerTests(unittest.TestCase):
                         printf '{"accepted":false}\\n%s' CODE
                     }
                     rootpxe_failure_wait_sec=60 rootpxe_failure_action=shutdown
-                    taskid=41 task_token=fixture mac=fixture pxeapi=http://fixture/ mc=no
+                    taskid=41 task_token=fixture mac=fixture pxeapi=http://fixture/
                     status=0; rootpxe_error_wait_for_retry failure CODE console_shown || status=$?
                     [[ $status == 2 && $clock == 160 && $(cat "$tmp/reports") == report ]]
                     [[ $(cat "$tmp/failure_action") == shutdown ]]
@@ -81,7 +79,6 @@ class StorageControllerTests(unittest.TestCase):
             date() { printf '%s\\n' "$clock"; }
             sleep() { clock=$((clock + $1)); }
             rootpxe_require_task_context() { :; }
-            rootpxe_task_multicast_form_args() { rootpxe_task_multicast_args=(); }
             killStatusReporter() { :; }
             rootpxe_task_curl() {
                 local previous='' timeout=''
@@ -95,7 +92,7 @@ class StorageControllerTests(unittest.TestCase):
             rootpxe_storage_reset_retry_state() { exit 92; }
             rootpxe_storage_released=no rootpxe_storage_stopped=yes
             rootpxe_failure_wait_sec=60 rootpxe_failure_action=reboot
-            taskid=41 task_token=fixture mac=fixture pxeapi=http://fixture/ mc=no
+            taskid=41 task_token=fixture mac=fixture pxeapi=http://fixture/
             status=0; rootpxe_error_wait_for_retry failure CODE console_shown '{"accepted":true,"waitSec":60}' || status=$?
             [[ $status == 2 && $clock == 160 && $rootpxe_storage_released == no ]]
             [[ ! -e $tmp/invalid-budget ]]

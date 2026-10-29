@@ -66,7 +66,7 @@ run_imgcomplete(){ (
     rootpxe_console_message(){ :; }
     dots(){ :; }
     debugPause(){ :; }
-    taskid=71 task_token=fixture mac=fixture web=fixture type=up imgType=P hd=fixture imagePath="$tmp/image" mc=no
+    taskid=71 task_token=fixture mac=fixture web=fixture type=up imgType=P hd=fixture imagePath="$tmp/image"
     source "$overlay/bin/pxeos.imgcomplete"
 ); }
 capture_failure=no rootpxe_capture_resume_published=0

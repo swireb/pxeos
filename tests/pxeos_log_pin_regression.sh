@@ -67,7 +67,7 @@ for release_failure in no yes; do
         rootpxe_task_log_initialize
         owned_pin=${rootpxe_task_log_state[pin]}; owned_identity=${rootpxe_task_log_state[pin_identity]}
         exec {foreign}<"$tmp/child-result"
-        pxeapi=https://example.invalid/; web=$pxeapi; taskid=1; task_token=FAKE_PIN_TOKEN; mac=00:00:00:00:00:00; mc=no
+        pxeapi=https://example.invalid/; web=$pxeapi; taskid=1; task_token=FAKE_PIN_TOKEN; mac=00:00:00:00:00:00;
         rootpxe_require_task_context(){ return 0; }
         rootpxe_console_message(){ :; }
         # The storage/new-process boundary has its own real-exec regression.

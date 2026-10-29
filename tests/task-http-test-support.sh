@@ -23,6 +23,5 @@ task_http_test_decode_curl_args() {
     done
 }
 export -f rootpxe_task_curl task_http_test_decode_curl_args
-# Child-shell entry fixtures need the same multicast identity helpers that
-# production funcs.sh sources; do not replace these safety checks with stubs.
-export -f rootpxe_task_multicast_number_valid rootpxe_task_multicast_identity_valid rootpxe_task_multicast_form_args rootpxe_task_multicast_json
+# Child-shell fixtures use the production storage/capture identity attachment.
+export -f rootpxe_task_identity_json

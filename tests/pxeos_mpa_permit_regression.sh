@@ -24,6 +24,7 @@ cp "$progress_lib" "$tmp/partclone-progress.sh"
 cp "$(dirname "$funcs")/log-paths.sh" "$tmp/log-paths.sh"
 cp "$(dirname "$funcs")/task-http.sh" "$tmp/task-http.sh"
 cp "$(dirname "$funcs")/storage-io.sh" "$tmp/storage-io.sh"
+cp "$(dirname "$funcs")/capture-direct.sh" "$tmp/capture-direct.sh"
 cp "$(dirname "$funcs")/cloud-init.sh" "$tmp/cloud-init.sh"
 cp "$(dirname "$funcs")/linux-hostname.sh" "$tmp/linux-hostname.sh"
 download_functions="$tmp/download-functions.sh"
@@ -45,7 +46,7 @@ expected_prepare=$'activate:/dev/diskA:deploy_write\ntable:/dev/diskA:1\npartpro
 [[ $(<"$events") == "$expected_prepare" ]] || fail prepare-order
 
 : >"$events"
-imgType=mpa osid=0 fixed_size_partitions= mc=no
+imgType=mpa osid=0 fixed_size_partitions=
 rootpxe_expansion_fixed_partitions(){ :; }
 sfdiskOriginalPartitionFileName(){ sfdiskoriginalpartitionfilename="$tmp/table"; }
 getValidRestorePartitions(){ restoreparts="${1}p1"; }
@@ -70,7 +71,6 @@ rootpxe_storage_path(){ printf '%s\n' "$tmp/image"; }
 rootpxe_require_unused_target_disks(){ :; } # 本入口仅核对模拟多盘 permit 顺序。
 rootpxe_deployment_identity_policy_enabled(){ return 1; }
 rootpxe_deployment_identity_cleanup_private(){ :; }
-rootpxe_multicast_cleanup(){ :; }
 rootpxe_validate_fixed_image_lvm_inventory(){ :; }
 rootpxe_validate_restore_artifacts(){ printf 'preflight\n' >>"$events"; }
 getMACAddresses(){ printf x; }
@@ -101,7 +101,7 @@ awk -v funcs="$test_funcs" -v stubs="$entry_stubs" '
 (
     set -euo pipefail
     type=down imgType=mpa imgPartitionType=all imgFormat=0 imgLegacy=0
-    img=fixture imagePath="$tmp/image" osid=0 mc=no nombr=0 mac=000c2958c550 taskid=1 task_token=0123456789abcdef
+    img=fixture imagePath="$tmp/image" osid=0 nombr=0 mac=000c2958c550 taskid=1 task_token=0123456789abcdef
     web=https://test/ originalSchemaFile= rootpxe_resolved_lvm_layout_file=
     source "$entry"
 )

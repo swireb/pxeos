@@ -50,8 +50,6 @@ finish_args+=("${rootpxe_finish_identity_args[@]}")
 if [[ ${rootpxe_capture_direct:-no} == yes ]]; then
     finish_args+=(--data-urlencode producerSucceeded=true --data-urlencode workerStopped=true)
 fi
-rootpxe_task_multicast_form_args || handleError "PXEOS_STAGE=finish_notify CODE=MULTICAST_SESSION_INVALID"
-finish_args+=("${rootpxe_task_multicast_args[@]}")
 [[ -n ${capture_size_bytes:-} ]] && finish_args+=(--data-urlencode "sizeBytes=$capture_size_bytes")
 [[ -n ${rootpxe_partition_inventory_file:-} ]] && finish_args+=(--data-urlencode "partitionInventory=$(cat "$rootpxe_partition_inventory_file")")
 [[ -n ${rootpxe_original_schema_file:-} ]] && finish_args+=(--data-urlencode "originalSchema=$(cat "$rootpxe_original_schema_file")")

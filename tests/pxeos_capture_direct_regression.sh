@@ -88,10 +88,8 @@ for pid in "$producer" "$pipeline" $children; do ! kill -0 "$pid" 2>/dev/null ||
         eval "$(sed -n "/^$function() {/,/^}/p" "$checkin")"
     done
     rootpxe_cloud_init_cleanup_private(){ :; }
-    rootpxe_multicast_reset(){ :; }
     rootpxe_apply_json_deployment_identity_policy(){ :; }
     rootpxe_apply_json_partition_inventory(){ :; }
-    rootpxe_multicast_apply_transport_mode(){ :; }
     rootpxe_apply_json_cloud_init(){ :; }
     document='{"taskId":4,"type":"capture","pxeType":"up","mac":"000c29129138","executionToken":"fixture","progressAttempt":7,"img":"1","imgType":"n","imgPartitionType":"all","osid":50,"imgFormat":4,"protocol":"nfs","storageip":"fixture","exportPath":"/images","captureProtocol":"mac-direct-v1","captureAccess":{"captureProtocol":"mac-direct-v1","attempt":7,"storageNonce":"11111111111111111111111111111111","nfsUid":0,"nfsGid":0}}'
     rootpxe_apply_json_checkin "$document" || fail direct-response-parser
@@ -106,7 +104,6 @@ done
 rootpxe_failure_begin(){ :; }
 rootpxe_failure_remaining(){ printf 60; }
 rootpxe_bound_callback_message(){ printf '%s' "$1"; }
-rootpxe_task_multicast_form_args(){ rootpxe_task_multicast_args=(); }
 rootpxe_cleanup_smb_credentials(){ :; }
 rootpxe_cleanup_task_json(){ :; }
 rootpxe_task_curl(){ printf '%s\n' "$*" >>"$tmp/callbacks"; printf '{"accepted":true}\n200'; }

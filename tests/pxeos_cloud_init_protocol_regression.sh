@@ -250,7 +250,6 @@ storage_test_patch_parser "$tmp/parser"
 rootpxe_deployment_identity_windows_hostname_capability_installed(){ return 1; }
 rootpxe_deployment_identity_windows_sysprep_capability_installed(){ return 1; }
 rootpxe_deployment_identity_linux_hostname_capability_installed(){ return 0; } # 目标工具就绪替身；MSYS缺mountpoint，不证明打包产物。
-rootpxe_multicast_runtime_ready(){ return 1; }
 taskid=1 task_token=private-token lmac=001122334455
 rootpxe_write_checkin_json_payload "$tmp/request" || fail 'request generation failed'
 jq -e '.cloudInitCapability=="linux-nocloud-v5" and (has("postDeployScriptCapability")|not) and (.deploymentIdentityCapabilities|index("linux-hostname-offline-v1")!=null)' "$tmp/request" >/dev/null || fail 'obsolete or missing capabilities'

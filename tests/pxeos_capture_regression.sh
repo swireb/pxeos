@@ -382,7 +382,7 @@ set +e
     imgLegacy=''
     storage=mock
     img=image
-    writeImage "$tmp/restore-image" /dev/mockp1 no
+    writeImage "$tmp/restore-image" /dev/mockp1
 ) 
 restore_rc=$?
 set -e
@@ -445,7 +445,7 @@ set +e
     imgLegacy=''
     storage=mock
     img=image
-    writeImage "$tmp/split/d1p1.img*" /dev/mockp1 no
+    writeImage "$tmp/split/d1p1.img*" /dev/mockp1
 )
 split_rc=$?
 set -e
@@ -472,7 +472,7 @@ set +e
     imgLegacy=''
     storage=mock
     img=image
-    writeImage "$tmp/split/missing*" /dev/mockp1 no
+    writeImage "$tmp/split/missing*" /dev/mockp1
 )
 split_missing_rc=$?
 set -e
@@ -495,7 +495,7 @@ set +e
     imgLegacy=''
     storage=mock
     img=image
-    writeImage "$tmp/split/not-an-image.img*" /dev/mockp1 no
+    writeImage "$tmp/split/not-an-image.img*" /dev/mockp1
 )
 split_directory_rc=$?
 set -e
@@ -531,7 +531,7 @@ set +e
     storage=mock
     img=image
     cat() { return 11; }
-    writeImage "$tmp/restore-image" /dev/mockp1 no
+    writeImage "$tmp/restore-image" /dev/mockp1
 )
 restore_source_rc=$?
 set -e

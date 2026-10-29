@@ -38,7 +38,7 @@ set +e
     type=down imgFormat=invalid imgLegacy=
     mkfifo(){ printf 'mkfifo-called\n'; return 99; }
     handleError(){ printf 'handleError:%s\n' "$1"; exit 77; }
-    writeImage "$tmp/source.img" "$tmp/target.img" ""
+    writeImage "$tmp/source.img" "$tmp/target.img"
 ) >"$tmp/invalid-format.log" 2>&1
 rc=$?
 set -e

@@ -467,7 +467,7 @@ assert_download_barrier() {
   esac
   (
     set -u
-    imgType=n imgPartitionType=all imagePath="$tmp/real-image" hd=/dev/mock mc=no nombr=0 sector_metadata= originalSchemaFile= deploymentLayoutFile=
+    imgType=n imgPartitionType=all imagePath="$tmp/real-image" hd=/dev/mock nombr=0 sector_metadata= originalSchemaFile= deploymentLayoutFile=
     rootpxe_validate_restore_artifacts() { printf 'artifact\n' >>"$events"; }
     rootpxe_plan_deploy_disk_operation() { printf 'UNEXPECTED:permit\n' >>"$events"; }
     rootpxe_wait_for_disk_permit() { printf 'UNEXPECTED:permit-wait\n' >>"$events"; }
