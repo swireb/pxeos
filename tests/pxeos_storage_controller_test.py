@@ -122,10 +122,10 @@ class StorageControllerTests(unittest.TestCase):
         ''', timeout=2)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_storage_only_upload_and_download_propagate_failure_timeout(self):
+    def test_storage_only_download_propagates_failure_timeout(self):
         helpers = re.findall(r"(?ms)^rootpxe_failure_(?:begin|remaining)\(\) \{.*?^\}", LIB.with_name("funcs.sh").read_text())
         overlay = LIB.parents[4]
-        for entry in ("pxeos.upload", "pxeos.download"):
+        for entry in ("pxeos.download",):
             with self.subTest(entry=entry), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory)
                 controller = path / "controller.sh"

@@ -118,8 +118,11 @@ rootpxe_write_checkin_json_payload() {
     [[ ${taskid:-} =~ ^[1-9][0-9]*$ && -n ${task_token:-} && -n ${lmac:-} ]] || return 1
     [[ -n $output_file && ! -L $output_file ]] || return 1
     capabilities=$(rootpxe_deployment_identity_capabilities_json) && rootpxe_deployment_identity_capabilities_valid "$capabilities" || return 1
-    rootpxe_storage_capabilities || return 1
-    storage_capabilities=$("$rootpxe_storage_helper" --capabilities) || return 1
+    if [[ ${type:-} == up ]]; then storage_capabilities='{}'
+    else
+        rootpxe_storage_capabilities || return 1
+        storage_capabilities=$("$rootpxe_storage_helper" --capabilities) || return 1
+    fi
     storage_boot=$(cat /proc/sys/kernel/random/boot_id) || return 1
     [[ $storage_boot =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]] || return 1
     rootpxe_storage_boot_id=$storage_boot
@@ -133,6 +136,7 @@ rootpxe_write_checkin_json_payload() {
     chmod 600 "$token_file" || { rm -f -- "$token_file"; umask "$old_umask"; return 1; }
     printf '%s' "$task_token" >"$token_file" || { rm -f -- "$token_file"; umask "$old_umask"; return 1; }
 	jq -cn \
+        --arg captureCheckinId "${rootpxe_capture_checkin_id:-}" \
         --argjson taskId "$taskid" \
 		--rawfile token "$token_file" \
         --arg mac "$lmac" \
@@ -140,7 +144,7 @@ rootpxe_write_checkin_json_payload() {
         --argjson versions "$identity_versions" \
         --argjson capabilities "$capabilities" \
         --argjson storageCapabilities "$storage_capabilities" --arg storageBootId "$storage_boot" \
-		'{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",cloudInitCapability:"linux-nocloud-v5",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities,storageProtocolVersions:[1],storageCapabilities:$storageCapabilities,storageBootId:$storageBootId}' >"$output_file"
+		'{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",cloudInitCapability:"linux-nocloud-v5",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities,captureProtocol:"mac-direct-v1",captureCheckinId:$captureCheckinId,storageProtocolVersions:[1],storageCapabilities:$storageCapabilities,storageBootId:$storageBootId}' >"$output_file"
 	result=$?
 	: >"$token_file"
 	rm -f -- "$token_file"
@@ -284,7 +288,20 @@ rootpxe_apply_json_checkin() {
             ;;
         *) return 1 ;;
     esac
-    rootpxe_storage_apply_context "$document" || return 1
+    rootpxe_capture_direct=no
+    if [[ $taskType == capture ]]; then
+        jq -e --argjson attempt "$progress_attempt" '.captureProtocol == "mac-direct-v1" and .captureAccess.captureProtocol == "mac-direct-v1" and .captureAccess.attempt == $attempt and (.captureAccess.storageNonce|test("^[a-f0-9]{32}$")) and (if .protocol == "nfs" then .captureAccess.nfsUid == 0 and .captureAccess.nfsGid == 0 else true end)' >/dev/null <<<"$document" || return 1
+        rootpxe_capture_direct=yes
+        rootpxe_capture_stopped=no rootpxe_capture_released=no rootpxe_storage_published=no
+        unset rootpxe_capture_published_attempt rootpxe_final_capture_path rootpxe_capture_xfs_mountpoint
+        rootpxe_storage_nonce=$(jq -r '.captureAccess.storageNonce' <<<"$document") || return 1
+        rootpxe_capture_nfs_version=$(jq -r '.captureAccess.nfsVersion // "auto"' <<<"$document")
+        rootpxe_capture_smb_version=$(jq -r '.captureAccess.smbVersion // "auto"' <<<"$document")
+        unset rootpxe_storage_workspace rootpxe_storage_worker_nonce
+        export rootpxe_capture_direct rootpxe_storage_nonce rootpxe_capture_nfs_version rootpxe_capture_smb_version
+    else
+        rootpxe_storage_apply_context "$document" || return 1
+    fi
     rootpxe_storage_only=$(jq -r 'if .storageOnly == true and .storageAccess.storageOnly == true then "yes" else "no" end' <<<"$document") || return 1
     if [[ $rootpxe_storage_only == yes ]]; then
         rootpxe_validate_json_storage || return 1
@@ -333,6 +350,11 @@ checkin_rootpxe() {
     # 按约定：使用服务端下发的任务主机 MAC（kernel cmdline 的 mac），不要在此处探测真实网卡
     lmac="$mac"
     local out checkin_payload_file
+    local rootpxe_capture_checkin_id=""
+    if [[ ${type:-} == up ]]; then
+        rootpxe_capture_checkin_id=$(tr -d "-" </proc/sys/kernel/random/uuid) || return 1
+        [[ $rootpxe_capture_checkin_id =~ ^[a-f0-9]{32}$ ]] || return 1
+    fi
     local body
     local http_code
     local waitFlag=""

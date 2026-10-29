@@ -1,4 +1,8 @@
 #!/bin/bash
+if [[ ${rootpxe_capture_direct:-no} == yes ]]; then
+    mountpoint -q /storage || handleError "Capture storage is not mounted"
+    return 0
+fi
 # Mount identity and version were verified by the restricted helper. Deployment
 # uses local metadata copies; neither a read test nor a read task creates dev.
 dots "Checking mounted file system"

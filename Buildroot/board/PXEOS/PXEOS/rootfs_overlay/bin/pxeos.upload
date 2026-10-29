@@ -2,11 +2,6 @@
 . /usr/share/pxeos/lib/funcs.sh || exit 1
 rootpxe_task_log_initialize || printf '[WARN]  Task log: unavailable.\n' >&2
 . /bin/pxeos.checkin
-if [[ ${rootpxe_storage_only:-no} == yes ]]; then
-    . /bin/pxeos.mount
-    rootpxe_storage_recover_until_clean
-    exit $?
-fi
 rootpxe_partition_progress_initialize_runtime
 . /bin/pxeos.mount
 . /bin/pxeos.checkmount
@@ -15,7 +10,12 @@ rootpxe_partition_progress_initialize_runtime
 rootpxe_require_task_context || handleError "Invalid task context ($0)"
 rootpxe_stage init "pxeos upload started, storage mounted"
 rootpxe_validate_image_contract || handleError "PXEOS_STAGE=capture CODE=IMAGE_CONTRACT_INVALID REASON=unsupported_type_scope_or_partimage_format"
-imagePath="$rootpxe_storage_workspace/image"
+[[ ${rootpxe_capture_direct:-no} == yes ]] || handleError "PXEOS_STAGE=capture CODE=CAPTURE_PROTOCOL_REQUIRED"
+imagePath="/storage/dev/$macWinSafe"
+# Background native children must not become job-control group leaders before
+# setsid establishes the process groups tracked by this controller.
+set +m
+rootpxe_capture_controller_pid=$$; export rootpxe_capture_controller_pid
 parts=""
 part=""
 disks=""
@@ -34,15 +34,6 @@ trap 'rootpxe_upload_cleanup_session; exit 130' INT
 trap 'rootpxe_upload_cleanup_session; exit 143' TERM
 pxeos.statusreporter "$mac" "${pxeapi:-$web}" "$taskid" "$rootpxe_partclone_progress_run_id" partclone &
 statusReporter="$!"
-if rootpxe_capture_resume_published; then
-    imagePath="$rootpxe_final_capture_path"
-    rootpxe_console_message INFO 'Capture payload already published; resuming finish notification.'
-    . /bin/pxeos.imgcomplete
-    exit 0
-else
-    resume_status=$?
-    [[ $resume_status -eq 1 ]] || handleError "PXEOS_STAGE=capture_resume CODE=${rootpxe_capture_resume_error_code:-CAPTURE_PUBLISHED_METADATA_MISSING} REASON=${rootpxe_capture_resume_error_reason:-published_artifacts_retained_for_manual_metadata_confirmation}"
-fi
 findHDDInfo
 rootpxe_capture_disks=()
 if [[ ${imgType:-} == mpa ]]; then
@@ -111,7 +102,7 @@ if declare -F rootpxe_display_metadata_begin >/dev/null 2>&1; then
     fi
 fi
 prepareUploadLocation "$imagePath"
-printf '%s\n' "$taskid" > "$imagePath/.rootpxe-capture-taskid" || handleError "Could not initialize capture task marker ($0)"
+printf '%s\n%s\n' "$taskid" "$progress_attempt" > "$imagePath/.rootpxe-capture-taskid" || handleError "Could not initialize capture task marker ($0)"
 rootpxe_console_message INFO "Using image: $img."
 # A resizable single-disk image keeps the captured partition layout intact.
 # d1.partitions is both the capture fact and the minimum deployment layout;
@@ -208,7 +199,7 @@ beginUpload() {
             rootpxe_partition_progress_item "d1:disk" running 0 "开始整盘复制"
             rootpxe_partition_progress_current_item "d1:disk"
             rootpxe_partclone_progress_start_collector
-            if LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.imager "${rootpxe_partclone_progress_args[@]}" -c -s "$hd" -O /tmp/pigz1 -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"; then
+            if LC_ALL=C TERM="$rootpxe_partclone_progress_term" rootpxe_capture_run_producer partclone.imager "${rootpxe_partclone_progress_args[@]}" -c -s "$hd" -O /tmp/pigz1 -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"; then
                 capture_exitcode=0
             else
                 capture_exitcode=$?
@@ -252,5 +243,5 @@ fi
 rootpxe_console_message INFO 'Capturing image with Partclone.'
 debugPause
 beginUpload
-rootpxe_wait_for_writers
+rootpxe_wait_for_writers || handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_FAILED REASON=storage_writer_or_compressor_failed"
 completeTasking

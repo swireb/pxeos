@@ -36,7 +36,10 @@ rootpxe_task_curl() {
             esac
             request_args+=("$argument")
         done
-        if [[ $has_form == yes && $has_binary == no && -n ${rootpxe_storage_nonce:-} ]]; then
+        if [[ $has_form == yes && $has_binary == no && ${rootpxe_capture_direct:-no} == yes ]]; then
+            request_args+=(--data-urlencode "captureProtocol=mac-direct-v1" --data-urlencode "attempt=$progress_attempt" --data-urlencode "storageNonce=$rootpxe_storage_nonce")
+            [[ ${rootpxe_capture_stopped:-no} != yes ]] || request_args+=(--data-urlencode workerStopped=true)
+        elif [[ $has_form == yes && $has_binary == no && -n ${rootpxe_storage_nonce:-} ]]; then
             request_args+=(--data-urlencode "storageNonce=$rootpxe_storage_nonce" --data-urlencode "workerNonce=$rootpxe_storage_worker_nonce" --data-urlencode "attempt=$progress_attempt" --data-urlencode "storageBootId=${rootpxe_storage_boot_id:-}" --data-urlencode "sysuuid=${rootpxe_storage_sysuuid:-}")
         fi
         # header 文件与请求 body 同属此次调用，既不碰 stdin 也不落任务日志。
@@ -81,7 +84,9 @@ rootpxe_task_multicast_form_args() {
 
 rootpxe_task_multicast_json() {
     local document=$1
-    if [[ -n ${rootpxe_storage_nonce:-} ]]; then
+    if [[ ${rootpxe_capture_direct:-no} == yes ]]; then
+        document=$(jq -c --arg protocol mac-direct-v1 --arg nonce "$rootpxe_storage_nonce" --argjson attempt "$progress_attempt" '. + {captureProtocol:$protocol,storageNonce:$nonce,attempt:$attempt}' <<<"$document") || return 1
+    elif [[ -n ${rootpxe_storage_nonce:-} ]]; then
         [[ ${progress_attempt:-} =~ ^[1-9][0-9]*$ && ${rootpxe_storage_worker_nonce:-} =~ ^[a-f0-9]{32}$ ]] || return 1
         document=$(jq -c --arg storageNonce "$rootpxe_storage_nonce" --arg workerNonce "$rootpxe_storage_worker_nonce" \
           --argjson attempt "$progress_attempt" --arg storageBootId "${rootpxe_storage_boot_id:-}" --arg sysuuid "${rootpxe_storage_sysuuid:-}" \

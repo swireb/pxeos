@@ -460,7 +460,10 @@ rootpxe_storage_path() {
     [[ -n ${rootpxe_storage_workspace:-} && $1 == "${img:-}" ]] || return 1
     printf '%s\n' "$rootpxe_storage_workspace/image"
 }
-prepareUploadLocation() { [[ ${1:-} == "$rootpxe_storage_workspace/image" && -d $1 && ! -L $1 ]]; }
+prepareUploadLocation() {
+    if [[ ${rootpxe_capture_direct:-no} == yes ]]; then rootpxe_capture_direct_prepare; return $?; fi
+    [[ ${1:-} == "$rootpxe_storage_workspace/image" && -d $1 && ! -L $1 ]]
+}
 rootpxe_prepare_storage_layout() { [[ -n ${rootpxe_storage_workspace:-} && -d $rootpxe_storage_workspace/image ]]; }
 
 rootpxe_storage_sync_payload_names() {
@@ -515,6 +518,7 @@ rootpxe_storage_sync_metadata() {
 }
 
 rootpxe_finalize_capture() {
+    if [[ ${rootpxe_capture_direct:-no} == yes ]]; then rootpxe_capture_direct_finalize; return $?; fi
     [[ ${type:-} == up && -n ${rootpxe_storage_workspace:-} ]] || return 1
     rootpxe_wait_for_writers || return 1
     rootpxe_storage_sync_metadata || return 1
@@ -546,6 +550,14 @@ rootpxe_storage_cleanup_owned() {
 }
 
 rootpxe_clear_capture_marker() {
+    if [[ ${rootpxe_capture_direct:-no} == yes ]]; then
+        local -a marker=()
+        mapfile -t marker <"$imagePath/.rootpxe-capture-taskid" || return 1
+        [[ ${marker[0]:-} == "$taskid" && ${marker[1]:-} == "$progress_attempt" ]] || return 1
+        rm -f -- "$imagePath/.rootpxe-capture-taskid" || return 1
+        rootpxe_capture_released=yes
+        return 0
+    fi
     if [[ ${type:-} == up ]]; then rootpxe_storage_cleanup_owned || return 1; fi
     rootpxe_storage_stop || return 1
     rootpxe_storage_call release --data-urlencode workerStopped=true >/dev/null || return 1

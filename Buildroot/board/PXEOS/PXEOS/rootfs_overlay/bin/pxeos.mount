@@ -1,4 +1,29 @@
 #!/bin/bash
+# Direct capture uses only the authenticated connection policy, without a
+# shadow tree, target inspection, or per-file storage controller.
+if [[ ${rootpxe_capture_direct:-no} == yes ]]; then
+    [[ ! -L /storage && ( ! -e /storage || -d /storage ) ]] || handleError "Unsafe capture mount point"
+    mkdir -p /storage || handleError "Capture mount point unavailable"
+    if mountpoint -q /storage; then umount /storage || handleError "Capture mount point busy"; fi
+    case $protocol in
+        smb)
+            case $rootpxe_capture_smb_version in
+                auto) capture_version=default;; 2.1|3.0|3.1.1) capture_version=$rootpxe_capture_smb_version;; 3.0.2) capture_version=3.02;; *) handleError "Invalid capture SMB version";;
+            esac
+            rootpxe_run_logged_typed_native storage-mount.log storage mount.cifs "//$storage_server/$storage_export" /storage -o "iocharset=utf8,rw,serverino,vers=$capture_version,credentials=$smb_credentials_file"
+            capture_mount_status=$?; rootpxe_cleanup_smb_credentials
+            ;;
+        nfs)
+            capture_options=rw,nolock,proto=tcp
+            [[ $rootpxe_capture_nfs_version == auto ]] || capture_options+=",vers=$rootpxe_capture_nfs_version"
+            rootpxe_run_logged_typed_native storage-mount.log storage mount -t nfs -o "$capture_options" "$storage_server:$storage_export" /storage
+            capture_mount_status=$?
+            ;;
+        *) handleError "Invalid capture storage protocol";;
+    esac
+    [[ $capture_mount_status == 0 ]] || handleError "Capture storage mount failed"
+    return 0
+fi
 # Managed tasks obtain storage only from authenticated JSON checkin.
 [[ -n ${rootpxe_storage_workspace:-} ]] || handleError "PXEOS_STAGE=storage CODE=STORAGE_CONTEXT_REQUIRED"
 [[ ! -L /storage && ( ! -e /storage || -d /storage ) ]] || handleError "PXEOS_STAGE=storage CODE=STORAGE_MOUNTPOINT_UNSAFE"

@@ -19,7 +19,7 @@ fi
 count=0
 res=""
 if [[ ${type:-} == "up" ]]; then
-    rootpxe_stage finalizing "moving captured image into final path"
+    [[ ${rootpxe_capture_direct:-no} == yes ]] || rootpxe_stage finalizing "moving captured image into final path"
     # Persist facts in staging before publication; a retry must never
     # reconstruct them from a source disk that may have changed meanwhile.
 if [[ ${rootpxe_capture_resume_published:-} != 1 ]]; then
@@ -47,6 +47,9 @@ finish_args=(
     --data-urlencode "message=pxeos imgcomplete type=$type"
 )
 finish_args+=("${rootpxe_finish_identity_args[@]}")
+if [[ ${rootpxe_capture_direct:-no} == yes ]]; then
+    finish_args+=(--data-urlencode producerSucceeded=true --data-urlencode workerStopped=true)
+fi
 rootpxe_task_multicast_form_args || handleError "PXEOS_STAGE=finish_notify CODE=MULTICAST_SESSION_INVALID"
 finish_args+=("${rootpxe_task_multicast_args[@]}")
 [[ -n ${capture_size_bytes:-} ]] && finish_args+=(--data-urlencode "sizeBytes=$capture_size_bytes")
@@ -62,10 +65,15 @@ while true; do
     fi
     if echo "$res" | grep -q '"success"[[:space:]]*:[[:space:]]*true'; then
         echo "Done"
+        [[ ${rootpxe_capture_direct:-no} != yes ]] || rootpxe_capture_released=yes
         if ! rootpxe_clear_capture_marker; then
             rootpxe_task_console_failure WARN "PXEOS_STAGE=finish_notify CODE=CAPTURE_MARKER_CLEAR_FAILED REASON=${rootpxe_capture_marker_clear_error_reason:-marker_clear_failed}"
-            rootpxe_console_message WARN 'Storage cleanup is not confirmed. Retrying the original execution.'
-            rootpxe_storage_recover_until_clean || exit $?
+            if [[ ${rootpxe_capture_direct:-no} == yes ]]; then
+                rootpxe_console_message WARN 'Capture finished; task marker cleanup failed and the marker was retained.'
+            else
+                rootpxe_console_message WARN 'Storage cleanup is not confirmed. Retrying the original execution.'
+                rootpxe_storage_recover_until_clean || exit $?
+            fi
         fi
         rootpxe_cleanup_task_json
         rootpxe_capture_resume_cleanup

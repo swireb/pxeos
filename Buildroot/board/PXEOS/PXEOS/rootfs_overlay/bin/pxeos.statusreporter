@@ -102,7 +102,18 @@ rootpxe_progress_send_heartbeat() {
     rootpxe_task_curl -ks --connect-timeout 3 --max-time 8 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" --data-urlencode "heartbeat=true" "${rootpxe_task_multicast_args[@]}" "${api_base}progress" >/dev/null 2>&1 || true
     last_heartbeat_sent=$now
 }
+rootpxe_capture_poll_cancel() {
+    [[ ${rootpxe_capture_direct:-no} == yes && ${rootpxe_capture_controller_pid:-} =~ ^[1-9][0-9]*$ ]] || return 0
+    local response state
+    response=$(rootpxe_task_curl -ks --connect-timeout 3 --max-time 8 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" "${api_base}task-status") || return 0
+    state=$(jq -r '.status // empty' <<<"$response" 2>/dev/null) || return 0
+    if [[ $state == cancelled ]]; then
+        kill -TERM "$rootpxe_capture_controller_pid" 2>/dev/null || true
+        exit 0
+    fi
+}
 rootpxe_progress_report_once() {
+    rootpxe_capture_poll_cancel
     local snapshot_file=/tmp/pxeos.partition-progress.json snapshot snapshot_hash now pct b64
     now=$(date +%s)
     # Preserve liveness during long preparation or multicast selection without

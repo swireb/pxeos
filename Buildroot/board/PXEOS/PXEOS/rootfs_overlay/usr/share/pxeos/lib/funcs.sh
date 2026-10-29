@@ -1036,12 +1036,14 @@ rootpxe_xfs_capture_preflight() {
         *) rootpxe_xfs_capture_error=mount_state_check_failed; return 1 ;;
     esac
     mount_point=$(mktemp -d /tmp/rootpxe-xfs-capture.XXXXXX) || { rootpxe_xfs_capture_error=temp_mountpoint_failed; return 1; }
+    [[ ${rootpxe_capture_direct:-no} != yes ]] || rootpxe_capture_xfs_mountpoint=$mount_point
     if ! mount -t xfs -o rw,nouuid "$device" "$mount_point"; then
         primary_error=log_replay_mount_failed
     elif ! umount "$mount_point"; then
         primary_error=log_replay_unmount_failed
-        umount "$mount_point" >/dev/null 2>&1 || true
+        if umount "$mount_point" >/dev/null 2>&1; then unset rootpxe_capture_xfs_mountpoint; fi
     else
+        unset rootpxe_capture_xfs_mountpoint
         repair_output=$(xfs_repair -n "$device" 2>&1)
         repair_rc=$?
         if [[ $repair_rc -ne 0 ]]; then
@@ -1052,6 +1054,7 @@ rootpxe_xfs_capture_preflight() {
     if [[ -n $mount_point ]] && ! rmdir "$mount_point" >/dev/null 2>&1 && [[ -z $primary_error ]]; then
         primary_error=temp_cleanup_failed
     fi
+    [[ -d $mount_point ]] || unset rootpxe_capture_xfs_mountpoint
     [[ -z $primary_error ]] || { rootpxe_xfs_capture_error=$primary_error; return 1; }
 }
 
@@ -1765,6 +1768,7 @@ rootpxe_cleanup_task_json() {
 }
 
 rootpxe_cleanup_session() {
+    if [[ ${rootpxe_capture_direct:-no} == yes ]]; then rootpxe_capture_direct_stop_ack || true; fi
     if [[ -n ${rootpxe_storage_workspace:-} ]] && declare -F rootpxe_storage_quiesce >/dev/null 2>&1; then rootpxe_storage_quiesce; fi
     rootpxe_cleanup_smb_credentials
     rootpxe_cleanup_task_json
@@ -3375,6 +3379,7 @@ rootpxe_error_report() {
         [[ $http_status =~ ^[0-9]{3}$ ]] || { http_status=000; response=$raw_response; }
         if [[ $http_status =~ ^2 ]] && jq -e 'type == "object" and .accepted == true' >/dev/null 2>&1 <<<"$response"; then
             rootpxe_failure_begin "$response" || return 1
+            if [[ ${rootpxe_capture_direct:-no} == yes && ${rootpxe_capture_stopped:-no} == yes ]]; then rootpxe_capture_released=yes; fi
             break
         fi
         response_reason=$(rootpxe_error_response_reason "$response")
@@ -6261,6 +6266,7 @@ handleError() {
     local part=""
     safe_str=$(rootpxe_redact_diagnostic "$str")
     rootpxe_diagnostic_cleanup
+    if [[ ${rootpxe_capture_direct:-no} == yes ]]; then rootpxe_capture_direct_quiesce; fi
     # A fetched initialization payload may contain an XML credential or a
     # password hash.  Remove it before any retry wait, diagnostics, or reboot.
     declare -F rootpxe_deployment_identity_cleanup_private >/dev/null 2>&1 && rootpxe_deployment_identity_cleanup_private
@@ -6414,6 +6420,22 @@ uploadFormat() {
     cores=$((cores - 1))
     [[ $cores -lt 1 ]] && cores=1
     [[ ${writer_pids+x} ]] || writer_pids=()
+    if [[ ${rootpxe_capture_direct:-no} == yes ]]; then
+        local -a compressor=()
+        case $imgFormat in
+            0|2) compressor=(pigz "${compression_args[@]}");;
+            3|4) compressor=(cat);;
+            *) compressor=(zstdmt --rsyncable --ultra "${compression_args[@]}");;
+        esac
+        case $imgFormat in
+            2|4|6)
+                setsid bash -o pipefail -c 'trap "wait; exit 143" TERM INT; file=$1; shift; "$@" | split -a 3 -d -b 200m - "$file."' capture-writer "$file" "${compressor[@]}" <"$fifo" & ;;
+            *) setsid "${compressor[@]}" <"$fifo" >"${file}.000" & ;;
+        esac
+        rootpxe_last_writer_pid=$!
+        writer_pids+=("$rootpxe_last_writer_pid")
+        return 0
+    fi
     local split_bytes=0
     case $imgFormat in 2|4|6) split_bytes=209715200;; esac
     case $imgFormat in
@@ -6966,7 +6988,7 @@ savePartition() {
             rootpxe_partition_progress_item "d${disk_number}:p${part_number}" running 0 "开始复制"
             rootpxe_partition_progress_current_item "d${disk_number}:p${part_number}"
             rootpxe_partclone_progress_start_collector
-            if LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.$fstype "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -f 1 2>"$rootpxe_partclone_progress_stderr_target"; then
+            if LC_ALL=C TERM="$rootpxe_partclone_progress_term" rootpxe_capture_run_producer partclone.$fstype "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -f 1 2>"$rootpxe_partclone_progress_stderr_target"; then
                 exitcode=0
             else
                 exitcode=$?
@@ -7021,7 +7043,7 @@ savePartition() {
                     rootpxe_partition_progress_item "d${disk_number}:p${part_number}" running 0 "开始复制"
                     rootpxe_partition_progress_current_item "d${disk_number}:p${part_number}"
                     rootpxe_partclone_progress_start_collector
-                    if LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.$fstype "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"; then
+                    if LC_ALL=C TERM="$rootpxe_partclone_progress_term" rootpxe_capture_run_producer partclone.$fstype "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -cs "$part" -O "$fifoname" -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"; then
                         exitcode=0
                     else
                         exitcode=$?
@@ -7208,7 +7230,7 @@ killStatusReporter() {
     statusReporter=''
     kill "$reporter_pid" >/dev/null 2>&1 || true
     wait "$reporter_pid" >/dev/null 2>&1 || true
-    debugPause
+    [[ ${rootpxe_capture_direct:-no} == yes ]] || debugPause
 }
 prepareResizeDownloadPartitions() {
     local disk="$1"
@@ -7498,3 +7520,5 @@ calculate_float() {
 
 # Managed storage always uses the task-bound helper and local metadata shadow.
 rootpxe_source_core_library storage-io.sh || return 1
+
+rootpxe_source_core_library capture-direct.sh || return 1

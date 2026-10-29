@@ -176,6 +176,7 @@ sed \
     -e 's|^rootpxe_source_core_library deployment-identity.sh.*|:|' \
     "$funcs" > "$tmp/funcs.sh"
 cp "$progress_lib" "$tmp/partclone-progress.sh"
+cp "$overlay/usr/share/pxeos/lib/capture-direct.sh" "$tmp/capture-direct.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-hostname.sh" "$tmp/linux-hostname.sh"
