@@ -131,6 +131,7 @@ printf '# keep node-old comment\r\n127.0.0.1\tlocalhost localhost.localdomain no
 cmp -s "$tmp/expected-hosts" "$target/etc/hosts" || { diff -u "$tmp/expected-hosts" "$target/etc/hosts" || :; fail 'hosts changed comments, remote names, whitespace or CRLF'; }
 [[ $(stat -c '%d:%i' "$target/etc/hostname" "$target/etc/hosts") == "$before" ]] || fail 'existing config inode/metadata replaced'
 [[ $(<"$target/var/lib/cloud/seed/nocloud/vendor-data") == 'foreign seed must not be read or removed' ]] || fail 'offline name inspected/changed Cloud-init seed'
+[[ ! -e $target/etc/cloud/cloud.cfg.d/99-rootpxe-nocloud.cfg ]] || fail 'offline hostname wrote NoCloud config'
 rootpxe_linux_hostname_preflight "$target" || fail 'idempotent hostname readonly preflight'
 [[ $rootpxe_linux_hostname_verified == yes ]] || fail 'same-name config not accepted read-only'
 for old in absent empty localhost no-loopback already-new missing-hosts; do

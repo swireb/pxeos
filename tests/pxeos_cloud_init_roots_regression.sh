@@ -44,7 +44,7 @@ rootpxe_lvm_native(){
     esac
 }
 rootpxe_linux_probe_root_candidate(){ printf '%s|%s|%s|%s|\n' "$1" "$2" "$3" "$4"; }
-rootpxe_cloud_init_process_root(){ printf '%s\n' "$3" >>"$tmp/phases"; rootpxe_cloud_init_seed_verified=no; }
+rootpxe_cloud_init_process_root(){ printf '%s\n' "$3" >>"$tmp/phases"; }
 rootpxe_linux_hostname_process_root(){ printf '%s\n' "$3" >>"$tmp/phases"; rootpxe_linux_hostname_verified=no; }
 rootpxe_stage(){ :; }
 mountpoint(){ return 1; }

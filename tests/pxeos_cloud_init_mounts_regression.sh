@@ -52,6 +52,12 @@ printf '/dev/Ap2 /var ext4 defaults 0 2\n/dev/Ap1 /var xfs defaults 0 2\n' >"$ta
 rootpxe_ci_mount_fstab "$target" /var rw && fail 'duplicate /var accepted'
 printf '/dev/Ap2 /var/lib/cloud ext4 defaults 0 2\n' >"$target/etc/fstab"
 rootpxe_ci_mount_fstab "$target" /var rw && fail 'shadowing /var/lib/cloud accepted'
+for shadow in /etc /etc/cloud /etc/cloud/cloud.cfg.d; do
+    printf '/dev/Ap2 %s ext4 defaults 0 2\n' "$shadow" >"$target/etc/fstab"
+    rootpxe_ci_mount_fstab "$target" /var rw && fail "shadowing $shadow accepted"
+done
+printf '/dev/Ap2 /etc/resolv.conf ext4 defaults 0 2\n' >"$target/etc/fstab"
+rootpxe_ci_mount_fstab "$target" /var rw || fail 'unrelated /etc/resolv.conf entry rejected'
 mkdir -p "$target/var/lib/cloud/instances"
 cloud_shadow=yes
 printf '/dev/Ap2 /usr ext4 defaults 0 2\n/dev/FOREIGN /var/lib/cloud ext4 defaults 0 2\n/dev/FOREIGN /etc/cloud ext4 defaults 0 2\n' >"$target/etc/fstab"
@@ -79,6 +85,55 @@ ci_owned_mounts=("$target/var") cleanup_fail=yes
 rootpxe_ci_cleanup_mounts && fail 'unmount failure swallowed'
 [[ ${#ci_owned_mounts[@]} == 1 ]] || fail 'failed cleanup evidence discarded'
 printf 'PASS: independent readonly /usr probe, strict /var permissions, all VG PVs, shadowing fstab, borrowed/failed cleanup\n'
+
+# Mount leaf substitutes expose a separate /var directory only while mounted.
+# The real ro/rw processor and installer must put boot config under root /etc.
+if [[ $EUID == 0 && $(uname -s) == Linux ]]; then
+(
+    . "$lib/cloud-init.sh"
+    system="$tmp/independent-var-root" external_var="$tmp/independent-var-data"
+    mkdir -p "$system/etc/cloud" "$system/usr/bin" "$system/var" "$external_var"
+    printf '# image cloud config\n' >"$system/etc/cloud/cloud.cfg"
+    printf '#!/bin/sh\nexit 99\n' >"$system/usr/bin/cloud-init"; chmod 755 "$system/usr/bin/cloud-init"
+    printf '/dev/fixture-var /var xfs defaults 0 2\n' >"$system/etc/fstab"
+    printf '#cloud-config\nruncmd: []\n' >"$tmp/independent-user-data"
+    printf 'instance-id: independent-var\n' >"$tmp/independent-meta-data"
+    cloudInitUserDataFile="$tmp/independent-user-data" cloudInitMetaDataFile="$tmp/independent-meta-data"
+    cloudInitUserDataSha256=$(rootpxe_ci_hash "$cloudInitUserDataFile")
+    cloudInitMetaDataSha256=$(rootpxe_ci_hash "$cloudInitMetaDataFile")
+    cloudInitNetworkConfigFile='' cloudInitNetworkConfigSha256='' cloudInitVendorDataFile='' cloudInitVendorDataSha256=''
+    rootpxe_ci_device_is_block(){ return 0; }
+    rootpxe_ci_device_permitted(){ [[ $1 == /dev/fixture-var ]]; }
+    rootpxe_ci_mount_matches(){ return 0; }
+    rootpxe_ci_mount_root(){ ci_mounted_root="$system"; }
+    blkid(){ printf xfs; }
+    var_mounted=no
+    mountpoint(){ [[ $var_mounted == yes && ${@: -1} == "$system/var" ]]; }
+    mount(){
+        [[ ${@: -1} == "$system/var" ]] || return 1
+        mv "$system/var" "$system/hidden-var"; mv "$external_var" "$system/var"; var_mounted=yes
+    }
+    umount(){
+        [[ $1 == "$system/var" ]] || return 1
+        mv "$system/var" "$external_var"; mv "$system/hidden-var" "$system/var"; var_mounted=no
+    }
+    rootpxe_cloud_init_process_root /dev/A '/dev/Ap1|xfs|||' ro || fail 'separate /var readonly preflight'
+    [[ ! -e $system/etc/cloud/cloud.cfg.d && ! -e $external_var/lib ]] || fail 'readonly separate /var preflight wrote files'
+    rootpxe_cloud_init_process_root /dev/A '/dev/Ap1|xfs|||' rw || fail 'separate /var injection'
+    config="$system/etc/cloud/cloud.cfg.d/99-rootpxe-nocloud.cfg"
+    printf 'datasource_list: [NoCloud]\n' | cmp -s - "$config" || fail 'separate /var boot config missing from root /etc'
+    cmp -s "$cloudInitUserDataFile" "$external_var/lib/cloud/seed/nocloud/user-data" || fail 'seed not installed on separate /var'
+    [[ ! -e $external_var/etc && ! -e $system/var/lib && $var_mounted == no ]] || fail 'config/seed used hidden mount path or mount leaked'
+    rm "$config"
+    rootpxe_cloud_init_process_root /dev/A '/dev/Ap1|xfs|||' ro || fail 'separate /var missing-config preflight'
+    rootpxe_cloud_init_process_root /dev/A '/dev/Ap1|xfs|||' rw || fail 'separate /var matching seed config repair'
+    cmp -s "$cloudInitUserDataFile" "$external_var/lib/cloud/seed/nocloud/user-data" || fail 'separate /var repeat injection bytes'
+    [[ -f $config && $var_mounted == no ]] || fail 'separate /var repeat injection missing config or leaked mount'
+    printf 'PASS: separate /var ro/rw injection keeps NoCloud config on root /etc\n'
+) || fail 'separate /var NoCloud boot config'
+else
+    printf 'SKIP: separate /var installer metadata fixture requires Linux root\n'
+fi
 
 # 使用真实 ownership 清理；失败项保留后再次清理也不得漏掉稀疏数组中的 VG。
 (

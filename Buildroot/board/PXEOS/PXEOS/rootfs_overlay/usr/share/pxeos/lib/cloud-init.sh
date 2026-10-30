@@ -1,5 +1,5 @@
 #!/bin/bash
-# 仅离线安装原生 NoCloud seed；不执行目标程序或任何配置正文。
+# 仅离线安装原生 NoCloud seed 与数据源配置；不执行目标程序或任何配置正文。
 # SELinux 由目标系统/镜像准备负责关闭；PXEOS 不识别、修改或校验其策略和标签。
 
 rootpxe_ci_stat() { stat -c '%u:%g:%a:%h' -- "$1"; }
@@ -79,7 +79,6 @@ rootpxe_ci_safe_write_directory() {
 }
 
 rootpxe_ci_inode() { stat -c '%d:%i' -- "$1"; }
-rootpxe_ci_move() { mv -n -- "$1" "$2"; }
 rootpxe_cloud_init_policy_enabled() {
     [[ ${taskType:-} == deploy && ${osid:-} == 50 && -r ${deploymentIdentityPolicyFile:-} ]] &&
         jq -e '.version == 1 and .cloudInit == true' "$deploymentIdentityPolicyFile" >/dev/null 2>&1
@@ -215,65 +214,20 @@ rootpxe_ci_check_prerequisites() {
             else rootpxe_ci_metadata_safe "$path" file || { rootpxe_ci_reject 43 cloud_init_target_path_unsafe; return $?; }; fi
         done
     done
-    # 原生 YAML 合并、NoCloud 可用性和启动启用状态由镜像管理员验证。
+    # 原生 YAML 合并、模块与启动启用状态由镜像管理员验证。
     return 0
-}
-rootpxe_ci_validate_cloud_state() {
-    local root="$1" path entry
-    rootpxe_ci_safe_write_directory "$root" /var || { rootpxe_ci_reject 43 cloud_init_target_path_unsafe; return $?; }
-    for path in /var/lib /var/lib/cloud /var/lib/cloud/seed /var/lib/cloud/seed/nocloud; do
-        [[ -e $root$path || -L $root$path ]] || break
-        rootpxe_ci_safe_write_directory "$root" "$path" || { rootpxe_ci_reject 43 cloud_init_target_path_unsafe; return $?; }
-    done
-    if [[ -d $root/var/lib/cloud ]]; then
-        while IFS= read -r -d '' entry; do [[ ${entry##*/} == seed ]] || { rootpxe_ci_reject 44 cloud_init_cache_not_clean; return $?; }; done < <(find "$root/var/lib/cloud" -mindepth 1 -maxdepth 1 -print0)
-    fi
-    if [[ -d $root/var/lib/cloud/seed ]]; then
-        while IFS= read -r -d '' entry; do [[ ${entry##*/} == nocloud ]] || { rootpxe_ci_reject 45 cloud_init_foreign_seed; return $?; }; done < <(find "$root/var/lib/cloud/seed" -mindepth 1 -maxdepth 1 -print0)
-    fi
-    return 0
-}
-rootpxe_ci_verify_seed() {
-    local seed="$1" data_hash="$2" metadata_hash="$3" network_hash="${4:-}" vendor_hash="${5:-}" entry count=0 expected_count=2
-    if [[ -n $network_hash ]]; then [[ $network_hash =~ ^[0-9a-f]{64}$ ]] || return 1; expected_count=$((expected_count + 1)); fi
-    if [[ -n $vendor_hash ]]; then [[ $vendor_hash =~ ^[0-9a-f]{64}$ ]] || return 1; expected_count=$((expected_count + 1)); fi
-    rootpxe_ci_metadata_safe "$seed" directory || return 1
-    while IFS= read -r -d '' entry; do
-        case ${entry##*/} in user-data|meta-data) ;; network-config) [[ -n $network_hash ]] || return 1;; vendor-data) [[ -n $vendor_hash ]] || return 1;; *) return 1;; esac
-        rootpxe_ci_metadata_safe "$entry" file 600 || return 1
-        count=$((count + 1))
-    done < <(find "$seed" -mindepth 1 -maxdepth 1 -print0)
-    [[ $count -eq $expected_count && $(rootpxe_ci_hash "$seed/user-data") == "$data_hash" && $(rootpxe_ci_hash "$seed/meta-data") == "$metadata_hash" ]] || return 1
-    [[ -z $network_hash || $(rootpxe_ci_hash "$seed/network-config") == "$network_hash" ]] || return 1
-    [[ -z $vendor_hash || $(rootpxe_ci_hash "$seed/vendor-data") == "$vendor_hash" ]]
 }
 rootpxe_ci_readonly_preflight() {
-    local root="$1" seed="$1/var/lib/cloud/seed/nocloud"
-    rootpxe_cloud_init_seed_verified=no
+    local root="$1" path
     rootpxe_ci_check_prerequisites "$root" || return $?
-    rootpxe_ci_validate_cloud_state "$root" || return $?
-    if [[ -d $seed ]]; then
-        if [[ -n $(find "$seed" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
-            rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" "${cloudInitVendorDataSha256:-}" || { rootpxe_ci_reject 45 cloud_init_foreign_seed; return $?; }
-            rootpxe_cloud_init_seed_verified=yes
-        fi
-    fi
-    return 0
-}
-# 动态局部数组只登记本次创建对象的 inode；不删除未知内容或递归删除目录。
-rootpxe_ci_transaction_cleanup() {
-    local index path result=0
-    for ((index=${#ci_owned_files[@]}-1; index>=0; index--)); do
-        path=${ci_owned_files[$index]}
-        [[ -e $path || -L $path ]] || continue
-        if [[ -f $path && ! -L $path && $(rootpxe_ci_inode "$path") == "${ci_owned_file_inodes[$index]}" ]]; then rm -- "$path" || result=1; else result=1; fi
+    for path in /etc/cloud/cloud.cfg.d /var /var/lib /var/lib/cloud /var/lib/cloud/seed /var/lib/cloud/seed/nocloud; do
+        [[ -e $root$path || -L $root$path ]] || continue
+        rootpxe_ci_safe_write_directory "$root" "$path" || { rootpxe_ci_reject 43 cloud_init_target_path_unsafe; return $?; }
     done
-    for ((index=${#ci_created_dirs[@]}-1; index>=0; index--)); do
-        path=${ci_created_dirs[$index]}
-        [[ -e $path || -L $path ]] || continue
-        if [[ -d $path && ! -L $path && $(rootpxe_ci_inode "$path") == "${ci_created_dir_inodes[$index]}" ]]; then rmdir -- "$path" || result=1; else result=1; fi
+    for path in /etc/cloud/cloud.cfg.d/99-rootpxe-nocloud.cfg /var/lib/cloud/seed/nocloud/user-data /var/lib/cloud/seed/nocloud/meta-data /var/lib/cloud/seed/nocloud/network-config /var/lib/cloud/seed/nocloud/vendor-data; do
+        [[ -e $root$path || -L $root$path ]] || continue
+        rootpxe_ci_metadata_safe "$root$path" file || { rootpxe_ci_reject 43 cloud_init_target_path_unsafe; return $?; }
     done
-    return "$result"
 }
 
 # fstab 源只做数据解析；只有全部 PV/分区属于当前许可集合才可挂载。
@@ -344,7 +298,7 @@ rootpxe_ci_mount_fstab() {
             [[ -n $source && $source != \#* ]] || continue
             case $target in
                 /usr/*) return 1;;
-                /var/*|/etc/cloud|/etc/cloud/*) [[ $requested != /var ]] || return 1;;
+                /var/*|/etc|/etc/cloud|/etc/cloud/*) [[ $requested != /var ]] || return 1;;
             esac
             [[ $target == "$requested" ]] || continue
             count=$((count + 1)); [[ $count -eq 1 && -n $declared && -n $options ]] || return 1
@@ -496,7 +450,6 @@ rootpxe_cloud_init_install_for_targets() {
     local rootpxe_cloud_init_allowed_disks="$*" rootpxe_cloud_init_probe_disk='' rootpxe_linux_selected_disk='' rootpxe_linux_selected_candidate='' disk
     rootpxe_linux_select_unique_root_for_targets "$@" || return 1
     rootpxe_cloud_init_process_root "$rootpxe_linux_selected_disk" "$rootpxe_linux_selected_candidate" ro || { [[ -n ${rootpxe_cloud_init_error:-} ]] || rootpxe_cloud_init_error=cloud_init_readonly_preflight_failed; return 1; }
-    [[ ${rootpxe_cloud_init_seed_verified:-no} != yes ]] || return 0
     for disk in "$@"; do rootpxe_verify_disk_permit_binding "$disk" deploy_write || return 1; done
     rootpxe_cloud_init_process_root "$rootpxe_linux_selected_disk" "$rootpxe_linux_selected_candidate" rw
 }
@@ -515,91 +468,37 @@ rootpxe_apply_cloud_init() {
     rootpxe_stage cloud_init 'Cloud-init configuration installed' || true
     return 0
 }
-rootpxe_ci_create_directory() {
-    local path="$1" inode
-    if [[ -e $path || -L $path ]]; then rootpxe_ci_metadata_safe "$path" directory || return 43; return 0; fi
-    mkdir -m 700 -- "$path" || return 51
-    inode=$(rootpxe_ci_inode "$path") || return 51
-    ci_created_dirs+=("$path"); ci_created_dir_inodes+=("$inode")
-    chown 0:0 -- "$path" && rootpxe_ci_metadata_safe "$path" directory 700 || return 43
-}
 rootpxe_cloud_init_install_at_root() {
     local root="$1" result
     rootpxe_cloud_init_error=""
     if (
-        set -o pipefail
-        local seed="$root/var/lib/cloud/seed/nocloud" stage="" file path final index root_device
-        local -a ci_owned_files=() ci_owned_file_inodes=() ci_created_dirs=() ci_created_dir_inodes=() ci_seed_files=(user-data meta-data)
-        trap 'ci_exit_status=$?; rootpxe_ci_transaction_cleanup || exit 50; exit "$ci_exit_status"' EXIT
-        trap 'exit 130' INT
-        trap 'exit 143' TERM
         umask 077
-        rootpxe_ci_is_root && rootpxe_ci_metadata_safe "$root" directory || exit 43
-        [[ -f ${cloudInitUserDataFile:-} && ! -L $cloudInitUserDataFile && ${cloudInitUserDataSha256:-} =~ ^[0-9a-f]{64}$ && $(rootpxe_ci_hash "$cloudInitUserDataFile") == "$cloudInitUserDataSha256" && $(wc -c <"$cloudInitUserDataFile") -le 65536 ]] || exit 46
-        [[ -f ${cloudInitMetaDataFile:-} && ! -L $cloudInitMetaDataFile && ${cloudInitMetaDataSha256:-} =~ ^[0-9a-f]{64}$ && $(rootpxe_ci_hash "$cloudInitMetaDataFile") == "$cloudInitMetaDataSha256" && $(wc -c <"$cloudInitMetaDataFile") -gt 0 && $(wc -c <"$cloudInitMetaDataFile") -le 65536 ]] || exit 46
-        if [[ -n ${cloudInitNetworkConfigFile:-} || -n ${cloudInitNetworkConfigSha256:-} ]]; then
-            [[ -f ${cloudInitNetworkConfigFile:-} && ! -L $cloudInitNetworkConfigFile && ${cloudInitNetworkConfigSha256:-} =~ ^[0-9a-f]{64}$ && $(rootpxe_ci_hash "$cloudInitNetworkConfigFile") == "$cloudInitNetworkConfigSha256" && $(wc -c <"$cloudInitNetworkConfigFile") -gt 0 && $(wc -c <"$cloudInitNetworkConfigFile") -le 65536 ]] || exit 46
-            ci_seed_files+=(network-config)
-        fi
-        if [[ -n ${cloudInitVendorDataFile:-} || -n ${cloudInitVendorDataSha256:-} ]]; then
-            [[ -f ${cloudInitVendorDataFile:-} && ! -L $cloudInitVendorDataFile && ${cloudInitVendorDataSha256:-} =~ ^[0-9a-f]{64}$ && $(rootpxe_ci_hash "$cloudInitVendorDataFile") == "$cloudInitVendorDataSha256" && $(wc -c <"$cloudInitVendorDataFile") -gt 0 && $(wc -c <"$cloudInitVendorDataFile") -le 65536 ]] || exit 46
-            ci_seed_files+=(vendor-data)
-        fi
+        local seed="$root/var/lib/cloud/seed/nocloud" file source path
+        rootpxe_ci_is_root || exit 43
         rootpxe_ci_readonly_preflight "$root" || exit $?
-        [[ $rootpxe_cloud_init_seed_verified != yes ]] || exit 0
-        if [[ -d $seed && -n $(find "$seed" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
-            rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" "${cloudInitVendorDataSha256:-}" || exit 45
-            exit 0
-        fi
-        for path in /var/lib /var/lib/cloud /var/lib/cloud/seed; do rootpxe_ci_create_directory "$root$path" || exit $?; done
-        stage=$(mktemp -d "$root/var/lib/cloud/seed/.nocloud.new.XXXXXX") || exit 1
-        ci_created_dirs+=("$stage"); ci_created_dir_inodes+=("$(rootpxe_ci_inode "$stage")")
-        chmod 700 "$stage" && chown 0:0 "$stage" || exit 1
-        rootpxe_ci_metadata_safe "$stage" directory 700 || exit 43
-        root_device=$(stat -c %d "$root/var/lib/cloud/seed") || exit 1
-        [[ $(stat -c %d "$stage") == "$root_device" ]] || exit 1
-        for file in "${ci_seed_files[@]}"; do
-            path="$stage/$file"
-            (set -o noclobber; : >"$path") || exit 1
-            ci_owned_files+=("$path"); ci_owned_file_inodes+=("$(rootpxe_ci_inode "$path")")
-            chmod 600 "$path" && chown 0:0 "$path" || exit 1
+        rootpxe_ci_safe_write_directory "$root" /var/lib/cloud/seed/nocloud yes || exit 1
+        chmod 700 "$seed" && chown 0:0 "$seed" || exit 1
+        for file in user-data meta-data network-config vendor-data; do
             case $file in
-                user-data) cp -- "$cloudInitUserDataFile" "$path" || exit 1;;
-                meta-data) cp -- "$cloudInitMetaDataFile" "$path" || exit 1;;
-                network-config) cp -- "$cloudInitNetworkConfigFile" "$path" || exit 1;;
-                vendor-data) cp -- "$cloudInitVendorDataFile" "$path" || exit 1;;
+                user-data) source="$cloudInitUserDataFile";;
+                meta-data) source="$cloudInitMetaDataFile";;
+                network-config) source="${cloudInitNetworkConfigFile:-}";;
+                vendor-data) source="${cloudInitVendorDataFile:-}";;
             esac
+            path="$seed/$file"
+            if [[ -n $source ]]; then
+                cp -- "$source" "$path" && chmod 600 "$path" && chown 0:0 "$path" || exit 1
+            else rm -f -- "$path" || exit 1; fi
         done
-        rootpxe_ci_verify_seed "$stage" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" "${cloudInitVendorDataSha256:-}" || exit 46
-        if [[ -d $seed ]]; then
-            [[ -z $(find "$seed" -mindepth 1 -maxdepth 1 -print -quit) ]] || exit 45
-            # 保留镜像原空目录的 inode/xattr；只发布本次期望文件集合。
-            for index in "${!ci_owned_files[@]}"; do
-                path=${ci_owned_files[$index]}; final="$seed/${path##*/}"
-                rootpxe_ci_move "$path" "$final" || exit 49
-                [[ ! -e $path && ! -L $path && $(rootpxe_ci_inode "$final") == "${ci_owned_file_inodes[$index]}" ]] || exit 1
-                ci_owned_files[$index]="$final"
-            done
-            rmdir -- "$stage" || exit 1
-        else
-            rootpxe_ci_move "$stage" "$seed" || exit 49
-            [[ ! -e $stage && ! -L $stage && $(rootpxe_ci_inode "$seed") == "${ci_created_dir_inodes[${#ci_created_dir_inodes[@]}-1]}" ]] || exit 1
-            ci_created_dirs[${#ci_created_dirs[@]}-1]="$seed"
-            for index in "${!ci_owned_files[@]}"; do ci_owned_files[$index]="$seed/${ci_owned_files[$index]##*/}"; done
-        fi
-        rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" "${cloudInitVendorDataSha256:-}" || exit 46
-        ci_owned_files=(); ci_owned_file_inodes=(); ci_created_dirs=(); ci_created_dir_inodes=()
+        rootpxe_ci_safe_write_directory "$root" /etc/cloud/cloud.cfg.d yes || exit 1
+        path="$root/etc/cloud/cloud.cfg.d/99-rootpxe-nocloud.cfg"
+        printf 'datasource_list: [NoCloud]\n' >"$path" && chmod 644 "$path" && chown 0:0 "$path" || exit 1
     ); then result=0; else
         result=$?
         case $result in
             41) rootpxe_cloud_init_error=cloud_init_not_installed;;
             42) rootpxe_cloud_init_error=cloud_init_explicitly_disabled;;
             43) rootpxe_cloud_init_error=cloud_init_target_path_unsafe;;
-            44) rootpxe_cloud_init_error=cloud_init_cache_not_clean;;
-            45) rootpxe_cloud_init_error=cloud_init_foreign_seed;;
-            46) rootpxe_cloud_init_error=cloud_init_seed_hash_mismatch;;
-            49) rootpxe_cloud_init_error=cloud_init_seed_publish_failed;;
-            50) rootpxe_cloud_init_error=cloud_init_seed_rollback_failed;;
             *) rootpxe_cloud_init_error=cloud_init_seed_io_failed;;
         esac
     fi

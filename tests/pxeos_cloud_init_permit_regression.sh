@@ -26,7 +26,7 @@ declare -F rootpxe_bind_granted_deploy_targets >/dev/null || fail 'first-deploy 
 . "${funcs%/*}/deployment-identity.sh"
 case $(uname -s) in MINGW*|MSYS*)
     rootpxe_ci_is_root(){ return 0; }
-    rootpxe_ci_stat(){ local owner=0 mode=700; [[ -d $1 ]] || mode=600; case $1 in /tmp/rootpxe-cloud-init.*|/tmp/rootpxe-cloud-meta.*|/tmp/rootpxe-cloud-network.*|/tmp/rootpxe-cloud-vendor.*) owner=$EUID;; esac; printf '%s:0:%s:%s\n' "$owner" "$mode" "$(command stat -c '%h' -- "$1")"; }
+    rootpxe_ci_stat(){ local owner=0 mode=700; [[ -d $1 ]] || mode=600; case $1 in */99-rootpxe-nocloud.cfg) mode=644;; /tmp/rootpxe-cloud-init.*|/tmp/rootpxe-cloud-meta.*|/tmp/rootpxe-cloud-network.*|/tmp/rootpxe-cloud-vendor.*) owner=$EUID;; esac; printf '%s:0:%s:%s\n' "$owner" "$mode" "$(command stat -c '%h' -- "$1")"; }
 ;; esac
 # All target roots are private ordinary fixture files. A non-root Linux
 # runner cannot chown them to image UID 0; emulate only that target metadata
@@ -159,15 +159,19 @@ for mode in network-only vendor-only single mpa; do
         expected_files=$((expected_files + 1))
     else [[ ! -e $fixture_root/var/lib/cloud/seed/nocloud/vendor-data ]] || fail 'empty vendor generated a seed file'; fi
     [[ $(find "$fixture_root/var/lib/cloud/seed/nocloud" -maxdepth 1 -type f | wc -l) == "$expected_files" ]] || fail "$mode expected seed file count"
+    config="$fixture_root/etc/cloud/cloud.cfg.d/99-rootpxe-nocloud.cfg"
+    printf 'datasource_list: [NoCloud]\n' | cmp -s - "$config" || fail 'real installer omitted NoCloud boot config'
     [[ $(<"$fixture_root/etc/hostname") == original-hostname ]] || fail 'offline Linux hostname changed'
     [[ $rootpxe_deployment_identity_cloud_init_result == true ]] || fail "$mode injection receipt not set"
-    rootpxe_apply_json_cloud_init "$payload" || fail 'same-task private response'
-    rootpxe_apply_cloud_init || fail 'same-task readonly NoCloud receipt'
-    [[ $(<"$phase_file") == $'ro\nrw\nro' ]] || fail 'same seed mounted writable'
+    rm "$config"
+    rootpxe_apply_json_cloud_init "$payload" || fail 'missing boot config private response'
+    rootpxe_apply_cloud_init || fail 'matching seed missing NoCloud boot config'
+    [[ $(<"$phase_file") == $'ro\nrw\nro\nrw' ]] || fail 'missing config did not enter write phase'
+    printf 'datasource_list: [NoCloud]\n' | cmp -s - "$config" || fail 'missing boot config not repaired'
     mkdir "$fixture_root/var/lib/cloud/instances"
     rootpxe_apply_json_cloud_init "$payload" || fail 'cache fixture private response'
-    rootpxe_apply_cloud_init && fail 'cached image accepted'
-    [[ $rootpxe_cloud_init_error == cloud_init_cache_not_clean && $(<"$phase_file") == $'ro\nrw\nro\nro' ]] || fail 'cache did not fail in readonly preflight'
+    rootpxe_apply_cloud_init || fail 'existing cache blocked file injection'
+    [[ -d $fixture_root/var/lib/cloud/instances && $(<"$phase_file") == $'ro\nrw\nro\nrw\nro\nrw' ]] || fail 'cache was removed or injection skipped rw'
     rootpxe_cloud_init_cleanup_private
     rootpxe_verify_disk_permit_binding /dev/fixtureB deploy_write && fail 'wrong disk accepted'
     rootpxe_verify_disk_permit_binding "$hd" capture_read_write && fail 'wrong operation accepted'
@@ -195,5 +199,9 @@ unset -f rootpxe_deployment_identity_capabilities_json
 eval "$(declare -f rootpxe_ci_fixture_capabilities_json | sed '1s/rootpxe_ci_fixture_capabilities_json/rootpxe_deployment_identity_capabilities_json/')"
 rootpxe_find_linux_root_filesystem(){ fail 'empty configuration attempted root/seed inspection'; }
 unset deploymentIdentityPolicyFile
-for taskType in deploy capture; do osid=50; rootpxe_apply_cloud_init || fail 'empty Linux/capture bypass'; done
+fixture_root="$tmp/disabled-windows-bypass"
+for taskType in deploy capture; do
+    for osid in 50 9; do rootpxe_apply_cloud_init || fail 'empty Linux/Windows/capture bypass'; done
+done
+[[ ! -e $fixture_root/etc/cloud/cloud.cfg.d/99-rootpxe-nocloud.cfg ]] || fail 'disabled/Windows bypass wrote NoCloud config'
 printf 'PASS: real v5 JSON checkin, empty/three/four seed files, first single/MPA1 plan-grant-record-verify; disk/map rejection and empty bypass\n'
