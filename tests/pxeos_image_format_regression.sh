@@ -36,8 +36,11 @@ rootpxe_partclone_progress_abort(){ :; }
 rootpxe_storage_exec(){ [[ $1 == read && $3 == - ]] || return 98; cat -- "$2"; }
 partclone.restore(){ local dest=''; while (( $# )); do if [[ $1 == -O ]]; then dest=$2; shift 2; else shift; fi; done; cat >"$dest"; }
 head -c 209715207 /dev/urandom >"$tmp/input"
+source_sha256=$(sha256sum "$tmp/input"); source_sha256=${source_sha256%% *}
+printf 'SOURCE: bytes=209715207 sha256=%s\n' "$source_sha256"
 for imgFormat in 0 5; do
- for PIGZ_COMP in 0 -6; do
+ for level in {0..9}; do
+  PIGZ_COMP=$(rootpxe_normalize_compression_level "$level")
   rootpxe_storage_workspace=$tmp/work
   mkdir -p "$rootpxe_storage_workspace/image"
   img=$rootpxe_storage_workspace/image storage=fixture rootpxe_capture_direct=yes
@@ -51,13 +54,15 @@ for imgFormat in 0 5; do
   rootpxe_validate_artifact_fragments "$file"
   writeImage "$file" "$tmp/output"
   cmp "$tmp/input" "$tmp/output"
+  restored_sha256=$(sha256sum "$tmp/output"); restored_sha256=${restored_sha256%% *}
+  [[ $restored_sha256 == "$source_sha256" ]]
   if [[ $PIGZ_COMP == 0 ]]; then
    [[ ! -s $CODEC_TRACE && $(stat -c %s "$file") == 209715207 ]]
   elif [[ $imgFormat == 0 ]]; then
    [[ $(cat "$CODEC_TRACE") == $'gzip\ngzip' ]]
   else [[ $(cat "$CODEC_TRACE") == $'zstd\nzstd' ]]
   fi
-  printf 'PASS: format=%s level=%s >200MiB one file, exact restore, codec selection\n' "$imgFormat" "$PIGZ_COMP"
+  printf 'PASS: format=%s level=%s >200MiB one file, exact restore, codec selection sha256=%s\n' "$imgFormat" "$level" "$restored_sha256"
   rm -rf "$rootpxe_storage_workspace" "$fifo" "$tmp/output"
  done
 done
