@@ -1,5 +1,6 @@
 #!/bin/bash
 # 仅离线安装原生 NoCloud seed；不执行目标程序或任何配置正文。
+# SELinux 由目标系统/镜像准备负责关闭；PXEOS 不识别、修改或校验其策略和标签。
 
 rootpxe_ci_stat() { stat -c '%u:%g:%a:%h' -- "$1"; }
 rootpxe_ci_is_root() { [[ $EUID == 0 ]]; }
@@ -75,46 +76,6 @@ rootpxe_ci_safe_write_directory() {
         fi
         rootpxe_ci_metadata_safe "$cursor" directory || return 1
     done
-}
-
-rootpxe_ci_target_selinux() {
-    local root="$1" config mode policy line path
-    config="$root/etc/selinux/config"
-    rootpxe_ci_selinux_contexts=""
-    [[ -e $root/etc/selinux || -L $root/etc/selinux ]] || return 0
-    rootpxe_ci_safe_write_directory "$root" /etc/selinux || return 1
-    rootpxe_ci_metadata_safe "$config" file || return 1
-    mode=$(awk -F= '/^[[:space:]]*SELINUX=/{gsub(/[[:space:]]/,"",$2); print $2}' "$config")
-    [[ $mode == disabled ]] && return 0
-    [[ $mode == enforcing || $mode == permissive ]] || return 1
-    policy=$(awk -F= '/^[[:space:]]*SELINUXTYPE=/{gsub(/[[:space:]]/,"",$2); print $2}' "$config")
-    [[ $policy =~ ^[A-Za-z0-9_-]+$ ]] || return 1
-    path="/etc/selinux/$policy/contexts/files"
-    rootpxe_ci_safe_write_directory "$root" "$path" || return 1
-    rootpxe_ci_selinux_contexts="$root$path/file_contexts"
-    rootpxe_ci_metadata_safe "$rootpxe_ci_selinux_contexts" file || return 1
-    for line in .bin .local .local.bin .subs .subs_dist .homedirs .homedirs.bin; do
-        path="$rootpxe_ci_selinux_contexts$line"
-        [[ ! -e $path && ! -L $path ]] || rootpxe_ci_metadata_safe "$path" file || return 1
-    done
-}
-rootpxe_ci_label_tools_ready() {
-    command -v matchpathcon >/dev/null 2>&1 && command -v setfattr >/dev/null 2>&1 &&
-        command -v getfattr >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1
-}
-rootpxe_ci_expected_label() {
-    timeout 10 matchpathcon -n -f "$rootpxe_ci_selinux_contexts" "$1" 2>/dev/null
-}
-rootpxe_ci_write_label() { setfattr -h -n security.selinux -v "$2" -- "$1" 2>/dev/null; }
-rootpxe_ci_read_label() { getfattr -h --only-values -n security.selinux -- "$1" 2>/dev/null | tr -d '\000'; }
-rootpxe_ci_label_path() {
-    local physical="$1" target="$2" label actual
-    [[ -n ${rootpxe_ci_selinux_contexts:-} ]] || return 0
-    label=$(rootpxe_ci_expected_label "$target") || return 1
-    [[ $label =~ ^[A-Za-z0-9_]+:[A-Za-z0-9_]+:[A-Za-z0-9_]+:s[0-9]+(:[A-Za-z0-9_,.-]+)?$ ]] || return 1
-    rootpxe_ci_write_label "$physical" "$label" || return 1
-    actual=$(rootpxe_ci_read_label "$physical") || return 1
-    [[ $actual == "$label" ]]
 }
 
 rootpxe_ci_inode() { stat -c '%d:%i' -- "$1"; }
@@ -286,33 +247,16 @@ rootpxe_ci_verify_seed() {
     [[ -z $network_hash || $(rootpxe_ci_hash "$seed/network-config") == "$network_hash" ]] || return 1
     [[ -z $vendor_hash || $(rootpxe_ci_hash "$seed/vendor-data") == "$vendor_hash" ]]
 }
-rootpxe_ci_verify_label() {
-    local physical="$1" target="$2" expected
-    [[ -n ${rootpxe_ci_selinux_contexts:-} ]] || return 0
-    expected=$(rootpxe_ci_expected_label "$target") || return 1
-    [[ $(rootpxe_ci_read_label "$physical") == "$expected" ]]
-}
-rootpxe_ci_verify_seed_labels() {
-    local seed="$1" file
-    local -a files=(user-data meta-data)
-    [[ -z ${cloudInitNetworkConfigSha256:-} ]] || files+=(network-config)
-    [[ -z ${cloudInitVendorDataSha256:-} ]] || files+=(vendor-data)
-    rootpxe_ci_verify_label "$seed" /var/lib/cloud/seed/nocloud || return 1
-    for file in "${files[@]}"; do rootpxe_ci_verify_label "$seed/$file" "/var/lib/cloud/seed/nocloud/$file" || return 1; done
-}
 rootpxe_ci_readonly_preflight() {
     local root="$1" seed="$1/var/lib/cloud/seed/nocloud"
     rootpxe_cloud_init_seed_verified=no
     rootpxe_ci_check_prerequisites "$root" || return $?
     rootpxe_ci_validate_cloud_state "$root" || return $?
-    rootpxe_ci_target_selinux "$root" || { rootpxe_ci_reject 48 cloud_init_label_unverified; return $?; }
-    if [[ -n ${rootpxe_ci_selinux_contexts:-} ]]; then rootpxe_ci_label_tools_ready || { rootpxe_ci_reject 47 cloud_init_label_tools_missing; return $?; }; fi
     if [[ -d $seed ]]; then
         if [[ -n $(find "$seed" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
             rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" "${cloudInitVendorDataSha256:-}" || { rootpxe_ci_reject 45 cloud_init_foreign_seed; return $?; }
-            rootpxe_ci_verify_seed_labels "$seed" || { rootpxe_ci_reject 48 cloud_init_label_unverified; return $?; }
             rootpxe_cloud_init_seed_verified=yes
-        else rootpxe_ci_verify_label "$seed" /var/lib/cloud/seed/nocloud || { rootpxe_ci_reject 48 cloud_init_label_unverified; return $?; }; fi
+        fi
     fi
     return 0
 }
@@ -572,13 +516,12 @@ rootpxe_apply_cloud_init() {
     return 0
 }
 rootpxe_ci_create_directory() {
-    local path="$1" target="$2" inode
+    local path="$1" inode
     if [[ -e $path || -L $path ]]; then rootpxe_ci_metadata_safe "$path" directory || return 43; return 0; fi
     mkdir -m 700 -- "$path" || return 51
     inode=$(rootpxe_ci_inode "$path") || return 51
     ci_created_dirs+=("$path"); ci_created_dir_inodes+=("$inode")
     chown 0:0 -- "$path" && rootpxe_ci_metadata_safe "$path" directory 700 || return 43
-    rootpxe_ci_label_path "$path" "$target" || return 48
 }
 rootpxe_cloud_init_install_at_root() {
     local root="$1" result
@@ -606,13 +549,13 @@ rootpxe_cloud_init_install_at_root() {
         [[ $rootpxe_cloud_init_seed_verified != yes ]] || exit 0
         if [[ -d $seed && -n $(find "$seed" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
             rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" "${cloudInitVendorDataSha256:-}" || exit 45
-            rootpxe_ci_verify_seed_labels "$seed" || exit 48
             exit 0
         fi
-        for path in /var/lib /var/lib/cloud /var/lib/cloud/seed; do rootpxe_ci_create_directory "$root$path" "$path" || exit $?; done
+        for path in /var/lib /var/lib/cloud /var/lib/cloud/seed; do rootpxe_ci_create_directory "$root$path" || exit $?; done
         stage=$(mktemp -d "$root/var/lib/cloud/seed/.nocloud.new.XXXXXX") || exit 1
         ci_created_dirs+=("$stage"); ci_created_dir_inodes+=("$(rootpxe_ci_inode "$stage")")
-        chmod 700 "$stage" && chown 0:0 "$stage" && rootpxe_ci_metadata_safe "$stage" directory 700 && rootpxe_ci_label_path "$stage" /var/lib/cloud/seed/nocloud || exit 48
+        chmod 700 "$stage" && chown 0:0 "$stage" || exit 1
+        rootpxe_ci_metadata_safe "$stage" directory 700 || exit 43
         root_device=$(stat -c %d "$root/var/lib/cloud/seed") || exit 1
         [[ $(stat -c %d "$stage") == "$root_device" ]] || exit 1
         for file in "${ci_seed_files[@]}"; do
@@ -626,12 +569,10 @@ rootpxe_cloud_init_install_at_root() {
                 network-config) cp -- "$cloudInitNetworkConfigFile" "$path" || exit 1;;
                 vendor-data) cp -- "$cloudInitVendorDataFile" "$path" || exit 1;;
             esac
-            rootpxe_ci_label_path "$path" "/var/lib/cloud/seed/nocloud/$file" || exit 48
         done
         rootpxe_ci_verify_seed "$stage" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" "${cloudInitVendorDataSha256:-}" || exit 46
         if [[ -d $seed ]]; then
             [[ -z $(find "$seed" -mindepth 1 -maxdepth 1 -print -quit) ]] || exit 45
-            rootpxe_ci_verify_label "$seed" /var/lib/cloud/seed/nocloud || exit 48
             # 保留镜像原空目录的 inode/xattr；只发布本次期望文件集合。
             for index in "${!ci_owned_files[@]}"; do
                 path=${ci_owned_files[$index]}; final="$seed/${path##*/}"
@@ -647,7 +588,6 @@ rootpxe_cloud_init_install_at_root() {
             for index in "${!ci_owned_files[@]}"; do ci_owned_files[$index]="$seed/${ci_owned_files[$index]##*/}"; done
         fi
         rootpxe_ci_verify_seed "$seed" "$cloudInitUserDataSha256" "$cloudInitMetaDataSha256" "${cloudInitNetworkConfigSha256:-}" "${cloudInitVendorDataSha256:-}" || exit 46
-        rootpxe_ci_verify_seed_labels "$seed" || exit 48
         ci_owned_files=(); ci_owned_file_inodes=(); ci_created_dirs=(); ci_created_dir_inodes=()
     ); then result=0; else
         result=$?
@@ -658,8 +598,6 @@ rootpxe_cloud_init_install_at_root() {
             44) rootpxe_cloud_init_error=cloud_init_cache_not_clean;;
             45) rootpxe_cloud_init_error=cloud_init_foreign_seed;;
             46) rootpxe_cloud_init_error=cloud_init_seed_hash_mismatch;;
-            47) rootpxe_cloud_init_error=cloud_init_label_tools_missing;;
-            48) rootpxe_cloud_init_error=cloud_init_label_unverified;;
             49) rootpxe_cloud_init_error=cloud_init_seed_publish_failed;;
             50) rootpxe_cloud_init_error=cloud_init_seed_rollback_failed;;
             *) rootpxe_cloud_init_error=cloud_init_seed_io_failed;;

@@ -254,46 +254,58 @@ rootpxe_cloud_init_install_at_root "$target" && fail 'network publish failure ac
 [[ -z $(find "$target/var/lib/cloud/seed" -name '.nocloud.new.*' -print) ]] || fail 'network rollback left its stage'
 unset -f rootpxe_ci_move
 eval "$(declare -f rootpxe_ci_original_move | sed '1s/rootpxe_ci_original_move/rootpxe_ci_move/')"
-fixture selinux
-mkdir -p "$target/etc/selinux/target/contexts/files"
-printf 'SELINUX=enforcing\nSELINUXTYPE=target\n' >"$target/etc/selinux/config"
-printf 'fixture' >"$target/etc/selinux/target/contexts/files/file_contexts"
-rootpxe_ci_label_tools_ready(){ return 1; }
-rootpxe_cloud_init_install_at_root "$target" && fail 'missing label tools accepted'
-[[ $rootpxe_cloud_init_error == cloud_init_label_tools_missing ]] || fail 'label tool reason'
-[[ ! -e $target/var/lib/cloud/seed ]] || fail 'SELinux prerequisite failed after mutation'
-rootpxe_ci_label_tools_ready(){ return 0; }
-rootpxe_ci_expected_label(){ printf 'system_u:object_r:cloud_var_lib_t:s0\n'; }
-rootpxe_ci_write_label(){ printf '%s\n' "$1|$2" >>"$tmp/labels"; }
-rootpxe_ci_read_label(){ printf 'system_u:object_r:cloud_var_lib_t:s0\n'; }
-printf 'version: 2\nethernets: {}\n' >"$tmp/network-config"
-cloudInitNetworkConfigFile="$tmp/network-config"
-cloudInitNetworkConfigSha256=$(rootpxe_ci_hash "$cloudInitNetworkConfigFile")
-printf '#cloud-config\nruncmd: []\n' >"$tmp/vendor-data"
-cloudInitVendorDataFile="$tmp/vendor-data"
-cloudInitVendorDataSha256=$(rootpxe_ci_hash "$cloudInitVendorDataFile")
-rootpxe_cloud_init_install_at_root "$target" || fail 'target-policy label branch failed'
-grep -Fq 'user-data|system_u:object_r:cloud_var_lib_t:s0' "$tmp/labels" || fail 'user-data label not written/read'
-grep -Fq 'meta-data|system_u:object_r:cloud_var_lib_t:s0' "$tmp/labels" || fail 'manual meta-data label not written/read'
-grep -Fq 'network-config|system_u:object_r:cloud_var_lib_t:s0' "$tmp/labels" || fail 'network-config label not written/read'
-grep -Fq 'vendor-data|system_u:object_r:cloud_var_lib_t:s0' "$tmp/labels" || fail 'vendor-data label not written/read'
-rootpxe_ci_read_label(){ if [[ $1 == */vendor-data ]]; then printf 'system_u:object_r:wrong_t:s0\n'; else printf 'system_u:object_r:cloud_var_lib_t:s0\n'; fi; }
-rootpxe_ci_readonly_preflight "$target" && fail 'readonly accepted wrong vendor-data label'
-[[ $rootpxe_cloud_init_error == cloud_init_label_unverified ]] || fail 'vendor-data readonly label reason'
-rootpxe_ci_read_label(){ if [[ $1 == */network-config ]]; then printf 'system_u:object_r:wrong_t:s0\n'; else printf 'system_u:object_r:cloud_var_lib_t:s0\n'; fi; }
-rootpxe_ci_readonly_preflight "$target" && fail 'readonly accepted wrong network-config label'
-[[ $rootpxe_cloud_init_error == cloud_init_label_unverified ]] || fail 'network-config readonly label reason'
-fixture label-failure
-mkdir -p "$target/etc/selinux/target/contexts/files"
-printf 'SELINUX=enforcing\nSELINUXTYPE=target\n' >"$target/etc/selinux/config"
-printf 'fixture' >"$target/etc/selinux/target/contexts/files/file_contexts"
-rootpxe_ci_read_label(){ printf 'system_u:object_r:wrong_t:s0\n'; }
-rootpxe_cloud_init_install_at_root "$target" && fail 'wrong label readback accepted'
-[[ $rootpxe_cloud_init_error == cloud_init_label_unverified ]] || fail 'label readback reason'
+# SELinux is the image/system administrator's responsibility. Even a residual
+# /etc/selinux directory must not make PXEOS read policy or call label tools.
+for selinux_case in residual absent disabled enforcing malformed; do
+    (
+        four_fixture "selinux-$selinux_case"
+        if [[ $selinux_case != absent ]]; then
+            mkdir -p "$target/etc/selinux"
+            printf 'fixture semanage settings\n' >"$target/etc/selinux/semanage.conf"
+            case $selinux_case in
+                disabled|enforcing) printf 'SELINUX=%s\nSELINUXTYPE=target\n' "$selinux_case" >"$target/etc/selinux/config";;
+                malformed) printf 'not a valid SELinux configuration\n' >"$target/etc/selinux/config";;
+            esac
+        fi
+        printf 'system-owned sentinel\n' >"$target/.autorelabel"
+        selinux_before=$(find "$target" -path '*/etc/selinux/*' -type f -exec sha256sum {} +; sha256sum "$target/.autorelabel")
+        selinux_calls="$tmp/cloud-selinux-$selinux_case.calls"
+        export SELINUX_TOOL_CALLS="$selinux_calls"
+        tool_dir="$tmp/tools-$selinux_case"
+        mkdir "$tool_dir"
+        for tool in matchpathcon getfattr setfattr selinuxenabled sestatus getenforce setenforce restorecon chcon; do
+            cat >"$tool_dir/$tool" <<'TOOL'
+#!/bin/sh
+printf '%s\n' "${0##*/}" >>"$SELINUX_TOOL_CALLS"
+exit 127
+TOOL
+            chmod +x "$tool_dir/$tool"
+        done
+        export PATH="$tool_dir:$PATH"
+        awk(){
+            case "$*" in *"$target/etc/selinux/"*) printf 'policy-read\n' >>"$selinux_calls"; return 1;; esac
+            command awk "$@"
+        }
+        rootpxe_cloud_init_install_at_root "$target" || fail "SELinux $selinux_case affected seed installation: ${rootpxe_cloud_init_error:-}"
+        rootpxe_ci_readonly_preflight "$target" || fail "SELinux $selinux_case affected readonly retry"
+        [[ $rootpxe_cloud_init_seed_verified == yes ]] || fail 'readonly seed was not verified'
+        [[ ! -e $selinux_calls ]] || fail "SELinux $selinux_case invoked policy/label tools"
+        selinux_after=$(find "$target" -path '*/etc/selinux/*' -type f -exec sha256sum {} +; sha256sum "$target/.autorelabel")
+        [[ $selinux_before == "$selinux_after" ]] || fail 'SELinux system files were changed'
+        for file in user-data meta-data network-config vendor-data; do cmp -s "$tmp/$file" "$target/var/lib/cloud/seed/nocloud/$file" || fail 'seed bytes changed in SELinux-independent path'; done
+        printf 'PASS: cloud-init does not inspect or alter SELinux: %s\n' "$selinux_case"
+    ) || fail "SELinux-independent cloud-init: $selinux_case"
+done
+fixture stage-permission-failure
+chmod(){ [[ ${*: -1} != */.nocloud.new.* ]] || return 1; command chmod "$@"; }
+rootpxe_cloud_init_install_at_root "$target" && fail 'stage permission failure accepted'
+unset -f chmod
+[[ $rootpxe_cloud_init_error == cloud_init_seed_io_failed ]] || fail 'stage permission failure was not an IO error'
+[[ ! -d $target/var/lib/cloud/seed || -z $(find "$target/var/lib/cloud/seed" -name '.nocloud.new.*' -print) ]] || fail 'stage permission failure left owned stage'
 fixture cleanup-failure
 rootpxe_ci_move(){ return 1; }
 rootpxe_ci_transaction_cleanup(){ return 1; }
 rootpxe_cloud_init_install_at_root "$target" && fail 'cleanup failure accepted'
 [[ $rootpxe_cloud_init_error == cloud_init_seed_rollback_failed ]] || fail 'rollback failure reason'
 [[ -n $(find "$target/var/lib/cloud/seed" -name '.nocloud.new.*' -print) ]] || fail 'rollback failure evidence discarded'
-printf 'PASS: native two/three/four-file seed, vendor bytes/readonly retry/conflicts/rollback/foreign preservation/SELinux\n'
+printf 'PASS: native two/three/four-file seed, vendor bytes/readonly retry/conflicts/rollback/foreign preservation/SELinux-independent\n'

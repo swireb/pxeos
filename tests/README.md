@@ -145,7 +145,7 @@ pxeos_os_type_regression.sh  # 核对系统 ID 到内部诊断名称的稳定映
 pxeos_display_metadata_regression.sh  # 以临时库存和边界 stub 核对显示元数据。
 pxeos_identity_preflight_order_regression.sh  # 核对部署入口中 Windows XML、NoCloud 注入、冻结回执的顺序及旧执行器缺失。
 pxeos_deployment_identity_regression.sh  # 核对部署身份工具的 XML 能力门槛与身份契约。
-pxeos_linux_hostname_regression.sh  # 真实普通文件事务覆盖 Linux 单标签校验、主机名/回环自身 hosts 更新、CRLF/注释/远端保留、旧名缺失与本机映射去重、路径/模式/硬链接拒绝、回读回滚、外来 inode 不覆盖、清理失败留证、标签工具分支、许可目标唯一根、只读重试和命名四态；不要求 Cloud-init 包或干净缓存/seed。
+pxeos_linux_hostname_regression.sh  # 真实普通文件事务覆盖 Linux 单标签校验、主机名/回环自身 hosts 更新、CRLF/注释/远端保留、旧名缺失与本机映射去重、路径/模式/硬链接拒绝、回读回滚、外来 inode 不覆盖、清理失败留证、SELinux 配置和工具不参与流程、许可目标唯一根、只读重试和命名四态；不要求 Cloud-init 包或干净缓存/seed。
 pxeos_template_injection_regression.sh  # 私有普通文件与设备/XML 边界替身覆盖 v5/v2 新能力、Windows 固定或缺失计算机名称原字节、Cloud 手工名称/固定实例标识/其他元数据键、名称开启仍允许空用户配置、checkin 跳过未使用的管理名称校验、restore 尾部名称隔离和模板只报告注入成功；不证明真实 XML 工具、注册表、磁盘或首启行为。
 ```
 
@@ -172,12 +172,12 @@ bash tests/pxeos_windows_initialization_regression.sh
 ```text
 pxeos_cloud_init_protocol_regression.sh  # 真实 jq 二次验证 v5 八个私有字段、空用户正文及真实空字节散列、UTF-8/CRLF、网络与供应方空值对、三个各 64 KiB 的总体大响应通过标准输入解析、四个私密文件的 BASHPID/inode/权限证明、独立及组合 unlink 故障后的整份失效与安全重试、旧键/缺失或关闭策略拒绝、四正文及供应方字段与路径脱敏、能力异常不生成请求及模板仅上报注入回执。
 pxeos_cloud_init_permit_regression.sh  # 真实首次单盘和 MPA 单盘计划、许可响应、登记及校验，真实 source JSON checkin 后调用两文件、三文件或四文件安装器；覆盖冻结 meta、空用户/网络/供应方配置、两 permit 的 v5 与 JSON 数组能力声明、异常能力不发请求、缺失/损坏映射、错误设备/操作及普通部署/捕获绕过。
-pxeos_cloud_init_seed_regression.sh  # 普通临时目录覆盖两文件、三文件或四文件原字节、空用户文件、冻结 meta、内容完全一致时的只读幂等、清空网络或供应方配置不删除已有文件、额外/缺失/篡改、foreign seed/缓存/禁用、链接、网络及供应方阶段回滚与外来内容保留、半份 seed 拒绝和 SELinux 工具分支；内容相等不证明同一任务归属。
+pxeos_cloud_init_seed_regression.sh  # 普通临时目录覆盖两文件、三文件或四文件原字节、空用户文件、冻结 meta、内容完全一致时的只读幂等、清空网络或供应方配置不删除已有文件、额外/缺失/篡改、foreign seed/缓存/禁用、链接、网络及供应方阶段回滚与外来内容保留、半份 seed 拒绝和 SELinux 配置/工具不参与流程；内容相等不证明同一任务归属。
 pxeos_cloud_init_mounts_regression.sh  # 设备边界替身覆盖独立只读程序分区探测不依赖 Cloud 路径、变量分区仍严格拒绝遮盖、全部物理卷许可、挂载歧义、借用与失败清理证据。
 pxeos_cloud_init_roots_regression.sh  # Cloud 注入与离线名称共用真实根发现/全部物理卷许可，对同一根去重，拒绝两个不同根、候选身份冲突及未许可物理卷。
 ```
 
-- 上述 fixture 不执行目标 Cloud-init、user-data、真实磁盘、真实 mount 或 LVM。MSYS 使用明确的 Unix 属主/模式替身，Windows 原生符号链接可能因权限拒绝而跳过；SELinux 工具分支使用替身，不代表工具包、目标策略或真实首启执行已验证。
+- 上述 fixture 不执行目标 Cloud-init、user-data、真实磁盘、真实 mount 或 LVM。MSYS 使用明确的 Unix 属主/模式替身，Windows 原生符号链接可能因权限拒绝而跳过；SELinux 相关命令使用失败且记录调用的替身，确认初始化不调用它们；不代表真实目标已关闭 SELinux 或已验证首启。
 
 ## API、注册、审计与控制台（6）
 

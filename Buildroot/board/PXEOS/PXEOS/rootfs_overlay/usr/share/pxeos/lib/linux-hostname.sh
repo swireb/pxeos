@@ -1,5 +1,6 @@
 #!/bin/bash
 # 仅处理 Cloud-init 关闭时的 Linux 主机名；不访问 Cloud-init 包、缓存或seed。
+# SELinux 由目标系统/镜像准备负责关闭；PXEOS 不识别、修改或校验其策略和标签。
 
 rootpxe_validate_linux_hostname() { [[ $1 =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]; }
 rootpxe_linux_hostname_task_valid() {
@@ -20,17 +21,6 @@ rootpxe_lh_inode() {
     value=$(rootpxe_ci_inode "$1") || return 1
     [[ $value =~ ^[0-9]{1,20}:[1-9][0-9]{0,19}$ ]] || return 1
     printf '%s\n' "$value"
-}
-rootpxe_lh_verify_label() {
-    local expected actual
-    [[ -n ${rootpxe_ci_selinux_contexts:-} ]] || return 0
-    expected=$(rootpxe_ci_expected_label "$2") || return 1
-    [[ $expected =~ ^[A-Za-z0-9_]+:[A-Za-z0-9_]+:[A-Za-z0-9_]+:s[0-9]+(:[A-Za-z0-9_,.-]+)?$ ]] || return 1
-    actual=$(set -o pipefail; rootpxe_ci_read_label "$1") || return 1
-    [[ $actual =~ ^[A-Za-z0-9_]+:[A-Za-z0-9_]+:[A-Za-z0-9_]+:s[0-9]+(:[A-Za-z0-9_,.-]+)?$ && $actual == "$expected" ]]
-}
-rootpxe_lh_label_path() {
-    rootpxe_ci_label_path "$1" "$2" && rootpxe_lh_verify_label "$1" "$2"
 }
 rootpxe_lh_file_safe() {
     local info uid gid mode links
@@ -113,13 +103,6 @@ rootpxe_linux_hostname_preflight() {
         [[ ! -e $root$path && ! -L $root$path ]] || rootpxe_lh_file_safe "$root$path" || { rootpxe_lh_reject linux_hostname_path_unsafe; return 1; }
         [[ ! -e $root$path ]] || rootpxe_lh_inode "$root$path" >/dev/null || { rootpxe_lh_reject linux_hostname_readback_failed; return 1; }
     done
-    rootpxe_ci_target_selinux "$root" || { rootpxe_lh_reject linux_hostname_label_unverified; return 1; }
-    if [[ -n ${rootpxe_ci_selinux_contexts:-} ]]; then
-        rootpxe_ci_label_tools_ready || { rootpxe_lh_reject linux_hostname_label_tools_missing; return 1; }
-        for path in /etc/hostname /etc/hosts; do
-            [[ ! -e $root$path ]] || rootpxe_lh_verify_label "$root$path" "$path" || { rootpxe_lh_reject linux_hostname_label_unverified; return 1; }
-        done
-    fi
     [[ -f $root/etc/hostname && -f $root/etc/hosts ]] || return 0
     expected=$(set -o pipefail; printf '%s\n' "$hostName" | rootpxe_lh_hash -) && actual=$(rootpxe_lh_hash "$root/etc/hostname") || { rootpxe_lh_reject linux_hostname_readback_failed; return 1; }
     [[ $actual == "$expected" ]] || return 0
@@ -152,8 +135,7 @@ rootpxe_lh_transaction_cleanup() {
                     rootpxe_lh_file_safe "$path" && actual_metadata=$(rootpxe_ci_stat "$path") && [[ $actual_metadata == "${lh_metadata[$index]}" ]] &&
                         rootpxe_lh_owned_file_valid "${lh_backups[$index]}" && actual_hash=$(rootpxe_lh_hash "${lh_backups[$index]}") && [[ $actual_hash == "${lh_old_hashes[$index]}" ]] &&
                         rootpxe_lh_write_bytes "${lh_backups[$index]}" "$path" && touch -r "${lh_backups[$index]}" -- "$path" &&
-                        actual_hash=$(rootpxe_lh_hash "$path") && actual_metadata=$(rootpxe_ci_stat "$path") && [[ $actual_hash == "${lh_old_hashes[$index]}" && $actual_metadata == "${lh_metadata[$index]}" ]] &&
-                        rootpxe_lh_verify_label "$path" "/etc/${path##*/}" || result=1
+                        actual_hash=$(rootpxe_lh_hash "$path") && actual_metadata=$(rootpxe_ci_stat "$path") && [[ $actual_hash == "${lh_old_hashes[$index]}" && $actual_metadata == "${lh_metadata[$index]}" ]] || result=1
                 else rootpxe_ci_metadata_safe "$path" file && rm -- "$path" || result=1; fi
             else result=1; fi
         done
@@ -193,7 +175,6 @@ rootpxe_linux_hostname_write_at_root() {
         lh_stage=$(mktemp -d "$root/etc/.rootpxe-hostname.XXXXXX") || exit 66
         lh_stage_inode=$(rootpxe_lh_inode "$lh_stage") || exit 66
         rootpxe_ci_metadata_safe "$lh_stage" directory 700 && parent_inode=$(rootpxe_lh_inode "$root/etc") && [[ ${lh_stage_inode%%:*} == "${parent_inode%%:*}" ]] || exit 61
-        rootpxe_lh_label_path "$lh_stage" /etc || exit 64
         for file in hostname hosts; do
             path="$root/etc/$file"; staged="$lh_stage/$file.new"; backup="$lh_stage/$file.old"
             lh_paths+=("$path"); lh_changed+=(no); lh_backups+=("$backup")
@@ -207,7 +188,7 @@ rootpxe_linux_hostname_write_at_root() {
             rootpxe_lh_owned_file "$staged" || exit 66
             if [[ $file == hostname ]]; then printf '%s\n' "$hostName" >"$staged" || exit 66
             else rootpxe_lh_render_hosts "$root" "$old" "$hostName" >"$staged" || exit 66; fi
-            rootpxe_lh_label_path "$staged" "/etc/$file" && rootpxe_ci_metadata_safe "$staged" file 600 || exit 64
+            rootpxe_ci_metadata_safe "$staged" file 600 || exit 61
             actual_hash=$(rootpxe_lh_hash "$staged") || exit 65
             lh_new_hashes+=("$actual_hash")
         done
@@ -222,18 +203,17 @@ rootpxe_linux_hostname_write_at_root() {
                 lh_changed[$index]=yes
                 actual_inode=$(rootpxe_lh_inode "$path") || exit 66
                 lh_final_inodes[$index]=$actual_inode
-                chmod 644 "$path" && chown 0:0 "$path" && rootpxe_lh_label_path "$path" "/etc/$file" || exit 64
+                chmod 644 "$path" && chown 0:0 "$path" || exit 66
             fi
             lh_changed[$index]=yes
             rootpxe_lh_write_bytes "$staged" "$path" || exit 66
             if [[ ${lh_existed[$index]} == yes ]]; then touch -r "${lh_backups[$index]}" -- "$path" || exit 66; fi
-            rootpxe_lh_file_safe "$path" && actual_inode=$(rootpxe_lh_inode "$path") && actual_metadata=$(rootpxe_ci_stat "$path") && actual_hash=$(rootpxe_lh_hash "$path") && [[ $actual_inode == "${lh_final_inodes[$index]}" && $actual_metadata == "${lh_metadata[$index]}" && $actual_hash == "${lh_new_hashes[$index]}" ]] && rootpxe_lh_verify_label "$path" "/etc/$file" || exit 65
+            rootpxe_lh_file_safe "$path" && actual_inode=$(rootpxe_lh_inode "$path") && actual_metadata=$(rootpxe_ci_stat "$path") && actual_hash=$(rootpxe_lh_hash "$path") && [[ $actual_inode == "${lh_final_inodes[$index]}" && $actual_metadata == "${lh_metadata[$index]}" && $actual_hash == "${lh_new_hashes[$index]}" ]] || exit 65
         done
     ); then result=0; else
         result=$?
         case $result in
             61) rootpxe_initialization_failure_reason=linux_hostname_preflight_or_path_rejected;;
-            64) rootpxe_initialization_failure_reason=linux_hostname_label_unverified;;
             65) rootpxe_initialization_failure_reason=linux_hostname_readback_failed;;
             67) rootpxe_initialization_failure_reason=linux_hostname_rollback_failed;;
             68) rootpxe_initialization_failure_reason=linux_hostname_cleanup_failed;;

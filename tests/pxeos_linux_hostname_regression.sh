@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 真实离线配置事务与四态分派；仅替换块设备/mount和MSYS权限/标签叶边界。
+# 真实离线配置事务与四态分派；仅替换块设备/mount和MSYS权限叶边界。
 set -euo pipefail
 export MSYS=winsymlinks:nativestrict
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -67,7 +67,7 @@ proof_fault_case(){
         fixture "proof-$rootpxe_lh_fixture_fault-$rootpxe_lh_fixture_mode"
         local bad=0 readonly=no
         case $rootpxe_lh_fixture_fault in
-            hash-actual|hash-expected|inode-preflight|label-*)
+            hash-actual|hash-expected|inode-preflight)
                 readonly=yes
                 printf 'node-new\n' >"$target/etc/hostname"
                 printf '127.0.0.1 localhost\n127.0.1.1 node-new\n' >"$target/etc/hosts"
@@ -97,28 +97,6 @@ proof_fault_case(){
             esac
             rootpxe_lh_fixture_base_inode "$@"
         }
-        if [[ $rootpxe_lh_fixture_fault == label-* ]]; then
-            mkdir -p "$target/etc/selinux/target/contexts/files"
-            printf 'SELINUX=enforcing\nSELINUXTYPE=target\n' >"$target/etc/selinux/config"
-            printf 'fixture' >"$target/etc/selinux/target/contexts/files/file_contexts"
-            rootpxe_ci_label_tools_ready(){ return 0; }
-            rootpxe_ci_expected_label(){
-                case $rootpxe_lh_fixture_fault in
-                    label-empty) return 0;;
-                    label-invalid) printf 'invalid-label\n'; return 0;;
-                esac
-                printf 'system_u:object_r:net_conf_t:s0\n'
-                [[ $rootpxe_lh_fixture_fault != label-expected-nonzero ]]
-            }
-            rootpxe_ci_read_label(){
-                case $rootpxe_lh_fixture_fault in
-                    label-empty) return 0;;
-                    label-invalid) printf 'invalid-label\n'; return 0;;
-                esac
-                printf 'system_u:object_r:net_conf_t:s0\n'
-                [[ $rootpxe_lh_fixture_fault != label-actual-nonzero ]]
-            }
-        fi
         # 保留真实 preflight/transaction/receipt，只替换设备选择和挂载叶边界。
         rootpxe_linux_select_unique_root_for_targets(){ rootpxe_linux_selected_disk=/dev/A; rootpxe_linux_selected_candidate='/dev/Ap1|ext4|||'; }
         rootpxe_verify_disk_permit_binding(){ [[ $1 == /dev/A && $2 == deploy_write ]]; }
@@ -144,10 +122,7 @@ proof_failures=0
 for proof_fault in hash-actual hash-expected hash-owned inode-preflight inode-stage inode-owned inode-final; do
     for proof_mode in nonzero empty invalid; do proof_fault_case "$proof_fault" "$proof_mode" || proof_failures=$((proof_failures+1)); done
 done
-for proof_fault in label-expected-nonzero label-actual-nonzero label-empty label-invalid; do
-    proof_fault_case "$proof_fault" label || proof_failures=$((proof_failures+1))
-done
-[[ $proof_failures == 0 ]] || fail "$proof_failures unsafe hash/inode/label read-proof branches"
+[[ $proof_failures == 0 ]] || fail "$proof_failures unsafe hash/inode read-proof branches"
 fixture basic
 before=$(stat -c '%d:%i' "$target/etc/hostname" "$target/etc/hosts")
 rootpxe_linux_hostname_write_at_root "$target" || fail "basic hostname transaction: ${rootpxe_initialization_failure_reason:-}"
@@ -217,30 +192,58 @@ rootpxe_linux_hostname_write_at_root "$target" && fail 'foreign replacement acce
 rootpxe_linux_hostname_preflight "$target" && fail 'unproved transaction evidence ignored on retry'
 unset -f rootpxe_lh_write_bytes
 eval "$(declare -f rootpxe_lh_fixture_write_bytes | sed '1s/rootpxe_lh_fixture_write_bytes/rootpxe_lh_write_bytes/')"
+fixture new-file-permission-failure
+rm -- "$target/etc/hostname"
+chmod(){ [[ ${*: -1} != "$target/etc/hostname" ]] || return 1; command chmod "$@"; }
+rootpxe_linux_hostname_write_at_root "$target" && fail 'new hostname permission failure accepted'
+unset -f chmod
+[[ $rootpxe_initialization_failure_reason == linux_hostname_write_failed ]] || fail 'new hostname permission failure was not a write error'
+[[ ! -e $target/etc/hostname && -z $(find "$target/etc" -maxdepth 1 -name '.rootpxe-hostname.*' -print) ]] || fail 'new hostname permission failure rollback left owned files'
 fixture cleanup-failure
 rm(){ [[ ${*: -1} != *.new ]] || return 1; command rm "$@"; }
 rootpxe_linux_hostname_write_at_root "$target" && fail 'stage cleanup failure accepted'
 unset -f rm
 [[ $rootpxe_initialization_failure_reason == linux_hostname_cleanup_failed ]] || fail 'cleanup failure reason lost'
 [[ -n $(find "$target/etc" -maxdepth 1 -name '.rootpxe-hostname.*' -print) ]] || fail 'cleanup failure evidence discarded'
-fixture selinux
-mkdir -p "$target/etc/selinux/target/contexts/files"
-printf 'SELINUX=enforcing\nSELINUXTYPE=target\n' >"$target/etc/selinux/config"
-printf 'fixture' >"$target/etc/selinux/target/contexts/files/file_contexts"
-rootpxe_ci_label_tools_ready(){ return 1; }
-rootpxe_linux_hostname_preflight "$target" && fail 'missing native label tools accepted'
-[[ $(<"$target/etc/hostname") == node-old ]] || fail 'label prerequisite rejected after mutation'
-rootpxe_ci_label_tools_ready(){ return 0; }
-rootpxe_ci_expected_label(){ printf 'system_u:object_r:net_conf_t:s0\n'; }
-rootpxe_ci_read_label(){ printf 'system_u:object_r:net_conf_t:s0\n'; }
-rootpxe_ci_write_label(){ printf '%s|%s\n' "$1" "$2" >>"$tmp/labels"; }
-rootpxe_linux_hostname_write_at_root "$target" || fail 'target policy label branch rejected'
-grep -Fq 'hostname.new|system_u:object_r:net_conf_t:s0' "$tmp/labels" || fail 'hostname final-path staging label not verified'
-grep -Fq 'hosts.new|system_u:object_r:net_conf_t:s0' "$tmp/labels" || fail 'hosts final-path staging label not verified'
-rootpxe_ci_read_label(){ printf 'system_u:object_r:wrong_t:s0\n'; }
-rootpxe_linux_hostname_preflight "$target" && fail 'unverified existing label accepted'
-unset -f rootpxe_ci_read_label
-rootpxe_ci_read_label(){ printf 'system_u:object_r:net_conf_t:s0\n'; }
+for selinux_case in residual absent disabled enforcing malformed; do
+    (
+        fixture "selinux-$selinux_case"
+        if [[ $selinux_case != absent ]]; then
+            mkdir -p "$target/etc/selinux"
+            printf 'fixture semanage settings\n' >"$target/etc/selinux/semanage.conf"
+            case $selinux_case in
+                disabled|enforcing) printf 'SELINUX=%s\nSELINUXTYPE=target\n' "$selinux_case" >"$target/etc/selinux/config";;
+                malformed) printf 'not a valid SELinux configuration\n' >"$target/etc/selinux/config";;
+            esac
+        fi
+        printf 'system-owned sentinel\n' >"$target/.autorelabel"
+        selinux_before=$(find "$target" -path '*/etc/selinux/*' -type f -exec sha256sum {} +; sha256sum "$target/.autorelabel")
+        selinux_calls="$tmp/hostname-selinux-$selinux_case.calls"
+        export SELINUX_TOOL_CALLS="$selinux_calls"
+        tool_dir="$tmp/tools-$selinux_case"
+        mkdir "$tool_dir"
+        for tool in matchpathcon getfattr setfattr selinuxenabled sestatus getenforce setenforce restorecon chcon; do
+            cat >"$tool_dir/$tool" <<'TOOL'
+#!/bin/sh
+printf '%s\n' "${0##*/}" >>"$SELINUX_TOOL_CALLS"
+exit 127
+TOOL
+            chmod +x "$tool_dir/$tool"
+        done
+        export PATH="$tool_dir:$PATH"
+        awk(){
+            case "$*" in *"$target/etc/selinux/"*) printf 'policy-read\n' >>"$selinux_calls"; return 1;; esac
+            command awk "$@"
+        }
+        rootpxe_linux_hostname_write_at_root "$target" || fail "SELinux $selinux_case affected hostname update: ${rootpxe_initialization_failure_reason:-}"
+        rootpxe_linux_hostname_preflight "$target" || fail "SELinux $selinux_case affected readonly hostname retry"
+        [[ $rootpxe_linux_hostname_verified == yes && $(<"$target/etc/hostname") == node-new ]] || fail 'hostname update was not verified'
+        [[ ! -e $selinux_calls ]] || fail "SELinux $selinux_case invoked policy/label tools"
+        selinux_after=$(find "$target" -path '*/etc/selinux/*' -type f -exec sha256sum {} +; sha256sum "$target/.autorelabel")
+        [[ $selinux_before == "$selinux_after" ]] || fail 'SELinux system files were changed'
+        printf 'PASS: hostname update does not inspect or alter SELinux: %s\n' "$selinux_case"
+    ) || fail "SELinux-independent hostname: $selinux_case"
+done
 # 真正目标集合选择/ro→rw/cleanup；只替换设备盘点与mount叶边界。
 fixture targets
 rootpxe_verify_disk_permit_binding(){ [[ $2 == deploy_write && ( $1 == /dev/A || $1 == /dev/B ) ]]; }
@@ -279,4 +282,4 @@ for cloud in false true; do
         else [[ ! -s $tmp/offline-calls ]] || fail 'four-state dispatch ran forbidden offline name branch'; fi
     done
 done
-printf 'PASS: Linux offline hostname/hosts transaction, metadata/labels/rollback, unique permitted roots and four-state dispatch\n'
+printf 'PASS: Linux offline hostname/hosts transaction, metadata/rollback/SELinux-independent, unique permitted roots and four-state dispatch\n'
