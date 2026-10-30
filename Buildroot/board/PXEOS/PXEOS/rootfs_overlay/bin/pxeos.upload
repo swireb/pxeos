@@ -9,7 +9,7 @@ rootpxe_partition_progress_initialize_runtime
 . /bin/pxeos.checkimgvar
 rootpxe_require_task_context || handleError "Invalid task context ($0)"
 rootpxe_stage init "pxeos upload started, storage mounted"
-rootpxe_validate_image_contract || handleError "PXEOS_STAGE=capture CODE=IMAGE_CONTRACT_INVALID REASON=unsupported_type_scope_or_partimage_format"
+rootpxe_validate_image_contract || handleError "PXEOS_STAGE=capture CODE=IMAGE_CONTRACT_INVALID REASON=unsupported_type_scope_or_capture_format"
 [[ ${rootpxe_capture_direct:-no} == yes ]] || handleError "PXEOS_STAGE=capture CODE=CAPTURE_PROTOCOL_REQUIRED"
 imagePath="/storage/dev/$macWinSafe"
 # Background native children must not become job-control group leaders before
@@ -222,6 +222,7 @@ beginUpload() {
                 rm -f /tmp/pigz1 >/dev/null 2>&1 || true
                 handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_FAILED REASON=storage_writer_or_compressor_failed"
             fi
+            mv "${imgpart}.000" "$imgpart" || handleError "PXEOS_STAGE=capture CODE=CAPTURE_ARTIFACT_FINALIZE_FAILED REASON=unable_to_finalize_image_artifact"
             rm /tmp/pigz1 >/dev/null 2>&1 || handleError "PXEOS_STAGE=capture CODE=CAPTURE_ARTIFACT_FINALIZE_FAILED REASON=unable_to_cleanup_capture_fifo"
             rootpxe_partition_progress_item "d1:disk" completed 100 "整盘抓取完成"
             rootpxe_partition_progress_clear_current_item

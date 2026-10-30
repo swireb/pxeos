@@ -23,14 +23,13 @@ table() { printf 'label: %s\n/dev/mock1 : start=        2048, size=        4096,
 
 . "$module"
 
-# A plain artifact and a contiguous split artifact are both valid, but sparse,
-# mixed, empty, or non-regular artifacts must fail before a writer is reached.
+# Only finalized single-file artifacts are valid; numbered files are retired.
 file "$tmp/plain.img"
 expect_ok rootpxe_validate_artifact_fragments "$tmp/plain.img"
 rm "$tmp/plain.img"
 file "$tmp/plain.img.000"
 file "$tmp/plain.img.001"
-expect_ok rootpxe_validate_artifact_fragments "$tmp/plain.img"
+expect_fail rootpxe_validate_artifact_fragments "$tmp/plain.img"
 rm "$tmp/plain.img.001"
 file "$tmp/plain.img.002"
 expect_fail rootpxe_validate_artifact_fragments "$tmp/plain.img"

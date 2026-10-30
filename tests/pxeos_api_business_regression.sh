@@ -844,9 +844,9 @@ awk '/^rootpxe_json_get_string\(/{on=1} /^checkin_rootpxe\(/{on=0} on' $checkin 
 # JSON parser behavior is covered by pxeos_checkin_json_regression.sh with a
 # real jq and real fixtures.  This broader disk-flow suite keeps jq mocked.
 [[ $(rootpxe_normalize_compression_level 6) == -6 ]] || fail positive-compression
-[[ $(rootpxe_normalize_compression_level -7) == -7 ]] || fail negative-compression
+rootpxe_normalize_compression_level -7 >/dev/null && fail negative-compression
 rootpxe_normalize_compression_level 23 >/dev/null && fail compression-range
-rootpxe_validate_pigz_compression -10 2 && fail gzip-range
+rootpxe_validate_pigz_compression -10 0 && fail gzip-range
 
 # The selected volume must have the fixed SYSTEM hive; an NTFS recovery
 # partition occurring first is intentionally skipped.

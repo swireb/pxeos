@@ -260,6 +260,41 @@ class StorageControllerTests(unittest.TestCase):
                                    str(Path(__file__).with_name("storage-test-support.sh")), str(Path(__file__).parents[1])], text=True,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=timeout)
 
+    def test_payload_stream_uses_write_and_registers_single_file_receipt(self):
+        result = self.run_controller('''
+            set -e
+            rootpxe_storage_stage=dev/27/2
+            printf '{"execution":{}}' >"$tmp/context.json"
+            printf 1 >"$tmp/next-sequence"
+            mkdir "$tmp/image"
+            rootpxe_safe_relative_path() { printf '%s' "$1"; }
+            rootpxe_storage_ensure_parents() { :; }
+            rootpxe_storage_call() { printf '{"nextSequence":"4","ack":{}}'; }
+            printf '%s\\n' '{"event":"result","operation":"write","path":"dev/27/2/payload/file.img.000","node":{"size":"7","sha256":"fixture"}}' '{"event":"done"}' >"$tmp/events"
+            exec {rootpxe_storage_request_fd}>"$tmp/requests"
+            exec {rootpxe_storage_result_fd}<"$tmp/events"
+            printf payload | rootpxe_storage_write_payload "$tmp/image/file.img"
+            head -n 1 "$tmp/requests" | jq -e '.operation=="write" and .lengthMode=="stream" and .path=="dev/27/2/payload/file.img.000" and (has("splitBytes")|not)' >/dev/null
+            [[ $(cat "$tmp/data") == payload && $(stat -c %s "$tmp/image/file.img.000") == 7 ]]
+            jq -e '.path=="file.img.000" and .size=="7" and .sha256=="fixture"' "$tmp/payloads.ndjson" >/dev/null
+        ''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_metadata_file_write_keeps_fixed_size_contract(self):
+        result = self.run_controller('''
+            set -e
+            printf '{"execution":{}}' >"$tmp/context.json"
+            printf 1 >"$tmp/next-sequence"
+            printf metadata >"$tmp/metadata"
+            printf '%s\\n' '{"event":"done"}' >"$tmp/events"
+            exec {rootpxe_storage_request_fd}>"$tmp/requests"
+            exec {rootpxe_storage_result_fd}<"$tmp/events"
+            rootpxe_storage_exec write dev/27/2/metadata "$tmp/metadata"
+            jq -e '.operation=="write" and .lengthMode=="fixed" and .expectedSize=="8"' "$tmp/requests" >/dev/null
+            [[ $(cat "$tmp/data") == metadata && ! -e $tmp/payloads.ndjson ]]
+        ''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_smb_mount_waits_for_the_real_child_and_preserves_failure(self):
         result = self.run_controller('''
             mount.cifs() { printf joined >"$rootpxe_storage_workspace/mount-ended"; return 17; }
@@ -535,7 +570,7 @@ BAD_CAPABILITIES
             rootpxe_storage_exec() { echo unexpected-command; return 81; }
             rootpxe_storage_ensure_parents() { echo unexpected-parent; return 82; }
             rootpxe_storage_write_payload "$tmp/foreign" 0 && exit 83
-            rootpxe_storage_read_files "$tmp/foreign" && exit 84
+            rootpxe_storage_read_file "$tmp/foreign" && exit 84
             exit 0
         ''')
         self.assertEqual(result.returncode, 0, result.stderr)

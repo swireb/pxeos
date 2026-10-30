@@ -78,14 +78,6 @@ printf 'PXEOS_PROGRESS_V1|old-run|9|12|partclone_progress\n' >"$ROOTPXE_PROGRESS
 assert_eq "$(rootpxe_partclone_progress_next_pct "$ROOTPXE_PROGRESS_STATUS_FILE" "$run" 100)" 100 'foreign run must not leak retry progress'
 pass 'empty and stale status are isolated'
 
-# Partimage remains on its historical stderr file format.  Its percentage is
-# read independently and cannot be mistaken for a Partclone V1 record.
-printf 'Partimage status: 73.50%%\ntrailer\n' >"$ROOTPXE_PROGRESS_STATUS_FILE"
-assert_eq "$(rootpxe_partimage_progress_next_pct "$ROOTPXE_PROGRESS_STATUS_FILE" 0)" 73 'legacy Partimage percentage must remain readable'
-: >"$ROOTPXE_PROGRESS_STATUS_FILE"
-assert_eq "$(rootpxe_partimage_progress_next_pct "$ROOTPXE_PROGRESS_STATUS_FILE" 73)" 73 'empty Partimage sample must retain progress'
-pass 'legacy Partimage progress remains separate'
-
 # Snapshot persistence is only telemetry: a write error must not turn a
 # successful Partclone reader/producer/writer pipeline into a failed task.
 ROOTPXE_PROGRESS_STATUS_FILE="$tmp/missing/status.pxeos"

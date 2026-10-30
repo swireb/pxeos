@@ -24,31 +24,14 @@ rootpxe_preflight_safe_artifact() {
     done
 }
 
-# A capture writer finalizes an unsplit payload as BASE.  Split captures retain
-# BASE.000, BASE.001, ...; accept exactly one representation, never a glob
-# that can silently skip a numbered hole.
+# Only a finalized single payload is deployable; numbered fragments are retired.
 rootpxe_validate_artifact_fragments() {
-    local base="$1" directory filename candidate suffix expected=0 found=0
-    [[ -n $base ]] || return 1
-    directory=${base%/*}; filename=${base##*/}
-    [[ $directory != "$base" && -d $directory && -n $filename ]] || return 1
-    if [[ -e $base ]]; then
-        rootpxe_preflight_regular_file "$base" || return 1
-        for candidate in "$directory/$filename".*; do
-            [[ -e $candidate ]] && return 1
-        done
-        return 0
-    fi
-    for candidate in "$directory/$filename".*; do
-        [[ -e $candidate ]] || continue
-        suffix=${candidate##*.}
-        [[ $suffix =~ ^[0-9]{3}$ ]] || return 1
-        rootpxe_preflight_regular_file "$candidate" || return 1
-        [[ $((10#$suffix)) -eq $expected ]] || return 1
-        expected=$((expected + 1))
-        found=1
+    local base="$1" candidate
+    rootpxe_preflight_regular_file "$base" || return 1
+    for candidate in "$base".*; do
+        [[ -e $candidate || -L $candidate ]] && return 1
     done
-    [[ $found -eq 1 ]]
+    return 0
 }
 
 rootpxe_preflight_table_type() {

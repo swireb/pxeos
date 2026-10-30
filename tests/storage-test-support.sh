@@ -53,7 +53,7 @@ storage_test_context_json() {
     jq -c '
       .taskId //= 42 | .type //= "capture" | .pxeType //= (if .type=="capture" then "up" else "down" end) |
       .executionToken //= "11111111111111111111111111111111" | .progressAttempt //= 1 |
-      .img //= "images/fixture" | .imgType //= "mps" | .imgPartitionType //= "all" | .osid //= 9 | .imgFormat //= 5 |
+      .img //= "images/fixture" | .imgType //= "mps" | .imgPartitionType //= "all" | .osid //= 9 | .imgFormat //= 5 | .compressionLevel //= 6 |
       .deploymentIdentityPolicy //= {version:1,systemIdentity:{sysprep:false},cloudInit:false} |
       . as $r | (.protocol // (if (.storage|type)=="object" then .storage.protocol else "" end)) as $p |
       .storageAccess //= {version:1,protocol:$p,
@@ -82,11 +82,10 @@ storage_test_patch_parser() {
 storage_test_pipeline_boundaries() {
     rootpxe_storage_write_payload() {
         [[ $1 == "${tmp:?}/"* && $1 != *'/../'* ]] || return 1
-        if [[ $2 == 0 ]]; then cat >"$1"; else split -a 3 -d -b "$2" - "$1."; fi
+        cat >"$1.000"
     }
-    rootpxe_storage_read_files() {
-        local file
-        for file in "$@"; do [[ $file == "${tmp:?}/"* && -f $file && ! -L $file ]] || return 1; done
-        cat -- "$@"
+    rootpxe_storage_read_file() {
+        [[ $# == 1 && $1 == "${tmp:?}/"* && -f $1 && ! -L $1 ]] || return 1
+        cat -- "$1"
     }
 }

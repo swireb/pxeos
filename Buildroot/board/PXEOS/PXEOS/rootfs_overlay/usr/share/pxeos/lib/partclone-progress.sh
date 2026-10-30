@@ -76,24 +76,6 @@ rootpxe_partclone_progress_next_pct() {
     printf '%s\n' "$pct"
 }
 
-rootpxe_partimage_progress_next_pct() {
-    local status_file="$1" last_pct="$2" record pct
-    [[ $last_pct =~ ^[0-9]{1,3}$ && $last_pct -le 100 ]] || return 1
-    record=$(rootpxe_partimage_progress_status_line "$status_file")
-    pct=$(LC_ALL=C printf '%s\n' "$record" | grep -oE '[0-9]+([.][0-9]+)?%' | head -n 1 | tr -d '%')
-    pct=${pct%%.*}
-    [[ $pct =~ ^[0-9]{1,3}$ && $pct -le 100 ]] || { printf '%s\n' "$last_pct"; return 0; }
-    printf '%s\n' "$pct"
-}
-
-rootpxe_partimage_progress_status_line() {
-    local status_file="$1"
-    [[ -r $status_file ]] || return 0
-    # This is a legacy Partimage stderr sink, potentially a single giant
-    # CR-only line.  Bound bytes before any line-oriented reader runs.
-    tail -c 8192 "$status_file" 2>/dev/null | tr '\r' '\n' | tail -n 2 | head -n 1 | cut -c1-4096
-}
-
 rootpxe_partclone_progress_sample_pct() {
     local line="$1" clean pct
     clean=$(LC_ALL=C printf '%s' "$line" | sed -E $'s/\033\\[[0-9;?]*[A-Za-z]//g') || return 1

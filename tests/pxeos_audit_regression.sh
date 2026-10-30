@@ -8,8 +8,8 @@ filesystem_lvm_patch="$root/patch/filesystem/lvm2-udev-sync.patch"
 realtek="$root/KernelPackages/drivers/net/ethernet/realtek/Makefile"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
-# Split fragments must be sorted independently of compgen's enumeration.
-grep -Fq 'LC_ALL=C sort' "$funcs" || fail 'split fragments lack deterministic C sort'
+# Fragment glob readers have been removed.
+! grep -Fq 'compgen -G' "$funcs" || fail 'retired fragment reader remains'
 # mpa capture selection is the only fixed image branch allowed to bind by facts.
 grep -Fq '"x$imgType" == "xmpa" && "x$type" == "xdown"' "$funcs" || fail 'mpa deploy binding branch missing'
 grep -Fq 'rootpxe_prepare_capture_output_path' "$funcs" || fail 'nested capture output safety gate missing'
@@ -29,6 +29,7 @@ sed -e 's|^rootpxe_source_core_library partition-funcs.sh.*|:|' -e 's|^rootpxe_s
 cp "$(dirname "$funcs")/partclone-progress.sh" "$tmp/partclone-progress.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
 cp "$(dirname "$funcs")/storage-io.sh" "$tmp/storage-io.sh"
+cp "$(dirname "$funcs")/capture-direct.sh" "$tmp/capture-direct.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-hostname.sh" "$tmp/linux-hostname.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" "$tmp/log-paths.sh"
@@ -43,19 +44,6 @@ mkdir -p "$tmp/capture"
 rootpxe_prepare_capture_output_path "$tmp/capture" "$tmp/capture/images/foo" || fail 'nested capture output path rejected'
 [[ -d $tmp/capture/images ]] || fail 'nested capture output parent was not created'
 rootpxe_prepare_capture_output_path "$tmp/capture" "$tmp/escape/foo" && fail 'capture output escaped staging root'
-
-# Bash 5.2 compgen output is mocked deliberately out of order; writeImage must
-# still hand the reader fragments in deterministic C-locale order.
-mkdir -p "$tmp/split"; : >"$tmp/split/f.000"; : >"$tmp/split/f.001"; : >"$tmp/split/f.010"
-split_args="$tmp/split.args"
-compgen() { [[ $1 == -G ]] || return 1; printf '%s\n' "$tmp/split/f.010" "$tmp/split/f.000" "$tmp/split/f.001"; }
-cat() { if [[ ${1:-} == -- ]]; then shift; printf '%s\n' "$@" >"$split_args"; printf payload; else command cat "$@"; fi; }
-rootpxe_validate_runtime_img_format() { return 0; }; rootpxe_partclone_progress_start() { return 0; }; rootpxe_partclone_progress_wait() { return 0; }
-rootpxe_console_message() { :; }; zstdmt() { command cat; }; partclone.restore() { command cat >/dev/null; }
-imgFormat=5; imgLegacy=''; imgFormat=5; storage=mock; img=image
-rootpxe_partclone_progress_term=xterm; rootpxe_partclone_progress_args=(); rootpxe_partclone_progress_stderr_target="$tmp/partclone.err"
-rm -f /tmp/pigz1; writeImage "$tmp/split/f.*" /dev/mock; rm -f /tmp/pigz1
-[[ $(<"$split_args") == $"$tmp/split/f.000"$'\n'"$tmp/split/f.001"$'\n'"$tmp/split/f.010" ]] || fail 'unordered compgen fragments were not sorted'
 
 # The extracted build helper must leave an already-applied patch unchanged and
 # reject a conflicting patch without performing a reverse application.
@@ -125,6 +113,7 @@ sed -e 's|^rootpxe_source_core_library partition-funcs.sh.*|:|' -e 's|^rootpxe_s
 cp "$(dirname "$funcs")/partclone-progress.sh" "$tmp/partclone-progress.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
 cp "$(dirname "$funcs")/storage-io.sh" "$tmp/storage-io.sh"
+cp "$(dirname "$funcs")/capture-direct.sh" "$tmp/capture-direct.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-hostname.sh" "$tmp/linux-hostname.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" "$tmp/log-paths.sh"

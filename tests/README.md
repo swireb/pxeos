@@ -197,7 +197,7 @@ pxeos_php_retirement_regression.sh  # 旧 PHP 运行时及产品 USB 制作/发�
 - 脚本及核对范围如下。
 
 ```text
-pxeos_script_audit_regression.sh  # 提取局部函数，以命令替身覆盖扩展分区、SATA/NVMe 名称碰撞、坏分区 dump、旧 Windows 分片、printf、控制字符及数组作用域、恢复格式与选择、时间显示、hash 前置门禁、磁盘容量、假钟倒计时、压缩参数、主机名、库存与 LVM probe 清理、算术错误传播和存储空间列。
+pxeos_script_audit_regression.sh  # 提取局部函数，以命令替身覆盖扩展分区、SATA/NVMe 名称碰撞、坏分区 dump、单文件恢复、printf、控制字符及数组作用域、恢复格式与选择、时间显示、hash 前置门禁、磁盘容量、假钟倒计时、压缩参数、主机名、库存与 LVM probe 清理、算术错误传播。
 pxeos_script_io_regression.sh  # 以临时普通文件核对 NFS/SMB 的 EXIT/INT/TERM 四份 Cloud-init 私有文件清理及自有派生计划清理、umask/trap 保留、缺库及 source 失败、入口停止、有限设备重读、raw 引导区逻辑字节、GPT backup 与 raw 区分及坏 raw 在清表前拒绝、日志折行、严格 JSON 响应、任务库存/磁盘健康/非镜像完成的 HTTP 失败门禁，以及大于 2^31 和接近 GPT 安全整数上界的 LBA 精确读回。设备重读和写入只调用函数替身，不执行真实 sfdisk、nvme 或 LVM。
 pxeos_task_http_regression.sh  # 以 curl 替身核对私有 form/JSON 文件原始字节、无附加换行、curl 参数和 stdin、EOF、真实返回码、重定向拒绝及成功/失败/信号/临时目录失败后的清理。
 ```
@@ -264,3 +264,9 @@ bash tests/pxeos_task_identity_regression.sh
 ```
 
 离线fixture完成后仍须分别构建x64/x86/arm64，核对helper及依赖进入initramfs；再验证NFS3/4.0/4.1/4.2固定/auto、SMB2.1/3.0/3.0.2/3.1.1固定/auto、实际mountinfo/非guest、UID/GID 0及非root/无本地同名账号、只读根、原worker未停保护、可信同host跨boot恢复、所有producer失败和响应丢失。离线通过不能证明这些真实矩阵或吞吐结果。根项目待运行清单见[存储系统待验矩阵](../../../docs/存储系统.md#初始化边界与未验证事项)。
+
+`pxeos_image_format_regression.sh` 覆盖仅 Gzip/Zstd、级别 0 真正未压缩、退役格式拒绝以及超过 200 MiB 的单文件编解码往返；Partclone 使用普通文件复制替身。
+
+`pxeos_checkin_format_regression.sh` 以真实 JSON parser 验证 0 保留、退役格式及非法级别拒绝，存储清理专用响应不要求镜像编解码字段。
+
+`pxeos_single_payload_regression.sh` 运行真实 LVM 捕获叶函数和 DD 捕获分支，仅模拟设备/Partclone，验证超过 200 MiB 的 LVM 数据不会截断且 DD 最终文件名与恢复一致。

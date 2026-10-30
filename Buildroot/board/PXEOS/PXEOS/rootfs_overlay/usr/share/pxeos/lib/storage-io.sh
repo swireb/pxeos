@@ -310,12 +310,6 @@ rootpxe_storage_local_payload() {
     relative=${relative#"$rootpxe_storage_stage/payload/"}
     rootpxe_safe_relative_path "$relative" >/dev/null || return 1
     file="$rootpxe_storage_workspace/image/$relative"
-    if [[ $(jq -r '.operation' <<<"$event") == remove-owned ]]; then
-        rm -f -- "$file" || return 1
-        jq -cs --arg path "$relative" '.[]|select(.path != $path)' "$rootpxe_storage_workspace/payloads.ndjson" >"$rootpxe_storage_workspace/payloads.next" || return 1
-        mv -- "$rootpxe_storage_workspace/payloads.next" "$rootpxe_storage_workspace/payloads.ndjson"
-        return
-    fi
     size=$(jq -r '.node.size' <<<"$event") || return 1
     [[ $size =~ ^[0-9]+$ && ! -e $file && ! -L $file ]] || return 1
     mkdir -p -- "${file%/*}" || return 1
@@ -325,11 +319,11 @@ rootpxe_storage_local_payload() {
       '{path:$path,inode:$inode,size:$size,sha256:$digest}' >>"$rootpxe_storage_workspace/payloads.ndjson"
 }
 
-# One command at a time, including all split-file receipts and data transfer.
+# One command at a time, including file receipts and data transfer.
 # The data writer is connected before the command; no helper holds a write end
 # of its own read FIFO. Every fixed write must reach EOF at its declared size.
 rootpxe_storage_exec() (
-    local operation=$1 path=$2 argument=${3:-} mode=${4:-} sequence command event phase response data_pid='' data_status=0 write_fd='' expected key read_timeout remaining
+    local operation=$1 path=$2 argument=${3:-} sequence command event phase response data_pid='' data_status=0 write_fd='' expected key read_timeout remaining
     trap 'if [[ -n $data_pid ]]; then kill -TERM "$data_pid" 2>/dev/null || true; while :; do wait "$data_pid" 2>/dev/null || true; kill -0 "$data_pid" 2>/dev/null || break; done; fi; [[ -z $write_fd ]] || exec {write_fd}>&-' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
@@ -343,16 +337,15 @@ rootpxe_storage_exec() (
     command=$(jq -cn --arg operation "$operation" --arg path "$path" --arg sequence "$sequence" \
       --slurpfile context "$rootpxe_storage_workspace/context.json" '{operation:$operation,path:$path,sequence:$sequence,execution:$context[0].execution}') || return 1
     if [[ $operation == rename-owned ]]; then command=$(jq -c --arg to "$argument" '.+{to:$to}' <<<"$command") || return 1; fi
-    if [[ $operation == write || $operation == write-split ]]; then
+    if [[ $operation == write ]]; then
         exec {write_fd}>"$rootpxe_storage_workspace/data" || return 1
-        if [[ $operation == write ]]; then
+        if [[ $argument != - ]]; then
             [[ -f $argument && ! -L $argument ]] || return 1
             expected=$(stat -c %s -- "$argument") || return 1
             command=$(jq -c --arg expectedSize "$expected" '.+{lengthMode:"fixed",expectedSize:$expectedSize}' <<<"$command") || return 1
             cat -- "$argument" >&"$write_fd" & data_pid=$!
         else
-            [[ $mode == 0 || $mode == 209715200 ]] || return 1
-            command=$(jq -c --argjson bytes "$mode" '.+{splitBytes:$bytes}' <<<"$command") || return 1
+            command=$(jq -c '.+{lengthMode:"stream"}' <<<"$command") || return 1
             cat <&0 >&"$write_fd" & data_pid=$!
         fi
         exec {write_fd}>&-; write_fd=''
@@ -382,7 +375,7 @@ rootpxe_storage_exec() (
             else [[ $argument == "$rootpxe_storage_workspace/"* && ! -L $argument ]] || break; head -c "$expected" <&"$rootpxe_storage_data_fd" >"$argument" & fi
             data_pid=$!
         fi
-        if [[ $operation == write-split && $phase == result ]]; then rootpxe_storage_local_payload "$event" || break; fi
+        if [[ $operation == write && $argument == - && $phase == result ]]; then rootpxe_storage_local_payload "$event" || break; fi
         jq -er '.nextSequence | strings' <<<"$response" >"$rootpxe_storage_workspace/next-sequence" || break
         jq -c '.ack' <<<"$response" >&"$rootpxe_storage_request_fd" || break
     done
@@ -408,7 +401,7 @@ rootpxe_storage_prepare_capture() {
 
 rootpxe_storage_is_payload() {
     local name=${1##*/}
-    [[ $name == *.img || $name =~ \.img\.[0-9]{3}$ || $name == sys.img.* || ( ${imgType:-} == dd && $1 == "$img"* ) ]]
+    [[ $name == *.img || ( ${imgType:-} == dd && $1 == "$img"* ) ]]
 }
 
 rootpxe_storage_load_shadow() {
@@ -439,21 +432,19 @@ rootpxe_storage_load_shadow() {
     done <"$rootpxe_storage_workspace/manifest.ndjson"
 }
 
-rootpxe_storage_read_files() {
-    local file relative
-    for file in "$@"; do
-        [[ $file == "$rootpxe_storage_workspace/image/"* ]] || return 1
-        relative=${file#"$rootpxe_storage_workspace/image/"}; rootpxe_safe_relative_path "$relative" >/dev/null || return 1
-        rootpxe_storage_exec read "$img/$relative" - || return 1
-    done
+rootpxe_storage_read_file() {
+    local file=$1 relative
+    [[ $# == 1 && $file == "$rootpxe_storage_workspace/image/"* ]] || return 1
+    relative=${file#"$rootpxe_storage_workspace/image/"}; rootpxe_safe_relative_path "$relative" >/dev/null || return 1
+    rootpxe_storage_exec read "$img/$relative" -
 }
 
 rootpxe_storage_write_payload() {
-    local local_file=$1 split_bytes=$2 relative
+    local local_file=$1 relative
     [[ $local_file == "$rootpxe_storage_workspace/image/"* ]] || return 1
     relative=${local_file#"$rootpxe_storage_workspace/image/"}; rootpxe_safe_relative_path "$relative" >/dev/null || return 1
     rootpxe_storage_ensure_parents "$rootpxe_storage_stage/payload/$relative" || return 1
-    rootpxe_storage_exec write-split "$rootpxe_storage_stage/payload/$relative" - "$split_bytes"
+    rootpxe_storage_exec write "$rootpxe_storage_stage/payload/$relative.000" -
 }
 
 rootpxe_storage_path() {

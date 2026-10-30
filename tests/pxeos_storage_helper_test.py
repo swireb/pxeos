@@ -20,7 +20,7 @@ class StorageHelperFixture(unittest.TestCase):
                             str(root / 'tests/storage_fs_fixture.c'),
                             str(source / 'storage_context.c'), str(source / 'storage_fs.c'),
                             *flags, '-o', str(binary)], check=True)
-            # Includes one 200 MiB split boundary. All bytes stay in this local
+            # Includes an unbounded stream larger than 200 MiB. All bytes stay in this local
             # temporary fixture; no production path or mount entry is opened.
             subprocess.run([str(binary)], check=True)
 

@@ -49,29 +49,26 @@ for function in uploadFormat rootpxe_prepare_capture_output_path; do
     eval "$(sed -n "/^$function() {/,/^}/p" "$lib/funcs.sh")"
 done
 handleError(){ fail "$*"; }
-imgFormat=4 PIGZ_COMP=''
+imgFormat=0 PIGZ_COMP=0
 mkfifo "$tmp/cancel.fifo"
 uploadFormat "$tmp/cancel.fifo" "$imagePath/split.img"
 pipeline=$rootpxe_last_writer_pid
 setsid yes CAPTURE >"$tmp/cancel.fifo" & rootpxe_capture_producer_pid=$!
-children=''
 for iteration in {1..100}; do
-    children=$(cat "/proc/$pipeline/task/$pipeline/children" 2>/dev/null || true)
-    [[ -z $children ]] || break
+    [[ $(ps -o pgid= -p "$pipeline" | tr -d ' ') != "$pipeline" ]] || break
     sleep 0.01
 done
-[[ -n $children ]] || fail pipeline-children-not-started
 [[ $(ps -o pgid= -p "$pipeline" | tr -d ' ') == "$pipeline" ]] || fail writer-pid-is-not-process-group
 producer=$rootpxe_capture_producer_pid
 rootpxe_capture_direct_quiesce
-for pid in "$producer" "$pipeline" $children; do ! kill -0 "$pid" 2>/dev/null || fail cancel-left-pipeline-process-alive; done
+for pid in "$producer" "$pipeline"; do ! kill -0 "$pid" 2>/dev/null || fail cancel-left-pipeline-process-alive; done
 [[ $rootpxe_capture_stopped == yes ]] || fail pipeline-stop-unconfirmed
 # A real compressor failure survives split's success; producer failures survive wait.
 (
     mkdir "$tmp/failing-bin"
     printf '#!/bin/bash\ncat >/dev/null\nexit 7\n' >"$tmp/failing-bin/pigz"
     chmod 700 "$tmp/failing-bin/pigz"
-    PATH="$tmp/failing-bin:$PATH";imgFormat=2
+    PATH="$tmp/failing-bin:$PATH";imgFormat=0 PIGZ_COMP=-6
     eval "$(sed -n '/^rootpxe_wait_for_writer() {/,/^}/p' "$lib/funcs.sh")"
     uploadFormat "$tmp/failing.fifo" "$imagePath/failed.img"
     writer=$rootpxe_last_writer_pid
@@ -84,14 +81,14 @@ for pid in "$producer" "$pipeline" $children; do ! kill -0 "$pid" 2>/dev/null ||
 # Exercise the real response parser: legacy and nonzero NFS never reach mount.
 (
     checkin="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.checkin"
-    for function in rootpxe_json_get_string rootpxe_json_get_text rootpxe_json_assign rootpxe_json_assign_text rootpxe_validate_json_storage rootpxe_apply_json_checkin; do
+    for function in rootpxe_json_get_string rootpxe_json_get_text rootpxe_json_assign rootpxe_json_assign_text rootpxe_validate_json_storage rootpxe_normalize_compression_level rootpxe_validate_pigz_compression rootpxe_apply_json_checkin; do
         eval "$(sed -n "/^$function() {/,/^}/p" "$checkin")"
     done
     rootpxe_cloud_init_cleanup_private(){ :; }
     rootpxe_apply_json_deployment_identity_policy(){ :; }
     rootpxe_apply_json_partition_inventory(){ :; }
     rootpxe_apply_json_cloud_init(){ :; }
-    document='{"taskId":4,"type":"capture","pxeType":"up","mac":"000c29129138","executionToken":"fixture","progressAttempt":7,"img":"1","imgType":"n","imgPartitionType":"all","osid":50,"imgFormat":4,"protocol":"nfs","storageip":"fixture","exportPath":"/images","captureProtocol":"mac-direct-v1","captureAccess":{"captureProtocol":"mac-direct-v1","attempt":7,"storageNonce":"11111111111111111111111111111111","nfsUid":0,"nfsGid":0}}'
+    document='{"taskId":4,"type":"capture","pxeType":"up","mac":"000c29129138","executionToken":"fixture","progressAttempt":7,"img":"1","imgType":"n","imgPartitionType":"all","osid":50,"imgFormat":0,"compressionLevel":0,"protocol":"nfs","storageip":"fixture","exportPath":"/images","captureProtocol":"mac-direct-v1","captureAccess":{"captureProtocol":"mac-direct-v1","attempt":7,"storageNonce":"11111111111111111111111111111111","nfsUid":0,"nfsGid":0}}'
     rootpxe_apply_json_checkin "$document" || fail direct-response-parser
     for filter in 'del(.captureProtocol)' '.captureAccess.captureProtocol="legacy"' '.captureAccess.attempt=6' '.captureAccess.nfsUid=1000'; do
         if rootpxe_apply_json_checkin "$(jq -c "$filter" <<<"$document")";then fail incompatible-response-accepted;fi

@@ -45,14 +45,13 @@ static void send_ack(int request,int root,struct json_object *event,int corrupt)
     json_object_object_add(ack,"proof",proof_for(root,rx_string(event,"path",4095)));
     assert(!rx_emit(request,ack));json_object_put(ack);
 }
-static struct json_object *command(struct storage_context *context,const char *path,uint64_t sequence,int fixed,uint64_t size,int split) {
+static struct json_object *command(struct storage_context *context,const char *path,uint64_t sequence,int fixed,uint64_t size) {
     struct json_object *c=json_object_new_object();char number[32];snprintf(number,sizeof(number),"%llu",(unsigned long long)sequence);
     json_object_object_add(c,"execution",json_object_get(context->owner));
     json_object_object_add(c,"sequence",json_object_new_string(number));
-    json_object_object_add(c,"operation",json_object_new_string(split?"write-split":"write"));
+    json_object_object_add(c,"operation",json_object_new_string("write"));
     json_object_object_add(c,"path",json_object_new_string(path));
-    if(split)json_object_object_add(c,"splitBytes",json_object_new_uint64(209715200));
-    else {json_object_object_add(c,"lengthMode",json_object_new_string(fixed?"fixed":"stream"));snprintf(number,sizeof(number),"%llu",(unsigned long long)size);if(fixed)json_object_object_add(c,"expectedSize",json_object_new_string(number));}
+    json_object_object_add(c,"lengthMode",json_object_new_string(fixed?"fixed":"stream"));snprintf(number,sizeof(number),"%llu",(unsigned long long)size);if(fixed)json_object_object_add(c,"expectedSize",json_object_new_string(number));
     return c;
 }
 static void write_bytes(int fd,uint64_t size) {
@@ -62,14 +61,14 @@ static void write_bytes(int fd,uint64_t size) {
 
 /* queued_data reaches the pipe before the created ACK, so a zero-size file at
  * that event proves that bulk bytes cannot cross the receipt barrier. */
-static void one_case(uint64_t expected,uint64_t actual,int fixed,int reject_result,int split) {
+static void one_case(uint64_t expected,uint64_t actual,int fixed,int reject_result) {
     char temporary[]="/tmp/rootpxe-fs-fixture.XXXXXX";assert(mkdtemp(temporary));
     int root=open(temporary,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);assert(root>=0);
     assert(!mkdirat(root,"dev",0700));assert(!mkdirat(root,"dev/27",0700));assert(!mkdirat(root,"dev/27/2",0700));assert(!mkdirat(root,"dev/27/2/payload",0700));
     int request[2],result[2],data[2];assert(!pipe(request)&&!pipe(result)&&!pipe(data));
     struct storage_context context={0};strcpy(context.protocol,"nfs");strcpy(context.stage,"dev/27/2");strcpy(context.lock,".locks/key");strcpy(context.image_path,"image");context.data_write=1;context.parent=getpid();context.owner=json_tokener_parse("{\"taskType\":\"capture\",\"nonce\":\"fixture\"}");
     pid_t child=fork();assert(child>=0);
-    if(!child){close(request[1]);close(result[0]);close(data[1]);struct storage_fs fs={.root=root,.context=&context};assert(!rx_stat_fd(root,&fs.root_stat));struct json_object *c=command(&context,"dev/27/2/payload/file",1,fixed,expected,split);int rc=rx_command(&fs,c,request[0],data[0],result[1]);json_object_put(c);if(reject_result){assert(rc&&fs.last_sequence==0);c=command(&context,"dev/27/2/payload",4,0,0,0);json_object_object_add(c,"operation",json_object_new_string("seal"));assert(rx_command(&fs,c,request[0],data[0],result[1]));json_object_put(c);}close(result[1]);_exit(rc?7:0);}
+    if(!child){close(request[1]);close(result[0]);close(data[1]);struct storage_fs fs={.root=root,.context=&context};assert(!rx_stat_fd(root,&fs.root_stat));struct json_object *c=command(&context,"dev/27/2/payload/file",1,fixed,expected);int rc=rx_command(&fs,c,request[0],data[0],result[1]);json_object_put(c);if(reject_result){assert(rc&&fs.last_sequence==0);c=command(&context,"dev/27/2/payload",4,0,0);json_object_object_add(c,"operation",json_object_new_string("seal"));assert(rx_command(&fs,c,request[0],data[0],result[1]));json_object_put(c);}close(result[1]);_exit(rc?7:0);}
     close(request[0]);close(result[1]);close(data[0]);
     pid_t producer=fork();assert(producer>=0);if(!producer){close(request[1]);close(result[0]);write_bytes(data[1],actual);close(data[1]);_exit(0);}close(data[1]);
     int created=0,results=0,refused=0;struct json_object *event;
@@ -80,19 +79,18 @@ static void one_case(uint64_t expected,uint64_t actual,int fixed,int reject_resu
         assert(request[1]>=0);send_ack(request[1],root,event,0);json_object_put(event);
     }
     if(request[1]>=0)close(request[1]);close(result[0]);int status=0;assert(waitpid(child,&status,0)==child&&WIFEXITED(status));
-    int success=fixed?expected==actual:1;if(reject_result)success=0;assert((WEXITSTATUS(status)==0)==success);assert(created>=1);if(success)assert(results==(split&&actual>209715200?2:1));if(reject_result)assert(refused&&results==1);
+    int success=fixed?expected==actual:1;if(reject_result)success=0;assert((WEXITSTATUS(status)==0)==success);assert(created>=1);if(success)assert(results==1);if(reject_result)assert(refused&&results==1);
     int producer_status;assert(waitpid(producer,&producer_status,0)==producer);assert(WIFEXITED(producer_status)&&WEXITSTATUS(producer_status)==0);
-    assert(!unlinkat(root,"dev/27/2/payload/file",0)||split);
-    if(split){assert(!unlinkat(root,"dev/27/2/payload/file.000",0));if(actual>209715200)assert(!unlinkat(root,"dev/27/2/payload/file.001",0));}
+    assert(!unlinkat(root,"dev/27/2/payload/file",0));
     assert(!unlinkat(root,"dev/27/2/payload",AT_REMOVEDIR));assert(!unlinkat(root,"dev/27/2",AT_REMOVEDIR));assert(!unlinkat(root,"dev/27",AT_REMOVEDIR));assert(!unlinkat(root,"dev",AT_REMOVEDIR));close(root);assert(!rmdir(temporary));json_object_put(context.owner);
 }
 
 static void two_files_one_fifo(void) {
     char temporary[]="/tmp/rootpxe-fifo-fixture.XXXXXX";assert(mkdtemp(temporary));int root=open(temporary,O_RDONLY|O_DIRECTORY|O_NOFOLLOW);assert(root>=0);assert(!mkdirat(root,"dev",0700));assert(!mkdirat(root,"dev/27",0700));assert(!mkdirat(root,"dev/27/2",0700));assert(!mkfifoat(root,"data",0600));
     int request[2],result[2];assert(!pipe(request)&&!pipe(result));struct storage_context context={0};strcpy(context.protocol,"nfs");strcpy(context.stage,"dev/27/2");strcpy(context.lock,".locks/key");strcpy(context.image_path,"image");context.data_write=1;context.parent=getpid();context.owner=json_tokener_parse("{\"taskType\":\"capture\"}");
-    pid_t child=fork();assert(child>=0);if(!child){close(request[1]);close(result[0]);int data=openat(root,"data",O_RDONLY|O_NOFOLLOW);assert(data>=0);struct storage_fs fs={.root=root,.context=&context};assert(!rx_stat_fd(root,&fs.root_stat));for(int i=0;i<2;i++){struct json_object *c=command(&context,i?"dev/27/2/b":"dev/27/2/a",i?4:1,1,3,0);if(rx_command(&fs,c,request[0],data,result[1]))_exit(7);json_object_put(c);}close(data);close(result[1]);_exit(0);}
+    pid_t child=fork();assert(child>=0);if(!child){close(request[1]);close(result[0]);int data=openat(root,"data",O_RDONLY|O_NOFOLLOW);assert(data>=0);struct storage_fs fs={.root=root,.context=&context};assert(!rx_stat_fd(root,&fs.root_stat));for(int i=0;i<2;i++){struct json_object *c=command(&context,i?"dev/27/2/b":"dev/27/2/a",i?4:1,1,3);if(rx_command(&fs,c,request[0],data,result[1]))_exit(7);json_object_put(c);}close(data);close(result[1]);_exit(0);}
     close(request[0]);close(result[1]);int writer=openat(root,"data",O_WRONLY|O_NOFOLLOW);assert(writer>=0);write_bytes(writer,3);close(writer);int results=0;struct json_object *event;
     while((event=rx_read_json(result[0],65536,1))){int finished=!strcmp(rx_string(event,"event",8),"result");send_ack(request[1],root,event,0);json_object_put(event);if(finished&&++results==1){writer=openat(root,"data",O_WRONLY|O_NOFOLLOW);assert(writer>=0);write_bytes(writer,3);close(writer);}}
     assert(results==2);close(request[1]);close(result[0]);int status;assert(waitpid(child,&status,0)==child&&WIFEXITED(status)&&!WEXITSTATUS(status));assert(!unlinkat(root,"dev/27/2/a",0)&&!unlinkat(root,"dev/27/2/b",0));assert(!unlinkat(root,"dev/27/2",AT_REMOVEDIR)&&!unlinkat(root,"dev/27",AT_REMOVEDIR)&&!unlinkat(root,"dev",AT_REMOVEDIR)&&!unlinkat(root,"data",0));close(root);assert(!rmdir(temporary));json_object_put(context.owner);
 }
-int main(void) {one_case(4,3,1,0,0);one_case(3,4,1,0,0);one_case(3,3,1,0,0);one_case(3,3,1,1,0);one_case(0,3,0,1,1);one_case(0,209715207,0,0,1);two_files_one_fifo();return 0;}
+int main(void) {one_case(4,3,1,0);one_case(3,4,1,0);one_case(3,3,1,0);one_case(3,3,1,1);one_case(0,3,0,1);one_case(0,209715207,0,0);two_files_one_fifo();return 0;}

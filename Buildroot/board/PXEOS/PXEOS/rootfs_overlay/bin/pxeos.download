@@ -34,15 +34,7 @@ rootpxe_validate_fixed_image_lvm_inventory "$imagePath" || handleError "PXEOS_ST
 . /bin/pxeos.inventory "true"
 layPartSize="-1s"
 progress_mode=partclone
-if [[ ${imgLegacy:-${imgFormat:-}} == 1 ]]; then
-    progress_mode=partimage
-    # Partimage has no Partclone decoder generation.  Keep a stable generation
-    # so the partition reporter can bind its legacy status samples to this run.
-    rootpxe_partclone_progress_run_id=partimage-legacy
-    rootpxe_partclone_progress_generation=0
-else
-    rootpxe_partclone_progress_initialize || handleError "PXEOS_STAGE=restore CODE=RESTORE_PROGRESS_SETUP_FAILED REASON=unable_to_initialize_partclone_progress"
-fi
+rootpxe_partclone_progress_initialize || handleError "PXEOS_STAGE=restore CODE=RESTORE_PROGRESS_SETUP_FAILED REASON=unable_to_initialize_partclone_progress"
 pxeos.statusreporter "$mac" "${pxeapi:-$web}" "$taskid" "$rootpxe_partclone_progress_run_id" "$progress_mode" &
 statusReporter="$!"
 fixed_size_partitions=""
@@ -84,13 +76,11 @@ putDataBack() {
     getPartitions "$hd"
     [[ -z $parts ]] && rootpxe_console_message WARN 'Restoring to an empty disk may cause problems.'
     rootpxe_console_message INFO 'Attempting image deployment.'
-    [[ $imgFormat -eq 1 || $imgLegacy -eq 1 ]] \
-        && rootpxe_console_message INFO 'Image format: Partimage.' \
-        || rootpxe_console_message INFO 'Image format: Partclone.'
+    rootpxe_console_message INFO 'Image format: Partclone.'
     usleep 3000000
     case $imgType in
         dd)
-            restorePartition "$hd" 1 "$imagePath/${img}*"
+            restorePartition "$hd" 1 "$imagePath/$img"
             ;;
         n|mps|mpa)
             [[ $imgType == +(n|mps) ]] && disks="$hd"
@@ -99,7 +89,7 @@ putDataBack() {
                     [[ ! -f $imagePath && ! -d $imagePath ]] && handleError "Fatal Error: Could not locate file ($0)\n   Args Passed: $*"
                     ;;
                 [5-7]|9|10|11)
-                    [[ ! -d $imagePath && ! -f $imagePath/sys.img.000 ]] && handleError "Fatal Error: Could not locate file ($0)\n   Args Passed: $*"
+                    [[ ! -d $imagePath ]] && handleError "Fatal Error: Could not locate file ($0)\n   Args Passed: $*"
                     ;;
                 4|50|51)
                     [[ ! -d $imagePath ]] && handleError "Fatal Error: could not locate file ($0)\n   Args Passed: $*"

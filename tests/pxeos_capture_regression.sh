@@ -191,7 +191,7 @@ PATH="$tmp/bin:$PATH"
 source "$tmp/funcs.sh" 2>/dev/null
 storage_test_pipeline_boundaries
 set -u
-imgFormat=2
+imgFormat=0
 PIGZ_COMP=-6
 writer_pids=()
 fifo="$tmp/capture.fifo"
@@ -241,7 +241,7 @@ set +e
     imgPartitionType=all
     storage=mock
     img=image
-    imgFormat=2
+    imgFormat=0
     PIGZ_COMP=-6
     writer_pids=()
     mkdir -p "$tmp/capture-image"
@@ -291,7 +291,7 @@ set +e
     imgPartitionType=all
     storage=mock
     img=image
-    imgFormat=2
+    imgFormat=0
     PIGZ_COMP=-6
     writer_pids=()
     mkdir -p "$tmp/capture-image"
@@ -342,7 +342,7 @@ set +e
     imgPartitionType=all
     storage=mock
     img=image
-    imgFormat=2
+    imgFormat=0
     PIGZ_COMP=-6
     ROOTPXE_PROGRESS_STATUS_FILE="$tmp/capture-progress"
     export ROOTPXE_PROGRESS_STATUS_FILE
@@ -390,73 +390,6 @@ rm -f /tmp/pigz1
 assert_eq "$restore_rc" 92 'restore decoder 失败必须升级为任务失败'
 grep -Fq 'PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_FAILED' "$tmp/restore-error" || fail 'restore 失败必须携带稳定 stage/code'
 pass 'restore decoder failure is not masked by partclone success'
-
-# split 格式传入的是 img* glob；恢复时必须按 shell glob 顺序读取全部普通文件，
-# 不能把星号当作字面路径，也不能接受无匹配或目录。
-mkdir -p "$tmp/split"
-printf 'a' > "$tmp/split/d1p1.img.000"
-printf 'b' > "$tmp/split/d1p1.img.001"
-printf 'c' > "$tmp/split/d1p1.img.010"
-cat > "$tmp/bin/cat" <<'EOF'
-#!/bin/sh
-: "${MOCK_CAT_ARGS:?}"
-for source_file in "$@"; do
-    printf '%s\n' "$source_file" >> "$MOCK_CAT_ARGS"
-    printf '%s\n' payload
-done
-EOF
-cat > "$tmp/bin/zstdmt" <<'EOF'
-#!/bin/sh
-exec /bin/cat
-EOF
-cat > "$tmp/bin/partclone.restore" <<'EOF'
-#!/bin/sh
-"${RESTORE_SYSTEM_CAT:?}" > "${MOCK_RESTORE_STDIN:?}"
-printf 'Elapsed: 00:00:01, Remaining: 00:00:00, Completed: 100.00%%, Rate:   1.00MB/s,\r' >&2
-exit 0
-EOF
-chmod +x "$tmp/bin/cat" "$tmp/bin/zstdmt" "$tmp/bin/partclone.restore"
-export MOCK_CAT_ARGS="$tmp/split-cat-args" MOCK_RESTORE_STDIN="$tmp/restore-stdin" RESTORE_SYSTEM_CAT=/bin/cat
-rm -f /tmp/pigz1
-set +e
-(
-    source "$tmp/funcs.sh" 2>/dev/null
-    storage_test_pipeline_boundaries
-    : > "$MOCK_CAT_ARGS"
-    rootpxe_require_unused_target_disks() { :; }
-    ROOTPXE_PROGRESS_STATUS_FILE="$tmp/restore-progress"
-    export ROOTPXE_PROGRESS_STATUS_FILE
-    handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 94; }
-    cat() {
-        local source_file
-        # Diagnostic publication is a separate reader, not a split-image
-        # source. Preserve its real bytes without adding it to image order.
-        if [[ $# == 2 && $1 == -- && $2 == "$tmp/log/.raw."* ]]; then
-            "$RESTORE_SYSTEM_CAT" "$2"
-            return $?
-        fi
-        for source_file in "$@"; do
-            [[ $source_file == -- ]] && continue
-            printf '%s\n' "$source_file" >> "$MOCK_CAT_ARGS"
-            printf '%s\n' payload
-        done
-    }
-    imgFormat=5
-    imgLegacy=''
-    storage=mock
-    img=image
-    writeImage "$tmp/split/d1p1.img*" /dev/mockp1
-)
-split_rc=$?
-set -e
-rm -f /tmp/pigz1
-assert_eq "$split_rc" 0 'split 镜像 glob 应按顺序恢复'
-expected_split_args="$(printf '%s\n' "$tmp/split/d1p1.img.000" "$tmp/split/d1p1.img.001" "$tmp/split/d1p1.img.010")"
-actual_split_args="$(<"$MOCK_CAT_ARGS")"
-assert_eq "$actual_split_args" "$expected_split_args" 'split 镜像必须保持 shell glob 分片顺序'
-assert_eq "$(<"$MOCK_RESTORE_STDIN")" "$(printf 'payload\npayload\npayload')" 'Partclone restore stdin must remain decoder output only'
-grep -Fq '|100|partclone_progress' "$tmp/restore-progress" || fail 'restore fake Partclone stderr 必须由独立状态 decoder 采集'
-pass 'split image glob is expanded safely and in order'
 
 export MOCK_ERROR_FILE="$tmp/split-no-match-error"
 rm -f /tmp/pigz1
@@ -648,7 +581,7 @@ grep -Fq 'rootpxe_validate_image_contract || handleError "PXEOS_STAGE=capture CO
 grep -Fq 'imgType:-} == mps' "$upload" || fail 'mps capture must have an explicit LVM rejection path'
 grep -Fq 'imgType:-} == mpa' "$upload" || fail 'mpa capture must have an explicit LVM rejection path'
 grep -Fq 'rootpxe_disk_has_lvm_pv' "$upload" || fail 'fixed capture must inspect LVM PV signatures'
-grep -Fq 'imgFormat:-} == 1' "$funcs" || fail 'capture contract must reject Partimage format 1'
+grep -Fq 'imgFormat:-} == 0 || ${imgFormat:-} == 5' "$funcs" || fail 'capture contract must reject Partimage format 1'
 grep -Fq 'case "${imgPartitionType:-}" in all|mbr|[1-9]|10)' "$funcs" || fail 'capture contract must enumerate fixed-image partition scopes'
 for legacy_lvm_helper in getLVM getVolumeGroup changeVolumeGroup getLogicalVolumes getLGDevice; do
     ! grep -Eq "^${legacy_lvm_helper}\\(\\)" "$funcs" || fail "obsolete LVM helper remains: $legacy_lvm_helper"

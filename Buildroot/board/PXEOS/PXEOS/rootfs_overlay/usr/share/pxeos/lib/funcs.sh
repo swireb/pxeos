@@ -322,13 +322,12 @@ rootpxe_require_task_context() {
     [[ ${task_token:-} =~ ^[A-Za-z0-9._~+/=-]{16,512}$ ]]
 }
 
-# Keep type/scope/format decisions identical to the management API.  Format 1
-# is a deployment-only compatibility reader: PXEOS must never create it.
+# Keep type/scope/format decisions identical to the management API.
 rootpxe_validate_image_contract() {
     case "${imgType:-}" in n|N|dd|mps|mpa) ;; *) return 1 ;; esac
     case "${imgPartitionType:-}" in all|mbr|[1-9]|10) ;; *) return 1 ;; esac
     case "${imgType:-}" in n|N|dd) [[ ${imgPartitionType:-} == all ]] || return 1 ;; esac
-    if [[ ${type:-} == up && ${imgFormat:-} == 1 ]]; then return 1; fi
+    [[ ${imgFormat:-} == 0 || ${imgFormat:-} == 5 ]] || return 1
     return 0
 }
 
@@ -336,14 +335,14 @@ rootpxe_validate_image_contract() {
 # runtime helper so restore code rejects an invalid value before allocating a
 # FIFO or starting an image reader.
 rootpxe_effective_img_format() {
-    local format="${imgLegacy:-${imgFormat:-}}"
-    [[ $format =~ ^[0-6]$ ]] || return 1
+    local format="${imgFormat:-}"
+    [[ $format == 0 || $format == 5 ]] || return 1
     printf '%s\n' "$format"
 }
 rootpxe_validate_runtime_img_format() {
     local format
     format=$(rootpxe_effective_img_format) || return 1
-    [[ ${type:-} != up || $format != 1 ]]
+    [[ $format == 0 || $format == 5 ]]
 }
 
 # Diagnostics may contain values from a task response or a helper's stderr.
@@ -4811,8 +4810,7 @@ writeImage()  {
     local target="$2"
     local source_pid=""
     local source_exitcode=0
-    local source_file=""
-    local source_files=()
+
     [[ -z $target ]] && handleError "No target to place image passed (${FUNCNAME[0]})"
     rootpxe_validate_runtime_img_format || handleError "PXEOS_STAGE=restore CODE=IMAGE_FORMAT_INVALID REASON=unsupported_or_missing_format"
     local format
@@ -4832,43 +4830,29 @@ writeImage()  {
     rootpxe_require_unused_target_disks "$target" || return 1
     mkfifo /tmp/pigz1 || handleError "PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_SETUP_FAILED REASON=unable_to_create_restore_fifo"
     [[ -n $file ]] || rootpxe_write_image_fail "No source file passed (${FUNCNAME[0]})\n   Args Passed: $*"
-    # Validate every split source before the progress decoder or reader is
-    # started, so an early failure cannot leave either FIFO endpoint open.
-    mapfile -t source_files < <(compgen -G "$file" | LC_ALL=C sort)
-    [[ ${#source_files[@]} -gt 0 ]] || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_UNAVAILABLE REASON=image_source_glob_has_no_regular_files"
-    for source_file in "${source_files[@]}"; do
-        [[ -f $source_file && -r $source_file ]] || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_UNAVAILABLE REASON=image_source_is_not_readable"
-    done
-    case $format in
-        0|2|3|4|5|6)
-            if ! rootpxe_partclone_progress_start; then
-                rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_PROGRESS_SETUP_FAILED REASON=unable_to_start_partclone_stderr_decoder"
-            fi
-            progress_enabled=yes
-            ;;
-        1)
-            # Partimage exposes its own status stream.  It still needs an
-            # active item so those samples cannot be assigned to another run.
-            ;;
-    esac
-    if [[ -n ${rootpxe_partition_progress_restore_key:-} && $format =~ ^(0|1|2|3|4|5|6)$ ]]; then
+    [[ -f $file && ! -L $file && -r $file ]] || rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_SOURCE_UNAVAILABLE REASON=image_source_is_not_readable"
+    if ! rootpxe_partclone_progress_start; then
+        rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_PROGRESS_SETUP_FAILED REASON=unable_to_start_partclone_stderr_decoder"
+    fi
+    progress_enabled=yes
+    if [[ -n ${rootpxe_partition_progress_restore_key:-} && $format =~ ^(0|5)$ ]]; then
         rootpxe_partition_progress_item "$rootpxe_partition_progress_restore_key" running 0 "开始写入"
         rootpxe_partition_progress_current_item "$rootpxe_partition_progress_restore_key"
     fi
-    rootpxe_storage_read_files "${source_files[@]}" >/tmp/pigz1 &
+    rootpxe_storage_read_file "$file" >/tmp/pigz1 &
     source_pid="$!"
-    case $format in
-        5|6) rootpxe_console_message INFO 'Imaging with Partclone (zstd).' ;;
-        3|4) rootpxe_console_message INFO 'Imaging with Partclone (uncompressed).' ;;
-        1) rootpxe_console_message INFO 'Imaging with Partimage (gzip).' ;;
-        0|2) rootpxe_console_message INFO 'Imaging with Partclone (gzip).' ;;
-    esac
-    case $format in
-        5|6) if ( set -o pipefail; zstdmt -dc </tmp/pigz1 | LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.restore "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -O "$target" -f 1 2>"$rootpxe_partclone_progress_stderr_target" ); then exitcode=0; else exitcode=$?; fi ;;
-        3|4) if ( set -o pipefail; cat </tmp/pigz1 | LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.restore "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -O "$target" -f 1 2>"$rootpxe_partclone_progress_stderr_target" ); then exitcode=0; else exitcode=$?; fi ;;
-        1) if ( set -o pipefail; pigz -dc </tmp/pigz1 | partimage restore "$target" stdin -f3 -b 2>/tmp/status.pxeos ); then exitcode=0; else exitcode=$?; fi ;;
-        0|2) if ( set -o pipefail; pigz -dc </tmp/pigz1 | LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.restore "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -O "$target" -f 1 2>"$rootpxe_partclone_progress_stderr_target" ); then exitcode=0; else exitcode=$?; fi ;;
-    esac
+    local -a decoder=()
+    if [[ ${PIGZ_COMP:--6} == 0 ]]; then
+        decoder=(cat)
+        rootpxe_console_message INFO 'Imaging with Partclone (uncompressed).'
+    elif [[ $format == 0 ]]; then
+        decoder=(pigz -dc)
+        rootpxe_console_message INFO 'Imaging with Partclone (gzip).'
+    else
+        decoder=(zstdmt -dc)
+        rootpxe_console_message INFO 'Imaging with Partclone (zstd).'
+    fi
+    if ( set -o pipefail; "${decoder[@]}" </tmp/pigz1 | LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.restore "${rootpxe_partclone_progress_args[@]}" -n "Storage Location $storage, Image name $img" -O "$target" -f 1 2>"$rootpxe_partclone_progress_stderr_target" ); then exitcode=0; else exitcode=$?; fi
     [[ $exitcode -ne 0 ]] && rootpxe_write_image_stop_local
     if [[ $progress_enabled == yes ]]; then
         rootpxe_partclone_progress_wait || progress_decoder=$?
@@ -4909,11 +4893,6 @@ getValidRestorePartitions() {
     local part=""
     local imgpart=""
     local part_number=0
-    local split='' format
-    format=$(rootpxe_effective_img_format) || return 1
-    if [[ $format -eq 6 || $format -eq 4 || $format -eq 2 ]]; then
-        split='*'
-    fi
     getPartitions "$disk"
     for part in $parts; do
         imgpart=""
@@ -4921,29 +4900,10 @@ getValidRestorePartitions() {
         [[ $imgPartitionType != all && $imgPartitionType != $part_number ]] && continue
         case $osid in
             [1-2])
-                [[ ! -f $imagePath ]] && imgpart="$imagePath/d${disk_number}p${part_number}.img${split}" || imgpart="$imagePath"
-                ;;
-            4|[5-7]|9|10|11)
-                [[ ! -f $imagePath/sys.img.000 ]] && imgpart="$imagePath/d${disk_number}p${part_number}.img${split}"
-                if [[ -z $imgpart ]]; then
-                    case $win7partcnt in
-                        1)
-                            [[ $part_number -eq 1 ]] && imgpart="$imagePath/sys.img.*"
-                            ;;
-                        2)
-                            [[ $part_number -eq 1 ]] && imgpart="$imagePath/rec.img.000"
-                            [[ $part_number -eq 2 ]] && imgpart="$imagePath/sys.img.*"
-                            ;;
-                        3)
-                            [[ $part_number -eq 1 ]] && imgpart="$imagePath/rec.img.000"
-                            [[ $part_number -eq 2 ]] && imgpart="$imagePath/rec.img.001"
-                            [[ $part_number -eq 3 ]] && imgpart="$imagePath/sys.img.*"
-                            ;;
-                    esac
-                fi
+                [[ ! -f $imagePath ]] && imgpart="$imagePath/d${disk_number}p${part_number}.img" || imgpart="$imagePath"
                 ;;
             *)
-                imgpart="$imagePath/d${disk_number}p${part_number}.img${split}"
+                imgpart="$imagePath/d${disk_number}p${part_number}.img"
                 ;;
         esac
         ls $imgpart >/dev/null 2>&1
@@ -6230,10 +6190,10 @@ escapeItem() {
 }
 # uploadFormat
 # Description:
-# Tells the system what format to upload in, whether split or not.
+# Starts the single-file capture writer for the selected codec and level.
 # Expects first argument to be the fifo to send to.
 # Expects part of the filename in the case of resizable
-#    will append 000 001 002 automatically
+#    uses .000 as an unfinished single-file artifact
 #
 # $1 The fifo name (file in file out)
 # $2 The file to upload into on the server
@@ -6265,16 +6225,9 @@ uploadFormat() {
     local file="$2"
     [[ -z $fifo ]] && handleError "Missing file in file out (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $file ]] && handleError "Missing file name to store (${FUNCNAME[0]})\n   Args Passed: $*"
-    local -a compression_args=()
-    [[ ${imgFormat:-} =~ ^[0-6]$ && $imgFormat != 1 ]] || { handleError "PXEOS_STAGE=capture CODE=IMAGE_FORMAT_INVALID REASON=unsupported_or_missing_format"; return 1; }
-    if [[ -n ${PIGZ_COMP:-} ]]; then
-        case $imgFormat in
-            0|2) [[ $PIGZ_COMP =~ ^-[1-9]$ ]] ;;
-            3|4|5|6) [[ $PIGZ_COMP =~ ^-([1-9]|1[0-9]|2[0-2])$ ]] ;;
-            *) false ;;
-        esac || { handleError "PXEOS_STAGE=capture CODE=COMPRESSION_LEVEL_INVALID REASON=unsupported_level_for_format"; return 1; }
-        [[ $imgFormat == 3 || $imgFormat == 4 ]] || compression_args=("$PIGZ_COMP")
-    fi
+    [[ ${imgFormat:-} == 0 || ${imgFormat:-} == 5 ]] || { handleError "PXEOS_STAGE=capture CODE=IMAGE_FORMAT_INVALID REASON=unsupported_or_missing_format"; return 1; }
+    local level=${PIGZ_COMP:--6}
+    [[ $level == 0 || $level =~ ^-[1-9]$ ]] || { handleError "PXEOS_STAGE=capture CODE=COMPRESSION_LEVEL_INVALID REASON=unsupported_level_for_format"; return 1; }
     # Only whole-disk dd uses a server-provided nested image name.  Partition
     # captures retain their existing prepared-directory contract.
     if [[ ${imgType:-} == dd && -n ${imagePath:-} ]]; then
@@ -6283,34 +6236,18 @@ uploadFormat() {
     if [[ ! -e $fifo ]]; then
         mkfifo "$fifo" >/dev/null 2>&1 || handleError "PXEOS_STAGE=capture CODE=CAPTURE_PIPELINE_SETUP_FAILED REASON=unable_to_create_capture_fifo"
     fi
-    local cores=$(nproc)
-    cores=$((cores - 1))
-    [[ $cores -lt 1 ]] && cores=1
     [[ ${writer_pids+x} ]] || writer_pids=()
-    if [[ ${rootpxe_capture_direct:-no} == yes ]]; then
-        local -a compressor=()
-        case $imgFormat in
-            0|2) compressor=(pigz "${compression_args[@]}");;
-            3|4) compressor=(cat);;
-            *) compressor=(zstdmt --rsyncable --ultra "${compression_args[@]}");;
-        esac
-        case $imgFormat in
-            2|4|6)
-                setsid bash -o pipefail -c 'trap "wait; exit 143" TERM INT; file=$1; shift; "$@" | split -a 3 -d -b 200m - "$file."' capture-writer "$file" "${compressor[@]}" <"$fifo" & ;;
-            *) setsid "${compressor[@]}" <"$fifo" >"${file}.000" & ;;
-        esac
-        rootpxe_last_writer_pid=$!
-        writer_pids+=("$rootpxe_last_writer_pid")
-        return 0
+    local -a compressor=()
+    if [[ $level == 0 ]]; then compressor=(cat)
+    elif [[ $imgFormat == 0 ]]; then compressor=(pigz "$level")
+    else compressor=(zstdmt --rsyncable "$level")
     fi
-    local split_bytes=0
-    case $imgFormat in 2|4|6) split_bytes=209715200;; esac
-    case $imgFormat in
-        5|6) ( set -o pipefail; zstdmt --rsyncable --ultra "${compression_args[@]}" <"$fifo" | rootpxe_storage_write_payload "$file" "$split_bytes" ) & ;;
-        3|4) ( set -o pipefail; cat <"$fifo" | rootpxe_storage_write_payload "$file" "$split_bytes" ) & ;;
-        *) ( set -o pipefail; pigz "${compression_args[@]}" <"$fifo" | rootpxe_storage_write_payload "$file" "$split_bytes" ) & ;;
-    esac
-    rootpxe_last_writer_pid="$!"
+    if [[ ${rootpxe_capture_direct:-no} == yes ]]; then
+        setsid "${compressor[@]}" <"$fifo" >"${file}.000" &
+    else
+        ( set -o pipefail; "${compressor[@]}" <"$fifo" | rootpxe_storage_write_payload "$file" ) &
+    fi
+    rootpxe_last_writer_pid=$!
     writer_pids+=("$rootpxe_last_writer_pid")
 }
 
@@ -6948,11 +6885,6 @@ restorePartition() {
     local part="$1"
     local disk_number="$2"
     local imagePath="$3"
-    local split='' format
-    format=$(rootpxe_effective_img_format) || return 1
-    if [[ $format -eq 6 || $format -eq 4 || $format -eq 2 ]]; then
-        split='*'
-    fi
     [[ -z $part ]] && handleError "No partition passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $disk_number ]] && handleError "No disk number passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $imagePath ]] && handleError "No image path passed (${FUNCNAME[0]})\n   Args Passed: $*"
@@ -6997,46 +6929,13 @@ restorePartition() {
         n|mps|mpa)
             case $osid in
                 [1-2])
-                    [[ -f $imagePath ]] && imgpart="$imagePath" || imgpart="$imagePath/d${disk_number}p${part_number}.img${split}"
+                    [[ -f $imagePath ]] && imgpart="$imagePath" || imgpart="$imagePath/d${disk_number}p${part_number}.img"
                     ;;
                 4|8|50|51|99)
-                    imgpart="$imagePath/d${disk_number}p${part_number}.img${split}"
+                    imgpart="$imagePath/d${disk_number}p${part_number}.img"
                     ;;
                 [5-7]|9|10|11)
-                    [[ ! -f $imagePath/sys.img.000 ]] && imgpart="$imagePath/d${disk_number}p${part_number}.img${split}"
-                    if [[ -z $imgpart ]] ;then
-                        [[ -r $imagePath/sys.img.000 ]] && win7partcnt=1
-                        [[ -r $imagePath/rec.img.000 ]] && win7partcnt=2
-                        [[ -r $imagePath/rec.img.001 ]] && win7partcnt=3
-                        case $win7partcnt in
-                            1)
-                                imgpart="$imagePath/sys.img.*"
-                                ;;
-                            2)
-                                case $part_number in
-                                    1)
-                                        imgpart="$imagePath/rec.img.000"
-                                        ;;
-                                    2)
-                                        imgpart="$imagePath/sys.img.*"
-                                        ;;
-                                esac
-                                ;;
-                            3)
-                                case $part_number in
-                                    1)
-                                        imgpart="$imagePath/rec.img.000"
-                                        ;;
-                                    2)
-                                        imgpart="$imagePath/rec.img.001"
-                                        ;;
-                                    3)
-                                        imgpart="$imagePath/sys.img.*"
-                                        ;;
-                                esac
-                                ;;
-                        esac
-                    fi
+                    imgpart="$imagePath/d${disk_number}p${part_number}.img"
                     ;;
             esac
             ;;

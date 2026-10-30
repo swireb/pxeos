@@ -183,27 +183,15 @@ rootpxe_validate_json_storage() {
     esac
 }
 
-# RootPXE JSON exposes a human-level positive compressionLevel (for example
-# 6).  PXEOS historically passes PIGZ_COMP directly to pigz/zstd, whose
-# command-line form is negative.  Keep legacy negative values valid, but do
-# not accept an unbounded value from an untrusted checkin response.
+# JSON levels are 0..9. Zero bypasses the codec; positive levels become CLI flags.
 rootpxe_normalize_compression_level() {
-    local value="$1" level
-    [[ $value =~ ^-?[0-9]+$ ]] || return 1
-    level=${value#-}
-    [[ $level =~ ^[1-9][0-9]*$ ]] && ((level <= 22)) || return 1
-    printf '%s\n' "-$level"
+    local value="$1"
+    [[ $value =~ ^[0-9]$ ]] || return 1
+    if [[ $value == 0 ]]; then printf '0\n'; else printf -- '-%s\n' "$value"; fi
 }
 
 rootpxe_validate_pigz_compression() {
-    local value="$1" format="$2" level
-    [[ $value =~ ^-[1-9][0-9]*$ ]] || return 1
-    level=${value#-}
-    ((level <= 22)) || return 1
-    # gzip/pigz only supports levels 1..9; zstd formats retain 1..22.
-    case "$format" in
-        0|2) ((level <= 9)) || return 1 ;;
-    esac
+    [[ $2 == 0 || $2 == 5 ]] && [[ $1 == 0 || $1 =~ ^-[1-9]$ ]]
 }
 
 # JSON checkin uses an explicit whitelist.  Never eval/source response content.
@@ -254,10 +242,7 @@ rootpxe_apply_json_checkin() {
     rootpxe_json_assign_text "$document" img_partition_type '.imgPartitionType // .img_partition_type' || return 1
     rootpxe_json_assign "$document" osid '.osid' || return 1
     rootpxe_json_assign "$document" img_format '.imgFormat // .img_format' || return 1
-    # JSON now uses a positive compressionLevel.  Older JSON emitters may
-    # still provide the legacy negative pigzComp/pigz_comp form.
-    rootpxe_json_assign "$document" pigz_comp '.compressionLevel // .pigzComp // .pigz_comp' || return 1
-    [[ -z $pigz_comp ]] || pigz_comp=$(rootpxe_normalize_compression_level "$pigz_comp") || return 1
+    rootpxe_json_assign "$document" pigz_comp '.compressionLevel' || return 1
     rootpxe_json_assign "$document" shutdown '.shutdown' || return 1
     storage_server="" storage_export="" smb_username="" smb_password="" smb_domain=""
     # A top-level protocol is authoritative.  Only legacy NFS JSON that omits
@@ -302,6 +287,8 @@ rootpxe_apply_json_checkin() {
         export taskid execution_token taskType pxe_type img protocol storage_server storage_export rootpxe_storage_only progress_attempt
         return 0
     fi
+    pigz_comp=$(rootpxe_normalize_compression_level "$pigz_comp") || return 1
+    rootpxe_validate_pigz_compression "$pigz_comp" "$img_format" || return 1
     rootpxe_json_assign_text "$document" hostName '.hostName // .host_name' || return 1
     rootpxe_json_assign "$document" changeHostname 'if has("changeHostname") then .changeHostname elif has("change_hostname") then .change_hostname else empty end' || return 1
     rootpxe_json_assign_text "$document" resumeStage '.resumeStage // .resume_stage' || return 1
@@ -443,8 +430,8 @@ checkin_rootpxe() {
         return 0
     fi
     [[ -z ${osid:-} || $osid =~ ^[0-9]+$ ]] || handleError "Invalid OS id ($0)"
-    [[ ${img_format:-} =~ ^[0-6]$ ]] || handleError "Invalid image format ($0)"
-    [[ -z ${pigz_comp:-} ]] || rootpxe_validate_pigz_compression "$pigz_comp" "${img_format:-${imgFormat:-}}" || handleError "Invalid compression value ($0)"
+    [[ ${img_format:-} == 0 || ${img_format:-} == 5 ]] || handleError "Invalid image format ($0)"
+    rootpxe_validate_pigz_compression "$pigz_comp" "${img_format:-${imgFormat:-}}" || handleError "Invalid compression value ($0)"
     [[ -z ${reply_mac:-} || $(rootpxe_normalize_mac "$reply_mac") == "$macWinSafe" ]] || handleError "Checkin MAC mismatch ($0)"
     taskType=${taskType:-${type:-}}; type=${pxe_type:-${type:-}}; pxeType=$type
     [[ $type == up || $type == down ]] || handleError "Invalid PXEOS direction ($0)"

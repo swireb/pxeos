@@ -39,7 +39,7 @@ sfdisk() { handleError 'unexpected native sfdisk'; }
 nvme() { handleError 'unexpected native nvme'; }
 lvm() { handleError 'unexpected native lvm'; }
 curl() { handleError 'unexpected network'; }
-for name in partitionIsDosExtended movePartition getFSID getValidRestorePartitions MBRFileName getPartBlockSize rootpxe_safe_relative_path calculate calculate_float getServerDiskSpaceSvailable sec2string restorePartition rootpxe_validate_deployment_layout findHDDInfo rootpxe_nvme_wait_for_cancel uploadFormat rootpxe_validate_windows_hostname getGraphics doInventory rootpxe_lvm_capture_preflight_single savePartitionTablesAndBootLoaders; do
+for name in partitionIsDosExtended movePartition getFSID getValidRestorePartitions MBRFileName getPartBlockSize rootpxe_safe_relative_path calculate calculate_float sec2string restorePartition rootpxe_validate_deployment_layout findHDDInfo rootpxe_nvme_wait_for_cancel uploadFormat rootpxe_validate_windows_hostname getGraphics doInventory rootpxe_lvm_capture_preflight_single savePartitionTablesAndBootLoaders; do
     load_function "$name" || exit 1
 done
 if grep -q '^rootpxe_effective_img_format() {' "$funcs"; then load_function rootpxe_effective_img_format; fi
@@ -140,16 +140,16 @@ test_fsid_invalid_dump() {
     done
 }
 test_restore_paths_reset() {
-    local image="$tmp/windows" osid=5 imgFormat=0 imgPartitionType=all win7partcnt=3
+    local image="$tmp/windows" osid=5 imgFormat=0 imgPartitionType=all
     mkdir -p "$image"
-    : >"$image/sys.img.000"; : >"$image/rec.img.000"
+    : >"$image/d1p1.img"; : >"$image/d1p3.img"
     getPartitions() { parts='/dev/mock1 /dev/mock2 /dev/mock3'; }
     getPartitionNumber() { part_number=${1##*[!0-9]}; }
     getValidRestorePartitions /dev/mock 1 "$image" ''
-    check_eq "$restoreparts" '/dev/mock1 /dev/mock3' 'missing rec.img.001 excludes only partition 2' || return 1
-    : >"$image/rec.img.001"
+    check_eq "$restoreparts" '/dev/mock1 /dev/mock3' 'missing single payload excludes only partition 2' || return 1
+    : >"$image/d1p2.img"
     getValidRestorePartitions /dev/mock 1 "$image" ''
-    check_eq "$restoreparts" '/dev/mock1 /dev/mock2 /dev/mock3' 'complete legacy artifacts'
+    check_eq "$restoreparts" '/dev/mock1 /dev/mock2 /dev/mock3' 'complete single-file artifacts'
 }
 test_printf_data() {
     local type=up mbrfile='' selected='' pbs='' expected="$tmp/100%backup/d1.mbr"
@@ -200,7 +200,7 @@ setup_restore_mocks() {
     writeImage() { printf '%s|%s\n' "$1" "$2" >"$tmp/restored"; }
 }
 test_restore_local_partition_number() {
-    local imgType=n imgFormat=0 imgLegacy='' imgPartitionType=2 osid=50 part_number=99
+    local imgType=mps imgFormat=0 imgPartitionType=2 osid=50 part_number=99
     mkdir -p "$tmp/selected"; : >"$tmp/selected/d1p2.img"
     setup_restore_mocks
     restorePartition /dev/mock2 1 "$tmp/selected" '' || return 1
@@ -212,17 +212,14 @@ test_restore_local_partition_number() {
     [[ ! -e $tmp/restored ]] || fail 'unselected partition restored'
 }
 test_effective_restore_format() {
-    local imgType=n imgFormat=0 imgLegacy=2 imgPartitionType=all osid=50 part_number=0
-    mkdir -p "$tmp/split"; : >"$tmp/split/d1p1.img.000"
+    local imgType=n imgFormat=0 imgPartitionType=all osid=50 part_number=0
+    mkdir -p "$tmp/current"; : >"$tmp/current/d1p1.img"
     setup_restore_mocks
     getPartitions() { parts=/dev/mock1; }
-    getValidRestorePartitions /dev/mock 1 "$tmp/split" ''
-    check_eq "$restoreparts" /dev/mock1 'legacy format selects split artifact' || return 1
-    restorePartition /dev/mock1 1 "$tmp/split" '' || return 1
-    check_eq "$(cat "$tmp/restored")" "$tmp/split/d1p1.img*|/dev/mock1" 'restore uses same effective format' || return 1
-    imgLegacy=0 imgFormat=2
-    getValidRestorePartitions /dev/mock 1 "$tmp/split" ''
-    check_eq "$restoreparts" '' 'legacy unsplit format overrides split imgFormat'
+    getValidRestorePartitions /dev/mock 1 "$tmp/current" ''
+    check_eq "$restoreparts" /dev/mock1 'current single artifact selected' || return 1
+    restorePartition /dev/mock1 1 "$tmp/current" '' || return 1
+    check_eq "$(cat "$tmp/restored")" "$tmp/current/d1p1.img|/dev/mock1" 'restore uses exact artifact'
 }
 test_layout_hash_early_gate() {
     local schemaHash='' schemaRevision=1 status item good_hash
@@ -278,29 +275,30 @@ test_nvme_countdown_elapsed() {
     check_eq "$mock_tick" 0 'zero countdown'
 }
 test_upload_compression_args() {
-    local imgType=n imgFormat=0 PIGZ_COMP='' writer_pids=() item status
+    local imgType=n imgFormat=0 PIGZ_COMP=-6 writer_pids=() item status
     : >"$tmp/capture-input"
     nproc() { printf '2\n'; }
     mkfifo() { : >"$tmp/fifo-called"; : >"$1"; }
     pigz() { printf '%s\n' "$#" >"$tmp/compressor-argc"; printf '%s\n' "$*" >"$tmp/compressor-args"; command cat; }
     zstdmt() { pigz "$@"; }
+    rootpxe_storage_write_payload() { command cat >"$1.000"; }
     uploadFormat "$tmp/capture-input" "$tmp/capture-output" || return 1
     wait "$rootpxe_last_writer_pid" || return 1
-    check_eq "$(cat "$tmp/compressor-argc")" 0 'empty gzip level uses compressor default' || return 1
+    check_eq "$(cat "$tmp/compressor-argc")" 1 'gzip level uses one parameter' || return 1
     PIGZ_COMP=-9
     uploadFormat "$tmp/capture-input" "$tmp/capture-output" || return 1
     wait "$rootpxe_last_writer_pid" || return 1
     check_eq "$(cat "$tmp/compressor-args")" -9 'single gzip level preserved' || return 1
-    imgFormat=5 PIGZ_COMP=-22
+    imgFormat=5 PIGZ_COMP=-9
     uploadFormat "$tmp/capture-input" "$tmp/capture-output" || return 1
     wait "$rootpxe_last_writer_pid" || return 1
-    check_eq "$(cat "$tmp/compressor-args")" '--rsyncable --ultra -22' 'single zstd level preserved' || return 1
-    imgFormat=3 PIGZ_COMP=-6
+    check_eq "$(cat "$tmp/compressor-args")" '--rsyncable -9' 'single zstd level preserved' || return 1
+    imgFormat=5 PIGZ_COMP=0
     rm -f "$tmp/compressor-argc"
     uploadFormat "$tmp/capture-input" "$tmp/uncompressed-output" || return 1
     wait "$rootpxe_last_writer_pid" || return 1
     [[ ! -e $tmp/compressor-argc ]] || fail 'uncompressed capture used compressor' || return 1
-    for item in '0|-10' '0|-6 --rsyncable' '5|-23' '5|--help' '3|-3 --help'; do
+    for item in '0|-10' '0|-6 --rsyncable' '5|-10' '5|--help' '5|-3 --help'; do
         IFS='|' read -r imgFormat PIGZ_COMP <<<"$item"
         rm -f "$tmp/fifo-called" "$tmp/compressor-argc"
         status=0; ( uploadFormat "$tmp/missing-fifo" "$tmp/invalid-output"; wait ) >/dev/null 2>&1 || status=$?
@@ -369,16 +367,15 @@ test_calculate_failure_status() {
     local expression
     check_eq "$(calculate '(1+2)*4')" 12 'integer arithmetic' || return 1
     check_eq "$(calculate_float '1/4')" 0.250000 'float arithmetic' || return 1
-    for expression in '' '1+' '1/0' 'system("false")' $'1\n+2' '1e3' "$(printf '1%.0s' {1..4097})"; do
+    for expression in '' '1+' 'system("false")' $'1\n+2' '1e3' "$(printf '1%.0s' {1..4097})"; do
         if calculate "$expression" >/dev/null 2>&1; then fail 'invalid integer arithmetic accepted'; return 1; fi
         if calculate_float "$expression" >/dev/null 2>&1; then fail 'invalid float arithmetic accepted'; return 1; fi
     done
-}
-test_storage_space_source_names() {
-    local source_name
-    df() { printf 'Avail\n12G\n'; printf '%s\n' "$*" >"$tmp/df-args"; }
-    check_eq "$(getServerDiskSpaceSvailable)" 12G 'targeted NFS/SMB available space' || return 1
-    [[ $(cat "$tmp/df-args") == *'/storage'* && $(cat "$tmp/df-args") == *'--output=avail'* ]] || fail 'df not limited to mounted storage available column'
+    # PXEOS uses gawk; host awk variants disagree about division-by-zero status.
+    # Inject a tool failure to test propagation independently of the host dialect.
+    awk() { return 9; }
+    if calculate '1/0' >/dev/null 2>&1; then fail 'integer arithmetic tool failure hidden'; return 1; fi
+    if calculate_float '1/0' >/dev/null 2>&1; then fail 'float arithmetic tool failure hidden'; return 1; fi
 }
 test_mbr_capture_done_once() {
     sfdiskPartitionFileName() { sfdiskoriginalpartitionfilename="$tmp/d1.partitions"; sfdiskminimumfilename="$tmp/d1.minimum.partitions"; }
@@ -414,7 +411,6 @@ run_case test_graphics_object_array
 run_case test_inventory_base64_bytes
 run_case test_lvm_probe_cleanup
 run_case test_calculate_failure_status
-run_case test_storage_space_source_names
 run_case test_mbr_capture_done_once
 printf 'script audit regression: %s cases, %s failures\n' "$cases" "$failures"
 (( failures == 0 ))
