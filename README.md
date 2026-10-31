@@ -172,14 +172,14 @@ PXEOS_BUILD_VERSION=Local-261014-0101 ./build.sh -nfa x64
 
 - 允许的值仅为 Release、Beta 或 Local 的上述日期时间格式，可选数字 run-id/attempt 后缀，总长度不超过 64 个 ASCII 字符；空值、空白、换行、旧纯日期号和其他内容会被拒绝。GitHub Actions 构建必须提供已选定的 Release/Beta 历史 tag；缺失、非法或 Local 值会在依赖安装、源码下载和构建前失败。
 
-- 运行时控制台与网络故障诊断统一显示镜像内的完整历史 tag；本地镜像显示本地版本号。控制台另外显示来自服务端 health 的协议号，不用来判断本机镜像版本。服务端内核配置页继续显示清单中的历史版本，因此只有使用同批次发布的内核/initramfs 和清单时才会一致。本修改须重新构建、发布并让客户端启动新 initramfs 后生效；已有制品和已启动的旧镜像不会因网页或 health 更新而自动改变版本号。
+- 运行时控制台与网络故障诊断统一显示镜像内的完整历史 tag；本地镜像显示本地版本号。控制台第二行显示来自服务端 health 的实际 RootPXE 软件版本，不能用 PXEOS 历史 tag 或协议号替代。该版本由根 `VERSION` 在构建时注入后端，再经 health 的 `serverVersion` 返回给客户端。服务端内核配置页继续显示清单中的历史版本，因此只有使用同批次发布的内核/initramfs 和清单时才会一致。本修改须同时更新服务端并重新构建、发布 PXEOS initramfs 后生效；已有制品和已启动的旧镜像不会因网页或 health 更新而自动改变版本号。
 
 ```text
 # 镜像版本显示
 PXEOS version: <完整历史 tag>
 Local-...
-# API 协议显示
-API version: 1
+# 服务端软件版本显示
+RootPXE version: <服务端实际版本>
 # 清单中的历史版本字段
 version
 ```

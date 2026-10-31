@@ -354,13 +354,25 @@ class WorkflowVersionTests(unittest.TestCase):
 
 
 class RuntimeVersionTests(unittest.TestCase):
-    def test_banner_keeps_the_local_token_separate_from_numeric_api_version(self) -> None:
+    def test_banner_keeps_the_local_token_separate_from_server_version(self) -> None:
         text = FUNCS.read_text(encoding="utf-8")
         console = text.split("rootpxe_console_message()", 1)[1].split("# Appends dots", 1)[0]
         console = "rootpxe_console_message()" + console
         banner = shell_function(text, "displayBanner")
         for local_version in ("Release-261014-0101-1234567890-2", "Beta-261014-0101", "Local-261014-0101", "unbuilt"):
-            for response, api in (("1", "1"), ('{"version":"1"}', "1"), ('{"version":1}', "1"), ('{"version":"Release-991231-2359"}', "unavailable")):
+            for response, server in (
+                ("1", "unavailable"),
+                ("{", "unavailable"),
+                ('{"version":"1"}', "unavailable"),
+                ('{"version":1}', "unavailable"),
+                ('{"version":"Release-991231-2359"}', "unavailable"),
+                ('{"version":"1","serverVersion":"1.0.0"}', "1.0.0"),
+                ('{"version":1,"serverVersion":"1.2.3"}', "1.2.3"),
+                ('{"version":"1","serverVersion":"dev"}', "dev"),
+                ('{"version":"1","serverVersion":""}', "unavailable"),
+                ('{"version":"1","serverVersion":"1/2"}', "unavailable"),
+                ('{"version":"1","serverVersion":"' + "A" * 65 + '"}', "unavailable"),
+            ):
                 with self.subTest(local=local_version, health=response):
                     result = subprocess.run(
                         [BASH, "-c", console + banner + '\ncurl() { printf "%s\\n" "$HEALTH_RESPONSE"; }; displayBanner\n'],
@@ -369,7 +381,8 @@ class RuntimeVersionTests(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("[INFO]  PXEOS version: " + local_version + "\n", result.stdout)
-                    self.assertIn("[INFO]  API version: " + api + "\n", result.stdout)
+                    self.assertIn("[INFO]  RootPXE version: " + server + "\n", result.stdout)
+                    self.assertNotIn("[INFO]  API version:", result.stdout)
                     self.assertNotIn("[INFO]  Version:", result.stdout)
                     self.assertNotIn("Init version:", result.stdout)
 
@@ -406,7 +419,7 @@ class RuntimeVersionTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("[INFO]  PXEOS version: Release-261014-0101-1234-2\n", result.stdout)
-        self.assertIn("[INFO]  API version: unavailable\n", result.stdout)
+        self.assertIn("[INFO]  RootPXE version: unavailable\n", result.stdout)
         self.assertIn("--connect-timeout 3", banner)
         self.assertIn("--max-time 5", banner)
 

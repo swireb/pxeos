@@ -3843,15 +3843,11 @@ clearScreen() {
 }
 # Displays the nice banner along with the running version
 displayBanner() {
-    local api_response api_version image_version="${initversion:-unavailable}"
-    # health 的 version 是 API 协议号，镜像发布号始终来自构建时嵌入的值。
+    local api_response server_version image_version="${initversion:-unavailable}"
+    # health 的 version 是 API 协议号；serverVersion 是服务端软件版本。
     api_response=$(curl -Lks --connect-timeout 3 --max-time 5 "${pxeapi:-${web:-}}health" 2>/dev/null) || api_response=''
-    if [[ $api_response =~ ^[0-9]+$ ]]; then
-        api_version=$api_response
-    else
-        api_version=$(sed -nE 's/.*"version"[[:space:]]*:[[:space:]]*"?([0-9]+)"?[[:space:]]*[,}].*/\1/p' <<<"$api_response")
-    fi
-    [[ ${#api_version} -le 16 && $api_version =~ ^[0-9]+$ ]] || api_version=unavailable
+    server_version=$(jq -r 'if (.serverVersion | type) == "string" then .serverVersion else "" end' <<<"$api_response" 2>/dev/null) || server_version=''
+    [[ ${#server_version} -le 64 && $server_version =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || server_version=unavailable
     if [[ $image_version != unbuilt ]] && ! [[ ${#image_version} -le 64 && $image_version =~ ^(Release|Beta|Local)-[0-9]{2}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])-([01][0-9]|2[0-3])[0-5][0-9](-[0-9]+-[0-9]+)?$ ]]; then
         image_version=unavailable
     fi
@@ -3871,7 +3867,7 @@ displayBanner() {
 EOF
 
     rootpxe_console_message INFO "PXEOS version: $image_version"
-    rootpxe_console_message INFO "API version: $api_version"
+    rootpxe_console_message INFO "RootPXE version: $server_version"
     printf '\n'
 }
 # Gets all system mac addresses except for loopback

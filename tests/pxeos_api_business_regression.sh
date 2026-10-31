@@ -1597,7 +1597,7 @@ must_fit "$(cat "$tmp/prompt.out")"
 (
     initversion=Release-261014-0101-1234-2
     pxeapi=https://example.invalid/service/
-    curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"; printf '{"version":"1"}\n'; }
+    curl() { task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"; printf '{"version":"1","serverVersion":"1.2.3"}\n'; }
     . "$tmp/console.sh"
     . "$tmp/banner.sh"
     displayBanner
@@ -1610,7 +1610,8 @@ while IFS= read -r line; do
     must_fit "$line"
 done <"$tmp/banner.out"
 grep -Fqx '[INFO]  PXEOS version: Release-261014-0101-1234-2' "$tmp/banner.out" || fail 'normal banner PXEOS version must use the embedded historical tag'
-grep -Fqx '[INFO]  API version: 1' "$tmp/banner.out" || fail 'normal banner API version must use a separate INFO row'
+grep -Fqx '[INFO]  RootPXE version: 1.2.3' "$tmp/banner.out" || fail 'normal banner must display the server software version'
+! grep -Fq '[INFO]  API version:' "$tmp/banner.out" || fail 'normal banner must not display the protocol version as software version'
 
 set +e
 (
