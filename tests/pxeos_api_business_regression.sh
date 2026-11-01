@@ -554,10 +554,14 @@ fi
 rm -rf "$mount"
 mkdir -p "$mount"
 make_linux_root() {
-    mkdir -p "$mount/etc" "$mount/usr/lib"
+    mkdir -p "$mount/etc" "$mount/usr/lib" "$mount/sbin"
     printf 'PXE-OLD\n' >"$mount/etc/hostname"
     printf '127.0.1.1 PXE-OLD old.example\n10.0.0.1 PXE-OLD.example\n# PXE-OLD comment\n' >"$mount/etc/hosts"
     printf 'NAME=mock\n' >"$mount/etc/os-release"
+    printf 'root:x:0:0:root:/root:/bin/sh\n' >"$mount/etc/passwd"
+    printf '#!/bin/sh\nexit 99\n' >"$mount/sbin/init"
+    /bin/chmod 755 "$mount" "$mount/etc" "$mount/usr" "$mount/usr/lib" "$mount/sbin" "$mount/sbin/init"
+    /bin/chmod 644 "$mount/etc/passwd"
 }
 case ${MODE:-} in
     linux_ext|linux_readback_fail|linux_symlink)
@@ -714,6 +718,14 @@ export PATH=$tmp/mock:$PATH
 ismajordebug=0
 isdebug=0
 . $tmp/funcs.sh
+# 根夹具属于当前用户；只替换其 Unix owner，保留真实模式和目标内链接解析。
+rootpxe_ci_stat() {
+    local info owner group mode links
+    info=$(stat -c '%u:%g:%a:%h' -- "$1") || return 1
+    IFS=: read -r owner group mode links <<<"$info"
+    [[ $1 != "$tmp/linuxroot" && $1 != "$tmp/linuxroot/"* ]] || { owner=0; group=0; }
+    printf '%s:%s:%s:%s\n' "$owner" "$group" "$mode" "$links"
+}
 . "$root/tests/storage-test-support.sh"
 storage_test_pipeline_boundaries
 . "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/deployment-identity.sh"

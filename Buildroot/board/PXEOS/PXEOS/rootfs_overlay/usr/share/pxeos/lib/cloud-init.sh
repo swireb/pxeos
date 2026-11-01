@@ -358,12 +358,25 @@ rootpxe_ci_mount_root() {
         rootpxe_ci_mount_matches "$ci_mounted_root" "$device" "$mode" || return 1
     fi
 }
+# 发行标记不是根身份；标准可启动 Linux 根须有真实 /etc、安全 passwd 和 init。
+# 返回 2 仅表示安全 /etc/passwd 已成立但 init 尚未解析，可补齐独立 /usr 再探测。
+rootpxe_linux_has_safe_root_structure() {
+    local root="$1" init info uid gid mode links
+    [[ -d $root/etc && ! -L $root/etc ]] || return 1
+    rootpxe_ci_resolve_target "$root" /etc/passwd file >/dev/null || return 1
+    init=$(rootpxe_ci_resolve_target "$root" /sbin/init file) || return 2
+    info=$(rootpxe_ci_stat "$init") || return 1
+    IFS=: read -r uid gid mode links <<<"$info"
+    # 检查目标文件的执行位；宿主挂载 noexec 不代表目标系统 init 不可执行。
+    (( (8#$mode & 0111) != 0 ))
+}
 rootpxe_cloud_init_probe_root_marker() {
-    local root="$1" path result=1 cleanup=0
+    local root="$1" result=1
     local -a ci_owned_mounts=() ci_vg_names=() ci_vg_uuids=() ci_vg_owned=()
-    for path in /etc/os-release /usr/lib/os-release; do rootpxe_ci_resolve_target "$root" "$path" file >/dev/null && return 0; done
+    if rootpxe_linux_has_safe_root_structure "$root"; then return 0; else result=$?; fi
+    [[ $result -eq 2 ]] || return 1
     if rootpxe_ci_mount_fstab "$root" /usr ro; then
-        for path in /etc/os-release /usr/lib/os-release; do rootpxe_ci_resolve_target "$root" "$path" file >/dev/null && result=0; done
+        if rootpxe_linux_has_safe_root_structure "$root"; then result=0; else result=1; fi
     else result=2; fi
     rootpxe_ci_cleanup_mounts || return 2
     return "$result"

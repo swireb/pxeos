@@ -86,6 +86,50 @@ rootpxe_ci_cleanup_mounts && fail 'unmount failure swallowed'
 [[ ${#ci_owned_mounts[@]} == 1 ]] || fail 'failed cleanup evidence discarded'
 printf 'PASS: independent readonly /usr probe, strict /var permissions, all VG PVs, shadowing fstab, borrowed/failed cleanup\n'
 
+# 真实根结构与 fstab 解析；目录交换只模拟独立 /usr 挂载，不执行 init。
+(
+    umask 022
+    . "$lib/cloud-init.sh"
+    system="$tmp/independent-usr-root" external_usr="$tmp/independent-usr-data"
+    mkdir -p "$system/etc" "$system/sbin" "$system/usr" "$external_usr/sbin"
+    : >"$system/etc/passwd"
+    printf '/dev/fixture-usr /usr ext4 defaults 0 2\n' >"$system/etc/fstab"
+    ln -s /usr/sbin/init "$system/sbin/init"
+    printf '#!/bin/sh\nexit 99\n' >"$external_usr/sbin/init"; chmod 755 "$external_usr/sbin/init"
+    rootpxe_ci_stat(){
+        local info owner group mode links
+        info=$(command stat -c '%u:%g:%a:%h' -- "$1") || return 1
+        IFS=: read -r owner group mode links <<<"$info"
+        printf '0:0:%s:%s\n' "$mode" "$links"
+    }
+    rootpxe_ci_fstab_device(){ [[ $1 == /dev/fixture-usr ]] && printf '%s\n' "$1"; }
+    rootpxe_ci_device_permitted(){ [[ ${usr_case:-} != denied && $1 == /dev/fixture-usr ]]; }
+    rootpxe_ci_mount_matches(){ [[ $usr_mounted == yes ]]; }
+    blkid(){ printf ext4; }
+    mountpoint(){ [[ ${@: -1} == "$system/usr" && $usr_mounted == yes ]]; }
+    mount(){
+        [[ ${usr_case:-} != mount-failed ]] || return 1
+        [[ $* == *'ro,noload'* ]] || fail 'independent /usr not mounted readonly without journal replay'
+        mv "$system/usr" "$system/hidden-usr"; mv "$external_usr" "$system/usr"; usr_mounted=yes
+    }
+    umount(){
+        [[ ${usr_case:-} != cleanup-failed ]] || return 1
+        mv "$system/usr" "$external_usr"; mv "$system/hidden-usr" "$system/usr"; usr_mounted=no
+    }
+    for usr_case in valid denied mount-failed cleanup-failed; do
+        usr_mounted=no
+        if rootpxe_cloud_init_probe_root_marker "$system"; then rc=0; else rc=$?; fi
+        if [[ $usr_case == valid ]]; then [[ $rc == 0 ]] || fail 'independent /usr root rejected'
+        else [[ $rc == 2 ]] || fail "independent /usr $usr_case did not propagate failure"; fi
+        if [[ $usr_case == cleanup-failed ]]; then
+            [[ $usr_mounted == yes ]] || fail 'failed cleanup lost mount state'
+            usr_case=cleanup; umount "$system/usr"
+        fi
+        [[ $usr_mounted == no ]] || fail 'independent /usr mount leaked'
+    done
+    printf 'PASS: release-independent root on separate readonly /usr, permit/mount/cleanup failures\n'
+)
+
 # Mount leaf substitutes expose a separate /var directory only while mounted.
 # The real ro/rw processor and installer must put boot config under root /etc.
 if [[ $EUID == 0 && $(uname -s) == Linux ]]; then

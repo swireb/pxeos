@@ -10,6 +10,68 @@ fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 case $(uname -s) in MINGW*|MSYS*) rootpxe_ci_fixture_jq=$(command -v jq.exe); jq(){ "$rootpxe_ci_fixture_jq" -b "$@"; };; esac
 . "$lib/cloud-init.sh"
 . "$lib/linux-hostname.sh"
+# 根目录使用普通文件；仅把夹具所有者映射为 root，保留真实权限、链接和路径解析。
+# 不执行夹具 init，不挂载文件系统，不依赖本机 root 权限。
+(
+    umask 022
+    rootpxe_ci_stat(){
+        local info owner group mode links
+        info=$(command stat -c '%u:%g:%a:%h' -- "$1") || return 1
+        IFS=: read -r owner group mode links <<<"$info"
+        [[ $1 != "$tmp/"* ]] || { owner=0; group=0; }
+        [[ $1 != "${unsafe_path:-}" ]] || owner=123
+        printf '%s:%s:%s:%s\n' "$owner" "$group" "$mode" "$links"
+    }
+    rootpxe_ci_mount_fstab(){ printf 'usr-probe\n' >>"$tmp/marker-mounts"; return 0; }
+    rootpxe_ci_cleanup_mounts(){ return 0; }
+    fixture_root="$tmp/marker-root"
+    mkdir -p "$fixture_root/etc" "$fixture_root/sbin" "$fixture_root/usr/lib"
+    printf 'root:x:0:0:root:/root:/bin/sh\n' >"$fixture_root/etc/passwd"
+    printf '#!/bin/sh\nexit 99\n' >"$fixture_root/sbin/init"
+    chmod 755 "$fixture_root/sbin/init"
+    # 与现场 CentOS 6 根一致：没有两处 os-release，仍应依据根结构入选。
+    rootpxe_cloud_init_probe_root_marker "$fixture_root" || fail 'standard Linux root without release marker rejected'
+    rootpxe_linux_has_safe_root_structure "$fixture_root" || fail 'generic root probe disagreed with permitted root probe'
+    printf 'NAME=modern\n' >"$fixture_root/etc/os-release"
+    rootpxe_cloud_init_probe_root_marker "$fixture_root" || fail 'modern Linux root rejected'
+    for target in ../usr/lib/systemd/systemd /usr/lib/systemd/systemd /bin/busybox; do
+        mkdir -p "$fixture_root/usr/lib/systemd" "$fixture_root/bin"
+        printf '#!/bin/sh\nexit 99\n' >"$fixture_root/usr/lib/systemd/systemd"
+        cp "$fixture_root/usr/lib/systemd/systemd" "$fixture_root/bin/busybox"
+        chmod 755 "$fixture_root/usr/lib/systemd/systemd" "$fixture_root/bin/busybox"
+        rm "$fixture_root/sbin/init"
+        ln -s "$target" "$fixture_root/sbin/init"
+        rootpxe_cloud_init_probe_root_marker "$fixture_root" || fail "target-root init link rejected: $target"
+    done
+    rm "$fixture_root/sbin/init"
+    rmdir "$fixture_root/sbin"
+    mkdir -p "$fixture_root/usr/sbin"
+    cp "$fixture_root/bin/busybox" "$fixture_root/usr/sbin/init"
+    ln -s usr/sbin "$fixture_root/sbin"
+    rootpxe_cloud_init_probe_root_marker "$fixture_root" || fail 'usr-merged /sbin directory rejected'
+    for case_name in release-only boot home usr no-passwd nonexecuting-init escape unsafe-owner writable-passwd; do
+        candidate="$tmp/marker-$case_name"
+        mkdir -p "$candidate/etc" "$candidate/sbin" "$candidate/usr/lib"
+        printf 'NAME=marker-only\n' >"$candidate/etc/os-release"
+        : >"$candidate/etc/passwd"
+        printf '#!/bin/sh\nexit 99\n' >"$candidate/sbin/init"; chmod 755 "$candidate/sbin/init"
+        unsafe_path=''
+        case $case_name in
+            release-only) rm "$candidate/etc/passwd" "$candidate/sbin/init";;
+            boot) rm -r "$candidate/etc" "$candidate/sbin" "$candidate/usr"; mkdir "$candidate/grub"; : >"$candidate/vmlinuz";;
+            home) rm -r "$candidate/etc" "$candidate/sbin" "$candidate/usr"; mkdir "$candidate/fixture-user";;
+            usr) rm -r "$candidate/etc" "$candidate/sbin" "$candidate/usr"; mkdir -p "$candidate/bin" "$candidate/lib/systemd"; cp "$fixture_root/bin/busybox" "$candidate/lib/systemd/systemd"; : >"$candidate/lib/os-release";;
+            no-passwd) rm "$candidate/etc/passwd";;
+            nonexecuting-init) chmod 644 "$candidate/sbin/init";;
+            escape) rm "$candidate/sbin/init"; ln -s ../../../../bin/sh "$candidate/sbin/init";;
+            unsafe-owner) unsafe_path="$candidate/etc/passwd";;
+            writable-passwd) chmod 666 "$candidate/etc/passwd";;
+        esac
+        rootpxe_cloud_init_probe_root_marker "$candidate" && fail "accepted false/unsafe root: $case_name"
+        rootpxe_linux_has_safe_root_structure "$candidate" && fail "generic accepted false/unsafe root: $case_name"
+    done
+    printf 'PASS: release-independent root structure, init links and false/unsafe roots\n'
+)
 for fn in rootpxe_find_linux_root_filesystem rootpxe_linux_validate_vg_target_pvs rootpxe_linux_activate_vg_if_needed rootpxe_linux_lvs_for_vg_json rootpxe_linux_cleanup_selected_vg; do
     eval "$(sed -n "/^$fn() {\$/,/^}\$/p" "$lib/funcs.sh")"
 done

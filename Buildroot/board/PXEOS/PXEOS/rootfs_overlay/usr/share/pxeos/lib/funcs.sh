@@ -5031,28 +5031,6 @@ rootpxe_linux_mount_options() {
     esac
 }
 
-# An image may contain symlinks.  Do not let a regular read of os-release
-# follow an absolute or escaping link outside the mounted target root.  Relative
-# /etc/os-release -> ../usr/lib/os-release remains valid when it resolves
-# inside that target root.
-rootpxe_linux_has_safe_os_release() {
-    local mountpoint="$1" path resolved target
-    for path in "$mountpoint/etc/os-release" "$mountpoint/usr/lib/os-release"; do
-        [[ -e $path || -L $path ]] || continue
-        if [[ -L $path ]]; then
-            target=$(readlink "$path" 2>/dev/null) || continue
-            [[ $target != /* ]] || continue
-            resolved=$(readlink -f "$path" 2>/dev/null) || continue
-            case $resolved in
-                "$mountpoint"/*) [[ -f $resolved ]] && return 0 ;;
-            esac
-        elif [[ -f $path ]]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
 rootpxe_linux_probe_root_candidate() {
     local device="$1" fstype="$2" vg_name="${3:-}" vg_uuid="${4:-}" subvolid="${5:-}" mountpoint=/linuxroot options candidate=""
     [[ -z ${rootpxe_linux_probe_mountpoint:-} ]] || mountpoint="$rootpxe_linux_probe_mountpoint"
@@ -5073,7 +5051,7 @@ rootpxe_linux_probe_root_candidate() {
                 if [[ $marker_rc -ne 1 ]]; then umount "$mountpoint" >/dev/null 2>&1 || return 2; return 3; fi
             fi
         else
-            rootpxe_linux_has_safe_os_release "$mountpoint" && marker_result=0
+            rootpxe_linux_has_safe_root_structure "$mountpoint" && marker_result=0
         fi
     fi
     if [[ $marker_result -eq 0 ]]; then
