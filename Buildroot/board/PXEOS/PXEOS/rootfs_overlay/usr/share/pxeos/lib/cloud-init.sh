@@ -239,14 +239,14 @@ rootpxe_ci_fstab_device() {
             identifier=${source#*=}
             if [[ $identifier == \"*\" ]]; then identifier=${identifier:1:${#identifier}-2}; fi
             [[ $identifier =~ ^[A-Za-z0-9._:-]+$ ]] || return 1
-            if [[ $source == UUID=* ]]; then device=$(blkid -U "$identifier" 2>/dev/null) || return 1; else device=$(blkid -t "PARTUUID=$identifier" -o device 2>/dev/null) || return 1; fi
+            if [[ $source == UUID=* ]]; then device=$(blkid -U "$identifier" 2>/dev/null) || return 2; else device=$(blkid -t "PARTUUID=$identifier" -o device 2>/dev/null) || return 2; fi
             ;;
         /dev/*) device="$source";;
         *) return 1;;
     esac
     [[ $device == /dev/* && $device != *$'\n'* && $device != *$'\r'* ]] || return 1
-    device=$(readlink -f -- "$device") || return 1
-    rootpxe_ci_device_is_block "$device" || return 1
+    device=$(readlink -f -- "$device") || return 2
+    rootpxe_ci_device_is_block "$device" || return 2
     printf '%s\n' "$device"
 }
 rootpxe_ci_device_permitted() {
@@ -263,7 +263,7 @@ rootpxe_ci_device_permitted() {
     rootpxe_lvm_json_jq -e '.report|type=="array" and length==1 and (.[0].lv|type=="array") and all(.[0].lv[]; (.lv_path|type=="string") and (.vg_name|type=="string") and (.vg_uuid|type=="string"))' <<<"$rows" >/dev/null || return 1
     while IFS=$'\t' read -r lv name uuid; do
         [[ -n $lv && -n $name && -n $uuid ]] || return 1
-        resolved=$(readlink -f -- "$lv") || return 1
+        resolved=$(readlink -f -- "$lv") || continue
         [[ $resolved == "$device" ]] || continue
         if [[ $match -gt 0 ]]; then [[ $name == "$selected_name" && $uuid == "$selected_uuid" ]] || return 1; else selected_name="$name"; selected_uuid="$uuid"; fi
         match=$((match + 1))
@@ -284,7 +284,8 @@ rootpxe_ci_mount_matches() {
     [[ ,$options, == *",$mode,"* ]]
 }
 rootpxe_ci_mount_fstab() {
-    local root="$1" requested="$2" mode="$3" source target declared options rest count=0 selected_source="" selected_fs="" device fs mount_options path
+    local root="$1" requested="$2" mode="$3" source target declared options rest count=0 selected_source="" selected_fs="" device fs mount_options path rc rows name uuid owned disk
+    local -A attempted_vgs=()
     [[ $requested == /var || $requested == /usr ]] || return 1
     rootpxe_ci_safe_write_directory "$root" "$requested" || return 1
     if [[ $requested == /var ]]; then
@@ -309,7 +310,33 @@ rootpxe_ci_mount_fstab() {
         ! mountpoint -q "$root$requested" 2>/dev/null
         return $?
     fi
-    device=$(rootpxe_ci_fstab_device "$selected_source") || return 1
+    if device=$(rootpxe_ci_fstab_device "$selected_source"); then :
+    else
+        rc=$?
+        [[ $rc -eq 2 && $selected_source != PARTUUID=* && -n ${rootpxe_cloud_init_allowed_disks:-} ]] || return 1
+        # 独立 usr/var 可在尚未激活的另一 VG。仅解析失败才尝试完整许可的 VG；
+        # UUID 无法从 inactive LV 静态定位，逐组尝试，设备路径只筛匹配 LV。
+        rows=$(rootpxe_lvm_native lvs --reportformat json -o lv_path,lv_name,vg_name,vg_uuid 2>/dev/null) || return 1
+        rootpxe_lvm_json_jq -e '.report|type=="array" and length==1 and (.[0].lv|type=="array") and all(.[0].lv[]; (.lv_path|type=="string") and (.lv_name|type=="string") and (.vg_name|type=="string" and length>0) and (.vg_uuid|type=="string" and length>0))' <<<"$rows" >/dev/null || return 1
+        disk=${rootpxe_cloud_init_allowed_disks%% *}
+        while IFS=$'\t' read -r name uuid; do
+            [[ -z ${attempted_vgs[$uuid]:-} ]] || continue
+            attempted_vgs[$uuid]=yes
+            if owned=$(rootpxe_linux_activate_vg_if_needed "$disk" "$name" "$uuid"); then
+                # 当前 shell 记录 ownership，禁止放进 device=$(...) 后丢失清理信息。
+                if [[ $owned == yes ]]; then ci_vg_names+=("$name"); ci_vg_uuids+=("$uuid"); ci_vg_owned+=("yes"); fi
+            else
+                rc=$?
+                [[ $rc -ne 2 ]] || continue
+                return 1
+            fi
+            if device=$(rootpxe_ci_fstab_device "$selected_source"); then break; fi
+        done < <(rootpxe_lvm_json_jq -r --arg source "$selected_source" '.report[0].lv[] |
+            select(($source|startswith("UUID=")) or .lv_path==$source or
+                ("/dev/mapper/"+(.vg_name|gsub("-";"--"))+"-"+(.lv_name|gsub("-";"--")))==$source) |
+            [.vg_name,.vg_uuid]|@tsv' <<<"$rows")
+        [[ -n $device ]] || return 1
+    fi
     rootpxe_ci_device_permitted "$device" || return 1
     fs=$(blkid -s TYPE -o value "$device" 2>/dev/null) || return 1
     [[ $fs == "$selected_fs" ]] || return 1

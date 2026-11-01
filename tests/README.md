@@ -165,7 +165,7 @@ bash tests/pxeos_windows_hostname_native_regression.sh
 bash tests/pxeos_windows_initialization_regression.sh
 ```
 
-## 原生 Cloud-init（5）
+## 原生 Cloud-init（6）
 
 - 脚本及核对范围如下。
 
@@ -175,6 +175,7 @@ pxeos_cloud_init_permit_regression.sh  # 真实首次单盘和MPA许可与source
 pxeos_cloud_init_seed_regression.sh  # 普通文件覆盖两/三/四文件原始字节、旧内容/半成文件补齐、空用户正文、可选旧文件删除、缓存/其他seed/未知文件保留；NoCloud单行配置/root0644/缺目录自动创建，公用路径安全、预装/禁用、写入失败及重试、SELinux配置和工具不参与流程。
 pxeos_cloud_init_mounts_regression.sh  # 设备边界替身覆盖独立usr/var、全部PV与挂载身份/借用清理；目录交换验证独立usr中的init根结构及许可/挂载/清理失败，独立var seed与根etc配置位置，以及拒绝etc/Cloud配置遮盖但允许无关resolv.conf条目。
 pxeos_cloud_init_roots_regression.sh  # 普通目录验证有/无release的安全passwd/init根结构、目标内init与usr-merge链接、拒绝boot/home/usr/release-only及不安全根；Cloud注入与离线名称共用真实根发现/全部PV许可，同根去重，拒绝不同根、身份冲突及未许可PV。
+pxeos_linux_root_chain_regression.sh  # ordinary/lvm/usr/negative四组逐项输出CASE与计数；串联真实枚举、候选探测、安全根结构、独立usr和唯一选择器，只替换设备事实/LVM报告/mount叶边界与普通夹具owner。覆盖ext2/3/4/XFS、实际init/链接差异、多PV、跨VG usr的设备/UUID/mapper、PARTUUID、无关inactive VG及许可/清理失败；四组须分别受限串行运行。
 ```
 
 - 上述 fixture 不执行目标 Cloud-init、user-data、真实磁盘、真实 mount 或 LVM。MSYS 使用明确的 Unix 属主/模式替身，Windows 原生符号链接可能因权限拒绝而跳过；SELinux 相关命令使用失败且记录调用的替身，确认初始化不调用它们；不代表真实目标已关闭 SELinux 或已验证首启。
