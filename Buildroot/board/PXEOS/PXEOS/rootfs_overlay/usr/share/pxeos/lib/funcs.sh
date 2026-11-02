@@ -15,6 +15,7 @@ rootpxe_source_core_library capture-recovery.sh || return 1
 rootpxe_source_core_library deployment-identity.sh || return 1
 rootpxe_source_core_library cloud-init.sh || return 1
 rootpxe_source_core_library linux-hostname.sh || return 1
+rootpxe_source_core_library uefi-boot.sh || return 1
 rootpxe_source_core_library task-http.sh || return 1
 rootpxe_message_format_lib=/usr/share/pxeos/lib/message-format.sh
 [[ -r $rootpxe_message_format_lib ]] || rootpxe_message_format_lib="$(dirname "${BASH_SOURCE[0]}")/message-format.sh"
@@ -5964,6 +5965,7 @@ completeTasking() {
 				rootpxe_deployment_identity_report_result "${rootpxe_deployment_identity_hostname_result:-false}" "${rootpxe_deployment_identity_sysprep_result:-false}" "${rootpxe_deployment_identity_cloud_init_result:-false}" || handleError "PXEOS_STAGE=deployment_identity_result CODE=IDENTITY_RESULT_REJECTED"
             fi
             rootpxe_deployment_identity_cleanup_private
+            rootpxe_prepare_uefi_boot ${disks:-${hd:-}}
             . /bin/pxeos.imgcomplete
             ;;
     esac

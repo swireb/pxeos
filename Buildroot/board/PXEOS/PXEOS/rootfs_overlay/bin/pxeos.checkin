@@ -241,6 +241,15 @@ rootpxe_apply_json_checkin() {
     rootpxe_json_assign_text "$document" img_type '.imgType // .img_type' || return 1
     rootpxe_json_assign_text "$document" img_partition_type '.imgPartitionType // .img_partition_type' || return 1
     rootpxe_json_assign "$document" osid '.osid' || return 1
+    # 兼容旧响应缺字段；真正部署收尾会明确报告缺少引导元信息。
+    imageBootMode='' imageArch=''
+    if [[ $taskType == deploy && $osid == 50 ]]; then
+        jq -e '((has("imageBootMode")|not) or (.imageBootMode|IN("BIOS","UEFI"))) and
+          ((has("imageArch")|not) or (.imageArch|IN("amd64","i386","arm64")))' <<<"$document" >/dev/null || return 1
+        rootpxe_json_assign_text "$document" imageBootMode '.imageBootMode // ""' || return 1
+        rootpxe_json_assign_text "$document" imageArch '.imageArch // ""' || return 1
+    fi
+    export imageBootMode imageArch
     rootpxe_json_assign "$document" img_format '.imgFormat // .img_format' || return 1
     rootpxe_json_assign "$document" pigz_comp '.compressionLevel' || return 1
     rootpxe_json_assign "$document" shutdown '.shutdown' || return 1

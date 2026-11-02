@@ -32,6 +32,7 @@ cp "$(dirname "$funcs")/storage-io.sh" "$tmp/storage-io.sh"
 cp "$(dirname "$funcs")/capture-direct.sh" "$tmp/capture-direct.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-hostname.sh" "$tmp/linux-hostname.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/uefi-boot.sh" "$tmp/uefi-boot.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" "$tmp/log-paths.sh"
 set +u; source "$tmp/funcs.sh"; set -u
 . "$root/tests/storage-test-support.sh"
@@ -116,6 +117,7 @@ cp "$(dirname "$funcs")/storage-io.sh" "$tmp/storage-io.sh"
 cp "$(dirname "$funcs")/capture-direct.sh" "$tmp/capture-direct.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-hostname.sh" "$tmp/linux-hostname.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/uefi-boot.sh" "$tmp/uefi-boot.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" "$tmp/log-paths.sh"
 set +u; source "$tmp/bcd-funcs.sh"; set -u
 osid=7; fsTypeSetting() { fstype=ntfs; }; ntfs-3g() { :; }; umount() { :; }; dots() { :; }; debugPause() { :; }; handleError() { return 1; }

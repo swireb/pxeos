@@ -9,6 +9,7 @@ if [[ ${rootpxe_storage_only:-no} == yes ]]; then
 fi
 rootpxe_download_cleanup_initialization_private() {
     killStatusReporter
+    rootpxe_uefi_cleanup
     rootpxe_cleanup_session
 }
 # The private initialization payload remains needed through finish reporting,
@@ -147,6 +148,7 @@ if [[ ${resumeStage:-} == customizing_hostname || ${resumeStage:-} == cloud_init
         rootpxe_deployment_identity_report_result "${rootpxe_deployment_identity_hostname_result:-false}" "${rootpxe_deployment_identity_sysprep_result:-false}" "${rootpxe_deployment_identity_cloud_init_result:-false}" || handleError 'PXEOS_STAGE=deployment_identity_result CODE=IDENTITY_RESULT_REJECTED'
     fi
     rootpxe_deployment_identity_cleanup_private
+    rootpxe_prepare_uefi_boot ${disks:-${hd:-}}
     . /bin/pxeos.imgcomplete
     exit 0
 fi

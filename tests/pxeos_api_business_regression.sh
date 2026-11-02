@@ -84,6 +84,22 @@ storage_test_apply_json_checkin "$flat_smb" || fail '平铺 SMB JSON 在 v2 校�
 export -p | grep -q 'smb_\(username\|password\|domain\)' && fail 'SMB 凭据不得导出到子进程环境'
 [[ ! -v captureBackupName ]] || fail 'checkin 不应设置已退役的捕获备份字段'
 
+# 新服务端元信息只约束Linux部署，旧checkin缺字段仍可解析。
+linux_boot=$(jq '.type="deploy" | .pxeType="down" | .osid=50 | .imageBootMode="UEFI" | .imageArch="amd64"' <<<"$flat_smb")
+storage_test_apply_json_checkin "$linux_boot" || fail 'Linux UEFI元信息被拒绝'
+[[ $imageBootMode == UEFI && $imageArch == amd64 ]] || fail 'Linux引导元信息未保存'
+legacy_boot=$(jq 'del(.imageBootMode,.imageArch)' <<<"$linux_boot")
+storage_test_apply_json_checkin "$legacy_boot" || fail '旧Linux checkin缺引导字段应可解析'
+[[ -z $imageBootMode && -z $imageArch ]] || fail '旧checkin继承引导字段'
+for invalid in 'UEFI/invalid' 'invalid/amd64'; do
+    bad_boot=$(jq --arg mode "${invalid%/*}" --arg arch "${invalid#*/}" '.imageBootMode=$mode | .imageArch=$arch' <<<"$linux_boot")
+    storage_test_apply_json_checkin "$bad_boot" && fail 'Linux非法引导字段被接受'
+done
+windows_boot=$(jq '.osid=9 | .imageBootMode={} | .imageArch=[]' <<<"$linux_boot")
+storage_test_apply_json_checkin "$windows_boot" || fail 'Windows受新Linux字段约束'
+[[ -z $imageBootMode && -z $imageArch ]] || fail 'Windows进入Linux元信息流程'
+storage_test_apply_json_checkin "$flat_smb" || fail '恢复捕获夹具失败'
+
 # 原生 Cloud-init 的私有正文形状/原字节由专属协议 fixture 覆盖。
 . "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh"
 . "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-hostname.sh"
@@ -695,6 +711,7 @@ cp "$overlay/usr/share/pxeos/lib/partclone-progress.sh" "$tmp/partclone-progress
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/task-http.sh" "$tmp/task-http.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/cloud-init.sh" "$tmp/cloud-init.sh"
 cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/linux-hostname.sh" "$tmp/linux-hostname.sh"
+cp "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/uefi-boot.sh" "$tmp/uefi-boot.sh"
 cp "$overlay/usr/share/pxeos/lib/capture-direct.sh" "$tmp/capture-direct.sh"
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"
 printf '\nif declare -F task_log_test_emulate_pin_flags >/dev/null; then task_log_test_emulate_pin_flags; fi\n' >>"$tmp/log-paths.sh"

@@ -27,6 +27,7 @@ cp "$(dirname "$funcs")/storage-io.sh" "$tmp/storage-io.sh"
 cp "$(dirname "$funcs")/capture-direct.sh" "$tmp/capture-direct.sh"
 cp "$(dirname "$funcs")/cloud-init.sh" "$tmp/cloud-init.sh"
 cp "$(dirname "$funcs")/linux-hostname.sh" "$tmp/linux-hostname.sh"
+cp "$(dirname "$funcs")/uefi-boot.sh" "$tmp/uefi-boot.sh"
 download_functions="$tmp/download-functions.sh"
 awk '/^preparePartitions\(\)/,/^findHDDInfo$/{ if ($0 ~ /^findHDDInfo$/) exit; print }' "$download" >"$download_functions"
 set +u; source "$test_funcs"; set -u

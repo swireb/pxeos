@@ -52,7 +52,8 @@
     "cancelled": "任务已取消",
     "superseded": "任务已替换",
     "aborted": "任务已终止",
-    "storage": "连接镜像存储"
+    "storage": "连接镜像存储",
+    "uefi_boot": "UEFI启动项"
   },
   "codes": {
     "CAPTURE_BINDING_CHANGED": "抓取磁盘绑定已变化",
@@ -266,7 +267,9 @@
     "STORAGE_SMB_MOUNT_FAILED": "挂载 SMB 镜像存储失败",
     "STORAGE_SMB_VERSION_INVALID": "SMB 存储协议版本无效",
     "STORAGE_TASK_TYPE_INVALID": "存储任务类型无效",
-    "STORAGE_WRITE_PREPARE_FAILED": "准备写入镜像存储失败"
+    "STORAGE_WRITE_PREPARE_FAILED": "准备写入镜像存储失败",
+    "UEFI_BOOT_REGISTRATION_FAILED": "UEFI启动项登记失败",
+    "UEFI_BOOT_METADATA_MISSING": "服务端未提供镜像引导信息"
   },
   "reasons": {
     "capture_binding_not_confirmed": "抓取磁盘绑定未确认",
@@ -388,7 +391,28 @@
     "unable_to_start_partclone_stderr_decoder": "无法启动进度读取",
     "unsafe_or_unavailable_output_parent": "镜像保存目录不可用",
     "unsafe_finalize_state": "镜像整理状态未通过检查",
-    "boot_code_metadata_invalid": "引导信息无效"
+    "boot_code_metadata_invalid": "引导信息无效",
+    "uefi_boot_metadata_missing": "服务端未提供镜像引导信息",
+    "uefi_boot_mode_mismatch": "镜像需要UEFI启动环境",
+    "uefi_boot_firmware_arch_mismatch": "UEFI固件架构不匹配",
+    "uefi_boot_variables_unavailable": "无法访问UEFI固件变量",
+    "uefi_boot_variables_readonly": "UEFI固件变量只读",
+    "uefi_boot_target_binding_changed": "目标磁盘身份已改变",
+    "uefi_boot_partition_metadata_invalid": "无法读取目标分区信息",
+    "uefi_boot_esp_filesystem_unsupported": "EFI系统分区不是FAT文件系统",
+    "uefi_boot_esp_mount_failed": "无法只读访问EFI系统分区",
+    "uefi_boot_esp_missing": "目标磁盘缺少EFI系统分区",
+    "uefi_boot_loader_invalid": "EFI加载器格式无效",
+    "uefi_boot_loader_arch_mismatch": "EFI加载器架构不匹配",
+    "uefi_boot_loader_unknown": "无法识别EFI加载器",
+    "uefi_boot_loader_ambiguous": "无法确定EFI加载器",
+    "uefi_boot_loader_missing": "目标系统缺少EFI加载器",
+    "uefi_boot_entry_create_failed": "UEFI启动项创建失败",
+    "uefi_boot_entry_activate_failed": "UEFI启动项激活失败",
+    "uefi_boot_order_update_failed": "UEFI启动顺序更新失败",
+    "uefi_boot_entry_readback_failed": "UEFI启动项读回不一致",
+    "uefi_boot_workspace_failed": "无法准备UEFI检查目录",
+    "uefi_boot_cleanup_failed": "UEFI检查挂载清理失败"
   },
   "messages": {
     "Task queued by RootPXE": "任务已排队",
@@ -448,7 +472,9 @@
     "Cloud-init configuration installed": "Cloud-init 配置写入完成",
     "captured image finalized": "镜像文件整理完成",
     "finish: completed": "任务完成",
-    "PXEOS 执行异常": "执行异常"
+    "PXEOS 执行异常": "执行异常",
+    "checking UEFI boot entry": "正在检查UEFI启动项",
+    "UEFI boot entry verified": "UEFI启动项检查完成"
   },
   "contextReasons": [
     "target_write_not_started",
@@ -579,7 +605,8 @@
       "cancelled": "Task cancelled",
       "superseded": "Task replaced",
       "aborted": "Task stopped",
-      "storage": "Connecting image storage"
+      "storage": "Connecting image storage",
+      "uefi_boot": "UEFI boot entry"
     },
     "codes": {
       "CAPTURE_BINDING_CHANGED": "Capture disk binding changed",
@@ -793,7 +820,9 @@
       "STORAGE_SMB_MOUNT_FAILED": "SMB image storage mount failed",
       "STORAGE_SMB_VERSION_INVALID": "Invalid SMB storage protocol version",
       "STORAGE_TASK_TYPE_INVALID": "Invalid storage task type",
-      "STORAGE_WRITE_PREPARE_FAILED": "Storage write preparation failed"
+      "STORAGE_WRITE_PREPARE_FAILED": "Storage write preparation failed",
+      "UEFI_BOOT_REGISTRATION_FAILED": "UEFI boot entry registration failed",
+      "UEFI_BOOT_METADATA_MISSING": "Image boot metadata is missing"
     },
     "reasons": {
       "capture_binding_not_confirmed": "Capture disk binding was not confirmed",
@@ -915,7 +944,28 @@
       "unable_to_start_partclone_stderr_decoder": "Progress reader could not be started",
       "unsafe_or_unavailable_output_parent": "Image output directory is unavailable",
       "unsafe_finalize_state": "Image finalization state did not pass checks",
-      "boot_code_metadata_invalid": "Boot metadata is invalid"
+      "boot_code_metadata_invalid": "Boot metadata is invalid",
+      "uefi_boot_metadata_missing": "Image boot metadata is missing",
+      "uefi_boot_mode_mismatch": "Image requires UEFI firmware",
+      "uefi_boot_firmware_arch_mismatch": "UEFI firmware architecture does not match",
+      "uefi_boot_variables_unavailable": "UEFI firmware variables are unavailable",
+      "uefi_boot_variables_readonly": "UEFI firmware variables are read only",
+      "uefi_boot_target_binding_changed": "Target disk identity changed",
+      "uefi_boot_partition_metadata_invalid": "Target partition metadata is unavailable",
+      "uefi_boot_esp_filesystem_unsupported": "EFI system partition is not FAT",
+      "uefi_boot_esp_mount_failed": "EFI system partition cannot be mounted read only",
+      "uefi_boot_esp_missing": "Target disk has no EFI system partition",
+      "uefi_boot_loader_invalid": "EFI loader format is invalid",
+      "uefi_boot_loader_arch_mismatch": "EFI loader architecture does not match",
+      "uefi_boot_loader_unknown": "EFI loader is not recognized",
+      "uefi_boot_loader_ambiguous": "EFI loader selection is ambiguous",
+      "uefi_boot_loader_missing": "Target system has no EFI loader",
+      "uefi_boot_entry_create_failed": "UEFI boot entry creation failed",
+      "uefi_boot_entry_activate_failed": "UEFI boot entry activation failed",
+      "uefi_boot_order_update_failed": "UEFI boot order update failed",
+      "uefi_boot_entry_readback_failed": "UEFI boot entry readback does not match",
+      "uefi_boot_workspace_failed": "UEFI inspection workspace is unavailable",
+      "uefi_boot_cleanup_failed": "UEFI inspection mount cleanup failed"
     },
     "messages": {
       "Task queued by RootPXE": "Task queued",
@@ -975,7 +1025,9 @@
       "Cloud-init configuration installed": "Cloud-init configuration installed",
       "captured image finalized": "Captured image finalized",
       "finish: completed": "Task completed",
-      "PXEOS 执行异常": "Operation failed; check task log"
+      "PXEOS 执行异常": "Operation failed; check task log",
+      "checking UEFI boot entry": "checking UEFI boot entry",
+      "UEFI boot entry verified": "UEFI boot entry verified"
     }
   }
 }

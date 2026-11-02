@@ -16,7 +16,7 @@ test_funcs="$tmp/funcs.sh"
 # ordinary-file tests do not call that companion, so remove only this import.
 sed -e '/partition-funcs\.sh/d' -e '/restore-preflight\.sh/d' -e '/capture-recovery\.sh/d' "$funcs" >"$test_funcs"
 cp "$progress_lib" "$tmp/partclone-progress.sh"
-for library in cloud-init.sh linux-hostname.sh deployment-identity.sh task-http.sh; do
+for library in cloud-init.sh linux-hostname.sh uefi-boot.sh deployment-identity.sh task-http.sh; do
     cp "${funcs%/*}/$library" "$tmp/$library"
 done
 sed "s|/tmp/log|$tmp/log|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/log-paths.sh" >"$tmp/log-paths.sh"

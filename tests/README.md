@@ -271,3 +271,13 @@ bash tests/pxeos_task_identity_regression.sh
 `pxeos_checkin_format_regression.sh` 以真实 JSON parser 验证 0 保留、退役格式及非法级别拒绝，存储清理专用响应不要求镜像编解码字段。
 
 `pxeos_single_payload_regression.sh` 运行真实 LVM 捕获叶函数和 DD 捕获分支，仅模拟设备/Partclone，验证超过 200 MiB 的 LVM 数据不会截断且 DD 最终文件名与恢复一致。
+
+## Linux UEFI 启动项回归
+
+- 下列套件覆盖加载器与架构、GPT/MBR 身份、原条目复用、激活和启动顺序、NVRAM 失败、正常及初始化续跑完成门槛与退出清理。Windows、其它系统和 BIOS 跳过新逻辑。
+
+```shell
+/home/sysadmin/.codex/bin/codex-build-test bash tests/pxeos_uefi_boot_regression.sh
+```
+
+- 使用自包含合成 PE 头、真实普通目录、固件文本和有状态命令叶替身，不挂载本机设备或写入真实 NVRAM；不等同于真实 FAT16/32、Secure Boot 或固件首启验证。后端另覆盖 Linux 专用返回链、受管理旧脚本升级和自定义脚本保留。

@@ -32,6 +32,7 @@ for name in rootpxe_register_derived_layout_file rootpxe_cleanup_derived_layout_
 done
 if [[ -r $overlay/usr/share/pxeos/lib/task-http.sh ]]; then . "$overlay/usr/share/pxeos/lib/task-http.sh"; fi
 . "$overlay/usr/share/pxeos/lib/cloud-init.sh"
+. "$overlay/usr/share/pxeos/lib/uefi-boot.sh"
 
 test_smb_umask_traps() {
     local protocol=smb smb_username=fixture-user smb_password=fixture-password smb_domain='' before_mask before_trap
