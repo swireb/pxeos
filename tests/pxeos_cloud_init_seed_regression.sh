@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 022
 export MSYS=winsymlinks:nativestrict
 root=$(cd "$(dirname "$0")/.." && pwd)
 lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib"
@@ -72,6 +73,22 @@ assert_nocloud_config(){
     printf 'datasource_list: [NoCloud]\n' | cmp -s - "$config" || fail 'NoCloud boot config bytes changed'
     [[ $(rootpxe_ci_stat "$config") == 0:0:644:1 ]] || fail 'NoCloud boot config metadata'
 }
+# 真实Unix元数据：既有cloud.cfg不属于注入写入目标。
+if [[ $(uname -s):$EUID == Linux:0 ]]; then
+    for links in single hardlink; do
+        fixture "existing-cloudcfg-0664-$links"
+        cfg="$target/etc/cloud/cloud.cfg"
+        chmod 664 "$cfg"
+        [[ $links != hardlink ]] || ln "$cfg" "$tmp/cloudcfg-existing-link"
+        before=$(stat -c '%u:%g:%a:%h:%d:%i:%s:%Y:%Z' "$cfg")
+        [[ $before == 0:0:664:* ]] || fail '0664 cloud.cfg fixture does not have real root metadata'
+        before_hash=$(rootpxe_ci_hash "$cfg")
+        rootpxe_cloud_init_install_at_root "$target" || fail "existing 0664 cloud.cfg $links rejected: $rootpxe_cloud_init_error"
+        [[ $(stat -c '%u:%g:%a:%h:%d:%i:%s:%Y:%Z' "$cfg") == "$before" && $(rootpxe_ci_hash "$cfg") == "$before_hash" ]] || fail 'existing cloud.cfg bytes or metadata changed'
+        assert_nocloud_config
+        printf 'PASS: existing cloud.cfg 0664 %s preserved bytes and metadata\n' "$links"
+    done
+else printf 'SKIP: real root-owned 0664 cloud.cfg fixtures require Linux root\n'; fi
 for shape in two network vendor four; do
     case $shape in two) fixture "$shape";; network) network_fixture "$shape";; vendor) vendor_fixture "$shape";; four) four_fixture "$shape";; esac
     rootpxe_cloud_init_install_at_root "$target" || fail "$shape injection"
@@ -131,15 +148,30 @@ for unsafe in file-symlink hardlink mode parent-symlink; do
         [[ $rootpxe_cloud_init_error == cloud_init_target_path_unsafe ]] || fail 'unsafe seed path error'
     ) || fail "unsafe path $unsafe"
 done
-for invalid in disabled missing-package masked; do
+for unsafe in config-symlink config-parent-mode; do
+    (
+        fixture "$unsafe"
+        case $unsafe in
+            config-symlink) printf 'outside sentinel\n' >"$tmp/outside-nocloud"; ln -s "$tmp/outside-nocloud" "$target/etc/cloud/cloud.cfg.d/99-rootpxe-nocloud.cfg";;
+            config-parent-mode) chmod 777 "$target/etc/cloud/cloud.cfg.d";;
+        esac
+        rootpxe_cloud_init_install_at_root "$target" && fail "unsafe $unsafe accepted"
+        [[ $rootpxe_cloud_init_error == cloud_init_target_path_unsafe && ! -e $target/var/lib/cloud/seed ]] || fail "unsafe $unsafe mutated target"
+        [[ $unsafe != config-symlink || $(<"$tmp/outside-nocloud") == 'outside sentinel' ]] || fail 'NoCloud symlink destination changed'
+        printf 'PASS: unsafe %s rejected\n' "$unsafe"
+    ) || fail "$unsafe guard"
+done
+for invalid in disabled missing-package missing-config masked; do
     fixture "$invalid"
     case $invalid in
         disabled) : >"$target/etc/cloud/cloud-init.disabled"; expected=cloud_init_explicitly_disabled;;
         missing-package) rm "$target/usr/bin/cloud-init"; expected=cloud_init_not_installed;;
+        missing-config) rm "$target/etc/cloud/cloud.cfg"; expected=cloud_init_not_installed;;
         masked) mkdir -p "$target/etc/systemd/system"; if ! ln -s /dev/null "$target/etc/systemd/system/cloud-init-network.service"; then continue; fi; expected=cloud_init_explicitly_disabled;;
     esac
     rootpxe_cloud_init_install_at_root "$target" && fail "accepted $invalid"
     [[ $rootpxe_cloud_init_error == "$expected" && ! -e $target/var/lib/cloud/seed ]] || fail 'package/disabled failure mutated seed'
+    printf 'PASS: prerequisite rejected %s without seed writes\n' "$invalid"
 done
 (
     fixture write-failure

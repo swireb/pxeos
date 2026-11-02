@@ -195,7 +195,7 @@ rootpxe_ci_check_prerequisites() {
     local root="$1" binary path dir file link
     rootpxe_ci_metadata_safe "$root" directory || { rootpxe_ci_reject 43 cloud_init_target_path_unsafe; return $?; }
     [[ -d $root/etc/cloud && -f $root/etc/cloud/cloud.cfg ]] || { rootpxe_ci_reject 41 cloud_init_not_installed; return $?; }
-    rootpxe_ci_safe_write_directory "$root" /etc/cloud && rootpxe_ci_metadata_safe "$root/etc/cloud/cloud.cfg" file || { rootpxe_ci_reject 43 cloud_init_target_path_unsafe; return $?; }
+    rootpxe_ci_safe_write_directory "$root" /etc/cloud || { rootpxe_ci_reject 43 cloud_init_target_path_unsafe; return $?; }
     [[ -e $root/usr/bin/cloud-init || -L $root/usr/bin/cloud-init ]] || { rootpxe_ci_reject 41 cloud_init_not_installed; return $?; }
     binary=$(rootpxe_ci_resolve_target "$root" /usr/bin/cloud-init file) || { rootpxe_ci_reject 43 cloud_init_target_path_unsafe; return $?; }
     rootpxe_ci_executable "$binary" || { rootpxe_ci_reject 41 cloud_init_not_installed; return $?; }
