@@ -109,6 +109,29 @@ file "$win_msr/d1p2.img"
 jq '(.partitions[] | select(.number == 2) | .fs) = "ntfs"' "$win_msr/schema.json" >"$win_msr/invalid-msr-filesystem-schema.json"
 expect_fail rootpxe_validate_restore_artifacts "$win_msr" n all "$win_msr/invalid-msr-filesystem-schema.json"
 
+# The canonical schema for a GPT BIOS Boot partition can omit its empty
+# filesystem field, but its raw partition payload remains required.
+bios_boot="$tmp/bios-boot"
+mkdir "$bios_boot"
+cat >"$bios_boot/schema.json" <<'JSON'
+{"version":2,"partitionTable":"gpt","logicalSectorBytes":512,"partitions":[
+ {"number":1,"startSectors":2048,"typeGuid":"21686148-6449-6E6F-744E-656564454649","role":"boot","artifact":"d1p1.img"},
+ {"number":2,"startSectors":4096,"role":"data","fs":"xfs","artifact":"d1p2.img"}]}
+JSON
+table "$bios_boot/d1.partitions" gpt 21686148-6449-6E6F-744E-656564454649
+bootfile "$bios_boot/d1.grub.mbr" 1048576
+file "$bios_boot/d1p1.img"
+file "$bios_boot/d1p2.img"
+expect_ok rootpxe_validate_restore_artifacts "$bios_boot" n all "$bios_boot/schema.json"
+jq '.partitions[0].fs = ""' "$bios_boot/schema.json" >"$bios_boot/empty-fs.json"
+expect_ok rootpxe_validate_restore_artifacts "$bios_boot" n all "$bios_boot/empty-fs.json"
+jq 'del(.partitions[0].artifact)' "$bios_boot/schema.json" >"$bios_boot/missing-artifact.json"
+expect_fail rootpxe_validate_restore_artifacts "$bios_boot" n all "$bios_boot/missing-artifact.json"
+jq '.partitions[0].typeGuid = "0FC63DAF-8483-4772-8E79-3D69D8477DE4"' "$bios_boot/schema.json" >"$bios_boot/ordinary-boot.json"
+expect_fail rootpxe_validate_restore_artifacts "$bios_boot" n all "$bios_boot/ordinary-boot.json"
+rm "$bios_boot/d1p1.img"
+expect_fail rootpxe_validate_restore_artifacts "$bios_boot" n all "$bios_boot/schema.json"
+
 cat >"$n/data-omitted-artifact-schema.json" <<'JSON'
 {"version":2,"partitionTable":"mbr","logicalSectorBytes":512,"originalDiskBytes":16777216,"partitions":[
  {"number":1,"kind":"primary","startSectors":8,"role":"data","fs":"ext4"},

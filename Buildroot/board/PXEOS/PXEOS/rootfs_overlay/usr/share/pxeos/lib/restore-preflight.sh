@@ -337,6 +337,9 @@ rootpxe_preflight_n_artifacts() {
         (.role|type) == "string" and
         (if .role == "msr" then omitted_or_empty_msr_fs
          elif (.kind == "extended" and .role == "extended_container" and (has("fs") | not)) then true
+         elif ($schema.partitionTable == "gpt" and .role == "boot" and
+               (.typeGuid | tostring | ascii_downcase) == "21686148-6449-6e6f-744e-656564454649" and
+               (has("fs") | not)) then true
          else (.fs|type) == "string" end) and
         (if ((exact_swap_no_payload or exact_extended_no_payload or exact_msr_no_payload or exact_lvm_pv_no_payload) and (has("artifact") | not))
          then true else (.artifact|type) == "string" end);
