@@ -313,7 +313,7 @@ flow_reset; fixture_system_name=Ubuntu
 printf 'Boot0003* fake\tHD(1,GPT,d14174d8-a0ba-48c6-a463-e3537e91e6d4,0x800,0x64000)/File(\\EFI\\redhat\\grub.efi)\tHD(1,GPT,ffffffff-ffff-ffff-ffff-ffffffffffff,0x800,0x64000)/File(\\EFI\\redhat\\grub.efi)\n' >>"$tmp/nvram"
 flow_ok label_cannot_supply_matching_device_path /dev/A
 grep -q '^create$' "$tmp/nv-events" || fail 'device path was taken from label'
-flow_reset; matching_entry '*'; sed -i 's/d14174d8-a0ba-48c6-a463-e3537e91e6d4/ffffffff-ffff-ffff-ffff-ffffffffffff/' "$tmp/nvram"
+flow_reset; fixture_system_name='RootPXE Linux'; matching_entry '*'; sed -i 's/d14174d8-a0ba-48c6-a463-e3537e91e6d4/ffffffff-ffff-ffff-ffff-ffffffffffff/' "$tmp/nvram"
 flow_ok same_label_wrong_guid_preserved /dev/A
 [[ $(grep -c '^Boot000[34]' "$tmp/nvram") == 2 ]] || fail 'old entry overwritten'
 flow_reset; matching_entry ''; sed -i 's/0001,0000,0002/0001,0003,0000,0002/' "$tmp/nvram"
@@ -350,9 +350,22 @@ flow_reset; sed -i 's/"gpt"/"dos"/;s/11111111-2222-3333-4444-555555555555/0xa1b2
 flow_ok mbr_ef_esp_created /dev/A
 grep -q 'HD(1,MBR,0xa1b2c3d4,0x800,0x64000)' "$tmp/nvram" || fail 'MBR identity lost'
 flow_ok mbr_entry_idempotent /dev/A
-flow_reset; sed -i 's/"gpt"/"dos"/;s/11111111-2222-3333-4444-555555555555/0xa1b2c3d4/;s/C12A7328-F81F-11D2-BA4B-00A0C93EC93B/0xef/' "$tmp/table-A.json"; matching_entry '*'; sed -i 's/GPT,d14174d8-a0ba-48c6-a463-e3537e91e6d4/MBR,0x11223344/' "$tmp/nvram"
+flow_reset; fixture_system_name='RootPXE Linux'; sed -i 's/"gpt"/"dos"/;s/11111111-2222-3333-4444-555555555555/0xa1b2c3d4/;s/C12A7328-F81F-11D2-BA4B-00A0C93EC93B/0xef/' "$tmp/table-A.json"; matching_entry '*'; sed -i 's/GPT,d14174d8-a0ba-48c6-a463-e3537e91e6d4/MBR,0x11223344/' "$tmp/nvram"
 flow_ok mbr_same_label_wrong_signature_preserved /dev/A
 [[ $(grep -c '^Boot000[34]' "$tmp/nvram") == 2 ]] || fail 'wrong-signature item overwritten'
+for boundary in start size; do
+    flow_reset; fixture_system_name='RootPXE Linux'
+    sed -i 's/"gpt"/"dos"/;s/11111111-2222-3333-4444-555555555555/0xa1b2c3d4/;s/C12A7328-F81F-11D2-BA4B-00A0C93EC93B/ef/' "$tmp/table-A.json"
+    matching_entry '*'
+    sed -i 's/GPT,d14174d8-a0ba-48c6-a463-e3537e91e6d4/MBR,0xa1b2c3d4/' "$tmp/nvram"
+    if [[ $boundary == start ]]; then sed -i 's/0x800,0x64000/0x801,0x64000/' "$tmp/nvram"
+    else sed -i 's/0x800,0x64000/0x800,0x64001/' "$tmp/nvram"; fi
+    old_entry=$(grep '^Boot0003' "$tmp/nvram")
+    flow_ok "mbr_same_signature_wrong_${boundary}_preserved" /dev/A
+    [[ $(grep '^Boot0003' "$tmp/nvram") == "$old_entry" ]] || fail 'different MBR partition was overwritten'
+    rootpxe_uefi_ensure_boot_for_targets /dev/A || fail 'MBR repeat registration failed'
+    [[ $(grep -c '^Boot000[34]' "$tmp/nvram") == 2 ]] || fail 'MBR identity mismatch duplicated target'
+done
 flow_reset; sed 's/Ap1/Bp1/g;s/d14174d8-a0ba-48c6-a463-e3537e91e6d4/ffffffff-ffff-ffff-ffff-ffffffffffff/g' "$tmp/table-A.json" >"$tmp/table-B.json"; pe "$tmp/esp-Bp1/EFI/ubuntu/grubx64.efi"
 flow_bad multiple_target_esps_ambiguous uefi_boot_loader_ambiguous /dev/A /dev/B
 [[ ! -s $tmp/nv-events ]] || fail 'ambiguous selection mutated NVRAM'
@@ -375,6 +388,153 @@ rootpxe_uefi_cleanup || fail 'failed mount could not be retried'
 [[ -z $uefi_work && $uefi_own_esp == no ]] || fail 'successful retry retained ownership'
 rootpxe_uefi_cleanup || fail 'repeated completed cleanup failed'
 pass failed_cleanup_retry_success
+
+# Keep the metadata-to-registration chain real. Only device/LVM reports and
+# mount/firmware command leaves are substituted with ordinary directories.
+(
+    . "$lib"
+    for fn in rootpxe_linux_root_fstype_supported rootpxe_linux_mount_options rootpxe_linux_probe_root_candidate rootpxe_find_linux_root_filesystem rootpxe_linux_validate_vg_target_pvs rootpxe_linux_activate_vg_if_needed rootpxe_linux_lvs_for_vg_json rootpxe_linux_cleanup_selected_vg rootpxe_lvm_safe_identifier rootpxe_lvm_validate_vg_name rootpxe_lvm_trim; do
+        eval "$(sed -n "/^$fn() {/,/^}/p" "${lib%/*}/funcs.sh")"
+    done
+    rootpxe_lvm_json_jq(){ jq "$@"; }
+    getPartitions(){ [[ $1 == /dev/A ]] || fail 'unexpected root-discovery disk'; parts='/dev/Ap1 /dev/Ap2'; }
+    rootpxe_ci_device_is_block(){ [[ $1 == /dev/Ap2 || $1 == /dev/vg/root || $1 == /dev/vg/usr ]]; }
+    rootpxe_linux_lvm_path_readable(){ [[ $(<"$tmp/matrix-vg-state") == active ]]; }
+    rootpxe_run_logged_typed_native(){ shift 2; "$@"; }
+    vgchange(){ rootpxe_lvm_native vgchange "$@"; }
+    readlink(){
+        if [[ $1 == -f && ${@: -1} == /dev/* ]]; then printf '%s\n' "${@: -1}"
+        else command readlink "$@"; fi
+    }
+    stat(){
+        if [[ $1 == -c && $2 == %r && ${@: -1} == /dev/* ]]; then command stat -c %d "$tmp"
+        else command stat "$@"; fi
+    }
+    blkid(){
+        case ${@: -1} in
+            /dev/Ap1) printf 'vfat\n';;
+            /dev/Ap2) [[ $topology == partition ]] && printf 'ext4\n' || printf 'LVM2_member\n';;
+            /dev/vg/root|/dev/vg/usr) printf 'xfs\n';;
+            *) fail 'unexpected metadata device';;
+        esac
+    }
+    rootpxe_lvm_native(){
+        case $1 in
+            pvs) printf '%s\n' '{"report":[{"pv":[{"pv_name":"/dev/Ap2","vg_name":"vg","vg_uuid":"uuid-vg"}]}]}';;
+            lvs) jq -n --arg state "$(<"$tmp/matrix-vg-state")" '{report:[{lv:["root","usr"]|map({vg_name:"vg",vg_uuid:"uuid-vg",lv_name:.,lv_path:("/dev/vg/"+.),lv_active:$state})}]}';;
+            vgchange)
+                [[ $2 == -ay ]] && printf 'active\n' >"$tmp/matrix-vg-state" || printf 'inactive\n' >"$tmp/matrix-vg-state";;
+            *) fail 'unexpected LVM command';;
+        esac
+    }
+    mountpoint(){
+        [[ ${@: -1} == "$rootpxe_uefi_firmware_dir/efivars" ]] ||
+            awk -F'|' -v target="${@: -1}" '$1==target {found=1} END {exit !found}' "$tmp/matrix-mounts"
+    }
+    findmnt(){
+        case ${@: -1} in
+            FSTYPE,OPTIONS) printf 'efivarfs rw\n';;
+            TARGET) awk -F'|' -v source="$3" '$2==source {print $1}' "$tmp/matrix-mounts";;
+            OPTIONS) awk -F'|' -v target="$3" '$1==target {print $3}' "$tmp/matrix-mounts";;
+            *) fail 'unexpected mount query';;
+        esac
+    }
+    mount(){
+        local target=${@: -1} device=${@: -2:1} fixture options=$4
+        case $device in
+            /dev/Ap1) fixture="$tmp/esp-Ap1";;
+            /dev/Ap2|/dev/vg/root) fixture="$tmp/matrix-root";;
+            /dev/vg/usr) fixture="$tmp/matrix-usr";;
+            *) fail 'mount escaped authorized targets';;
+        esac
+        [[ ,$options, == *,ro,* ]] || fail 'metadata mounted writable'
+        cp -a "$fixture/." "$target/"
+        printf '%s|%s|%s\n' "$target" "$device" "$options" >>"$tmp/matrix-mounts"
+    }
+    umount(){
+        [[ $1 == /tmp/rootpxe-uefi.*/* || $1 == /tmp/rootpxe-cloud-mount.*/* ]] || fail 'unexpected metadata unmount'
+        find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+        awk -F'|' -v target="$1" '$1!=target' "$tmp/matrix-mounts" >"$tmp/matrix-mounts.next"
+        mv "$tmp/matrix-mounts.next" "$tmp/matrix-mounts"
+    }
+    matrix_cases=0
+    for system in centos6 centos7 rocky ubuntu; do
+        case $system in
+            centos6) expected=CentOS; loader=/EFI/redhat/grub.efi;;
+            centos7) expected='CentOS Linux'; loader=/EFI/centos/shimx64.efi;;
+            rocky) expected='Rocky Linux'; loader=/EFI/rocky/shimx64.efi;;
+            ubuntu) expected=Ubuntu; loader=/EFI/ubuntu/shimx64.efi;;
+        esac
+        for topology in partition lvm_usr; do
+            rm -rf "$tmp/matrix-root" "$tmp/matrix-usr"
+            mkdir -p "$tmp/matrix-root/etc" "$tmp/matrix-root/sbin" "$tmp/matrix-root/usr" "$tmp/matrix-usr/lib/systemd"
+            printf 'root:x:0:0:root:/root:/bin/sh\n' >"$tmp/matrix-root/etc/passwd"
+            printf '#!/bin/sh\nexit 99\n' >"$tmp/matrix-usr/lib/systemd/systemd"
+            chmod 755 "$tmp/matrix-usr/lib/systemd/systemd"
+            if [[ $topology == partition ]]; then
+                cp "$tmp/matrix-usr/lib/systemd/systemd" "$tmp/matrix-root/sbin/init"
+                metadata="$tmp/matrix-root/etc"
+            else
+                ln -s /usr/lib/systemd/systemd "$tmp/matrix-root/sbin/init"
+                printf '/dev/vg/usr /usr xfs defaults 0 0\n' >"$tmp/matrix-root/etc/fstab"
+                ln -s /usr/lib/os-release "$tmp/matrix-root/etc/os-release"
+                metadata="$tmp/matrix-usr/lib"
+            fi
+            if [[ $system == centos6 ]]; then
+                printf 'CentOS release 6.10 (Final)\n' >"$tmp/matrix-root/etc/centos-release"
+            else printf 'NAME="%s"\nPRETTY_NAME="unused version"\n' "$expected" >"$metadata/os-release"; fi
+            for state in new vendor custom inactive unlisted create readback order delete; do
+                flow_reset
+                : >"$tmp/matrix-mounts"
+                printf 'inactive\n' >"$tmp/matrix-vg-state"
+                rm -rf "$tmp/esp-Ap1"
+                pe "$tmp/esp-Ap1$loader"
+                [[ $system == centos6 ]] || pe "$tmp/esp-Ap1${loader%/*}/grubx64.efi"
+                identity='GPT,d14174d8-a0ba-48c6-a463-e3537e91e6d4'
+                if [[ $topology == lvm_usr ]]; then
+                    sed -i 's/"gpt"/"dos"/;s/11111111-2222-3333-4444-555555555555/0xa1b2c3d4/;s/C12A7328-F81F-11D2-BA4B-00A0C93EC93B/ef/' "$tmp/table-A.json"
+                    identity='MBR,0xa1b2c3d4'
+                fi
+                if [[ $state != new ]]; then
+                    label=$expected; active='*'
+                    case $state in
+                        custom) label='Custom operating system';;
+                        inactive) active='';;
+                        create|readback|order|delete) label='RootPXE OS';;
+                    esac
+                    printf 'Boot0003%s %s\tHD(1,%s,0x800,0x64000)/File(%s)\n' "$active" "$label" "$identity" "$loader" >>"$tmp/nvram"
+                    [[ $state == unlisted ]] || sed -i 's/0001,0000,0002/0001,0003,0000,0002/' "$tmp/nvram"
+                fi
+                case $state in
+                    create|readback|order|delete)
+                        nvfail=$state
+                        if rootpxe_uefi_ensure_boot_for_targets /dev/A; then fail "$system/$topology/$state did not stop"; fi
+                        grep -q '^Boot0003' "$tmp/nvram" || fail 'migration failure removed old entry'
+                        nvfail='';;
+                esac
+                rootpxe_uefi_ensure_boot_for_targets /dev/A || fail "$system/$topology/$state: ${rootpxe_uefi_error:-unknown}"
+                [[ ! -s $tmp/matrix-mounts && -z $uefi_name_work ]] || fail 'metadata mounts leaked'
+                [[ $(<"$tmp/matrix-vg-state") == inactive ]] || fail 'owned VG leaked'
+                id=0003
+                case $state in create|readback|order|delete) id=0004;; esac
+                [[ $state != custom ]] || expected_label='Custom operating system'
+                [[ $state == custom ]] || expected_label=$expected
+                grep -Fq "$(printf 'Boot%s* %s\t' "$id" "$expected_label")" "$tmp/nvram" || fail "$system/$topology/$state lost target name"
+                [[ $(grep -c '^Boot[[:xdigit:]]\{4\}' "$tmp/nvram") == 4 ]] || fail 'registration duplicated an existing target'
+                if [[ $state == vendor || $state == custom || $state == inactive || $state == unlisted ]]; then
+                    ! grep -q '^create$' "$tmp/nv-events" || fail 'matching target recreated by label'
+                fi
+                snapshot=$(sha256sum "$tmp/nvram")
+                rootpxe_uefi_ensure_boot_for_targets /dev/A || fail 'repeat registration failed'
+                [[ $(sha256sum "$tmp/nvram") == "$snapshot" ]] || fail 'repeat registration mutated entries'
+                matrix_cases=$((matrix_cases + 1))
+            done
+        done
+        printf 'SYSTEM_MATRIX system=%s cases=18\n' "$system"
+    done
+    printf 'SYSTEM_MATRIX_CASES=%s\n' "$matrix_cases"
+)
+pass four_system_metadata_registration_chain
 
 # The mock has no real mounts. Remove only work directories recorded by this test.
 if [[ -f $tmp/workdirs ]]; then while IFS= read -r dir; do [[ $dir == /tmp/rootpxe-uefi.?????? && -d $dir && ! -L $dir ]] && rm -rf -- "$dir"; done <"$tmp/workdirs"; fi
