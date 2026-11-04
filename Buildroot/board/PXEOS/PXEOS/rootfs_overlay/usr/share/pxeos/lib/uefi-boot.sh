@@ -92,12 +92,69 @@ rootpxe_uefi_path_key() {
     while [[ $path == \\* ]]; do path=${path#\\}; done
     printf '\\%s\n' "$path"
 }
+rootpxe_uefi_system_name() {
+    local root=$1 relative file line name
+    for relative in /etc/os-release /usr/lib/os-release /etc/centos-release /etc/redhat-release /etc/system-release; do
+        file=$(rootpxe_ci_resolve_target "$root" "$relative" file) || continue
+        [[ $(stat -c %s -- "$file") -le 65536 ]] || continue
+        name=''
+        while IFS= read -r line || [[ -n $line ]]; do
+            if [[ $relative == */os-release ]]; then
+                [[ $line == NAME=* ]] || continue
+                name=${line#NAME=}
+                case $name in
+                    \"*\") name=${name:1:${#name}-2};;
+                    \'*\') name=${name:1:${#name}-2};;
+                esac
+            else
+                name=${line%% release *}
+            fi
+            [[ $name =~ ^[[:alnum:]][[:alnum:]\ ._()+/-]{0,127}$ ]] || { name=''; continue; }
+            printf '%s\n' "$name"
+            return 0
+        done <"$file"
+    done
+    return 1
+}
+rootpxe_uefi_target_label() {
+    local rootpxe_cloud_init_allowed_disks="$*" rootpxe_cloud_init_error=''
+    local rootpxe_linux_selected_disk='' rootpxe_linux_selected_candidate=''
+    local device fs vg uuid subvol extra owned result=0 ci_mounted_root='' name=''
+    [[ -z ${uefi_name_work:-} ]] || { rootpxe_uefi_fail uefi_boot_cleanup_failed; return 1; }
+    declare -ga uefi_name_mounts=() uefi_name_vg_names=() uefi_name_vg_uuids=() uefi_name_vg_owned=()
+    local -n ci_owned_mounts=uefi_name_mounts ci_vg_names=uefi_name_vg_names ci_vg_uuids=uefi_name_vg_uuids ci_vg_owned=uefi_name_vg_owned
+    uefi_label=Linux
+    if ! rootpxe_linux_select_unique_root_for_targets "$@"; then
+        case $rootpxe_cloud_init_error in
+            *_cleanup_failed) rootpxe_uefi_fail uefi_boot_cleanup_failed; return 1;;
+        esac
+        return 0
+    fi
+    IFS='|' read -r device fs vg uuid subvol extra <<<"$rootpxe_linux_selected_candidate"
+    uefi_name_work=$(mktemp -d /tmp/rootpxe-cloud-mount.XXXXXX) || { rootpxe_uefi_fail uefi_boot_workspace_failed; return 1; }
+    if [[ -n $vg ]]; then
+        owned=$(rootpxe_linux_activate_vg_if_needed "$rootpxe_linux_selected_disk" "$vg" "$uuid") || result=1
+        if [[ $owned == yes ]]; then ci_vg_names+=("$vg"); ci_vg_uuids+=("$uuid"); ci_vg_owned+=(yes); fi
+    fi
+    if [[ $result == 0 ]]; then rootpxe_ci_mount_root "$device" "$fs" "$uefi_name_work" ro || result=1; fi
+    if [[ $result == 0 ]]; then
+        name=$(rootpxe_uefi_system_name "$ci_mounted_root") || name=''
+        if [[ -z $name ]] && rootpxe_ci_mount_fstab "$ci_mounted_root" /usr ro; then
+            name=$(rootpxe_uefi_system_name "$ci_mounted_root") || name=''
+        fi
+    fi
+    rootpxe_ci_cleanup_mounts || { rootpxe_uefi_fail uefi_boot_cleanup_failed; return 1; }
+    rootpxe_ci_workspace_remove "$uefi_name_work" || { rootpxe_uefi_fail uefi_boot_cleanup_failed; return 1; }
+    uefi_name_work=''
+    [[ -z $name ]] || uefi_label=$name
+    return 0
+}
 rootpxe_uefi_read_entries() {
-    local text line id active node number kind signature start size suffix path classification order='' count=0
+    local text line id active label device_path node number kind signature start size suffix path classification order='' count=0
     text=$(LC_ALL=C efibootmgr -v 2>"$uefi_work/efibootmgr.stderr") || { rootpxe_uefi_fail uefi_boot_variables_unavailable; return 1; }
     # efibootmgr 可在部分 Boot 变量读取失败时仍返回0。此时不能据部分列表新建条目。
     [[ ! -s $uefi_work/efibootmgr.stderr ]] || { rootpxe_uefi_fail uefi_boot_variables_unavailable; return 1; }
-    uefi_entries=(); uefi_order=''
+    uefi_entries=(); uefi_labels=(); uefi_order=''
     while IFS= read -r line; do
         if [[ $line == BootOrder:* ]]; then
             order=${line#BootOrder:}; order=${order//[[:space:]]/}; order=${order^^}
@@ -105,10 +162,16 @@ rootpxe_uefi_read_entries() {
             count=$((count+1)); uefi_order=$order
         elif [[ $line =~ ^Boot([[:xdigit:]]{4})(\*)?[[:space:]] ]]; then
             id=${BASH_REMATCH[1]^^}; active=no; [[ ${BASH_REMATCH[2]:-} != '*' ]] || active=yes
-            if [[ $line =~ HD\(([0-9]+),(GPT|MBR),([^,]+),([^,]+),([^\)]+)\) ]]; then
+            # efibootmgr separates the label from the device path with a tab.
+            # Never interpret HD/File text supplied inside a label as a path.
+            [[ $line == *$'\t'* ]] || { rootpxe_uefi_fail uefi_boot_variables_unavailable; return 1; }
+            label=${line%$'\t'*}; label=${label#* }
+            device_path=${line##*$'\t'}
+            uefi_labels[$id]=$label
+            if [[ $device_path =~ HD\(([0-9]+),(GPT|MBR),([^,]+),([^,]+),([^\)]+)\) ]]; then
                 node=${BASH_REMATCH[0]}; number=${BASH_REMATCH[1]}; kind=${BASH_REMATCH[2]}; signature=${BASH_REMATCH[3],,}; start=${BASH_REMATCH[4]}; size=${BASH_REMATCH[5]}
                 [[ $start =~ ^(0x[[:xdigit:]]+|[0-9]+)$ && $size =~ ^(0x[[:xdigit:]]+|[0-9]+)$ ]] || continue
-                suffix=${line#*"$node"}
+                suffix=${device_path#*"$node"}
                 path=''
                 if [[ ${suffix,,} == /file\(* ]]; then
                     path=${suffix:6}
@@ -122,9 +185,9 @@ rootpxe_uefi_read_entries() {
                 fi
                 classification=local
                 uefi_entries+=("$id|$active|$number|$kind|$signature|$((start))|$((size))|$path|$classification")
-            elif [[ $line == *'MAC('* || $line == *'IPv4('* || $line == *'IPv6('* || $line == *'Uri('* ]]; then
+            elif [[ $device_path == *'MAC('* || $device_path == *'IPv4('* || $device_path == *'IPv6('* || $device_path == *'Uri('* ]]; then
                 uefi_entries+=("$id|$active|||||||network")
-            elif [[ $line == *'HD('* || $line == *'NVMe('* || $line == *'Sata('* || $line == *'Ata('* ]]; then
+            elif [[ $device_path == *'HD('* || $device_path == *'NVMe('* || $device_path == *'Sata('* || $device_path == *'Ata('* ]]; then
                 uefi_entries+=("$id|$active|||||||local")
             else uefi_entries+=("$id|$active|||||||other"); fi
         fi
@@ -139,39 +202,60 @@ rootpxe_uefi_write_ready() {
     fi
 }
 rootpxe_uefi_find_entry() {
-    local entry id active number kind signature start size path classification
+    local entry id active number kind signature start size path classification rank best=0
     uefi_match='' uefi_match_active=no
+    uefi_managed_id='' uefi_managed_count=0 uefi_desired_count=0
     for entry in "${uefi_entries[@]}"; do
         IFS='|' read -r id active number kind signature start size path classification <<<"$entry"
         [[ $number == "$uefi_number" && $kind == "$uefi_kind" && $signature == "$uefi_signature" && $path == "$uefi_path_key" ]] || continue
         [[ $kind != MBR || ( $start == "$uefi_start" && $size == "$uefi_size" ) ]] || continue
-        if [[ -z $uefi_match || ( $active == yes && ,$uefi_order, == *,$id,* ) ]]; then uefi_match=$id; uefi_match_active=$active; fi
-        [[ $active != yes || ,$uefi_order, != *,$id,* ]] || break
+        rank=3
+        if [[ ${uefi_labels[$id]} == 'RootPXE OS' ]]; then
+            rank=1; uefi_managed_id=$id; uefi_managed_count=$((uefi_managed_count + 1))
+        elif [[ ${uefi_labels[$id]} == "$uefi_label" ]]; then
+            rank=2; uefi_desired_count=$((uefi_desired_count + 1))
+        fi
+        if (( rank > best )) || { [[ $rank == "$best" && $uefi_match_active != yes && $active == yes ]]; } ||
+            { [[ $rank == "$best" && ,$uefi_order, != *,$uefi_match,* && $active == yes && ,$uefi_order, == *,$id,* ]]; }; then
+            uefi_match=$id; uefi_match_active=$active; best=$rank
+        fi
     done
 }
 rootpxe_uefi_register_selected() {
-    local original_order=$uefi_order entry id active number kind signature start size path classification item desired='' inserted=no anchor='' last_network='' listed=no
+    local original_order=$uefi_order entry id active number kind signature start size path classification item desired='' inserted=no anchor='' last_network='' listed=no old_id=''
     local -a order_items=()
     local -A types=()
     for entry in "${uefi_entries[@]}"; do IFS='|' read -r id active number kind signature start size path classification <<<"$entry"; types[$id]=$classification; done
     rootpxe_uefi_find_entry
+    if [[ $uefi_managed_count == 1 && $uefi_label != Linux &&
+          ( ${uefi_labels[$uefi_match]} == 'RootPXE OS' || ${uefi_labels[$uefi_match]} == "$uefi_label" ) ]]; then
+        [[ $uefi_desired_count -le 1 ]] || { rootpxe_uefi_fail uefi_boot_entry_readback_failed; return 1; }
+        old_id=$uefi_managed_id
+        [[ $uefi_match != "$old_id" ]] || uefi_match=''
+    fi
     IFS=, read -r -a order_items <<<"$original_order"
     for item in "${order_items[@]}"; do
         [[ $item != "$uefi_match" ]] || { listed=yes; break; }
     done
-    if [[ $listed == yes && $uefi_match_active == yes ]]; then return 0; fi
+    if [[ $listed == yes && $uefi_match_active == yes && -z $old_id ]]; then return 0; fi
     rootpxe_uefi_write_ready || return 1
     if [[ -z $uefi_match ]]; then
         # -C 不抢占 BootOrder 首位；不删除相同 label 的其它磁盘条目。
-        LC_ALL=C efibootmgr -C -d "$uefi_disk" -p "$uefi_number" -L 'RootPXE OS' -l "$uefi_path_key" >/dev/null 2>&1 || { rootpxe_uefi_fail uefi_boot_entry_create_failed; return 1; }
+        LC_ALL=C efibootmgr -C -d "$uefi_disk" -p "$uefi_number" -L "$uefi_label" -l "$uefi_path_key" >/dev/null 2>&1 || { rootpxe_uefi_fail uefi_boot_entry_create_failed; return 1; }
         rootpxe_uefi_read_entries || return 1
         rootpxe_uefi_find_entry
-        [[ -n $uefi_match ]] || { rootpxe_uefi_fail uefi_boot_entry_readback_failed; return 1; }
+        [[ -n $uefi_match && $uefi_desired_count == 1 && ${uefi_labels[$uefi_match]} == "$uefi_label" ]] || { rootpxe_uefi_fail uefi_boot_entry_readback_failed; return 1; }
     fi
     if [[ $uefi_match_active != yes ]]; then
         LC_ALL=C efibootmgr -b "$uefi_match" -a >/dev/null 2>&1 || { rootpxe_uefi_fail uefi_boot_entry_activate_failed; return 1; }
     fi
-    if [[ $listed == no ]]; then
+    if [[ -n $old_id && ,$original_order, == *,$old_id,* ]]; then
+        for item in "${order_items[@]}"; do
+            [[ $item != "$uefi_match" ]] || continue
+            [[ $item != "$old_id" ]] || item=$uefi_match
+            desired+="${desired:+,}$item"
+        done
+    elif [[ $listed == no ]]; then
         for item in "${order_items[@]}"; do
             [[ $item != "$uefi_match" ]] || continue
             if [[ ${types[$item]:-} == local && -z $anchor ]]; then anchor=$item; fi
@@ -192,12 +276,21 @@ rootpxe_uefi_register_selected() {
     rootpxe_uefi_read_entries || return 1
     rootpxe_uefi_find_entry
     [[ -n $uefi_match && $uefi_match_active == yes && $uefi_order == "$desired" ]] || { rootpxe_uefi_fail uefi_boot_entry_readback_failed; return 1; }
+    if [[ -n $old_id ]]; then
+        [[ ${uefi_labels[$uefi_match]} == "$uefi_label" ]] || { rootpxe_uefi_fail uefi_boot_entry_readback_failed; return 1; }
+        LC_ALL=C efibootmgr -b "$old_id" -B >/dev/null 2>&1 || { rootpxe_uefi_fail uefi_boot_entry_readback_failed; return 1; }
+        rootpxe_uefi_read_entries || return 1
+        rootpxe_uefi_find_entry
+        [[ ! -v uefi_labels[$old_id] && -n $uefi_match && $uefi_match_active == yes &&
+           ${uefi_labels[$uefi_match]} == "$uefi_label" && $uefi_order == "$desired" ]] || { rootpxe_uefi_fail uefi_boot_entry_readback_failed; return 1; }
+    fi
 }
 rootpxe_uefi_process_targets() {
     local bits hardware disk table part number start size type uuid label signature candidate rc best_error=uefi_boot_esp_missing
     local -a candidates=() fallback=()
     local -a uefi_entries=()
-    local uefi_order='' uefi_match='' uefi_match_active=no
+    local -A uefi_labels=()
+    local uefi_order='' uefi_match='' uefi_match_active=no uefi_label=Linux uefi_managed_id='' uefi_managed_count=0 uefi_desired_count=0
     [[ -d $uefi_firmware ]] || { rootpxe_uefi_fail uefi_boot_mode_mismatch; return 1; }
     bits=$(cat "$uefi_firmware/fw_platform_size" 2>/dev/null) || { rootpxe_uefi_fail uefi_boot_firmware_arch_mismatch; return 1; }
     hardware=$(uname -m) || return 1
@@ -247,12 +340,18 @@ rootpxe_uefi_process_targets() {
     IFS='|' read -r uefi_disk uefi_number uefi_kind uefi_signature uefi_start uefi_size uefi_path <<<"${candidates[0]}"
     uefi_path_key=$(rootpxe_uefi_path_key "$uefi_path")
     rootpxe_verify_disk_permit_binding "$uefi_disk" deploy_write || { rootpxe_uefi_fail uefi_boot_target_binding_changed; return 1; }
+    rootpxe_uefi_target_label "$@" || return 1
     rootpxe_uefi_register_selected
 }
 # 状态仅由本库创建资源时设置，供正常收尾与下载退出共用。
 rootpxe_uefi_cleanup() {
     local result=0
-    [[ -n ${uefi_work:-} ]] || return 0
+    if [[ -n ${uefi_name_work:-} ]]; then
+        local -n ci_owned_mounts=uefi_name_mounts ci_vg_names=uefi_name_vg_names ci_vg_uuids=uefi_name_vg_uuids ci_vg_owned=uefi_name_vg_owned
+        if rootpxe_ci_cleanup_mounts && rootpxe_ci_workspace_remove "$uefi_name_work"; then uefi_name_work=''
+        else result=1; rootpxe_uefi_error=uefi_boot_cleanup_failed; fi
+    fi
+    [[ -n ${uefi_work:-} ]] || return "$result"
     if [[ ${uefi_own_esp:-no} == yes ]]; then
         if umount "$uefi_work/esp"; then uefi_own_esp=no; else result=1; fi
     fi

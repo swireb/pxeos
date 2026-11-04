@@ -5,6 +5,7 @@ lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/uefi-b
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 [[ -r $lib ]] || fail 'UEFI deployment registration feature is missing (uefi-boot.sh)'
 . "$lib"
+. "${lib%/*}/cloud-init.sh"
 tmp=$(mktemp -d /tmp/pxeos-uefi-tests.XXXXXX)
 trap '[[ $tmp == /tmp/pxeos-uefi-tests.* && -d $tmp && ! -L $tmp ]] && rm -rf -- "$tmp"' EXIT
 cases=0
@@ -87,7 +88,84 @@ select_bad direct_multiple_uki_ambiguous amd64 50 uefi_boot_loader_ambiguous
 reset_loader; pe "$tmp/esp/EFI/redhat/grub.efi"; pe "$tmp/esp/EFI/redhat/mmx64.efi"; pe "$tmp/esp/EFI/redhat/fwupdx64.efi"
 select_ok firmware_tools_not_os_candidates amd64 50 /EFI/redhat/grub.efi
 
+# Read actual target metadata as text, including the old CentOS release file.
+rootpxe_ci_stat(){ printf '0:0:%s\n' "$(stat -c '%a:%h' -- "$1")"; }
+umask 077
+mkdir -p "$tmp/os/etc" "$tmp/os/usr/lib"
+printf 'NAME="Rocky Linux"\nPRETTY_NAME="Rocky Linux 10"\n' >"$tmp/os/etc/os-release"
+[[ $(rootpxe_uefi_system_name "$tmp/os") == 'Rocky Linux' ]] || fail 'NAME was not preferred'
+printf "NAME='Ubuntu'\n" >"$tmp/os/etc/os-release"
+[[ $(rootpxe_uefi_system_name "$tmp/os") == Ubuntu ]] || fail 'single-quoted NAME was not read'
+rm "$tmp/os/etc/os-release"
+printf 'NAME="Rocky Linux"\n' >"$tmp/os/usr/lib/os-release"
+ln -s ../usr/lib/os-release "$tmp/os/etc/os-release"
+[[ $(rootpxe_uefi_system_name "$tmp/os") == 'Rocky Linux' ]] || fail 'target-relative os-release link failed'
+rm "$tmp/os/etc/os-release"
+ln -s /usr/lib/os-release "$tmp/os/etc/os-release"
+[[ $(rootpxe_uefi_system_name "$tmp/os") == 'Rocky Linux' ]] || fail 'absolute os-release link escaped target root'
+rm "$tmp/os/etc/os-release" "$tmp/os/usr/lib/os-release"
+printf 'CentOS release 6.10 (Final)\n' >"$tmp/os/etc/centos-release"
+[[ $(rootpxe_uefi_system_name "$tmp/os") == CentOS ]] || fail 'CentOS 6 short name failed'
+rm "$tmp/os/etc/centos-release"
+printf 'Red Hat Enterprise Linux Server release 6.10 (Santiago)\n' >"$tmp/os/etc/redhat-release"
+[[ $(rootpxe_uefi_system_name "$tmp/os") == 'Red Hat Enterprise Linux Server' ]] || fail 'legacy redhat-release short name failed'
+rm "$tmp/os/etc/redhat-release"
+printf 'NAME="$(touch %s/executed)"\n' "$tmp" >"$tmp/os/etc/os-release"
+if rootpxe_uefi_system_name "$tmp/os"; then fail 'executable metadata accepted as a name'; fi
+[[ ! -e $tmp/executed ]] || fail 'target metadata was executed'
+rm "$tmp/os/etc/os-release"
+ln -s ../../outside-os-release "$tmp/os/etc/os-release"
+printf 'NAME=Foreign\n' >"$tmp/outside-os-release"
+if rootpxe_uefi_system_name "$tmp/os"; then fail 'metadata escaped target root'; fi
+pass target_name_metadata_safe
+
+(
+    rm "$tmp/os/etc/os-release"
+    rootpxe_linux_select_unique_root_for_targets(){
+        [[ $* == '/dev/A /dev/B' ]] || fail 'root discovery expanded its target set'
+        rootpxe_linux_selected_disk=/dev/A
+        rootpxe_linux_selected_candidate='/dev/Ap2|ext4|||'
+    }
+    rootpxe_ci_mount_root(){ [[ $1 == /dev/Ap2 && $2 == ext4 && $4 == ro ]] || fail 'root was not mounted read-only'; ci_mounted_root="$tmp/os"; name_work=$3; }
+    rootpxe_ci_mount_fstab(){ [[ $2 == /usr && $3 == ro ]] || fail 'unexpected auxiliary mount'; printf 'NAME=Ubuntu\n' >"$tmp/os/usr/lib/os-release"; }
+    rootpxe_ci_cleanup_mounts(){ [[ ${name_cleanup_failed:-no} == no ]]; }
+    rootpxe_ci_workspace_remove(){ rmdir "$1"; }
+    rootpxe_uefi_target_label /dev/A /dev/B || fail 'target name lifecycle failed'
+    [[ $uefi_label == Ubuntu ]] || fail 'separate usr metadata not read'
+    name_cleanup_failed=yes
+    if rootpxe_uefi_target_label /dev/A /dev/B; then fail 'name cleanup failure swallowed'; fi
+    [[ $rootpxe_uefi_error == uefi_boot_cleanup_failed ]] || fail 'wrong name cleanup error'
+    rmdir "$name_work"
+    uefi_name_work=''
+    rootpxe_linux_select_unique_root_for_targets(){ return 1; }
+    rootpxe_uefi_target_label /dev/A /dev/B || fail 'unknown root fallback failed'
+    [[ $uefi_label == Linux ]] || fail 'unknown root did not fall back to Linux'
+)
+pass target_name_readonly_mount_lifecycle
+
+# Use the real CI cleanup/workspace routines, replacing only umount/LVM leaves.
+(
+    eval "$(sed -n '/^rootpxe_linux_cleanup_selected_vg() {$/,/^}$/p' "${lib%/*}/funcs.sh")"
+    uefi_work='' uefi_name_work=$(mktemp -d /tmp/rootpxe-cloud-mount.XXXXXX)
+    mkdir "$uefi_name_work/root"
+    uefi_name_mounts=("$uefi_name_work/root") uefi_name_vg_names=(owned borrowed)
+    uefi_name_vg_uuids=(uuid-owned uuid-borrowed) uefi_name_vg_owned=(yes no)
+    name_cleanup_failed=yes
+    umount(){ [[ $name_cleanup_failed == no ]]; }
+    mountpoint(){ return 1; }
+    rootpxe_lvm_native(){ printf '%s\n' "$*" >>"$tmp/name-vg-cleanup"; }
+    if rootpxe_uefi_cleanup; then fail 'failed name mount cleanup was accepted'; fi
+    [[ -d $uefi_name_work/root && ${#uefi_name_mounts[@]} == 1 && ${#uefi_name_vg_names[@]} == 2 ]] || fail 'failed name cleanup lost ownership'
+    [[ ! -e $tmp/name-vg-cleanup ]] || fail 'VG deactivated under a mounted root'
+    name_cleanup_failed=no
+    rootpxe_uefi_cleanup || fail 'name cleanup could not be retried'
+    [[ -z $uefi_name_work && ${#uefi_name_mounts[@]} == 0 && ${#uefi_name_vg_names[@]} == 0 ]] || fail 'successful name cleanup retained ownership'
+    [[ $(wc -l <"$tmp/name-vg-cleanup") == 1 ]] || fail 'borrowed VG was deactivated'
+)
+pass target_name_cleanup_retains_ownership
+
 # 真实目录/PE头/固件文本；只替换块设备报告、mount和efibootmgr命令叶边界。
+rootpxe_uefi_target_label(){ uefi_label=${fixture_system_name:-Linux}; }
 rootpxe_verify_disk_permit_binding(){ [[ $1 == /dev/A || $1 == /dev/B ]] && [[ $2 == deploy_write && ${deny_permit:-no} == no ]]; }
 # sfdisk mock uses a basename because its input is an absolute device path.
 sfdisk(){ local disk=${@: -1}; cat "$tmp/table-${disk##*/}.json"; }
@@ -113,7 +191,7 @@ efibootmgr(){
             -v) action=read; shift;;
             -C|--create-only) action=create; shift;;
             -d) disk=$2; shift 2;; -p) number=$2; shift 2;; -L) label=$2; shift 2;; -l) loader=$2; shift 2;;
-            -b) id=$2; shift 2;; -a) action=active; shift;; -o) action=order; order=$2; shift 2;;
+            -b) id=$2; shift 2;; -a) action=active; shift;; -B) action=delete; shift;; -o) action=order; order=$2; shift 2;;
             *) fail "unexpected efibootmgr flag $1";;
         esac
     done
@@ -121,7 +199,7 @@ efibootmgr(){
         read)
             [[ ${nvfail:-} != read ]] || return 1
             [[ ${nvfail:-} != warning ]] || printf 'Could not read variable Boot0009: Permission denied\n' >&2
-            if [[ ${nvfail:-} == readback && -s $tmp/nv-events ]]; then grep -v '^Boot0003' "$tmp/nvram"; else cat "$tmp/nvram"; fi;;
+            if [[ ${nvfail:-} == readback && -s $tmp/nv-events ]]; then grep -v '^Boot000[34]' "$tmp/nvram"; else cat "$tmp/nvram"; fi;;
         create)
             printf 'create\n' >>"$tmp/nv-events"
             [[ ${nvfail:-} != create ]] || return 1
@@ -130,7 +208,7 @@ efibootmgr(){
             kind=$(jq -r '.partitiontable.label' "$tmp/table-${disk##*/}.json")
             if [[ $kind == gpt ]]; then kind=GPT; signature=$(jq -r .uuid <<<"$row"); else kind=MBR; signature=$(jq -r '.partitiontable.id' "$tmp/table-${disk##*/}.json"); fi
             start=$(jq -r .start <<<"$row"); size=$(jq -r .size <<<"$row")
-            printf 'Boot%s* %s HD(%s,%s,%s,0x%x,0x%x)/%s\n' "$id" "$label" "$number" "$kind" "$signature" "$start" "$size" "$loader" >>"$tmp/nvram";;
+            printf 'Boot%s* %s\tHD(%s,%s,%s,0x%x,0x%x)/%s\n' "$id" "$label" "$number" "$kind" "$signature" "$start" "$size" "$loader" >>"$tmp/nvram";;
         active)
             printf 'active:%s\n' "$id" >>"$tmp/nv-events"
             [[ ${nvfail:-} != active ]] || return 1
@@ -139,6 +217,10 @@ efibootmgr(){
             printf 'order:%s\n' "$order" >>"$tmp/nv-events"
             [[ ${nvfail:-} != order ]] || return 1
             if grep -q "^BootOrder:" "$tmp/nvram"; then sed -i "s/^BootOrder:.*/BootOrder: $order/" "$tmp/nvram"; else printf "BootOrder: %s\n" "$order" >>"$tmp/nvram"; fi;;
+        delete)
+            printf 'delete:%s\n' "$id" >>"$tmp/nv-events"
+            [[ ${nvfail:-} != delete ]] || return 1
+            sed -i "/^Boot$id/d" "$tmp/nvram";;
     esac
 }
 flow_reset(){
@@ -147,14 +229,14 @@ flow_reset(){
     mkdir -p "$rootpxe_uefi_firmware_dir/efivars"
     printf '64\n' >"$rootpxe_uefi_firmware_dir/fw_platform_size"
     uname(){ printf 'x86_64\n'; }
-    nvfail='' deny_permit=no unsupported_fs=no variables_mode=rw mount_failed=no cleanup_failed=no
+    nvfail='' deny_permit=no unsupported_fs=no variables_mode=rw mount_failed=no cleanup_failed=no fixture_system_name=Linux
     : >"$tmp/nv-events"
     cat >"$tmp/nvram" <<'EOF'
 BootCurrent: 0001
 BootOrder: 0001,0000,0002
-Boot0000* Local NVMe PciRoot(0x0)/NVMe(0x1,00)
-Boot0001* PXE PciRoot(0x0)/MAC(001122334455,0)
-Boot0002* Shell FvFile(1234)
+Boot0000* Local NVMe	PciRoot(0x0)/NVMe(0x1,00)
+Boot0001* PXE	PciRoot(0x0)/MAC(001122334455,0)
+Boot0002* Shell	FvFile(1234)
 EOF
     printf '%s\n' '{"partitiontable":{"label":"gpt","id":"11111111-2222-3333-4444-555555555555","unit":"sectors","sectorsize":512,"partitions":[{"node":"/dev/Ap1","start":2048,"size":409600,"type":"C12A7328-F81F-11D2-BA4B-00A0C93EC93B","uuid":"d14174d8-a0ba-48c6-a463-e3537e91e6d4"}]}}' >"$tmp/table-A.json"
     rm -rf -- "$tmp/esp-Ap1" "$tmp/esp-Bp1"
@@ -162,7 +244,7 @@ EOF
 }
 flow_ok(){ rootpxe_uefi_ensure_boot_for_targets "${@:2}" || fail "$1 reason=${rootpxe_uefi_error:-unknown}"; pass "$1"; }
 flow_bad(){ local name=$1 reason=$2; shift 2; if rootpxe_uefi_ensure_boot_for_targets "$@"; then fail "$name accepted"; fi; [[ $rootpxe_uefi_error == "$reason" ]] || fail "$name reason=$rootpxe_uefi_error"; pass "$name"; }
-matching_entry(){ printf 'Boot0003%s RootPXE Linux HD(1,GPT,d14174d8-a0ba-48c6-a463-e3537e91e6d4,0x800,0x64000)/File(\\EFI\\redhat\\grub.efi)\n' "$1" >>"$tmp/nvram"; }
+matching_entry(){ printf 'Boot0003%s %s\tHD(1,GPT,d14174d8-a0ba-48c6-a463-e3537e91e6d4,0x800,0x64000)/File(\\EFI\\redhat\\grub.efi)\n' "$1" "${2:-RootPXE Linux}" >>"$tmp/nvram"; }
 
 flow_reset; imageBootMode=''
 flow_bad metadata_missing uefi_boot_metadata_missing /dev/A
@@ -191,6 +273,46 @@ flow_ok gpt_create_keeps_pxe_priority /dev/A
 grep -q '^BootOrder: 0001,0003,0000,0002$' "$tmp/nvram" || fail 'PXE/original order changed'
 flow_ok repeated_execution_idempotent /dev/A
 [[ $(grep -c '^create$' "$tmp/nv-events") == 1 ]] || fail 'duplicate entry created'
+grep -q $'^Boot0003\\* Linux\t' "$tmp/nvram" || fail 'unknown system fallback label missing'
+flow_reset; fixture_system_name='Rocky Linux'
+flow_ok new_entry_uses_actual_system_name /dev/A
+grep -q $'^Boot0003\\* Rocky Linux\t' "$tmp/nvram" || fail 'new entry did not use NAME'
+flow_reset; fixture_system_name='Rocky Linux'; matching_entry '*' 'RootPXE OS'
+sed -i 's/0001,0000,0002/0001,0000,0003,0002/' "$tmp/nvram"
+flow_ok managed_label_migrated_in_original_position /dev/A
+grep -q '^BootOrder: 0001,0000,0004,0002$' "$tmp/nvram" || fail 'managed migration changed order'
+! grep -q '^Boot0003' "$tmp/nvram" || fail 'old managed item retained after successful migration'
+grep -q $'^Boot0004\\* Rocky Linux\t' "$tmp/nvram" || fail 'managed label was not migrated'
+[[ $(tail -1 "$tmp/nv-events") == delete:0003 ]] || fail 'managed item deleted before verification'
+flow_ok managed_migration_idempotent /dev/A
+[[ $(grep -c '^create$' "$tmp/nv-events") == 1 ]] || fail 'managed migration duplicated new item'
+flow_reset; matching_entry '*' 'RootPXE OS'
+sed -i 's/0001,0000,0002/0001,0003,0000,0002/' "$tmp/nvram"
+flow_ok unknown_name_preserves_managed_item /dev/A
+[[ ! -s $tmp/nv-events ]] || fail 'unknown name migrated managed item'
+flow_reset; fixture_system_name=Ubuntu; matching_entry '*' 'My custom Linux'
+sed -i 's/0001,0000,0002/0001,0003,0000,0002/' "$tmp/nvram"
+flow_ok custom_label_preserved /dev/A
+[[ ! -s $tmp/nv-events ]] || fail 'custom name was changed'
+flow_reset; fixture_system_name=CentOS; matching_entry '*' 'RootPXE OS'
+sed -n '/^Boot0003/p' "$tmp/nvram" | sed 's/Boot0003/Boot0004/' >>"$tmp/nvram"
+sed -i 's/0001,0000,0002/0001,0003,0004,0000,0002/' "$tmp/nvram"
+flow_ok ambiguous_managed_items_preserved /dev/A
+[[ ! -s $tmp/nv-events ]] || fail 'ambiguous managed items migrated'
+for fault in create readback order delete; do
+    flow_reset; fixture_system_name='Rocky Linux'; matching_entry '*' 'RootPXE OS'
+    sed -i 's/0001,0000,0002/0001,0003,0000,0002/' "$tmp/nvram"
+    nvfail=$fault
+    if rootpxe_uefi_ensure_boot_for_targets /dev/A; then fail "$fault migration unexpectedly passed"; fi
+    grep -q '^Boot0003' "$tmp/nvram" || fail "$fault failure removed old managed item"
+    nvfail=''
+    flow_ok "managed_${fault}_failure_retry" /dev/A
+    [[ $(grep -c '^Boot[[:xdigit:]]\{4\}' "$tmp/nvram") == 4 ]] || fail "$fault retry duplicated entries"
+done
+flow_reset; fixture_system_name=Ubuntu
+printf 'Boot0003* fake\tHD(1,GPT,d14174d8-a0ba-48c6-a463-e3537e91e6d4,0x800,0x64000)/File(\\EFI\\redhat\\grub.efi)\tHD(1,GPT,ffffffff-ffff-ffff-ffff-ffffffffffff,0x800,0x64000)/File(\\EFI\\redhat\\grub.efi)\n' >>"$tmp/nvram"
+flow_ok label_cannot_supply_matching_device_path /dev/A
+grep -q '^create$' "$tmp/nv-events" || fail 'device path was taken from label'
 flow_reset; matching_entry '*'; sed -i 's/d14174d8-a0ba-48c6-a463-e3537e91e6d4/ffffffff-ffff-ffff-ffff-ffffffffffff/' "$tmp/nvram"
 flow_ok same_label_wrong_guid_preserved /dev/A
 [[ $(grep -c '^Boot000[34]' "$tmp/nvram") == 2 ]] || fail 'old entry overwritten'
@@ -218,7 +340,7 @@ flow_ok existing_active_order_preserved_even_after_shell /dev/A
 grep -q '^BootOrder: 0001,0000,0002,0003$' "$tmp/nvram" || fail 'existing active OS moved'
 [[ ! -s $tmp/nv-events ]] || fail 'existing ordered entry mutated'
 ! grep -q '^create$' "$tmp/nv-events" || fail 'blocked existing entry duplicated'
-flow_reset; printf 'BootOrder: 0002\nBoot0002* EFI Internal Shell FvFile(1234)\n' >"$tmp/nvram"
+flow_reset; printf 'BootOrder: 0002\nBoot0002* EFI Internal Shell\tFvFile(1234)\n' >"$tmp/nvram"
 flow_ok shell_only_new_os_before_shell /dev/A
 grep -q '^BootOrder: 0003,0002$' "$tmp/nvram" || fail 'new OS appended behind Shell'
 flow_reset; sed -i 's/0001,0000,0002/0000,0001,0002/;s@PciRoot(0x0)/NVMe(0x1,00)@HD(1,GPT,ffffffff-ffff-ffff-ffff-ffffffffffff,0x800,0x64000)@' "$tmp/nvram"
@@ -306,6 +428,10 @@ for signal in EXIT INT TERM; do
     (
         killStatusReporter(){ :; }; rootpxe_cleanup_session(){ :; }
         uefi_work="$tmp/cleanup-$signal" uefi_vars="$tmp/own-vars" uefi_own_esp=yes uefi_own_vars=yes uefi_esp_cleanup_attempted=no uefi_vars_cleanup_attempted=no
+        uefi_name_work=$(mktemp -d /tmp/rootpxe-cloud-mount.XXXXXX)
+        mkdir "$uefi_name_work/root"
+        printf '%s\n' "$uefi_name_work" >"$tmp/name-work-$signal"
+        uefi_name_mounts=("$uefi_name_work/root") uefi_name_vg_names=() uefi_name_vg_uuids=() uefi_name_vg_owned=()
         umount(){ printf '%s\n' "$1" >>"$tmp/cleanup-events-$signal"; }
         eval "$cleanup_code"
         if [[ $signal == EXIT ]]; then exit 0; else kill -s "$signal" "$BASHPID"; fi
@@ -313,7 +439,7 @@ for signal in EXIT INT TERM; do
     result=$?
     set -e
     case $signal:$result in EXIT:0|INT:130|TERM:143) ;; *) fail "cleanup hook $signal exit=$result";; esac
-    [[ $(wc -l <"$tmp/cleanup-events-$signal") == 2 && ! -e $tmp/cleanup-$signal ]] || fail "$signal cleanup missed or repeated owned mounts"
+    [[ $(wc -l <"$tmp/cleanup-events-$signal") == 3 && ! -e $tmp/cleanup-$signal && ! -e $(cat "$tmp/name-work-$signal") ]] || fail "$signal cleanup missed or repeated owned mounts"
     pass "download_${signal}_owned_cleanup"
 done
 uefi_work='' uefi_own_esp=no uefi_own_vars=no
