@@ -94,21 +94,17 @@ rootpxe_uefi_path_key() {
 }
 rootpxe_uefi_system_name() {
     local root=$1 relative file line name
-    for relative in /etc/os-release /usr/lib/os-release /etc/centos-release /etc/redhat-release /etc/system-release; do
+    for relative in /etc/os-release /usr/lib/os-release; do
         file=$(rootpxe_ci_resolve_target "$root" "$relative" file) || continue
         [[ $(stat -c %s -- "$file") -le 65536 ]] || continue
         name=''
         while IFS= read -r line || [[ -n $line ]]; do
-            if [[ $relative == */os-release ]]; then
-                [[ $line == NAME=* ]] || continue
-                name=${line#NAME=}
-                case $name in
-                    \"*\") name=${name:1:${#name}-2};;
-                    \'*\') name=${name:1:${#name}-2};;
-                esac
-            else
-                name=${line%% release *}
-            fi
+            [[ $line == NAME=* ]] || continue
+            name=${line#NAME=}
+            case $name in
+                \"*\") name=${name:1:${#name}-2};;
+                \'*\') name=${name:1:${#name}-2};;
+            esac
             [[ $name =~ ^[[:alnum:]][[:alnum:]\ ._()+/-]{0,127}$ ]] || { name=''; continue; }
             printf '%s\n' "$name"
             return 0

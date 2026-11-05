@@ -88,12 +88,14 @@ select_bad direct_multiple_uki_ambiguous amd64 50 uefi_boot_loader_ambiguous
 reset_loader; pe "$tmp/esp/EFI/redhat/grub.efi"; pe "$tmp/esp/EFI/redhat/mmx64.efi"; pe "$tmp/esp/EFI/redhat/fwupdx64.efi"
 select_ok firmware_tools_not_os_candidates amd64 50 /EFI/redhat/grub.efi
 
-# Read actual target metadata as text, including the old CentOS release file.
+# Read NAME as target text; release-only metadata must not infer a name.
 rootpxe_ci_stat(){ printf '0:0:%s\n' "$(stat -c '%a:%h' -- "$1")"; }
 umask 077
 mkdir -p "$tmp/os/etc" "$tmp/os/usr/lib"
 printf 'NAME="Rocky Linux"\nPRETTY_NAME="Rocky Linux 10"\n' >"$tmp/os/etc/os-release"
 [[ $(rootpxe_uefi_system_name "$tmp/os") == 'Rocky Linux' ]] || fail 'NAME was not preferred'
+printf 'NAME="Example GNU/Linux"\nPRETTY_NAME="Ubuntu 24.04 LTS"\nID=rocky\n' >"$tmp/os/etc/os-release"
+[[ $(rootpxe_uefi_system_name "$tmp/os") == 'Example GNU/Linux' ]] || fail 'NAME was mapped from other distribution metadata'
 printf "NAME='Ubuntu'\n" >"$tmp/os/etc/os-release"
 [[ $(rootpxe_uefi_system_name "$tmp/os") == Ubuntu ]] || fail 'single-quoted NAME was not read'
 rm "$tmp/os/etc/os-release"
@@ -105,11 +107,15 @@ ln -s /usr/lib/os-release "$tmp/os/etc/os-release"
 [[ $(rootpxe_uefi_system_name "$tmp/os") == 'Rocky Linux' ]] || fail 'absolute os-release link escaped target root'
 rm "$tmp/os/etc/os-release" "$tmp/os/usr/lib/os-release"
 printf 'CentOS release 6.10 (Final)\n' >"$tmp/os/etc/centos-release"
-[[ $(rootpxe_uefi_system_name "$tmp/os") == CentOS ]] || fail 'CentOS 6 short name failed'
+if rootpxe_uefi_system_name "$tmp/os"; then fail 'release-only CentOS metadata supplied a name'; fi
 rm "$tmp/os/etc/centos-release"
 printf 'Red Hat Enterprise Linux Server release 6.10 (Santiago)\n' >"$tmp/os/etc/redhat-release"
-[[ $(rootpxe_uefi_system_name "$tmp/os") == 'Red Hat Enterprise Linux Server' ]] || fail 'legacy redhat-release short name failed'
+if rootpxe_uefi_system_name "$tmp/os"; then fail 'release-only Red Hat metadata supplied a name'; fi
 rm "$tmp/os/etc/redhat-release"
+printf 'Example Linux release 1\n' >"$tmp/os/etc/system-release"
+printf 'NAME=""\nPRETTY_NAME="Example Linux 1"\nID=example\n' >"$tmp/os/etc/os-release"
+if rootpxe_uefi_system_name "$tmp/os"; then fail 'empty NAME was inferred from other metadata'; fi
+rm "$tmp/os/etc/system-release"
 printf 'NAME="$(touch %s/executed)"\n' "$tmp" >"$tmp/os/etc/os-release"
 if rootpxe_uefi_system_name "$tmp/os"; then fail 'executable metadata accepted as a name'; fi
 [[ ! -e $tmp/executed ]] || fail 'target metadata was executed'
@@ -277,6 +283,15 @@ grep -q $'^Boot0003\\* Linux\t' "$tmp/nvram" || fail 'unknown system fallback la
 flow_reset; fixture_system_name='Rocky Linux'
 flow_ok new_entry_uses_actual_system_name /dev/A
 grep -q $'^Boot0003\\* Rocky Linux\t' "$tmp/nvram" || fail 'new entry did not use NAME'
+flow_reset; fixture_system_name='Debian GNU/Linux'
+rm -rf "$tmp/esp-Ap1"
+pe "$tmp/esp-Ap1/EFI/debian/grubx64.efi"
+flow_ok debian_grub_only_registration_idempotent /dev/A
+[[ $rootpxe_uefi_loader_path == /EFI/debian/grubx64.efi ]] || fail 'Debian GRUB-only loader was not selected'
+grep -Fq $'Debian GNU/Linux\t' "$tmp/nvram" || fail 'Debian NAME was not preserved'
+snapshot=$(sha256sum "$tmp/nvram")
+rootpxe_uefi_ensure_boot_for_targets /dev/A || fail 'Debian GRUB-only repeat failed'
+[[ $(sha256sum "$tmp/nvram") == "$snapshot" && $(grep -c '^create$' "$tmp/nv-events") == 1 ]] || fail 'Debian GRUB-only entry duplicated'
 flow_reset; fixture_system_name='Rocky Linux'; matching_entry '*' 'RootPXE OS'
 sed -i 's/0001,0000,0002/0001,0000,0003,0002/' "$tmp/nvram"
 flow_ok managed_label_migrated_in_original_position /dev/A
@@ -458,12 +473,15 @@ pass failed_cleanup_retry_success
         mv "$tmp/matrix-mounts.next" "$tmp/matrix-mounts"
     }
     matrix_cases=0
-    for system in centos6 centos7 rocky ubuntu; do
+    for system in centos6 centos7 rocky ubuntu debian; do
+        system_cases=0
+        states='new vendor custom inactive unlisted create readback order delete'
         case $system in
-            centos6) expected=CentOS; loader=/EFI/redhat/grub.efi;;
+            centos6) expected=Linux; loader=/EFI/redhat/grub.efi; states='new vendor managed';;
             centos7) expected='CentOS Linux'; loader=/EFI/centos/shimx64.efi;;
             rocky) expected='Rocky Linux'; loader=/EFI/rocky/shimx64.efi;;
             ubuntu) expected=Ubuntu; loader=/EFI/ubuntu/shimx64.efi;;
+            debian) expected='Debian GNU/Linux'; loader=/EFI/debian/shimx64.efi;;
         esac
         for topology in partition lvm_usr; do
             rm -rf "$tmp/matrix-root" "$tmp/matrix-usr"
@@ -483,8 +501,11 @@ pass failed_cleanup_retry_success
             if [[ $system == centos6 ]]; then
                 printf 'CentOS release 6.10 (Final)\n' >"$tmp/matrix-root/etc/centos-release"
             else printf 'NAME="%s"\nPRETTY_NAME="unused version"\n' "$expected" >"$metadata/os-release"; fi
-            for state in new vendor custom inactive unlisted create readback order delete; do
+            for state in $states; do
                 flow_reset
+                if [[ $system == debian ]]; then
+                    printf 'NAME="Debian GNU/Linux"\nPRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\nID=debian\n' >"$metadata/os-release"
+                fi
                 : >"$tmp/matrix-mounts"
                 printf 'inactive\n' >"$tmp/matrix-vg-state"
                 rm -rf "$tmp/esp-Ap1"
@@ -498,9 +519,11 @@ pass failed_cleanup_retry_success
                 if [[ $state != new ]]; then
                     label=$expected; active='*'
                     case $state in
+                        vendor)
+                            case $system in centos6) label=CentOS;; debian) label=debian;; esac;;
                         custom) label='Custom operating system';;
                         inactive) active='';;
-                        create|readback|order|delete) label='RootPXE OS';;
+                        managed|create|readback|order|delete) label='RootPXE OS';;
                     esac
                     printf 'Boot0003%s %s\tHD(1,%s,0x800,0x64000)/File(%s)\n' "$active" "$label" "$identity" "$loader" >>"$tmp/nvram"
                     [[ $state == unlisted ]] || sed -i 's/0001,0000,0002/0001,0003,0000,0002/' "$tmp/nvram"
@@ -519,22 +542,30 @@ pass failed_cleanup_retry_success
                 case $state in create|readback|order|delete) id=0004;; esac
                 [[ $state != custom ]] || expected_label='Custom operating system'
                 [[ $state == custom ]] || expected_label=$expected
+                [[ $system != debian || $state != vendor ]] || expected_label=debian
+                [[ $system != centos6 || $state != vendor ]] || expected_label=CentOS
+                [[ $state != managed ]] || expected_label='RootPXE OS'
                 grep -Fq "$(printf 'Boot%s* %s\t' "$id" "$expected_label")" "$tmp/nvram" || fail "$system/$topology/$state lost target name"
                 [[ $(grep -c '^Boot[[:xdigit:]]\{4\}' "$tmp/nvram") == 4 ]] || fail 'registration duplicated an existing target'
-                if [[ $state == vendor || $state == custom || $state == inactive || $state == unlisted ]]; then
+                if [[ $state == vendor || $state == custom || $state == inactive || $state == unlisted || $state == managed ]]; then
                     ! grep -q '^create$' "$tmp/nv-events" || fail 'matching target recreated by label'
                 fi
                 snapshot=$(sha256sum "$tmp/nvram")
+                if [[ $system == debian ]]; then
+                    printf 'NAME="Debian GNU/Linux"\nPRETTY_NAME="Debian GNU/Linux 13 (trixie)"\nID=debian\n' >"$metadata/os-release"
+                fi
                 rootpxe_uefi_ensure_boot_for_targets /dev/A || fail 'repeat registration failed'
                 [[ $(sha256sum "$tmp/nvram") == "$snapshot" ]] || fail 'repeat registration mutated entries'
+                [[ $system != debian ]] || printf 'DEBIAN_MATRIX topology=%s state=%s NAME="%s" repeat=unchanged\n' "$topology" "$state" "$expected"
                 matrix_cases=$((matrix_cases + 1))
+                system_cases=$((system_cases + 1))
             done
         done
-        printf 'SYSTEM_MATRIX system=%s cases=18\n' "$system"
+        printf 'SYSTEM_MATRIX system=%s cases=%s\n' "$system" "$system_cases"
     done
     printf 'SYSTEM_MATRIX_CASES=%s\n' "$matrix_cases"
 )
-pass four_system_metadata_registration_chain
+pass five_system_metadata_registration_chain
 
 # The mock has no real mounts. Remove only work directories recorded by this test.
 if [[ -f $tmp/workdirs ]]; then while IFS= read -r dir; do [[ $dir == /tmp/rootpxe-uefi.?????? && -d $dir && ! -L $dir ]] && rm -rf -- "$dir"; done <"$tmp/workdirs"; fi
