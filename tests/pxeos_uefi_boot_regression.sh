@@ -55,6 +55,40 @@ taskType=deploy
 reset_loader; pe "$tmp/esp/EFI/ubuntu/shimx64.efi"; pe "$tmp/esp/EFI/ubuntu/grubx64.efi"
 select_ok shim_grub_same_chain_prefers_shim amd64 50 /EFI/ubuntu/shimx64.efi
 reset_loader
+pe "$tmp/esp/EFI/debian/shimx64.efi"; pe "$tmp/esp/EFI/debian/grubx64.efi"
+mkdir -p "$tmp/esp/EFI/BOOT"
+cp "$tmp/esp/EFI/debian/shimx64.efi" "$tmp/esp/EFI/BOOT/BOOTX64.EFI"
+cp "$tmp/esp/EFI/debian/grubx64.efi" "$tmp/esp/EFI/BOOT/grubx64.efi"
+pe "$tmp/esp/EFI/BOOT/mmx64.efi"; pe "$tmp/esp/EFI/BOOT/fbx64.efi"
+select_ok vendor_with_complete_fallback_chain amd64 50 /EFI/debian/shimx64.efi
+for vendor in ubuntu rocky vendor; do
+    reset_loader
+    pe "$tmp/esp/EFI/$vendor/shimx64.efi"; pe "$tmp/esp/EFI/$vendor/grubx64.efi"
+    mkdir -p "$tmp/esp/EFI/BOOT"
+    cp "$tmp/esp/EFI/$vendor/shimx64.efi" "$tmp/esp/EFI/BOOT/BOOTX64.EFI"
+    cp "$tmp/esp/EFI/$vendor/grubx64.efi" "$tmp/esp/EFI/BOOT/grubx64.efi"
+    select_ok "${vendor}_with_fallback_companions" amd64 50 "/EFI/$vendor/shimx64.efi"
+done
+reset_loader; pe "$tmp/esp/EFI/BOOT/BOOTX64.EFI"; pe "$tmp/esp/EFI/BOOT/grubx64.efi"; pe "$tmp/esp/EFI/BOOT/systemd-bootx64.efi"
+select_ok fallback_companions_select_canonical amd64 50 /EFI/BOOT/BOOTX64.EFI
+for arch in i386 arm64; do
+    reset_loader
+    if [[ $arch == i386 ]]; then machine=332; fallback=BOOTIA32.EFI; manager=grubia32.efi
+    else machine=43620; fallback=BOOTAA64.EFI; manager=grubaa64.efi; fi
+    pe "$tmp/esp/EFI/BOOT/$fallback" "$machine"; pe "$tmp/esp/EFI/BOOT/$manager" "$machine"
+    select_ok "${arch}_fallback_companion" "$arch" 50 "/EFI/BOOT/$fallback"
+done
+reset_loader; pe "$tmp/esp/EFI/Linux/linux.efi" 34404 yes; pe "$tmp/esp/EFI/BOOT/BOOTX64.EFI"; pe "$tmp/esp/EFI/BOOT/grubx64.efi"
+select_ok unique_uki_before_fallback_chain amd64 50 /EFI/Linux/linux.efi
+reset_loader; pe "$tmp/esp/EFI/BOOT/grubx64.efi"
+select_ok boot_manager_without_canonical_preserved amd64 50 /EFI/BOOT/grubx64.efi
+reset_loader; pe "$tmp/esp/EFI/BOOT/grubx64.efi"; printf broken >"$tmp/esp/EFI/BOOT/BOOTX64.EFI"
+select_ok invalid_canonical_does_not_hide_manager amd64 50 /EFI/BOOT/grubx64.efi
+reset_loader; pe "$tmp/esp/EFI/BOOT/grubx64.efi"; pe "$tmp/esp/EFI/BOOT/BOOTX64.EFI" 43620
+select_ok wrong_arch_canonical_does_not_hide_manager amd64 50 /EFI/BOOT/grubx64.efi
+reset_loader; pe "$tmp/esp/EFI/one/grubx64.efi"; pe "$tmp/esp/EFI/two/grubx64.efi"; pe "$tmp/esp/EFI/BOOT/BOOTX64.EFI"; pe "$tmp/esp/EFI/BOOT/grubx64.efi"
+select_bad independent_vendors_with_fallback_still_ambiguous amd64 50 uefi_boot_loader_ambiguous
+reset_loader
 for loader in shimx64-centos.efi shim.efi shimx64.efi grubx64.efi; do pe "$tmp/esp/EFI/centos/$loader"; done
 select_ok el7_shim_aliases_choose_canonical amd64 50 /EFI/centos/shimx64.efi
 reset_loader; pe "$tmp/esp/EFI/vendor/grubx64.efi"; pe "$tmp/esp/EFI/vendor/systemd-bootx64.efi"
@@ -511,6 +545,11 @@ pass failed_cleanup_retry_success
                 rm -rf "$tmp/esp-Ap1"
                 pe "$tmp/esp-Ap1$loader"
                 [[ $system == centos6 ]] || pe "$tmp/esp-Ap1${loader%/*}/grubx64.efi"
+                if [[ $system != centos6 ]]; then
+                    mkdir -p "$tmp/esp-Ap1/EFI/BOOT"
+                    cp "$tmp/esp-Ap1$loader" "$tmp/esp-Ap1/EFI/BOOT/BOOTX64.EFI"
+                    cp "$tmp/esp-Ap1${loader%/*}/grubx64.efi" "$tmp/esp-Ap1/EFI/BOOT/grubx64.efi"
+                fi
                 identity='GPT,d14174d8-a0ba-48c6-a463-e3537e91e6d4'
                 if [[ $topology == lvm_usr ]]; then
                     sed -i 's/"gpt"/"dos"/;s/11111111-2222-3333-4444-555555555555/0xa1b2c3d4/;s/C12A7328-F81F-11D2-BA4B-00A0C93EC93B/ef/' "$tmp/table-A.json"

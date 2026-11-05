@@ -70,6 +70,8 @@ rootpxe_uefi_select_loader() {
         elif (( rank == ${ranks[$group]:-0} )) && [[ ${managers[$group]} != "$path" ]]; then ambiguous[$group]=yes; fi
     done < <(find "$root" -maxdepth 4 -type f -iname '*.efi' -print0)
     for group in "${!managers[@]}"; do
+        # A validated canonical fallback owns its companion managers in EFI/BOOT.
+        [[ $group != /efi/boot:* || ${#fallback[@]} == 0 ]] || continue
         [[ ${ambiguous[$group]} != yes ]] || { rootpxe_uefi_fail uefi_boot_loader_ambiguous; return 1; }
         candidates+=("${managers[$group]}")
     done
