@@ -3977,12 +3977,12 @@ doInventory() {
 }
 # Gets the location of the SAM registry if found
 getSAMLoc() {
-    local path=""
-    local paths="/ntfs/WINDOWS/system32/config/SAM /ntfs/Windows/System32/config/SAM"
-    for path in $paths; do
-        [[ ! -f $path ]] && continue
-        sam="$path" && break
+    local parent=/ntfs component
+    sam=''
+    for component in Windows System32 config; do
+        parent=$(rootpxe_resolve_casefold_directory "$parent" "$component") || return 1
     done
+    sam=$(rootpxe_resolve_casefold_file "$parent" SAM) || return 1
 }
 # Prints a completed task-console line with a fixed level/body boundary.
 # Messages are wrapped before 80 columns.  Only callers decide which values
@@ -4944,8 +4944,8 @@ makeAllSwapSystems() {
 }
 # Find the one deployed Windows system volume before making any hostname
 # change.  Recovery partitions can also be NTFS, so filesystem type alone is
-# unsafe.  The fixed SYSTEM hive is proof of a Windows installation; this does
-# not search for arbitrary unattend files.  Return 10 for no candidate and 11
+# unsafe.  A case-insensitive SYSTEM hive path proves a Windows installation;
+# this does not search for arbitrary unattend files.  Return 10 for no candidate and 11
 # for ambiguity so callers report a stable attention reason.
 rootpxe_find_windows_system_partition() {
     local disk="$1" part candidate="" candidate_count=0
@@ -4957,7 +4957,7 @@ rootpxe_find_windows_system_partition() {
         [[ $fstype == ntfs ]] || continue
         umount /ntfs >/dev/null 2>&1 || true
         rootpxe_run_logged_typed_native ntfs-mount.log "$part" ntfs-3g -o ro "$part" /ntfs || continue
-        if [[ -f /ntfs/Windows/System32/config/SYSTEM ]]; then
+        if rootpxe_resolve_windows_system_hive /ntfs >/dev/null; then
             candidate="$part"
             ((candidate_count++))
         fi
@@ -5328,9 +5328,8 @@ rootpxe_change_hostname_registry() {
     local part="$1" hive hostname controls control script rc inspected paths key expected_paths=0
     local -a path_components
     rootpxe_initialization_failure_reason=windows_hostname_hive_inspection_failed
-    [[ ${changeHostname:-false} == true && -n ${hostName:-} && -d /ntfs && ! -L /ntfs ]] || return 1
-    hive=/ntfs/Windows/System32/config/SYSTEM
-    [[ -f $hive && ! -L $hive ]] || return 1
+    [[ ${changeHostname:-false} == true && -n ${hostName:-} ]] || return 1
+    hive=$(rootpxe_resolve_windows_system_hive /ntfs) || return 1
     hostname="$hostName"
     # Do not lose the inspector exit status through process substitution.
     inspected=$(rootpxe-offline-identities windows-hostname-inspect "$hive") || return 1
@@ -5388,6 +5387,29 @@ rootpxe_resolve_casefold_directory() {
     done
     [[ ${#matches[@]} -eq 1 ]] || return 1
     printf '%s\n' "${matches[0]}"
+}
+
+rootpxe_resolve_casefold_file() {
+    local parent="$1" expected="$2" candidate name
+    local -a matches=()
+    [[ $parent == /* && -d $parent && ! -L $parent && -n $expected ]] || return 1
+    for candidate in "$parent"/*; do
+        [[ -e $candidate || -L $candidate ]] || continue
+        name=${candidate##*/}
+        [[ ${name,,} == ${expected,,} ]] || continue
+        [[ -f $candidate && ! -L $candidate ]] || return 1
+        matches+=("$candidate")
+    done
+    [[ ${#matches[@]} -eq 1 ]] || return 1
+    printf '%s\n' "${matches[0]}"
+}
+
+rootpxe_resolve_windows_system_hive() {
+    local parent="$1" component
+    for component in Windows System32 config; do
+        parent=$(rootpxe_resolve_casefold_directory "$parent" "$component") || return 1
+    done
+    rootpxe_resolve_casefold_file "$parent" SYSTEM
 }
 
 rootpxe_resolve_windows_sysprep_unattend_path() {
@@ -5463,7 +5485,7 @@ rootpxe_apply_windows_hostname() {
 #
 # $1 is the partition
 fixWin7boot() {
-    local part="$1"
+    local part="$1" boot bcd backup replacement=""
     [[ -z $part ]] && handleError "No partition passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ $osid != [5-7] ]] && return
     local fstype=""
@@ -5494,13 +5516,13 @@ fixWin7boot() {
                     handleError "Could not mount $part (${FUNCNAME[0]})\n    Args Passed: $*"
             ;;
     esac
-    if [[ ! -f /bcdstore/Boot/BCD ]]; then
+    if ! boot=$(rootpxe_resolve_casefold_directory /bcdstore Boot) || ! bcd=$(rootpxe_resolve_casefold_file "$boot" BCD); then
         umount /bcdstore >/dev/null 2>&1
         return
     fi
     dots "Backing up and replacing BCD"
-    local bcd=/bcdstore/Boot/BCD backup=/bcdstore/Boot/BCD.bak replacement=""
-    replacement=$(mktemp /bcdstore/Boot/.BCD.rootpxe-new.XXXXXX) || {
+    backup="$boot/BCD.bak"
+    replacement=$(mktemp "$boot/.BCD.rootpxe-new.XXXXXX") || {
         echo "Failed"; debugPause; umount /bcdstore >/dev/null 2>&1
         handleError "PXEOS_STAGE=restore CODE=BCD_REPLACE_FAILED REASON=unable_to_create_staged_replacement"; return 1
     }

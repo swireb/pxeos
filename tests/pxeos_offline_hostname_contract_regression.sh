@@ -10,14 +10,20 @@ cleanup_fixture() {
 }
 trap cleanup_fixture EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
-mkdir -p "$tmp/ntfs/Windows/System32/config"
-touch "$tmp/ntfs/Windows/System32/config/SYSTEM"
+expected_hive="$tmp/ntfs/wInDoWs/sYsTeM32/CoNfIg/sYsTeM"
+mkdir -p "${expected_hive%/*}"
+touch "$expected_hive"
 # Only the mount path is relocated; the wrapper body is copied verbatim.
+for name in rootpxe_resolve_casefold_directory rootpxe_resolve_casefold_file rootpxe_resolve_windows_system_hive; do
+    awk -v name="$name" '$0 ~ "^" name "\\(\\)" { found=1 } found {print} found && /^}/ {exit}' "$funcs" >>"$tmp/wrapper.sh"
+done
 awk '/^rootpxe_change_hostname_registry\(\)/ { found=1 } found { print } found && /^}/ { exit }' "$funcs" |
-    sed "s|/ntfs|$tmp/ntfs|g" >"$tmp/wrapper.sh"
+    sed "s|/ntfs|$tmp/ntfs|g" >>"$tmp/wrapper.sh"
 source "$tmp/wrapper.sh"
 changeHostname=true hostName=AFTER inspect_failure=false write_paths_failure=false verify_failure=false
 rootpxe-offline-identities(){
+    [[ $2 == "$expected_hive" ]] || return 91
+    printf '%s\n' "$1" >>"$tmp/native-calls"
     if [[ $1 == windows-hostname-inspect ]]; then
         printf 'ControlSet001\nControlSet002\n'
         [[ $inspect_failure == false ]]
@@ -37,6 +43,7 @@ rootpxe-offline-identities(){
 }
 reged(){
     local input
+    [[ $1 == -e && $2 == "$expected_hive" ]] || return 91
     input=$(</dev/stdin)
     printf '%s\n' "$input" >>"$tmp/reged-calls"
     [[ $input != *ActiveComputerName* ]] || return 3
@@ -44,6 +51,7 @@ reged(){
     return 2
 }
 rootpxe_change_hostname_registry /dev/fake || fail offline-hive-without-volatile-key
+[[ $(cat "$tmp/native-calls") == $'windows-hostname-inspect\nwindows-hostname-write-paths\nwindows-hostname-verify' ]] || fail actual-hive-path-not-used-throughout
 grep -Fq '\ControlSet001\services\Tcpip\Parameters\NV Hostname' "$tmp/reged-calls" || fail preserved-services-case
 grep -Fq '\ControlSet002\SERVICES\TCPIP\PARAMETERS\HOSTNAME' "$tmp/reged-calls" || fail preserved-value-case
 rm "$tmp/reged-calls"

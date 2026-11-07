@@ -38,6 +38,8 @@ chmod +x "$tmp/bin/jq" "$tmp/bin/ntfs-3g" "$tmp/bin/umount"; export PATH="$tmp/b
 awk '/^rootpxe_change_hostname_registry\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" >"$tmp/functions.sh"
 awk '/^rootpxe_validate_windows_hostname\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" >>"$tmp/functions.sh"
 awk '/^rootpxe_resolve_casefold_directory\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" >>"$tmp/functions.sh"
+awk '/^rootpxe_resolve_casefold_file\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" >>"$tmp/functions.sh"
+awk '/^rootpxe_resolve_windows_system_hive\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" >>"$tmp/functions.sh"
 awk '/^rootpxe_resolve_windows_sysprep_unattend_path\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" >>"$tmp/functions.sh"
 awk '/^rootpxe_apply_windows_hostname\(\)/ {p=1} p {print} p && /^}$/ {exit}' "$funcs" >>"$tmp/functions.sh"
 source "$tmp/functions.sh"; rootpxe_stage(){ :; }
@@ -46,7 +48,7 @@ policy="$tmp/policy.json"; private="$tmp/private.json"; deploymentIdentityPolicy
 output_xml=/ntfs/Windows/System32/Sysprep/unattend.xml
 write_private(){ printf '{"unattendXml":%s}' "$(printf '%s' "$1" | jq -Rs .)" >"$private"; }
 write_policy(){ printf '{"systemIdentity":{"sysprep":%s}}' "$1" >"$policy"; }
-assert_registry(){ rootpxe-offline-identities windows-hostname-verify /ntfs/Windows/System32/config/SYSTEM "$1" || fail "registry did not contain $1"; }
+assert_registry(){ rootpxe-offline-identities windows-hostname-verify "$(rootpxe_resolve_windows_system_hive /ntfs)" "$1" || fail "registry did not contain $1"; }
 
 # OFF/OFF does not mount or modify either registry or unattend XML.
 printf 'sentinel' >"$tmp/source/Windows/System32/Sysprep/unattend.xml"; write_policy false; changeHostname=false; hostName=''
@@ -54,9 +56,16 @@ rootpxe_apply_windows_hostname "$tmp/source" || fail 'OFF/OFF rejected'
 [[ $(cat "$tmp/source/Windows/System32/Sysprep/unattend.xml") == sentinel ]] || fail 'OFF/OFF touched XML'
 
 # ON/OFF uses the direct registry path and never parses existing XML.
-printf 'bad xml' >"$tmp/source/Windows/System32/Sysprep/unattend.xml"; changeHostname=true; hostName=HOST-ONE
-rootpxe_apply_windows_hostname "$tmp/source" || fail 'ON/OFF failed'; assert_registry HOST-ONE
-[[ $(cat "$tmp/source/Windows/System32/Sysprep/unattend.xml") == 'bad xml' ]] || fail 'ON/OFF touched XML'
+changeHostname=true; hostName=HOST-ONE
+for variant in Windows/System32/config/SYSTEM Windows/System32/config/system windows/system32/config/system wInDoWs/sYsTeM32/cOnFiG/sYsTeM; do
+    case_source="$tmp/source-${variant//\//-}"
+    case_system32=${variant%/*/*}
+    mkdir -p "$case_source/${variant%/*}" "$case_source/$case_system32/Sysprep"
+    "$tmp/fixture" "$minimal" "$case_source/$variant"
+    printf 'bad xml' >"$case_source/$case_system32/Sysprep/unattend.xml"
+    rootpxe_apply_windows_hostname "$case_source" || fail "ON/OFF failed for $variant"; assert_registry HOST-ONE
+    [[ $(cat "/ntfs/$case_system32/Sysprep/unattend.xml") == 'bad xml' ]] || fail 'ON/OFF touched XML'
+done
 
 # OFF/ON writes the supplied custom XML byte-for-byte and cannot invoke reged.
 xml='<?xml version="1.0"?><unattend xmlns="urn:schemas-microsoft-com:unattend"><settings pass="specialize"><component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"><ComputerName>USER</ComputerName></component></settings></unattend>'
