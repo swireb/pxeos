@@ -656,7 +656,7 @@ for signal in EXIT INT TERM; do
     : >"$tmp/cleanup-$signal/efibootmgr.stderr"
     set +e
     (
-        killStatusReporter(){ :; }; rootpxe_cleanup_session(){ :; }
+        killStatusReporter(){ :; }; rootpxe_cleanup_session(){ printf 'session\n' >>"$tmp/session-cleanup-$signal"; }
         uefi_work="$tmp/cleanup-$signal" uefi_vars="$tmp/own-vars" uefi_own_esp=yes uefi_own_vars=yes uefi_esp_cleanup_attempted=no uefi_vars_cleanup_attempted=no
         uefi_name_work=$(mktemp -d /tmp/rootpxe-cloud-mount.XXXXXX)
         mkdir "$uefi_name_work/root"
@@ -670,6 +670,8 @@ for signal in EXIT INT TERM; do
     set -e
     case $signal:$result in EXIT:0|INT:130|TERM:143) ;; *) fail "cleanup hook $signal exit=$result";; esac
     [[ $(wc -l <"$tmp/cleanup-events-$signal") == 3 && ! -e $tmp/cleanup-$signal && ! -e $(cat "$tmp/name-work-$signal") ]] || fail "$signal cleanup missed or repeated owned mounts"
+    [[ -s $tmp/session-cleanup-$signal ]] || fail "$signal skipped session/SMB cleanup entry"
+    printf 'SESSION_CLEANUP signal=%s calls=%s\n' "$signal" "$(wc -l <"$tmp/session-cleanup-$signal")"
     pass "download_${signal}_owned_cleanup"
 done
 uefi_work='' uefi_own_esp=no uefi_own_vars=no

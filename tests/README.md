@@ -103,7 +103,7 @@ pxeos_task_identity_regression.sh  # 核对普通 JSON/form 存储身份、捕�
 ```
 
 
-## 捕获、恢复、存储与分区（18）
+## 捕获、恢复、存储与分区（17）
 
 - 脚本及核对范围如下。
 
@@ -121,7 +121,6 @@ pxeos_partclone_vt_progress_regression.sh  # 核对 Partclone VT/VCSA 快照进�
 pxeos_lvm_console_regression.sh  # 核对 LVM 控制台激活与消息处理。
 pxeos_lvm_schema_jq_regression.sh  # 以真实 jq 核对 LVM capture schema 过滤程序。
 pxeos_lvm_udev_rules_regression.sh  # 核对 LVM udev 同步及移除 systemd 专用自动激活规则。
-pxeos_var_mount_regression.sh  # 核对原生 NoCloud 的独立 /var 许可、全部 PV、挂载身份与借用清理。
 pxeos_lvm_multi_regression.sh  # 核对同一磁盘上 1/2/3/5 组彼此独立的一 PV/一 VG/多 linear LV，覆盖正序与倒序布局；默认执行叶级集成回归。
 pxeos_mbr_partition_contract_regression.sh  # 核对 DOS/MBR 分区编号、32 位 LBA 与 GPT 边界契约，同时检查 Schema object 和 resolved partition array 两种输入形态。
 pxeos_lvm_naming_contract.sh  # 核对 pinned LVM2 官方名称 127 字节边界、保留前缀/内部片段及连字符转义 mapper 名边界。
