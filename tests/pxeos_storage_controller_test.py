@@ -10,6 +10,101 @@ LIB = Path(__file__).parents[1] / "Buildroot/board/PXEOS/PXEOS/rootfs_overlay/us
 
 
 class StorageControllerTests(unittest.TestCase):
+    def test_new_boot_cleanup_continues_full_restore_in_same_process(self):
+        overlay = LIB.parents[4]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            funcs = path / "funcs.sh"
+            funcs.write_text('rootpxe_task_log_initialize() { :; }\nrootpxe_storage_recover_until_clean() { printf \'cleanup:%s\\n\' "$$" >>"$trace"; rootpxe_storage_released=yes; rootpxe_storage_stopped=yes; }\nrootpxe_storage_reset_retry_state() { [[ $rootpxe_storage_released == yes && $rootpxe_storage_stopped == yes ]]; printf \'reset:%s\\n\' "$$" >>"$trace"; }\n')
+            checkin = path / "checkin.sh"
+            checkin.write_text('calls=$(( ${calls:-0} + 1 ))\nprintf \'checkin:%s:%s\\n\' "$calls" "$$" >>"$trace"\nif [[ $calls == 1 ]]; then rootpxe_storage_only=yes; rootpxe_restart_after_cleanup=yes; progress_attempt=2\nelse rootpxe_storage_only=no; rootpxe_restart_after_cleanup=no; progress_attempt=3; resumeStage=\'\'; fi\n')
+            mount = path / "mount.sh"
+            mount.write_text(":\n")
+            funcs.write_text(funcs.read_text() + r'''
+rootpxe_partition_progress_initialize_runtime() { :; }
+rootpxe_stage() { :; }
+rootpxe_validate_image_contract() { :; }
+rootpxe_validate_fixed_image_lvm_inventory() { :; }
+rootpxe_storage_path() { printf '%s' "$1"; }
+rootpxe_partclone_progress_initialize() { :; }
+pxeos.statusreporter() { :; }
+rootpxe_console_message() { :; }
+rootpxe_require_unused_target_disks() { :; }
+rootpxe_validate_restore_artifacts() { :; }
+rootpxe_plan_deploy_disk_operation() { rootpxe_planned_target_id=disk-fixed; rootpxe_planned_disk_operation=deploy_write; }
+rootpxe_wait_for_disk_permit() { printf 'permit:%s\n' "$$" >>"$trace"; }
+rootpxe_bind_granted_deploy_targets() { :; }
+rootpxe_deployment_identity_policy_enabled() { return 1; }
+enableWriteCache() { :; }
+findHDDInfo() { [[ $progress_attempt == 3 && -z $resumeStage ]] || exit 93; hd=mock; disks=mock; performRestore() { printf 'restore:%s\n' "$$" >>"$trace"; }; }
+command_exists() { return 1; }
+completeTasking() { printf 'initialize:%s\n' "$$" >>"$trace"; . "$finish_script"; }
+rootpxe_require_task_context() { :; }
+rootpxe_task_curl() { printf 'finish:%s\n' "$$" >>"$trace"; printf '{"success":true}'; }
+rootpxe_clear_capture_marker() { :; }
+rootpxe_cleanup_task_json() { :; }
+rootpxe_capture_resume_cleanup() { :; }
+rootpxe_uefi_cleanup() { :; }
+rootpxe_cleanup_session() { :; }
+killStatusReporter() { :; }
+debugPause() { :; }
+dots() { :; }
+handleError() { printf '%s\n' "$*" >&2; exit 94; }
+''')
+            checkin.write_text(checkin.read_text() + "\ntype=down; img=fixture; imgType=mps; imgFormat=5; imgPartitionType=all; nombr=1; taskid=41; task_token=fixture; mac=fixture; web=http://fixture/; rootpxe_partclone_progress_run_id=fixture\n")
+            finish = path / "finish.sh"
+            finish.write_text((overlay / "bin/pxeos.imgcomplete").read_text())
+            source = (overlay / "bin/pxeos.download").read_text()
+            source = source.replace("/bin/pxeos.checkmount", str(mount)).replace("/bin/pxeos.checkimgvar", str(mount)).replace("/bin/pxeos.inventory", str(mount))
+
+            source = source.replace("/usr/share/pxeos/lib/funcs.sh", str(funcs)).replace("/bin/pxeos.checkin", str(checkin)).replace("/bin/pxeos.mount", str(mount))
+            source = source.replace("/tmp/pxeos.storage-recovery-only", str(path / "recovery-only"))
+            script = path / "download.sh"
+            script.write_text(source)
+            trace = path / "trace"
+            result = subprocess.run(["bash", "-c", 'trace="$1"; finish_script="$3"; export trace finish_script; bash "$2"', "test", str(trace), str(script), str(finish)], text=True, capture_output=True, timeout=2, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            lines = trace.read_text().splitlines()
+            self.assertEqual([line.split(":")[0] for line in lines], ["checkin", "cleanup", "reset", "checkin", "permit", "restore", "initialize", "finish"])
+            self.assertEqual(len({line.rsplit(":", 1)[-1] for line in lines}), 1)
+
+    def test_cleanup_failure_or_cleanup_only_never_starts_restore(self):
+        overlay = LIB.parents[4]
+        for cleanup_rc, restart in ((7, "yes"), (0, "no")):
+            with self.subTest(cleanup_rc=cleanup_rc, restart=restart), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory)
+                funcs = path / "funcs.sh"
+                funcs.write_text(f"rootpxe_task_log_initialize() {{ :; }}\nrootpxe_storage_recover_until_clean() {{ return {cleanup_rc}; }}\nrootpxe_storage_reset_retry_state() {{ exit 91; }}\n")
+                checkin = path / "checkin.sh"
+                checkin.write_text(f"printf checkin >>'{path / 'calls'}'\nrootpxe_storage_only=yes; rootpxe_restart_after_cleanup={restart}\n")
+                mount = path / "mount.sh"
+                mount.write_text(":\n")
+                source = (overlay / "bin/pxeos.download").read_text().split("rootpxe_download_cleanup_initialization_private()", 1)[0]
+                source = source.replace("/usr/share/pxeos/lib/funcs.sh", str(funcs)).replace("/bin/pxeos.checkin", str(checkin)).replace("/bin/pxeos.mount", str(mount)).replace("/tmp/pxeos.storage-recovery-only", str(path / "marker"))
+                source += "exit 92\n"
+                script = path / "download.sh"
+                script.write_text(source)
+                result = subprocess.run(["bash", str(script)], text=True, capture_output=True, timeout=2, check=False)
+                self.assertEqual(result.returncode, cleanup_rc, result.stderr)
+                self.assertEqual((path / "calls").read_text(), "checkin")
+                self.assertEqual((path / "marker").exists(), cleanup_rc == 0)
+
+    def test_real_retry_reset_discards_released_flags_and_old_failure_deadline(self):
+        result = self.run_controller('''
+            set -e
+            rootpxe_cleanup_task_json() { :; }
+            rootpxe_deployment_identity_cleanup_private() { :; }
+            rootpxe_storage_workspace="$tmp/work"
+            rootpxe_storage_released=yes rootpxe_storage_stopped=yes
+            rootpxe_failure_started_at=100 rootpxe_failure_deadline=160
+            rootpxe_storage_reconcile=yes rootpxe_storage_recovery_completed=yes
+            rootpxe_storage_reset_retry_state
+            [[ -z ${rootpxe_storage_workspace:-} && -z ${rootpxe_storage_released:-} && -z ${rootpxe_storage_stopped:-} ]]
+            [[ -z ${rootpxe_failure_started_at:-} && -z ${rootpxe_failure_deadline:-} ]]
+            [[ -z ${rootpxe_storage_reconcile:-} && -z ${rootpxe_storage_recovery_completed:-} ]]
+        ''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_permanent_storage_rejection_obeys_the_failure_deadline(self):
         result = self.run_controller('''
             set -e

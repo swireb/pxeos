@@ -15,6 +15,15 @@ rootpxe_apply_json_cloud_init(){ :; }
 recovery='{"taskId":42,"type":"deploy","pxeType":"down","executionToken":"11111111111111111111111111111111","progressAttempt":2,"img":"image","protocol":"nfs","storageip":"192.0.2.1","exportPath":"/images","storageOnly":true,"storageAccess":{"storageOnly":true}}'
 rootpxe_apply_json_checkin "$recovery"
 [[ $rootpxe_storage_only == yes && -z $img_format && -z $pigz_comp ]]
+for restart in true false; do
+ rootpxe_apply_json_checkin "$(jq -c --argjson flag "$restart" '.restartAfterCleanup=$flag' <<<"$recovery")"
+ expected=no; [[ $restart == false ]] || expected=yes
+ [[ $rootpxe_restart_after_cleanup == "$expected" ]]
+done
+for value in '"true"' 1 null '{}' '[]'; do
+ invalid=$(jq -c --argjson value "$value" '.restartAfterCleanup=$value' <<<"$recovery")
+ if rootpxe_apply_json_checkin "$invalid"; then printf 'invalid restartAfterCleanup accepted\n' >&2; exit 1; fi
+done
 for format in 0 5; do
  for level in 0 1 9; do
   document=$(jq -c --argjson format "$format" --argjson level "$level" '.storageOnly=false | .storageAccess.storageOnly=false | .imgFormat=$format | .compressionLevel=$level | .imgType="mps" | .imgPartitionType="all" | .osid=9' <<<"$recovery")

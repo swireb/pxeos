@@ -291,9 +291,11 @@ rootpxe_apply_json_checkin() {
         rootpxe_storage_apply_context "$document" || return 1
     fi
     rootpxe_storage_only=$(jq -r 'if .storageOnly == true and .storageAccess.storageOnly == true then "yes" else "no" end' <<<"$document") || return 1
+    jq -e 'if has("restartAfterCleanup") then (.restartAfterCleanup|type == "boolean") else true end' >/dev/null <<<"$document" || return 1
+    rootpxe_restart_after_cleanup=$(jq -r 'if .restartAfterCleanup == true then "yes" else "no" end' <<<"$document") || return 1
     if [[ $rootpxe_storage_only == yes ]]; then
         rootpxe_validate_json_storage || return 1
-        export taskid execution_token taskType pxe_type img protocol storage_server storage_export rootpxe_storage_only progress_attempt
+        export taskid execution_token taskType pxe_type img protocol storage_server storage_export rootpxe_storage_only rootpxe_restart_after_cleanup progress_attempt
         return 0
     fi
     pigz_comp=$(rootpxe_normalize_compression_level "$pigz_comp") || return 1

@@ -677,8 +677,8 @@ rootpxe_storage_recover_until_clean() {
     return 2
 }
 
-# Only an administrator-requested new attempt crosses this boundary. Same
-# attempt storage recovery must retain its exact execution identity.
+# Only a server-admitted new attempt crosses this boundary after verified
+# cleanup. Same-attempt recovery retains its exact execution identity.
 rootpxe_storage_reset_retry_state() {
     if [[ -n ${rootpxe_storage_workspace:-} ]]; then
         [[ ${rootpxe_storage_released:-no} == yes && ${rootpxe_storage_stopped:-no} == yes && -z ${rootpxe_storage_pid:-} ]] || return 1
@@ -687,6 +687,8 @@ rootpxe_storage_reset_retry_state() {
     rootpxe_deployment_identity_cleanup_private || return 1
     unset rootpxe_storage_workspace rootpxe_storage_nonce rootpxe_storage_worker_nonce rootpxe_storage_stage rootpxe_storage_lock
     unset rootpxe_storage_published capture_size_bytes rootpxe_final_capture_path
+    unset rootpxe_storage_released rootpxe_storage_stopped rootpxe_storage_reconcile rootpxe_storage_recovery_completed
+    unset rootpxe_failure_started_at rootpxe_failure_deadline
 }
 
 rootpxe_capture_resume_published() {

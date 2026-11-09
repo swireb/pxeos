@@ -3,9 +3,17 @@
 rootpxe_task_log_initialize || printf '[WARN]  Task log: unavailable.\n' >&2
 . /bin/pxeos.checkin
 if [[ ${rootpxe_storage_only:-no} == yes ]]; then
-    . /bin/pxeos.mount
-    rootpxe_storage_recover_until_clean
-    exit $?
+    while [[ ${rootpxe_storage_only:-no} == yes ]]; do
+        . /bin/pxeos.mount
+        rootpxe_storage_recover_until_clean || exit $?
+        if [[ ${rootpxe_restart_after_cleanup:-no} != yes ]]; then
+            (umask 077; : >/tmp/pxeos.storage-recovery-only) || exit 1
+            exit 0
+        fi
+        rootpxe_storage_reset_retry_state || exit 1
+        rm -f -- /tmp/pxeos.storage-recovery-only
+        . /bin/pxeos.checkin
+    done
 fi
 rootpxe_download_cleanup_initialization_private() {
     killStatusReporter
