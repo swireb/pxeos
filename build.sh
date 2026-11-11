@@ -108,6 +108,11 @@ if [[ $fsDownloadOnly != y ]]; then
     rootpxe_build_resolve_server_version "$confirm" || exit 1
 fi
 
+# Buildroot's download-only targets use the host tools and the configured internal toolchain sources.
+require_arm64_toolchain=n
+if [[ $fsDownloadOnly != y && " $arch " == *" arm64 "* ]]; then
+    require_arm64_toolchain=y
+fi
 if ! checkDependencies; then
     exit 1
 fi

@@ -16,7 +16,6 @@ declare -ar common_dependencies=(
     "gcc"
     "flex"
     "bison"
-    "gcc-aarch64-linux-gnu"
     "cpio"
     "file"
     "rsync"
@@ -44,6 +43,12 @@ declare -ar rhel_dependencies=(
     "ncurses-devel"
 )
 
+declare -ar apt_acquire_options=(
+    -o Acquire::Retries=1
+    -o Acquire::http::Timeout=30
+    -o Acquire::https::Timeout=30
+)
+
 
 function __epel_repo_message() {
     echo ""
@@ -54,14 +59,15 @@ function __epel_repo_message() {
 
 
 function checkDependencies() {
-    local running_os package_list package status
+    local running_os package_list package status arm64_toolchain=gcc-aarch64-linux-gnu
+    local -a dependencies
     running_os=$(grep "^ID=" /etc/os-release | cut -d'=' -f2 | tr -d '"')
     package_manager=()
 
     case $running_os in
         "debian" | "ubuntu")
             dependencies=("${common_dependencies[@]}" "${deb_dependencies[@]}")
-            package_manager=(sudo apt install -y)
+            package_manager=(sudo apt-get "${apt_acquire_options[@]}" install -y)
             pkgmgr() {
                 dpkg-query -W -f='${db:Status-Status}\t${binary:Package}\n'
             }
@@ -72,9 +78,6 @@ function checkDependencies() {
             pkgmgr() {
                 rpm -qa --qf '%{NAME}\n'
             }
-            if [[ $running_os == "rhel" || $running_os == "rocky" ]]; then
-                __epel_repo_message
-            fi
             ;;
         *)
             echo "Untested OS: $running_os"
@@ -82,6 +85,10 @@ function checkDependencies() {
             return 1
             ;;
     esac
+
+    if [[ ${require_arm64_toolchain:-y} == y ]]; then
+        dependencies+=("$arm64_toolchain")
+    fi
 
     if ! package_list="$(pkgmgr)"; then
         echo "Failed to query installed packages. Exiting now." >&2
@@ -108,6 +115,10 @@ function checkDependencies() {
         fi
     done
 
+    if [[ ( $running_os == rhel || $running_os == rocky ) &&
+        ${require_arm64_toolchain:-y} == y && -z ${installed_packages[$arm64_toolchain]+x} ]]; then
+        __epel_repo_message
+    fi
     if [[ ${#missing_packages[@]} -ne 0 ]]; then
         echo "The following dependencies are missing: ${missing_packages[*]}"
     fi
@@ -119,18 +130,29 @@ function checkDependencies() {
 function installDependencies() {
     local install_dep=$1
 
-    if [[ $install_dep != "y" && ${#missing_packages[@]} -ne 0 ]]; then
+    if [[ ${#missing_packages[@]} -eq 0 ]]; then
+        return 0
+    fi
+    if [[ $install_dep != "y" ]]; then
         echo "Exiting now, please install the packages manually or add the -i or --install-dep flag to install them automatically."
         return 1
     fi
 
-    if [[ ${#missing_packages[@]} -ne 0 ]]; then
-        echo "Attempting to install missing dependencies..."
-        if ! "${package_manager[@]}" "${missing_packages[@]}"; then
-            echo "Failed to install dependencies, please install the packages manually. Exiting now."
-            return 1
-        fi
+    echo "Attempting to install missing dependencies..."
+    if "${package_manager[@]}" "${missing_packages[@]}"; then
+        return 0
     fi
 
-    return 0
+    if [[ ${package_manager[1]-} == apt-get ]]; then
+        echo "APT install failed. Refreshing package indexes before retrying once." >&2
+        if sudo apt-get "${apt_acquire_options[@]}" --error-on=any update &&
+            "${package_manager[@]}" "${missing_packages[@]}"; then
+            return 0
+        fi
+        echo "APT could not install dependencies. Check network access, DNS resolution and the configured APT mirrors before retrying." >&2
+    else
+        echo "Failed to install dependencies, please install the packages manually. Exiting now."
+    fi
+
+    return 1
 }
