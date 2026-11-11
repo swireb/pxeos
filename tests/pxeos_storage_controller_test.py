@@ -375,6 +375,74 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
         ''')
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_restore_read_logs_done_and_actual_forward_wait_status(self):
+        for case, result_code, forward_code, wait_phase, done in (
+            ("done", 0, 0, "done", "yes"),
+            ("failed_forward", 23, 23, "done", "yes"),
+            ("missing_done", 1, 143, "cleanup", "no"),
+            ("not_started", 1, "not_started", "not_started", "no"),
+            ("unrelated", 0, None, None, None),
+        ):
+            with self.subTest(case=case):
+                result = self.run_controller(f"case_name={case}\n" + r'''
+                    rootpxe_task_log_append() {
+                        printf '%s\n' "$*" >>"$tmp/diagnostics"
+                        printf 'unexpected logger stdout'
+                        return 29
+                    }
+                    rootpxe_safe_relative_path() { :; }
+                    rootpxe_storage_call() {
+                        if [[ $case_name == missing_done && $2 == *'"event":"result"'* ]]; then
+                            while [[ ! -e $tmp/forward-started ]]; do sleep 0.01; done
+                        fi
+                        printf '{"nextSequence":"2","ack":{"proof":{"%s":{"size":"7"}}}}' "$proof_key"
+                    }
+                    head() {
+                        command head "$@" || return $?
+                        case $case_name in
+                            failed_forward) return 23 ;;
+                            missing_done)
+                                trap 'exit 143' TERM
+                                : >"$tmp/forward-started"
+                                while :; do sleep 0.01; done ;;
+                        esac
+                    }
+                    img=images/fixture
+                    proof_key=$(printf '%s' "$img/private-file.img" | sha256sum | cut -d ' ' -f1)
+                    printf '{"execution":{"token":"fixture-secret"}}' >"$tmp/context.json"
+                    printf '1\n' >"$tmp/next-sequence"
+                    : >"$tmp/events"
+                    if [[ $case_name != not_started ]]; then
+                        printf '%s\n' '{"event":"intent"}' '{"event":"result"}' >"$tmp/events"
+                    fi
+                    if [[ $case_name != missing_done && $case_name != not_started ]]; then
+                        printf '%s\n' '{"event":"done"}' >>"$tmp/events"
+                    fi
+                    printf 'payload' >"$tmp/data"
+                    exec {rootpxe_storage_request_fd}>"$tmp/requests"
+                    exec {rootpxe_storage_result_fd}<"$tmp/events"
+                    exec {rootpxe_storage_data_fd}<"$tmp/data"
+                    sleep 10 & rootpxe_storage_pid=$!
+                    status=0
+                    if [[ $case_name == unrelated ]]; then
+                        rootpxe_storage_read_file "$tmp/image/private-file.img" || status=$?
+                    else
+                        rootpxe_restore_read_target=/dev/mockp1 rootpxe_storage_read_file "$tmp/image/private-file.img" || status=$?
+                    fi
+                    kill "$rootpxe_storage_pid" 2>/dev/null || true
+                    wait "$rootpxe_storage_pid" 2>/dev/null || true
+                    if [[ -f $tmp/diagnostics ]]; then cat "$tmp/diagnostics" >&2; fi
+                    exit "$status"
+                ''', timeout=3)
+                self.assertEqual(result.returncode, result_code, result.stderr)
+                self.assertEqual(result.stdout, "" if case == "not_started" else "payload")
+                diagnostics = [line for line in result.stderr.splitlines() if "forward_exitcode=" in line]
+                expected = [] if forward_code is None else [
+                    f"PXEOS_STAGE=restore target=/dev/mockp1 forward_exitcode={forward_code} "
+                    f"forward_wait={wait_phase} helper_done={done}"
+                ]
+                self.assertEqual(diagnostics, expected)
+
     def test_metadata_file_write_keeps_fixed_size_contract(self):
         result = self.run_controller('''
             set -e

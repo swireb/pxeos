@@ -324,7 +324,23 @@ rootpxe_storage_local_payload() {
 # of its own read FIFO. Every fixed write must reach EOF at its declared size.
 rootpxe_storage_exec() (
     local operation=$1 path=$2 argument=${3:-} sequence command event phase response data_pid='' data_status=0 write_fd='' expected key read_timeout remaining
-    trap 'if [[ -n $data_pid ]]; then kill -TERM "$data_pid" 2>/dev/null || true; while :; do wait "$data_pid" 2>/dev/null || true; kill -0 "$data_pid" 2>/dev/null || break; done; fi; [[ -z $write_fd ]] || exec {write_fd}>&-' EXIT
+    local helper_done=no forward_wait=not_started
+    trap '
+        if [[ -n $data_pid ]]; then
+            kill -TERM "$data_pid" 2>/dev/null || true
+            while :; do
+                data_status=0
+                wait "$data_pid" 2>/dev/null || data_status=$?
+                kill -0 "$data_pid" 2>/dev/null || break
+            done
+            forward_wait=cleanup
+        fi
+        [[ -z $write_fd ]] || exec {write_fd}>&-
+        if [[ $operation == read && $argument == - && -n ${rootpxe_restore_read_target:-} ]]; then
+            [[ $forward_wait != not_started ]] || data_status=not_started
+            rootpxe_task_log_append "PXEOS_STAGE=restore target=$rootpxe_restore_read_target forward_exitcode=$data_status forward_wait=$forward_wait helper_done=$helper_done" >/dev/null 2>&1 || true
+        fi
+    ' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
     trap 'exit 129' HUP
@@ -364,7 +380,15 @@ rootpxe_storage_exec() (
             [[ $(jq -r '.bytes' <<<"$event") =~ ^[0-9]+$ ]] || break
             continue
         fi
-        [[ $phase != done ]] || { [[ -z $data_pid ]] || wait "$data_pid" || data_status=$?; data_pid=''; return "$data_status"; }
+        if [[ $phase == done ]]; then
+            helper_done=yes
+            if [[ -n $data_pid ]]; then
+                wait "$data_pid" || data_status=$?
+                forward_wait=done
+            fi
+            data_pid=''
+            return "$data_status"
+        fi
         [[ $phase == intent || $phase == created || $phase == result ]] || break
         response=$(rootpxe_storage_call publish-checkpoint --data-urlencode "event=$event") || break
         if [[ $operation == read && $phase == intent ]]; then

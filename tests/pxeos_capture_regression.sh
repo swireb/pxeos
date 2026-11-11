@@ -378,6 +378,8 @@ set +e
     source "$tmp/funcs.sh" 2>/dev/null
     storage_test_pipeline_boundaries
     rootpxe_require_unused_target_disks() { :; } # 恢复 writer 使用模拟设备。
+    rootpxe_storage_read_file() { printf image; return 19; }
+    rootpxe_task_log_append() { printf '%s\n' "$*" >>"$tmp/restore-pipeline-diagnostic"; }
     handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 92; }
     imgFormat=5
     imgLegacy=''
@@ -390,6 +392,7 @@ set -e
 rm -f /tmp/pigz1
 assert_eq "$restore_rc" 92 'restore decoder 失败必须升级为任务失败'
 grep -Fq 'PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_FAILED' "$tmp/restore-error" || fail 'restore 失败必须携带稳定 stage/code'
+grep -Fxq 'PXEOS_STAGE=restore target=/dev/mockp1 source_exitcode=19' "$tmp/restore-pipeline-diagnostic" || fail 'restore pipeline failure must retain the first source wait status'
 pass 'restore decoder failure is not masked by partclone success'
 
 export MOCK_ERROR_FILE="$tmp/split-no-match-error"
@@ -460,6 +463,7 @@ set +e
     storage_test_pipeline_boundaries
     handleError() { printf '%s\n' "$1" > "${MOCK_ERROR_FILE:?}"; exit 93; }
     rootpxe_require_unused_target_disks() { :; }
+    rootpxe_task_log_append() { printf '%s\n' "$*" >>"$tmp/restore-source-diagnostic"; return 29; }
     imgFormat=5
     imgLegacy=''
     storage=mock
@@ -472,6 +476,7 @@ set -e
 rm -f /tmp/pigz1
 assert_eq "$restore_source_rc" 93 'restore 后台镜像读取失败必须升级为任务失败'
 grep -Fq 'PXEOS_STAGE=restore CODE=RESTORE_SOURCE_FAILED' "$tmp/restore-source-error" || fail 'restore source 失败必须携带稳定 stage/code'
+grep -Fxq 'PXEOS_STAGE=restore target=/dev/mockp1 source_exitcode=11' "$tmp/restore-source-diagnostic" || fail 'restore source failure must log the actual source wait status'
 pass 'restore source failure is not masked by downstream success'
 
 printf 'PASS: PXEOS pipeline regression\n'

@@ -4831,7 +4831,11 @@ writeImage()  {
     local file="$1"
     local target="$2"
     local source_pid=""
-    local source_exitcode=0
+    local source_exitcode=0 source_cleanup_exitcode=''
+    local rootpxe_restore_read_target=unknown
+    if [[ $target =~ ^/dev/[A-Za-z0-9_.+-]+(/[A-Za-z0-9_.+-]+)?$ && ${#target} -le 200 ]]; then
+        rootpxe_restore_read_target=$target
+    fi
 
     [[ -z $target ]] && handleError "No target to place image passed (${FUNCNAME[0]})"
     rootpxe_validate_runtime_img_format || handleError "PXEOS_STAGE=restore CODE=IMAGE_FORMAT_INVALID REASON=unsupported_or_missing_format"
@@ -4839,8 +4843,11 @@ writeImage()  {
     format=$(rootpxe_effective_img_format) || return 1
     local exitcode=0 progress_decoder=0 progress_enabled=no
     rootpxe_write_image_stop_local() {
-        [[ $source_pid =~ ^[0-9]+$ ]] && kill "$source_pid" >/dev/null 2>&1 || true
-        [[ $source_pid =~ ^[0-9]+$ ]] && wait "$source_pid" >/dev/null 2>&1 || true
+        if [[ $source_pid =~ ^[0-9]+$ ]]; then
+            kill "$source_pid" >/dev/null 2>&1 || true
+            source_cleanup_exitcode=0
+            wait "$source_pid" >/dev/null 2>&1 || source_cleanup_exitcode=$?
+        fi
         [[ $progress_enabled == yes ]] && rootpxe_partclone_progress_abort >/dev/null 2>&1 || true
         rm -f -- /tmp/pigz1 >/dev/null 2>&1 || true
     }
@@ -4884,6 +4891,7 @@ writeImage()  {
     else
         source_exitcode=$?
     fi
+    rootpxe_task_log_append "PXEOS_STAGE=restore target=$rootpxe_restore_read_target source_exitcode=${source_cleanup_exitcode:-$source_exitcode}" >/dev/null 2>&1 || true
     if [[ $exitcode -ne 0 ]]; then
         rootpxe_write_image_fail "PXEOS_STAGE=restore CODE=RESTORE_PIPELINE_FAILED REASON=image_decoder_or_writer_failed"
     fi
