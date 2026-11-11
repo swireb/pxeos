@@ -109,6 +109,7 @@ for mode in network-only vendor-only single mpa; do
     rootpxe_validate_smb_export(){ printf '%s' "$1"; }
     rootpxe_prepare_smb_credentials(){ :; }
     rootpxe_send_disk_health(){ :; }
+    rootpxe_send_hardware_inventory(){ :; }
     rootpxe_safe_relative_path(){ printf '%s' "$1"; }
     rootpxe_normalize_mac(){ printf '%s' "$1"; }
     rootpxe_cleanup_session(){ rootpxe_cloud_init_cleanup_private; }

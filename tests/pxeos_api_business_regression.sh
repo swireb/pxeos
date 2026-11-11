@@ -201,6 +201,7 @@ storage_test_patch_parser "$tmp/checkin-json.sh"
 rootpxe_deployment_identity_windows_hostname_capability_installed() { return 1; }
 rootpxe_deployment_identity_windows_sysprep_capability_installed() { return 1; }
 rootpxe_send_disk_health() { return 0; }
+rootpxe_send_hardware_inventory() { return 0; }
 rootpxe_console_message() { :; }
 debugPause() { :; }
 dots() { :; }

@@ -103,7 +103,7 @@ pxeos_task_identity_regression.sh  # 核对普通 JSON/form 存储身份、捕�
 ```
 
 
-## 捕获、恢复、存储与分区（17）
+## 捕获、恢复、存储与分区（18）
 
 - 脚本及核对范围如下。
 
@@ -114,6 +114,7 @@ pxeos_restore_preflight_regression.sh  # 核对恢复制品的离线预检。
 pxeos_partition_regression.sh  # 合并的分区安全与布局回归。
 pxeos_layout_alignment_regression.sh  # 核对 4Kn 等扇区/布局对齐契约。
 pxeos_disk_health_regression.sh  # 核对磁盘健康盘点及上报接口。
+pxeos_hardware_inventory_regression.sh  # 核对任务 check-in 后的硬件盘点、PXE 启动网卡标识及限额，使用临时设备夹具和 HTTP 替身。
 pxeos_partition_progress_regression.sh  # 核对分区计划、进度 flush 与 LVM 事实。
 pxeos_timeline_order_regression.sh  # 使用临时普通文件和真实入口的安全叶级替身，核对准备心跳、pending计划先发、真实零进度开始、部署各镜像类型、MBR-only、初始化续跑、重试/执行身份隔离，以及停止采样并等待在途HTTP替身子进程后才结束数据阶段；不访问真实磁盘或网络，不重排历史事件。
 pxeos_partclone_progress_regression.sh  # 核对 Partclone 文本模式 stderr 进度适配。

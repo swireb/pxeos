@@ -16,6 +16,27 @@ rootpxe_disk_health_run() {
     timeout -k 1 3 "$@" >"$output" 2>/dev/null
 }
 
+# Preserve lsblk tree order in both the disk-health and hardware reports.
+rootpxe_physical_disk_entries() {
+    local format="$1"
+    shift
+    jq -r --arg format "$format" '
+        def positive_size:
+          if type == "number" then . > 0
+          elif type == "string" then ((tonumber? // 0) > 0)
+          else false end;
+        .. | objects |
+        select(
+          .type? == "disk" and
+          (.path? | type == "string" and startswith("/dev/")) and
+          (.size? | positive_size) and
+          (.path | test("^/dev/(nbd|loop|ram|zram|md|dm-|mapper/|sr)"; "i") | not) and
+          (.path | test("^/dev/mmcblk[0-9]+boot[0-9]+$"; "i") | not)
+        ) |
+        if $format == "tsv" then [.path, (.tran // "")] | @tsv else tojson end
+    ' "$@"
+}
+
 rootpxe_disk_health_message_for_result() {
     local tool="$1" result="$2" parsed="$3"
     local label="$tool"
@@ -229,21 +250,7 @@ rootpxe_collect_disk_health() {
         rm -f -- "$lsblk_file" "$candidates_file" "$rows_file" "$output_file"
         return 1
     }
-    if ! jq -r '
-            def positive_size:
-              if type == "number" then . > 0
-              elif type == "string" then ((tonumber? // 0) > 0)
-              else false end;
-            .. | objects |
-            select(
-              .type? == "disk" and
-              (.path? | type) == "string" and
-              (.size? | positive_size) and
-              (.path | test("^/dev/(nbd|loop|ram|zram|md|dm-|mapper/|sr)"; "i") | not) and
-              (.path | test("^/dev/mmcblk[0-9]+boot[0-9]+$"; "i") | not)
-            ) |
-            [.path, (.tran // "")] | @tsv
-        ' "$lsblk_file" >"$candidates_file" 2>/dev/null; then
+    if ! rootpxe_physical_disk_entries tsv "$lsblk_file" >"$candidates_file" 2>/dev/null; then
         rm -f -- "$lsblk_file" "$candidates_file" "$rows_file" "$output_file"
         return 1
     fi
