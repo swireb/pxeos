@@ -326,7 +326,7 @@ test_large_lba_readback() {
     local body start=2147483648 size=2147483649 total target_bytes template="$tmp/template" plan="$tmp/plan" number=caller-number extra=caller-extra
     body=$(sed -n '/^rootpxe_apply_deployment_layout() {/,/^}/p' "$funcs")
     [[ $body != *'%12d'* ]] || fail 'layout uses signed integer printf for large LBA' || return 1
-    for name in rootpxe_apply_deployment_layout rootpxe_sfdisk_layout_fingerprint rootpxe_validate_partition_lba_contract; do load "$name" || return 1; done
+    for name in rootpxe_apply_deployment_layout rootpxe_gpt_backup_sectors rootpxe_sfdisk_layout_fingerprint rootpxe_validate_partition_lba_contract; do load "$name" || return 1; done
     rootpxe_lvm_json_jq() { command jq "$@"; }
     rootpxe_cleanup_deployment_partition_file() { :; }
     rootpxe_require_unused_target_disks() { :; }

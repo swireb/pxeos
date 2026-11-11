@@ -48,7 +48,7 @@ getPartitions() {
     else parts='/dev/mock1 /dev/mock2'; fi
 }
 getPartitionNumber() { part_number=${1##*mock}; }
-blockdev() { case "$1:$2" in --getsize64:/dev/mock) [[ ${MATRIX_GROUP_COUNT:-0} =~ ^[1-9][0-9]*$ ]] && printf '%s\n' "$((MATRIX_GROUP_COUNT * 268435456 + 268435456))" || { [[ ${TARGET_GROW:-no} == yes ]] && printf '2147483648\n' || printf '1073741824\n'; };; --getsize64:/dev/vg[0-9]/root) printf '67108864\n';; --getsize64:/dev/vg[0-9]/data) printf '33554432\n';; --getsize64:/dev/mock[1-9]) printf '268435456\n';; --getsize64:/dev/vg0/swap) printf '33554432\n';; --getss:/dev/mock|--getpbsz:/dev/mock) printf '512\n';; *) return 1;; esac; }
+blockdev() { case "$1:$2" in --getsize64:/dev/mock) if [[ -n ${SMALL_LAYOUT_TARGET_BYTES:-} ]]; then printf '%s\n' "$SMALL_LAYOUT_TARGET_BYTES"; return; fi; [[ ${MATRIX_GROUP_COUNT:-0} =~ ^[1-9][0-9]*$ ]] && printf '%s\n' "$((MATRIX_GROUP_COUNT * 268435456 + 268435456))" || { [[ ${TARGET_GROW:-no} == yes ]] && printf '2147483648\n' || printf '1073741824\n'; };; --getsize64:/dev/vg[0-9]/root) printf '67108864\n';; --getsize64:/dev/vg[0-9]/data) printf '33554432\n';; --getsize64:/dev/mock[1-9]) printf '268435456\n';; --getsize64:/dev/vg0/swap) printf '33554432\n';; --getss:/dev/mock|--getpbsz:/dev/mock) printf '512\n';; *) return 1;; esac; }
 blkid() { for last; do :; done; case " $* " in *' TYPE '*) [[ ${MULTI_MODE:-ok} == no_pv_luks && $last == /dev/mock1 ]] && { printf 'crypto_LUKS\n'; return; }; [[ ${MATRIX_GROUP_COUNT:-0} =~ ^[1-9][0-9]*$ && $last =~ ^/dev/mock[1-9][0-9]*$ ]] && { printf 'LVM2_member\n'; return; }; [[ $last == /dev/mock1 || $last == /dev/mock2 ]] && { printf 'LVM2_member\n'; return; }; [[ $last == /dev/vg0/swap ]] && printf 'swap\n' || printf 'ext4\n';; *' UUID '*) [[ $last == /dev/vg0/swap ]] && printf 'swap-uuid\n' || printf 'root-uuid\n';; esac; }
 
 pvs() {
@@ -371,14 +371,24 @@ full_schema_hash=$(rootpxe_canonical_json_hash "$rootpxe_original_schema_file") 
 schemaHash="$full_schema_hash"; schemaRevision=1
 rootpxe_validate_deployment_layout /dev/mock "$rootpxe_original_schema_file" "$tmp/full-layout.json" || fail production-full-layout-two-groups-original
 "$real_jq" -e '(.groups|length) == 2 and ([.groups[].pv.partitionNumber]|sort) == [1,2]' "$rootpxe_resolved_lvm_layout_file" >/dev/null || fail production-full-layout-two-groups-content
+# Capture capacity is still 1GiB, while both unchanged 256MiB PVs and their
+# existing LVs fit a 768MiB target. Only tail unallocated space is discarded.
+SMALL_LAYOUT_TARGET_BYTES=805306368 rootpxe_validate_deployment_layout /dev/mock "$rootpxe_original_schema_file" "$tmp/full-layout.json" || fail production-small-disk-original-lvm
+"$real_jq" -e 'all(.groups[]; .pvBytes==268435456 and all(.volumes[]; .resolvedBytes==.originalBytes))' "$rootpxe_resolved_lvm_layout_file" >/dev/null || fail production-small-disk-keeps-pv-lv-sizes
+if SMALL_LAYOUT_TARGET_BYTES=524288000 rootpxe_validate_deployment_layout /dev/mock "$rootpxe_original_schema_file" "$tmp/full-layout.json" >/dev/null 2>&1; then fail production-small-disk-cannot-shrink-pv; fi
+[[ $(rootpxe_canonical_json_hash "$rootpxe_original_schema_file") == "$full_schema_hash" ]] || fail production-small-disk-mutated-lvm-schema
 rm -f -- "$rootpxe_resolved_lvm_layout_file"; unset rootpxe_resolved_lvm_layout_file
 "$real_jq" '.partitions |= map(if .number == 1 then .mode="fixed" | .fixedBytes=370147328 else . end) | .lvm |= map(if .pvPartitionNumber == 1 then .volumes |= map(if .uuid == "lv-root" then .mode="fixed" | .fixedBytes=335544320 else . end) else . end)' "$tmp/full-layout.json" >"$tmp/full-layout-fixed.json" || fail production-full-layout-fixed-build
-TARGET_GROW=yes rootpxe_validate_deployment_layout /dev/mock "$rootpxe_original_schema_file" "$tmp/full-layout-fixed.json" || fail production-full-layout-two-groups-fixed
+for layout_target_bytes in 805306368 2147483648; do
+SMALL_LAYOUT_TARGET_BYTES=$layout_target_bytes rootpxe_validate_deployment_layout /dev/mock "$rootpxe_original_schema_file" "$tmp/full-layout-fixed.json" || fail production-two-groups-fixed-target-$layout_target_bytes
 "$real_jq" -e '(.groups|length)==2 and ([.groups[]|select(.pv.partitionNumber==1).pvBytes]|first) > 268435456 and ([.groups[]|select(.pv.partitionNumber==1).volumes[]|select(.uuid=="lv-root").resolvedBytes]|first)==335544320' "$rootpxe_resolved_lvm_layout_file" >/dev/null || fail production-full-layout-fixed-content
+done
 rm -f -- "$rootpxe_resolved_lvm_layout_file"; unset rootpxe_resolved_lvm_layout_file
 "$real_jq" '.partitions |= map(if .number == 1 then .mode="remaining" else . end) | .lvm |= map(if .pvPartitionNumber == 1 then .freeSpacePolicy="allocateToRemaining" | .volumes |= map(if .uuid == "lv-root" then .mode="remaining" else . end) else . end)' "$tmp/full-layout.json" >"$tmp/full-layout-remaining.json" || fail production-full-layout-remaining-build
-TARGET_GROW=yes rootpxe_validate_deployment_layout /dev/mock "$rootpxe_original_schema_file" "$tmp/full-layout-remaining.json" || fail production-full-layout-two-groups-remaining
+for layout_target_bytes in 805306368 2147483648; do
+SMALL_LAYOUT_TARGET_BYTES=$layout_target_bytes rootpxe_validate_deployment_layout /dev/mock "$rootpxe_original_schema_file" "$tmp/full-layout-remaining.json" || fail production-two-groups-remaining-target-$layout_target_bytes
 "$real_jq" -e '(.groups|length)==2 and ([.groups[]|select(.pv.partitionNumber==1).volumes[]|select(.uuid=="lv-root").resolvedBytes]|first) > 67108864' "$rootpxe_resolved_lvm_layout_file" >/dev/null || fail production-full-layout-remaining-content
+done
 "$real_jq" '.lvm |= map(if .pvPartitionNumber == 2 then .volumes |= map(if .uuid == "lv-root-2" then .mode="remaining" else . end) else . end)' "$tmp/full-layout-remaining.json" >"$tmp/full-layout-two-remaining.json" || fail production-full-layout-two-remaining-build
 if TARGET_GROW=yes rootpxe_validate_deployment_layout /dev/mock "$rootpxe_original_schema_file" "$tmp/full-layout-two-remaining.json"; then fail production-full-layout-second-remaining-must-reject; fi
 rm -f -- "$rootpxe_resolved_lvm_layout_file"; unset rootpxe_resolved_lvm_layout_file TARGET_GROW

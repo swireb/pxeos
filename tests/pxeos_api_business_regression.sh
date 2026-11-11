@@ -1136,7 +1136,7 @@ grep -Fq '"artifact":""' $rootpxe_original_schema_file || fail swap-artifact
 grep -Fq '== "0xef"' $funcs || fail mbr-efi
 grep -Fq '== "0x27"' $funcs || fail mbr-recovery
 grep -Fq 'original size violated' $funcs || fail grow-only-layout
-grep -Fq 'target_bytes >= original_disk_bytes' $funcs || fail target-original-capacity-guard
+grep -Fq 'target_bytes >= original_disk_bytes' $funcs && fail obsolete-target-original-capacity-guard
 grep -Fq 'align_down(($available-$used);$alignment)' $funcs || fail remaining-floor
 node -e 'const a=512,r=Math.floor((7000-3500)/a)*a;if(r!==3072||r%a)process.exit(1)' || fail remaining-oracle
 
@@ -1170,7 +1170,7 @@ TEST_SECTOR=4096; export TEST_SECTOR
 
 # 用真实 jq 执行解析器：目标容量在部署时才已知。100GB 源镜像到
 # 101/200/300GB 等更大目标均可解析，且每个叶子分区不小于原始大小；
-# 小于原始盘的目标和缩小 fixed 分区在写盘前拒绝。
+# 小于原始盘但容纳布局的目标可以解析；扇区不对齐与缩小 fixed 分区仍拒绝。
 grow_schema=$tmp/grow-schema; grow_layout=$tmp/grow-layout
 cat >$grow_schema <<'EOF'
 {"version":1,"partitionTable":"gpt","originalDiskBytes":100000000,"logicalSectorBytes":512,"physicalSectorBytes":512,"minDeployBytes":50000000,"partitions":[{"number":1,"startSectors":2048,"originalSectors":90112,"minSectors":40000,"role":"efi","resizable":true,"fs":"vfat","fsVariant":"FAT32"},{"number":2,"startSectors":92160,"originalSectors":90112,"minSectors":30000,"role":"recovery","resizable":true,"fs":"ntfs"}]}
@@ -1178,14 +1178,14 @@ EOF
 MODE=layout_apply; export MODE
 SCHEMAHASH=$(rootpxe_canonical_json_hash $grow_schema)
 schemaHash=$SCHEMAHASH; schemaRevision=1
-for TARGET_BYTES in 101000192 200000000 300000256; do
+for TARGET_BYTES in 95000064 101000192 200000000 300000256; do
   export TARGET_BYTES
   printf '{"version":1,"schemaHash":"%s","partitions":[{"number":1,"mode":"original"},{"number":2,"mode":"remaining"}]}' "$SCHEMAHASH" >$grow_layout
   rootpxe_validate_deployment_layout /dev/mock $grow_schema $grow_layout || fail grow-only-target-$TARGET_BYTES
   "$REAL_JQ" -e 'all(.[]; .resolvedSectors >= .originalSectors)' "$rootpxe_resolved_layout_file" >/dev/null || fail grow-only-leaf-$TARGET_BYTES
 done
 TARGET_BYTES=99999999; export TARGET_BYTES
-rootpxe_validate_deployment_layout /dev/mock $grow_schema $grow_layout >/dev/null 2>&1 && fail smaller-than-original-prewrite
+rootpxe_validate_deployment_layout /dev/mock $grow_schema $grow_layout >/dev/null 2>&1 && fail unaligned-target-prewrite
 TARGET_BYTES=200000000; export TARGET_BYTES
 printf '{"version":1,"schemaHash":"%s","partitions":[{"number":1,"mode":"fixed","fixedBytes":46080000},{"number":2,"mode":"remaining"}]}' "$SCHEMAHASH" >$grow_layout
 rootpxe_validate_deployment_layout /dev/mock $grow_schema $grow_layout >/dev/null 2>&1 && fail fixed-shrink-prewrite

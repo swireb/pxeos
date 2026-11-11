@@ -1841,8 +1841,25 @@ rootpxe_validate_partition_lba_contract() {
     ' "$file" >/dev/null
 }
 
+# sfdisk GPT entries are 128 bytes each.  The backup entry array and one
+# header occupy the end of the target, independently of first-lba alignment.
+# Share this calculation between permit-time validation and the table writer.
+rootpxe_gpt_backup_sectors() {
+    local template="$1" logical="$2" entries
+    [[ -r $template && $logical =~ ^[1-9][0-9]*$ ]] || return 1
+    entries=$(awk '
+      /^table-length:/ { if (++count != 1 || $2 !~ /^[1-9][0-9]*$/) bad=1; entries=$2+0 }
+      /start=/ { number=$1; sub(/^.*[^0-9]/,"",number); number+=0; if (number > maximum) maximum=number }
+      END {
+        if (!count) entries=(maximum > 128 ? maximum : 128)
+        if (bad || entries < maximum || entries > 2147483647) exit 1
+        printf "%.0f\n", entries
+      }' "$template") || return 1
+    printf '%s\n' "$(((entries * 128 + logical - 1) / logical + 1))"
+}
+
 rootpxe_validate_deployment_layout() {
-    local disk="$1" schema_file="$2" layout_file="$3" schema_logical original_disk_bytes target_bytes target_sectors source_hash layout_hash
+    local disk="$1" schema_file="$2" layout_file="$3" template="${4:-}" schema_logical target_bytes target_sectors source_hash layout_hash gpt_backup_sectors=0 template_first_lba=0
     [[ -r $schema_file && -r $layout_file ]] || return 1
     [[ ${schemaHash:-} =~ ^[a-fA-F0-9]{64}$ ]] || return 1
     source_hash=$(rootpxe_canonical_json_hash "$schema_file") || return 1
@@ -1858,12 +1875,15 @@ rootpxe_validate_deployment_layout() {
     # Target 4Kn/512e geometry must therefore be converted through bytes, not
     # by incorrectly substituting target --getss into source-sector fields.
     schema_logical=$(jq -er '.logicalSectorBytes' "$schema_file" 2>/dev/null) || return 1
-    original_disk_bytes=$(jq -er '.originalDiskBytes' "$schema_file" 2>/dev/null) || return 1
     target_bytes=$(blockdev --getsize64 "$disk" 2>/dev/null) || return 1
-    [[ $schema_logical =~ ^[1-9][0-9]*$ && $original_disk_bytes =~ ^[1-9][0-9]*$ && $target_bytes =~ ^[1-9][0-9]*$ ]] || return 1
-    # 单磁盘可调整镜像只允许扩容。这里发生在分区表应用和磁盘许可前，
-    # 因此目标盘小于捕获原始容量不会触及目标磁盘。
-    (( target_bytes >= original_disk_bytes )) || return 1
+    [[ $schema_logical =~ ^[1-9][0-9]*$ && $target_bytes =~ ^[1-9][0-9]*$ ]] || return 1
+    # 准入依据最终分区布局；捕获整盘容量和 minDeployBytes 保持不变，
+    # 不再作为目标盘下限。每个分区、PV、LV 仍不得缩小。
+    if [[ $schema_table == gpt && -n $template ]]; then
+        gpt_backup_sectors=$(rootpxe_gpt_backup_sectors "$template" "$schema_logical") || return 1
+        template_first_lba=$(awk '/^first-lba:/{print $2; count++} END{if(count != 1) exit 1}' "$template") || return 1
+        [[ $template_first_lba =~ ^[1-9][0-9]*$ ]] || return 1
+    fi
     (( target_bytes % schema_logical == 0 )) || return 1
     target_sectors=$(( target_bytes / schema_logical ))
     [[ ${schemaRevision:-} =~ ^[1-9][0-9]*$ ]] || return 1
@@ -1872,7 +1892,7 @@ rootpxe_validate_deployment_layout() {
     rootpxe_resolved_layout_file=$(mktemp /tmp/rootpxe-resolved-layout.XXXXXX) || return 1
     chmod 600 "$rootpxe_resolved_layout_file" && rootpxe_register_derived_layout_file "$rootpxe_resolved_layout_file" || { rm -f -- "$rootpxe_resolved_layout_file"; unset rootpxe_resolved_layout_file; return 1; }
     jq -n --slurpfile schema "$schema_file" --slurpfile layout "$layout_file" \
-        --argjson target "$target_sectors" --argjson logical "$schema_logical" '
+        --argjson target "$target_sectors" --argjson logical "$schema_logical" --argjson gptBackup "$gpt_backup_sectors" --argjson firstLBA "$template_first_lba" '
           def align_up($n;$a): ((($n + $a - 1) / $a)|floor) * $a;
           def align_down($n;$a): (($n / $a)|floor) * $a;
           def verified_lvm_pv($p;$lvm):
@@ -1925,10 +1945,12 @@ rootpxe_validate_deployment_layout() {
              ([$sp[] | select(.kind == "logical" and .parentNumber == $extended.number)] | length) * $extended.ebrReservedSectors
            else 0 end) as $ebrReservedTotal |
           ($sp|map(.startSectors)|min) as $front |
-          (if $s.partitionTable == "gpt" then $front else 0 end) as $back |
+          (if $s.partitionTable == "gpt" then
+             (if $gptBackup > 0 then $gptBackup else (((([128] + [$sp[].number]) | max) * 128 / $logical | ceil) + 1) end)
+           else 0 end) as $backup |
+          ([$front * (if $s.partitionTable == "gpt" then 1 else 0 end), $backup] | max) as $back |
           ($target - $front - $back - $ebrReservedTotal) as $available |
           (262144 / $logical | floor | if . < 1 then 1 else . end) as $alignment |
-          if $available <= 0 then error("target too small") else . end |
           [ $worksp[] as $p | ($lp[]|select(.number == $p.number)) as $o |
             ($o.mode // "original") as $mode |
             if (($mode|type) != "string" or ($mode|IN("original","fixed","remaining")|not)) then error("unknown mode") else . end |
@@ -1940,12 +1962,13 @@ rootpxe_validate_deployment_layout() {
             {p:$p,o:$o,mode:$mode} ] as $items |
           ([ $items[]|select(.mode == "remaining") ]|length) as $remainingCount |
           if $remainingCount > 1 then error("multiple remaining") else . end |
-          # The unadjusted disk writer restores the original table verbatim.
-          # Its runtime plan must use the same geometry, without re-alignment.
-          if all($items[]; .mode == "original") then
-            if any($sp[]; .startSectors < 0 or .originalSectors <= 0 or (.startSectors + .originalSectors) > $target) then error("source geometry exceeds target")
+          # Preserve captured positions and sizes for the original layout;
+          # only the GPT backup metadata moves to the actual target end.
+          (if all($items[]; .mode == "original") then
+            if any($sp[]; .startSectors < 0 or .originalSectors <= 0 or (.startSectors + .originalSectors) > ($target - $backup)) then error("source geometry exceeds target")
             else $sp | map(. + {resolvedSectors:.originalSectors}) end
           else
+          if $available <= 0 then error("target too small") else . end |
           ($items | map(if .mode == "original" then .p.originalSectors elif .mode == "fixed" then align_up(((.o.fixedBytes // 0) / $logical|ceil);$alignment) else 0 end)) as $pre |
           ($pre|add) as $used |
           if $used > $available then error("target too small") else . end |
@@ -1997,7 +2020,8 @@ rootpxe_validate_deployment_layout() {
               if $extendedEnd > ($target-$back) then error("layout exceeds target")
               else ($leaves + [$extended + {startSectors:$extendedStart,resolvedSectors:($extendedEnd-$extendedStart)}] | sort_by(.number)) end
             else $leaves end) as $resolved |
-           $resolved end' >"$rootpxe_resolved_layout_file" || { rm -f "$rootpxe_resolved_layout_file"; return 1; }
+           $resolved end) |
+           if any(.[]; .startSectors < $firstLBA) then error("layout precedes gpt first usable lba") else . end' >"$rootpxe_resolved_layout_file" || { rm -f "$rootpxe_resolved_layout_file"; return 1; }
     export rootpxe_resolved_layout_file
     rootpxe_validate_lvm_deployment_layout "$schema_file" "$layout_file" "$rootpxe_resolved_layout_file" || return 1
     # A layout that preserves every captured partition is not an adjusted
@@ -2742,7 +2766,7 @@ rootpxe_restore_deployment_boot_code() {
 }
 
 rootpxe_apply_deployment_layout() {
-    local disk="$1" template="$2" map output output_dir verify expected actual expected_numbers actual_numbers logical disk_bytes total_sectors table template_sector first_lba= last_lba= is_gpt=0 write_stderr partprobe_stderr dump_stderr reread_attempt reread_max=5 reread_ok=0 number start size extra
+    local disk="$1" template="$2" map output output_dir verify expected actual expected_numbers actual_numbers logical disk_bytes total_sectors table template_sector first_lba= last_lba= backup_sectors= is_gpt=0 write_stderr partprobe_stderr dump_stderr reread_attempt reread_max=5 reread_ok=0 number start size extra
     rootpxe_layout_apply_code=""
     rootpxe_layout_apply_reason=""
     rootpxe_layout_diagnostics_file=""
@@ -2763,8 +2787,9 @@ rootpxe_apply_deployment_layout() {
         is_gpt=1
         first_lba=$(awk '/^first-lba:/{print $2; count++} END{if(count != 1) exit 1}' "$template") || { rootpxe_layout_apply_failed LAYOUT_TEMPLATE_INVALID gpt_first_lba_missing; return 1; }
         [[ $first_lba =~ ^[1-9][0-9]*$ ]] || { rootpxe_layout_apply_failed LAYOUT_TEMPLATE_INVALID gpt_first_lba_invalid; return 1; }
-        (( first_lba < total_sectors && total_sectors - first_lba >= first_lba )) || { rootpxe_layout_apply_failed LAYOUT_TARGET_GEOMETRY_INVALID gpt_usable_lba_unavailable; return 1; }
-        last_lba=$((total_sectors - first_lba))
+        backup_sectors=$(rootpxe_gpt_backup_sectors "$template" "$logical") || { rootpxe_layout_apply_failed LAYOUT_TEMPLATE_INVALID gpt_table_length_invalid; return 1; }
+        (( first_lba < total_sectors && total_sectors - backup_sectors - 1 >= first_lba )) || { rootpxe_layout_apply_failed LAYOUT_TARGET_GEOMETRY_INVALID gpt_usable_lba_unavailable; return 1; }
+        last_lba=$((total_sectors - backup_sectors - 1))
     fi
     map=$(mktemp /tmp/rootpxe-layout-map.XXXXXX) || { rootpxe_layout_apply_failed LAYOUT_PLAN_FAILED map_file_create_failed; return 1; }
     rootpxe_cleanup_deployment_partition_file
@@ -2784,7 +2809,7 @@ rootpxe_apply_deployment_layout() {
         extra=${extra%$'\r'}
         [[ -n $number && -z ${extra:-} && $number =~ ^[1-9][0-9]*$ && $start =~ ^(0|[1-9][0-9]*)$ && $size =~ ^[1-9][0-9]*$ ]] || { rm -f "$map" "$output"; rootpxe_layout_apply_failed LAYOUT_PLAN_INVALID invalid_partition_plan_entry; return 1; }
         (( number <= 2147483647 && start < total_sectors && size <= total_sectors - start )) || { rm -f "$map" "$output"; rootpxe_layout_apply_failed LAYOUT_PLAN_INVALID partition_plan_exceeds_target; return 1; }
-        (( is_gpt == 0 || start + size - 1 <= last_lba )) || { rm -f "$map" "$output"; rootpxe_layout_apply_failed LAYOUT_PLAN_INVALID partition_plan_exceeds_gpt_usable_range; return 1; }
+        (( is_gpt == 0 || (start >= first_lba && start + size - 1 <= last_lba) )) || { rm -f "$map" "$output"; rootpxe_layout_apply_failed LAYOUT_PLAN_INVALID partition_plan_exceeds_gpt_usable_range; return 1; }
     done <"$map"
     awk -F'\t' 'NF != 3 || seen[$1]++ {exit 1} END {exit (NR > 0 ? 0 : 1)}' "$map" || { rm -f "$map" "$output"; rootpxe_layout_apply_failed LAYOUT_PLAN_INVALID partition_plan_numbers_invalid; return 1; }
     expected_numbers=$(awk -F'\t' '{print $1}' "$map" | sort -n | tr '\n' ' ')

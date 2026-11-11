@@ -123,6 +123,7 @@ pxeos_lvm_schema_jq_regression.sh  # 以真实 jq 核对 LVM capture schema 过�
 pxeos_lvm_udev_rules_regression.sh  # 核对 LVM udev 同步及移除 systemd 专用自动激活规则。
 pxeos_lvm_multi_regression.sh  # 核对同一磁盘上 1/2/3/5 组彼此独立的一 PV/一 VG/多 linear LV，覆盖正序与倒序布局；默认执行叶级集成回归。
 pxeos_mbr_partition_contract_regression.sh  # 核对 DOS/MBR 分区编号、32 位 LBA 与 GPT 边界契约，同时检查 Schema object 和 resolved partition array 两种输入形态。
+pxeos_small_disk_layout_regression.sh  # 真实 jq 解析旧 v1/v2 GPT/MBR 布局，验证 1TB 源盘前 300GB 分区部署到 500GB、原始位置不变、不可缩小及远处分区拒绝；真实 sfdisk 仅写临时普通文件，核对 128/512 条目 GPT 的紧凑原始布局、备份空间恰好容纳/少一扇区、UUID/磁盘标识及 usable LBA 读回，不接触物理磁盘。
 pxeos_lvm_naming_contract.sh  # 核对 pinned LVM2 官方名称 127 字节边界、保留前缀/内部片段及连字符转义 mapper 名边界。
 pxeos_lvm_capture_scan_contract.sh  # 核对 LVM 初次扫描 warning、目标 PV 缺失时 fail-closed，以及普通无 LVM 盘的正向路径。
 ```
