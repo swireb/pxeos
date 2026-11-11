@@ -61,6 +61,8 @@ jobs:
           key: buildroot-dl-${{ hashFiles('build.sh', 'download_helpers.sh', 'configs/**', 'Buildroot/package/**') }}
           restore-keys: |
             buildroot-dl-
+      - name: Prepare Ubuntu APT sources
+        run: bash .github/scripts/prepare-ubuntu-apt.sh
       - name: Download all FS packages
         run: ./build.sh -i --fs-download-only
 
@@ -73,6 +75,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+      - name: Prepare Ubuntu APT sources
+        run: bash .github/scripts/prepare-ubuntu-apt.sh
       - name: Build arm64 kernel
         run: ./build.sh --install-dep -nka arm64
       - name: Run sha256 checksum
@@ -95,6 +99,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+      - name: Prepare Ubuntu APT sources
+        run: bash .github/scripts/prepare-ubuntu-apt.sh
       - name: Build x86 kernel
         run: ./build.sh --install-dep -nka x86
       - name: Run sha256 checksum
@@ -117,6 +123,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+      - name: Prepare Ubuntu APT sources
+        run: bash .github/scripts/prepare-ubuntu-apt.sh
       - name: Build x64 kernel
         run: ./build.sh --install-dep -nka x64
       - name: Run sha256 checksum
@@ -153,6 +161,8 @@ jobs:
           key: ccache-arm64
           restore-keys: |
             ccache-arm64
+      - name: Prepare Ubuntu APT sources
+        run: bash .github/scripts/prepare-ubuntu-apt.sh
       - name: Build arm64 initrd
         run: ./build.sh --install-dep -nfa arm64
       - name: Run sha256 checksum
@@ -196,6 +206,8 @@ jobs:
           key: ccache-x86
           restore-keys: |
             ccache-x86
+      - name: Prepare Ubuntu APT sources
+        run: bash .github/scripts/prepare-ubuntu-apt.sh
       - name: Build x86 initrd
         run: ./build.sh --install-dep -nfa x86
       - name: Run sha256 checksum
@@ -239,6 +251,8 @@ jobs:
           key: ccache-x64
           restore-keys: |
             ccache-x64
+      - name: Prepare Ubuntu APT sources
+        run: bash .github/scripts/prepare-ubuntu-apt.sh
       - name: Build x64 initrd
         run: ./build.sh --install-dep -nfa x64
       - name: Run sha256 checksum
