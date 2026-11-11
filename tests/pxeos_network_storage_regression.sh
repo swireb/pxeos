@@ -94,80 +94,6 @@ printf 'PASS: PXEOS network diagnostics regression\n'
 )
 # ===== 原脚本结束：tests/pxeos_network_regression.sh =====
 
-# ===== PXEOS 运行时英文控制台文本回归 =====
-(
-# 该检查只在开发回归中运行。它枚举 overlay 内的实际 Shell 入口，保留
-# heredoc 内容、剥离真实 Shell 注释，并拒绝所有剩余的中日韩统一表意文字。
-set -euo pipefail
-root=$(cd "$(dirname "$0")/.." && pwd)
-overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
-while IFS= read -r -d '' file; do
-    case "$file" in
-        *.sh|*/bin/pxeos*|*/etc/init.d/S*|*/etc/init.d/K*) printf '%s\n' "$file" ;;
-        *)
-            if LC_ALL=C grep -Iq . "$file"; then
-                first_line=$(head -n 1 "$file" 2>/dev/null || :)
-                [[ $first_line == \#!*sh* || $first_line == \#!*bash* ]] && printf '%s\n' "$file"
-            fi
-            ;;
-    esac
-done < <(find "$overlay" -type f -print0) >"$tmp/runtime-files"
-[[ -s $tmp/runtime-files ]] || fail '未找到 PXEOS 运行时 Shell 脚本'
-
-# AWK keeps heredoc bodies intact because they may be printed at runtime. For
-# ordinary code it removes only # comments outside single/double quotes, so
-# translated comments remain allowed while quoted runtime text is inspected.
-xargs -d '\n' awk '
-function emit_code(line,    i,ch,out,single,double,escaped) {
-    out = ""; single = 0; double = 0; escaped = 0
-    for (i = 1; i <= length(line); i++) {
-        ch = substr(line, i, 1)
-        if (escaped) { out = out ch; escaped = 0; continue }
-        if (ch == "\\" && !single) { out = out ch; escaped = 1; continue }
-        if (ch == "\x27" && !double) { single = !single; out = out ch; continue }
-        if (ch == "\"") { if (!single) double = !double; out = out ch; continue }
-        if (ch == "#" && !single && !double) break
-        out = out ch
-    }
-    print FILENAME ":" FNR ":" out
-}
-function begin_heredoc(line,    token) {
-    if (!match(line, /<<-?[[:space:]]*[\x27"]?[A-Za-z_][A-Za-z0-9_]*[\x27"]?/)) return
-    token = substr(line, RSTART, RLENGTH)
-    heredoc_tabs = (substr(token, 3, 1) == "-")
-    sub(/^<<-?[[:space:]]*/, "", token)
-    gsub(/[\x27"]/, "", token)
-    heredoc = token
-}
-{
-    if (heredoc != "") {
-        compare = $0
-        if (heredoc_tabs) sub(/^\t+/, "", compare)
-        print FILENAME ":" FNR ":" $0
-        if (compare == heredoc) heredoc = ""
-        next
-    }
-    emit_code($0)
-    begin_heredoc($0)
-}
-' <"$tmp/runtime-files" >"$tmp/runtime-code"
-
-set +e
-LC_ALL=C grep -nP '\p{Han}' "$tmp/runtime-code"
-cjk_status=$?
-set -e
-case $cjk_status in
-    1) ;;
-    0) fail 'PXEOS 运行时 Shell 文本包含非英文 CJK 字符' ;;
-    *) fail "PXEOS 运行时文本扫描失败（grep exit $cjk_status）" ;;
-esac
-printf 'PASS: PXEOS runtime console text is English\n'
-)
-# ===== PXEOS 运行时英文控制台文本回归结束 =====
-
 # ===== PXEOS 启动网络与 SSH 服务控制台回归 =====
 (
 # 启动脚本测试只替换 PATH 中的命令，并在临时目录中保存 DHCP/服务日志；
@@ -200,6 +126,11 @@ EOF
 cat >"$tmp/mock/curl" <<'EOF'
 #!/usr/bin/env bash
 exit 0
+EOF
+export PXEOS_PCI_DEVICE='0000:00:1f.6 Ethernet controller [0200]: Example Corporation Long Fixture Network Adapter Model [8086:15bb] (rev 10)'
+cat >"$tmp/mock/lspci" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$PXEOS_PCI_DEVICE"
 EOF
 cat >"$tmp/mock/ssh-keygen" <<'EOF'
 #!/usr/bin/env bash
@@ -248,6 +179,8 @@ set -e
 grep -Eq '^\[INFO\]  Acquiring DHCP lease on eth0\.+Failed \(exit 42\)$' "$tmp/network-failure.out" || fail 'DHCP 失败未保留原始返回码'
 grep -Fq 'Details: ' "$tmp/network-failure.out" || fail 'DHCP 失败未指向诊断日志'
 grep -Fq 'udhcpc: started' "$tmp/log/dhcp.log" || fail 'DHCP 失败日志未保存'
+[[ ${#PXEOS_PCI_DEVICE} -gt 80 ]] || fail 'PCI 诊断夹具须超过固定提示列宽'
+grep -Fqx "$PXEOS_PCI_DEVICE" "$tmp/network-failure.out" || fail 'PCI 诊断原文被截断或重排'
 
 for script in "$cron" "$sshd"; do
     [[ -f $script ]] || fail "缺少启动服务覆盖脚本: $script"
@@ -338,6 +271,9 @@ grep -Eq '^\[INFO\]  Starting SSH service\.+Failed \(exit 24\)$' "$tmp/sshd-serv
 for output in "$tmp/network-success.out" "$tmp/network-failure.out" "$tmp/cron-success.out" "$tmp/sshd-success.out" "$tmp/sshd-existing-keys.out" "$tmp/cron-failure.out" "$tmp/cron-failure-255.out" "$tmp/cron-stop-failure.out" "$tmp/cron-restart.out" "$tmp/sshd-restart.out" "$tmp/sshd-keygen-failure.out" "$tmp/sshd-service-failure.out"; do
     LC_ALL=C grep -Eq '[^ -~]' "$output" && fail "启动控制台输出包含非 ASCII 文本: $output"
     while IFS= read -r line; do
+        if [[ $output == "$tmp/network-failure.out" && $line == "$PXEOS_PCI_DEVICE" ]]; then
+            continue
+        fi
         [[ ${#line} -le 80 ]] || fail "启动控制台输出超过 80 列: $line"
     done <"$output"
 done

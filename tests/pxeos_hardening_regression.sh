@@ -189,11 +189,12 @@ rootpxe_validate_growth_capability "$schema_extended" "$resolved" || fail derive
 jq '.partitions[0].kind="primary"' "$schema_extended" >"$tmp/fake-container.json"
 if rootpxe_validate_growth_capability "$tmp/fake-container.json" "$resolved"; then fail fake-container-growth-accepted; fi
 
-# Integration names: capture resume and full restore preflight are exercised
-# by their dedicated capture/partition suites; keep this test tied to them.
+# Check the direct capture and restore wiring covered by the capture/partition suites.
 must_have "$restore_preflight" 'rootpxe_validate_restore_artifacts'
 must_have "$funcs" 'rootpxe_request_disk_permit_batch'
-must_have "$upload" 'rootpxe_capture_resume_published'
+must_have "$upload" 'CAPTURE_PROTOCOL_REQUIRED'
+must_have "${upload%/*}/pxeos.imgcomplete" 'rootpxe_finalize_capture || handleError'
+must_have "${capture_recovery%/*}/capture-direct.sh" 'rootpxe_capture_publish_metadata "$source" "$imgType"'
 must_have "$capture_recovery" 'rootpxe_capture_publish_metadata'
 
 # D: multi-disk restore permissions are bound to the original device path as

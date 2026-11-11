@@ -4,7 +4,7 @@
 
 ## 部署和捕获审计集合
 
-`pxeos_lifecycle_audit_regression.sh` 只组合本次任务审计涉及的 HTTP、存储控制器/helper、数据管线、身份初始化、进度回归，不包含全部目录测试或 Buildroot 构建。它串行执行，每项最多 300 秒，并检查共享 slice 的内存事件；未处理的缺命令诊断即使退出 0 也按失败记录。
+`pxeos_lifecycle_audit_regression.sh` 串行执行选定的 HTTP、存储控制器和 helper、数据管线、身份初始化及进度回归。每项最多 300 秒，并检查共享 slice 的内存事件。未处理的缺命令诊断按失败记录，即使脚本退出码为 0。
 
 ```shell
 /home/sysadmin/.codex/bin/codex-build-test bash tests/pxeos_lifecycle_audit_regression.sh
@@ -25,6 +25,7 @@
 
 - 静态契约：读取源码、配置或补丁，核对固定字符串、顺序、清单和构建配置。
 - mock/离线回归：使用临时普通文件、临时目录或命令替身，覆盖生产函数的局部行为；通过不代表已经验证 Buildroot 产物、真实磁盘、真实设备或端到端部署。
+- 涉及启动、电源和设备操作的用例在隔离环境中运行。网络诊断保留第三方工具的原始数据，固定控制台提示单独核对格式。
 - 真实 native 工具链：少数脚本会调用真实 jq、reged、hivex 或 XML 工具；仍应按脚本的隔离条件执行。QEMU 与 FAT 镜像相关验证属于可选环境验证，不在普通 mock 通过的保证范围内。
 
 - 从 PXEOS 子模块目录运行 Bash 脚本的形式如下。
@@ -59,7 +60,7 @@ python3 tests/pxeos_build_version_test.py
 - 脚本及核对范围如下。
 
 ```text
-release_naming_test.py  # 离线核对发布命名和选定 beta 架构契约。
+release_naming_test.py  # 离线核对发布命名和 Beta 全架构契约。
 pxeos_release_manifest_test.py  # 离线核对发布清单和固定发布频道。
 pxeos_build_version_test.py  # 以只读 GitHub 查询替身、时间 fixture 和临时 overlay，核对构建前一次选定 Release/Beta 最终 tag、同一分钟重名后缀、全部架构传播、历史/频道清单与镜像同值、跨时区/跨日及不重采样、本地 Local、CI 缺号/非法号拒绝、复制失败不写号、控制台 API/PXEOS 分列、网络诊断安全读取，以及已选 tag 被占用时发布前失败停止。
 ```
@@ -71,12 +72,13 @@ pxeos_build_version_test.py  # 以只读 GitHub 查询替身、时间 fixture �
 Asia/Shanghai
 ```
 
-## 构建与运行时（3）
+## 构建与运行时（4）
 
 - 脚本及核对范围如下。
 
 ```text
 pxeos_build_kernel_regression.sh  # 合并的构建下载安全、依赖和内核相关回归。
+pxeos_build_dependencies_test.py  # 用包管理器替身核对 ARM64 交叉编译器需求、自动安装开关、APT 索引刷新与单次重试，以及 DNF 安装路径。
 pxeos_build_sources_test.py  # 以离线 mock 核对六个自定义 Buildroot 包的 HTTPS 主/备用预置、唯一 SHA-256、实际 package 下载目录、BR2_PRIMARY_SITE_ONLY 跳过、make source 失败传播及 Release/Beta 公共构建 YAML 契约。
 pxeos_gconv_runtime_regression.sh  # 核对 libhivex 所需 glibc gconv Buildroot 配置。
 ```
@@ -103,7 +105,7 @@ pxeos_task_identity_regression.sh  # 核对普通 JSON/form 存储身份、捕�
 ```
 
 
-## 捕获、恢复、存储与分区（18）
+## 捕获、恢复、存储与分区（19）
 
 - 脚本及核对范围如下。
 
@@ -242,16 +244,14 @@ fixtures/lvm2-udev-sync-91b1dd3.patch
 pxeos_lvm_udev_rules_regression.sh
 ```
 
-## 新网络存储测试源码与待验证边界
+## 网络存储离线回归
 
-2026-10-27本轮只编写/调整源码和测试源码，未运行测试、编译、静态检查、挂载、真实NAS或设备操作；下列入口是用户后续执行说明，没有RED/GREEN或通过结论。
-
-- `pxeos_storage_helper_test.py`使用本机C编译器、json-c/OpenSSL开发元数据及临时目录，编译并运行C fixture；覆盖有界流、对象回执、解析和身份syscall顺序。执行该Python文件会真实编译临时测试程序，不能把它当纯文本检查；本轮未执行。
+- `pxeos_storage_helper_test.py` 使用本机 C 编译器、`pkg-config`、json-c 和 OpenSSL 开发依赖编译并运行临时测试程序，覆盖有界流、对象回执、解析和身份系统调用顺序。
 - `storage_helper_fixture.c`是配套本地隔离fixture，不构建Buildroot产物，不应挂载或访问真实NAS/块设备。身份顺序注入用例不能代替真实数值UID/GID权限验证。
 - `pxeos_storage_controller_test.py` 使用 Python、Bash、jq 和私有临时普通文件调用当前 `storage-io.sh` 控制流，以受控进程/回调替身核对原 owner/attempt、身份/能力拒绝、发布前各失败点、冻结 finish、只读收尾、原代际发布/回滚、只清原范围、等待 helper 后释放及失败不释放。旧 marker 或目录名不能认领已发布执行，越出原 shadow 的 payload 在 helper 命令前拒绝；SMB 挂载取消仍须等待实际子进程。该入口不编译 C，不访问真实 NAS 或块设备，不能代替原生 helper/身份验证。
 - `storage-test-support.sh` 是存储相关 shell/Python fixture 共用的测试支持文件，不是独立测试入口。它加载当前控制器、构造认证 JSON/owner/attempt/boot 上下文并限定私有工作区；仅在原生进程边界提供能力/连接/preflight 替身，在管线回归中以受限普通文件替代远端字节读写，保留真实 producer、压缩与 wait 控制流，不提供真实挂载或 NAS 变更。
-- `pxeos_capture_regression.sh` 保留捕获/恢复管线、完成回调、许可、源盘布局和 extfs 相关测试源码；`pxeos_capture_resume_regression.sh` 保留元数据校验、私有副本清理与许可测试源码。旧 MAC 暂存、shell 锁/finalize 和 marker 发现发布的旧矩阵已退出维护，当前原执行发布/恢复矩阵集中到 controller Python 入口。
-- `pxeos_network_storage_regression.sh` 聚合入口、Partclone 等现有回归按各自范围保留；共同支持文件由需要当前存储上下文或管线边界的 fixture 引用。源码整理不表示任何套件已经运行，原生 C/helper fixture 继续独立维护。
+- `pxeos_capture_regression.sh` 覆盖捕获和还原管线、完成回调、许可、源盘布局与 extfs。`pxeos_capture_resume_regression.sh` 覆盖元数据校验、私有副本清理与许可。`pxeos_capture_direct_regression.sh` 覆盖直接捕获的 MAC 暂存和发布，原执行恢复由 controller Python 入口覆盖。
+- `pxeos_network_storage_regression.sh` 核对网络存储及 SSH 调试入口。Partclone 和任务标识使用各自的定向回归入口。
 
 用户可在具备本机依赖的隔离环境从子模块根执行：
 
@@ -265,7 +265,7 @@ bash tests/pxeos_partclone_progress_regression.sh
 bash tests/pxeos_task_identity_regression.sh
 ```
 
-离线fixture完成后仍须分别构建x64/x86/arm64，核对helper及依赖进入initramfs；再验证NFS3/4.0/4.1/4.2固定/auto、SMB2.1/3.0/3.0.2/3.1.1固定/auto、实际mountinfo/非guest、UID/GID 0及非root/无本地同名账号、只读根、原worker未停保护、可信同host跨boot恢复、所有producer失败和响应丢失。离线通过不能证明这些真实矩阵或吞吐结果。根项目待运行清单见[存储系统待验矩阵](../../../docs/存储系统.md#初始化边界与未验证事项)。
+三架构构建需核对 helper 及依赖进入各自的 initramfs。真实存储需验证 NFS 3/4.0/4.1/4.2 和 SMB 2.1/3.0/3.0.2/3.1.1 的固定及自动协商、实际挂载和非 guest 会话、NFS AUTH_SYS `0/0` 与 NAS 权限、原工作者未停保护、可信同一主机跨 boot 恢复、数据管线失败及响应丢失。完整范围见根项目[存储系统待验矩阵](../../../docs/存储系统.md#初始化边界与未验证事项)。
 
 `pxeos_image_format_regression.sh` 覆盖仅 Gzip/Zstd、级别 0 真正未压缩、退役格式拒绝以及超过 200 MiB 的单文件编解码往返；Partclone 使用普通文件复制替身。
 

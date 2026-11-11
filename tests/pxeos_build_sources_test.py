@@ -421,17 +421,14 @@ class CabextractDownloadTests(unittest.TestCase):
         release = RELEASE_WORKFLOW.read_text()
         self.assertEqual(beta.count(EXPECTED_CACHE_KEY), 4)
         self.assertEqual(release.count(EXPECTED_CACHE_KEY), 4)
-        self.assertIn("download_filesystem_packages:\n", release)
-        self.assertIn("run: ./build.sh -i --fs-download-only", release)
-        for arch in ("arm64", "x86", "x64"):
-            self.assertIn(
-                f"  build_initrd_{arch}:\n    needs: [release_metadata, download_filesystem_packages]",
-                release,
-            )
-            self.assertIn(
-                f"  build_initrd_{arch}:\n    needs: [input_checks, release_metadata, download_filesystem_packages]",
-                beta,
-            )
+        for workflow in (release, beta):
+            self.assertIn("download_filesystem_packages:\n", workflow)
+            self.assertIn("run: ./build.sh -i --fs-download-only", workflow)
+            for arch in ("arm64", "x86", "x64"):
+                self.assertIn(
+                    f"  build_initrd_{arch}:\n    needs: [release_metadata, download_filesystem_packages]",
+                    workflow,
+                )
 
     def test_release_and_beta_share_public_build_steps(self) -> None:
         release = RELEASE_WORKFLOW.read_text()
@@ -478,16 +475,13 @@ class CabextractDownloadTests(unittest.TestCase):
             beta_initrd = self.workflow_job_block(BETA_WORKFLOW, f"build_initrd_{arch}")
             release_kernel = self.workflow_job_block(RELEASE_WORKFLOW, f"build_kernel_{arch}")
             release_initrd = self.workflow_job_block(RELEASE_WORKFLOW, f"build_initrd_{arch}")
-            self.assertIn(f"if: ${{{{ inputs.{arch} }}}}", beta_kernel)
-            self.assertIn(f"if: ${{{{ inputs.{arch} }}}}", beta_initrd)
-            self.assertNotIn("\n    if:", release_kernel)
-            self.assertNotIn("\n    if:", release_initrd)
+            for job in (release_kernel, release_initrd, beta_kernel, beta_initrd):
+                self.assertNotIn("\n    if:", job)
             for job in (release_initrd, beta_initrd):
                 self.assertIn(f"path: ~/.buildroot-ccache-{arch}", job)
                 self.assertIn(f"key: ccache-{arch}", job)
                 self.assertIn(f"ccache-{arch}", job)
 
-        self.assertIn("  input_checks:\n", beta)
         release_publish = self.workflow_steps(RELEASE_WORKFLOW, "release")
         beta_publish = self.workflow_steps(BETA_WORKFLOW, "release")
         release_order = [
@@ -498,12 +492,16 @@ class CabextractDownloadTests(unittest.TestCase):
             "Publish latest download manifest",
         ]
         self.assertEqual(sorted(release_order, key=release_publish.index), release_order)
-        self.assertLess(
-            beta_publish.index("Generate beta download manifest"),
-            beta_publish.index("Run final sha256 checksum"),
-        )
+        beta_order = [
+            "Generate beta historical download manifest",
+            "Run final sha256 checksum",
+            "Create GitHub Release",
+            "Generate beta channel download manifest",
+            "Publish beta download manifest",
+        ]
+        self.assertEqual(sorted(beta_order, key=beta_publish.index), beta_order)
         self.assertIn("--require-all", release_publish)
-        self.assertNotIn("--require-all", beta_publish)
+        self.assertIn("--require-all", beta_publish)
         self.assertIn("- name: Download distribution files", release_publish)
         self.assertIn("- name: Download distribution files", beta_publish)
         self.assertIn("- name: Create GitHub Release", release_publish)

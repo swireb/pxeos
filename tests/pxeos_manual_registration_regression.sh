@@ -73,7 +73,7 @@ must_have "$checkin" "--proto '=https' --proto-redir '=https' --max-redirs 0 --p
 # authenticated task response.
 identity_line=$(grep -n -m1 'rootpxe_require_identity ||' "$checkin" | cut -d: -f1)
 reply_mac_line=$(grep -n -m1 'rootpxe_normalize_mac "\$reply_mac"' "$checkin" | cut -d: -f1)
-runtime_call_line=$(grep -n -m1 '^pxeos_checkin_runtime_setup$' "$checkin" | cut -d: -f1)
+runtime_call_line=$(grep -n -m1 -E '(^| \|\| )pxeos_checkin_runtime_setup$' "$checkin" | cut -d: -f1)
 [[ $identity_line =~ ^[0-9]+$ && $reply_mac_line =~ ^[0-9]+$ && $runtime_call_line =~ ^[0-9]+$ ]] || fail 'checkin identity ordering markers are missing'
 (( identity_line < reply_mac_line && reply_mac_line < runtime_call_line )) || fail 'checkin MAC identity/runtime ordering is unsafe'
 for config in "$root/configs/fsx64.config" "$root/configs/fsx86.config" "$root/configs/fsarm64.config"; do

@@ -5,7 +5,8 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partclone-progress.sh"
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+test_shell=$BASHPID
+trap '[[ $BASHPID != "$test_shell" ]] || rm -rf "$tmp"' EXIT
 . "$root/tests/task-log-test-support.sh"
 . <(sed "s|/tmp/log|$tmp/log|g" "$(dirname "$lib")/log-paths.sh")
 

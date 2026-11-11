@@ -15,7 +15,7 @@ for imgFormat in 0 5; do
 done
 for imgFormat in 1 2 3 4 6 invalid ''; do ! rootpxe_validate_runtime_img_format; done
 printf 'PASS: two image formats and zero compression contract\n'
-tmp=$(mktemp -d /tmp/rootpxe-image-format.XXXXXX)
+tmp=$(mktemp -d -t rootpxe-image-format.XXXXXX)
 trap 'rm -rf -- "$tmp"' EXIT
 for f in uploadFormat rootpxe_wait_for_writer writeImage rootpxe_safe_relative_path; do eval "$(sed -n "/^$f() *{/,/^}/p" "$lib/funcs.sh")"; done
 for f in rootpxe_storage_read_file; do eval "$(sed -n "/^$f() *{/,/^}/p" "$lib/storage-io.sh")"; done

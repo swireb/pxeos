@@ -150,16 +150,14 @@ cloud-init status --long
 /var/log/cloud-init-output.log
 ```
 
-## 修改记录
+## 主机硬件清单
 
-- 2026-10-15：退役平台部署脚本与 Linux 自制初始化，改用原生 NoCloud 两文件离线注入；保留 Windows 计算机名称与 Sysprep 应答文件四态。
-- 2026-10-15：升级 NoCloud 能力并支持可选网络配置；未配置网络仍保持两文件，非空网络增加第三文件并纳入私密校验、只读幂等与回滚。
-- 2026-10-15：升级为三份原文私有链及手工元数据，允许空用户文件；恢复独立 Linux 离线改名并按四态路由，名称回执只证明配置注入或离线文件更新，不代表首启执行。
-- 2026-10-16：增加可选供应方配置，四文件集合完整纳入私有句柄、只读预检、标签、暂存发布和回滚；升级为 v5 冻结模板及 Windows 应答模板 v2，保留手工元数据和固定名称，客户端停止强制名称覆盖，模板只报告注入结果。
+- 抓取或部署的任务 checkin 通过鉴权后，PXEOS 只读采集 CPU、已安装内存、物理磁盘、显卡和网卡。设备按采集顺序保存，未知型号、规格与分类留空。表单的 `hardwareInventory` 字段携带版本 `1` 的 JSON，最多 128 件设备、64 KiB，使用原任务认证发送到 `POST /pxe/v1/inventory`。
+- PXEOS 只使用内核参数 `pxe_boot_mac` 报告 `pxeBootMac`。服务端仅在清单有唯一匹配时标记 PXE 网卡。采集或上报失败时，PXEOS 客户端控制台显示警告，任务继续。磁盘健康独立上报，原有库存载荷仍由现有入口处理。字段与主机快照见根项目[通信消息规范](../../../docs/RootPXE与PXEOS通信消息规范.md#通信方向与入口)。
 
 ## 网络存储与抓取发布
 
-当前源码增加存储协议v1和固定C/json-c/OpenSSL helper，x64/x86/arm64 profile同步接入；必须重新构建并成对发布服务端与PXEOS。源码存在不等于三架构产物或真实NAS已验证，本轮未执行编译、测试、挂载或设备操作。
+部署使用存储协议 v1 和以 C、json-c、OpenSSL 实现的 helper。x64、x86、arm64 的 initramfs 均需包含该 helper，发布时与对应的 RootPXE 服务端配套。
 
 ```json
 {
@@ -179,7 +177,7 @@ cloud-init status --long
 
 | 协议 | 配置策略 | 执行要求 |
 | --- | --- | --- |
-| NFS | auto、3、4.0、4.1、4.2 | AUTH_SYS；UID/GID双必填，0..4294967294，显式0合法。auto只在明确版本拒绝时按4.2→4.1→4.0→3回退 |
+| NFS | auto、3、4.0、4.1、4.2 | AUTH_SYS 使用 RootPXE 的有效身份 `0/0`。`auto` 只在明确版本拒绝时按 4.2 → 4.1 → 4.0 → 3 回退 |
 | SMB | auto、2.1、3.0、3.0.2、3.1.1 | 只允许四方言，拒SMB1/2.0.2和guest/null；空域不补WORKGROUP，固定版本必须精确匹配 |
 
 部署的服务端与 PXEOS 继续分别核验 `configuredVersion/actualVersion`，helper 的版本与访问身份检查保持原链路。捕获使用当前认证 checkin 下发的 NFS/SMB 版本策略及 SMB 凭据挂载真实 NAS，不启动 shadow/helper writer。
@@ -205,9 +203,9 @@ NAS 访问根预先存在；捕获按需创建根下 `dev` 和本机去冒号 MA
 
 ### 普通 checkin
 
-部署首次 checkin 若尚未发放 storage reservation，可沿原 reservation 独立准入；一旦已执行 preflight，恢复只允许原代际 storage-only 路径，不发放新的磁盘许可。捕获使用上文独立协议与新 attempt 重捕获流程。服务端 owner/目标占用返回409，协调不可用返回503，真实数据库错误返回500；checkin 只接受当前 JSON，不提供旧键值载荷兼容。
+部署首次 checkin 若尚未发放 storage reservation，可沿原 reservation 独立准入。需要处理已有执行时，客户端先按原代际进行 storage-only 收尾，期间不会取得新磁盘许可。只有认证响应明确给出 `restartAfterCleanup: true` 时，客户端才在收尾成功后重新 checkin。捕获使用上文独立协议与新 attempt 重捕获流程。服务端 owner 或目标占用返回 HTTP 409，协调不可用返回 503，数据库错误返回 500。checkin 使用当前 JSON 格式。
 
-本页记录源码合同和客户端边界，不代表构建或运行通过。shell/C 离线入口见本仓[测试说明](../tests/README.md)；仍须构建三架构产物并验收真实 NAS 权限、版本、原工作者未停保护、跨 boot 恢复和吞吐。RootPXE 数据库只支持匹配当前完整初始化目标的新空库，不提供旧库迁移。
+离线入口见[测试说明](../tests/README.md)。真实 NAS 权限、协议版本、原工作者未停保护、跨 boot 恢复和吞吐需独立验收。RootPXE 可初始化空库、验证当前库或升级已核验的受支持旧库，具体范围见根项目[数据库结构](../../../docs/项目说明.md#数据库结构)。
 
 ## 发布清单与服务端版本
 

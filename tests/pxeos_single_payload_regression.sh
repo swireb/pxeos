@@ -2,7 +2,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 lib=$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib
-tmp=$(mktemp -d /tmp/rootpxe-lvm-volume-audit.XXXXXX)
+tmp=$(mktemp -d -t rootpxe-lvm-volume-audit.XXXXXX)
 trap 'rm -rf -- "$tmp"' EXIT
 for f in rootpxe_capture_lvm_volumes_single uploadFormat rootpxe_wait_for_writer rootpxe_safe_relative_path; do eval "$(sed -n "/^$f() *{/,/^}/p" "$lib/funcs.sh")"; done
 . "$lib/restore-preflight.sh"

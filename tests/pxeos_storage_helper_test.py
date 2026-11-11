@@ -1,4 +1,4 @@
-"""用户自行运行的离线 fixture；本轮仅新增源码，未执行。"""
+"""在临时目录编译和运行原生存储 helper 离线回归。"""
 import os
 from pathlib import Path
 import shlex

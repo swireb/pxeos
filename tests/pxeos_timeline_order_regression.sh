@@ -35,12 +35,12 @@ progress_attempt=2
 progress_attempt=1 rootpxe_partclone_progress_run_id=fixture-run-2
 ! rootpxe_progress_data_phase_active || fail old_run_opened_copy
 rootpxe_partclone_progress_run_id=fixture-run-1 task_token=another-execution-token
-! rootpxe_progress_data_phase_active || fail reused_taskid_attempt_partimage_token_opened_copy
+! rootpxe_progress_data_phase_active || fail reused_taskid_attempt_token_opened_copy
 task_token=0123456789abcdef rootpxe_partclone_progress_run_id=fixture-run-2
 rootpxe_partition_progress_initialize_runtime
 type=down
 rootpxe_partition_progress_current_item d1:disk
-grep -qx 'stage:restore:progress=0' "$trace" || fail raw_or_partimage_zero_start_missing
+grep -qx 'stage:restore:progress=0' "$trace" || fail raw_copy_zero_start_missing
 
 # A full pending plan is sent separately before any queued item can be applied.
 rootpxe_partition_progress_initialize_runtime
@@ -80,11 +80,9 @@ last_heartbeat_sent=0
 : >"$trace"
 rootpxe_progress_send_heartbeat "$(date +%s)"
 assert_eq "$(grep -o 'progressAttempt=1' "$trace" | wc -l | tr -d ' ')" 1 heartbeat_duplicated_attempt
-for progress_mode in partclone partimage; do
-    : >"$trace"
-    rootpxe_progress_report_once
-    grep -q 'progress=0.*stage=restore' "$trace" || fail actual_copy_zero_was_removed
-done
+: >"$trace"
+rootpxe_progress_report_once
+grep -q 'progress=0.*stage=restore' "$trace" || fail actual_copy_zero_was_removed
 
 # No-copy work keeps its registered plan but never creates copy start/end.
 rootpxe_partition_progress_initialize_runtime
@@ -104,6 +102,7 @@ rootpxe_deployment_identity_windows_policy_enabled(){ return 1; }
 rootpxe_cloud_init_policy_enabled(){ return 1; }
 rootpxe_apply_cloud_init(){ printf 'initialization\n' >>"$trace"; }
 rootpxe_deployment_identity_cleanup_private(){ :; }
+rootpxe_prepare_uefi_boot(){ printf 'uefi\n' >>"$trace"; }
 rootpxe_partition_progress_enabled=no imagePath="$tmp/image" capone=0 changeHostname=false
 for type in up down; do
     rootpxe_partition_progress_initialize_runtime
@@ -112,6 +111,9 @@ for type in up down; do
     completeTasking
     assert_eq "$(head -n 2 "$trace" | tr '\n' ' ')" 'stopped flushed ' end_preceded_reporter_flush
     [[ $(grep -n '^stage:' "$trace" | cut -d: -f1) == 3 ]] || fail end_missing_or_before_flush
+    if [[ $type == down ]]; then
+        assert_eq "$(tail -n 3 "$trace" | tr '\n' ' ')" 'initialization uefi finish ' deployment_completion_reordered
+    fi
     rootpxe_partition_progress_initialize_runtime
     : >"$trace"
     completeTasking
