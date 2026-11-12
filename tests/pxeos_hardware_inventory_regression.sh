@@ -159,6 +159,31 @@ jq -e '
 ' "$tmp/report" >/dev/null || fail 'multi-device report, order, metadata or boot MAC mismatch'
 ! grep -Fq 'private-' "$tmp/report" || fail 'device serial number leaked'
 
+# dmidecode 3.7 emits binary unit names in SMBIOS Type 17 records.
+handle=16
+while IFS='|' read -r size locator model; do
+    printf 'Handle 0x%04X, DMI type 17, 40 bytes\nMemory Device\n\tSize: %s\n\tLocator: %s\n\tType: DRAM\n\tSpeed: 4800 MT/s\n\tPart Number: %s\n\n' \
+        "$handle" "$size" "$locator" "$model"
+    handle=$((handle + 1))
+done >"$tmp/dmi-memory-units" <<'EOF'
+2048 MiB|RAM slot #0|VMW-2048MB
+2 GiB|RAM slot #1|VMW-2048MB
+512 KiB|DIMM A|Example DIMM
+1 TiB|DIMM B|Example DIMM
+Unknown|RAM slot #2|VMW-2048MB
+0 MiB|RAM slot #3|Not Specified
+EOF
+HARDWARE_DMI="$tmp/dmi-memory-units" rootpxe_collect_hardware_inventory "$tmp/sys" "$tmp/cpuinfo" "$tmp/cmdline" >"$tmp/memory-units"
+jq -e '
+    [.devices[] | select(.kind == "memory") |
+      [.location, .model, .capacityBytes, .memoryType, .speedMTs, has("capacityBytes")]] ==
+      [["RAM slot #0", "VMW-2048MB", 2147483648, "DRAM", 4800, true],
+       ["RAM slot #1", "VMW-2048MB", 2147483648, "DRAM", 4800, true],
+       ["DIMM A", "Example DIMM", 524288, "DRAM", 4800, true],
+       ["DIMM B", "Example DIMM", 1099511627776, "DRAM", 4800, true],
+       ["RAM slot #2", "VMW-2048MB", null, "DRAM", 4800, false]]
+' "$tmp/memory-units" >/dev/null || fail 'SMBIOS memory size units, unknown capacity or empty slot mismatch'
+
 # Missing DMI still allows known Linux CPU topology, disks, GPUs and NICs.
 mkdir -p "$tmp/sys/devices/system/cpu/"{cpu0,cpu1,cpu2}/topology
 for cpu in 0 1 2; do

@@ -55,16 +55,18 @@ def cpu_topology($topology; $cpuinfo):
   });
 
 def dmi_size:
-  [(strings | capture("^(?<value>[0-9]+)[ ]+(?<unit>kB|MB|GB|TB)$"; "i"))] |
+  [(strings | capture("^(?<value>[0-9]+)[ ]+(?<unit>[kmgt]i?B)$"; "i"))] |
   if length == 1 then
-    .[0] | ((.value | tonumber) * ({"kb": 1024, "mb": 1048576, "gb": 1073741824, "tb": 1099511627776}[.unit | ascii_downcase])) | positive_integer
+    .[0] |
+    (.unit | ascii_downcase | sub("ib$"; "b")) as $unit |
+    ((.value | tonumber) * ({"kb": 1024, "mb": 1048576, "gb": 1073741824, "tb": 1099511627776}[$unit])) | positive_integer
   else null end;
 
 def dmi_memory($records):
   [$records[] | select(.type == 17) | .fields as $memory |
    ($memory.Size // "") as $size |
    ($memory."Part Number" | clean_text(256)) as $model |
-   select(($size | test("^(no module installed|not installed|0 (kb|mb|gb|tb))$"; "i") | not) and
+   select(($size | test("^(no module installed|not installed|0 [kmgt]i?b)$"; "i") | not) and
           ($size != "" or $model != null)) |
    {
      kind: "memory",
