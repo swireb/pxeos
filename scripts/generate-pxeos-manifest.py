@@ -3,6 +3,7 @@
 
 省略下载频道时，资源 URL 固定指向传入的历史 release tag；显式指定
 ``latest`` 或 ``beta`` 时，资源 URL 指向对应的可变频道。
+指定 ``--download-base-url`` 时，资源 URL 使用给定的 HTTPS 版本目录。
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import json
 from pathlib import Path
 import re
 import sys
+from urllib.parse import urlsplit
 
 
 ARCHITECTURES = (
@@ -31,7 +33,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--repo", required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--required-server-version", required=True)
-    parser.add_argument("--download-channel", choices=("latest", "beta"))
+    download = parser.add_mutually_exclusive_group()
+    download.add_argument("--download-channel", choices=("latest", "beta"))
+    download.add_argument("--download-base-url")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--require-all", action="store_true")
     return parser.parse_args()
@@ -45,15 +49,27 @@ def digest(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def asset(path: Path, repository: str, channel: str) -> dict[str, str]:
+def https_base_url(value: str, label: str) -> str:
+    error = f"{label} must be an HTTPS URL without credentials, query or fragment"
+    if not re.fullmatch(r"https://[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?:/[A-Za-z0-9._~-]+)*/?", value):
+        raise ValueError(error)
+    url = urlsplit(value)
+    path = url.path.rstrip("/")
+    if any(segment in {".", ".."} for segment in path.split("/")):
+        raise ValueError(f"{label} has an invalid path")
+    return f"https://{url.netloc}{path}"
+
+
+def asset(path: Path, download_base: str) -> dict[str, str]:
     return {
-        "url": f"https://github.com/{repository}/releases/download/{channel}/{path.name}",
+        "url": f"{download_base}/{path.name}",
         "sha256": digest(path),
     }
 
 
 def generate(
-    input_dir: Path, repository: str, tag: str, channel: str | None, require_all: bool, required_server_version: str
+    input_dir: Path, repository: str, tag: str, channel: str | None, require_all: bool, required_server_version: str,
+    download_base_url: str | None = None,
 ) -> dict[str, object]:
     if not re.fullmatch(r"(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})", required_server_version) or any(int(part) > 65535 for part in required_server_version.split(".")):
         raise ValueError("--required-server-version must have three components in 0..65535 without leading zeros or suffixes")
@@ -62,6 +78,11 @@ def generate(
     if not TAG_PATTERN.fullmatch(tag) or tag in MUTABLE_ALIASES:
         raise ValueError("--tag must be a historical release tag, not latest or beta")
     download_ref = tag if channel is None else channel
+    download_base = (
+        https_base_url(download_base_url, "--download-base-url")
+        if download_base_url is not None
+        else f"https://github.com/{repository}/releases/download/{download_ref}"
+    )
 
     kernels: list[dict[str, object]] = []
     missing: list[str] = []
@@ -80,8 +101,8 @@ def generate(
                 {
                     "arch": architecture,
                     "version": tag,
-                    "kernel": asset(kernel, repository, download_ref),
-                    "initrd": asset(initrd, repository, download_ref),
+                    "kernel": asset(kernel, download_base),
+                    "initrd": asset(initrd, download_base),
                 }
             )
         elif require_all:
@@ -95,7 +116,10 @@ def generate(
 def main() -> int:
     args = parse_arguments()
     try:
-        manifest = generate(args.input_dir, args.repo, args.tag, args.download_channel, args.require_all, args.required_server_version)
+        manifest = generate(
+            args.input_dir, args.repo, args.tag, args.download_channel, args.require_all,
+            args.required_server_version, args.download_base_url,
+        )
     except (OSError, ValueError) as error:
         print(f"pxeos manifest: {error}", file=sys.stderr)
         return 1

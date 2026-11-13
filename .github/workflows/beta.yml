@@ -418,3 +418,49 @@ jobs:
             --target "$GITHUB_SHA" \
             --manifest channel-files/pxeos.json \
             --resource-dir distribution-files
+
+  sync_r2:
+    needs: [release_metadata, release]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    concurrency:
+      group: pxeos-beta-r2
+      cancel-in-progress: false
+    env:
+      TAG_NAME: ${{ needs.release_metadata.outputs.tag_name }}
+      PXEOS_REQUIRED_SERVER_VERSION: ${{ needs.release_metadata.outputs.server_version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Check R2 credentials
+        id: r2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: python3 -B scripts/sync-pxeos-r2.py --check-secrets
+      - name: Download distribution files
+        if: steps.r2.outputs.enabled == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: distribution-files-*
+          merge-multiple: true
+          path: distribution-files
+      - name: Sync PXEOS to R2
+        if: steps.r2.outputs.enabled == 'true'
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PREFIX: ${{ secrets.R2_PREFIX }}
+          R2_PUBLIC_BASE_URL: ${{ secrets.R2_PUBLIC_BASE_URL }}
+        run: |
+          python3 -B scripts/sync-pxeos-r2.py \
+            --channel beta \
+            --input-dir distribution-files \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$TAG_NAME" \
+            --required-server-version "$PXEOS_REQUIRED_SERVER_VERSION"

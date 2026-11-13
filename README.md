@@ -364,6 +364,25 @@ capture
 BR2_PACKAGE_LIBCURL_CURL
 ```
 
+## Cloudflare R2 备用下载
+
+正式及测试工作流在 GitHub 历史 Release 与对应频道发布成功后，各自运行独立的 R2 同步任务。GitHub 下载清单继续使用 GitHub Release 地址。R2 同步需要在 PXEOS 仓库的 Actions secrets 中填写以下配置。
+
+| Secret | 内容 |
+| --- | --- |
+| `R2_ACCESS_KEY_ID` | 对指定桶有对象读写权限的 R2 S3 Access Key ID |
+| `R2_SECRET_ACCESS_KEY` | 对应的 R2 S3 Secret Access Key |
+| `R2_ENDPOINT` | Cloudflare 控制台显示的 HTTPS S3 API endpoint，填写到主机名 |
+| `R2_BUCKET` | 已有桶的名称 |
+| `R2_PREFIX` | 桶内对象前缀，例如 `kernels`，也可填写 `downloads/kernels` |
+| `R2_PUBLIC_BASE_URL` | 已配置的桶公开根地址，例如 `https://downloads.example.com`，无需附加 `R2_PREFIX` |
+
+两个密钥均为空时跳过同步。仅配置一个密钥，或启用后缺任何一项配置，R2 任务会报错。同步沿用桶当前的权限和公开地址，公开备用站点需已有对应访问配置。
+
+同步先上传 `R2_PREFIX/<TAG>/` 下的六个内核/initramfs 文件、六个 `.sha256` 文件及 `pxeos.json`，然后逐项下载比对。全部通过后才写入 `R2_PREFIX/latest/pxeos.json` 或 `R2_PREFIX/beta/pxeos.json`。R2 清单中的资源 URL 使用 `R2_PUBLIC_BASE_URL/R2_PREFIX/<TAG>/<文件名>`，频道清单也引用固定历史版本。频道清单设置 `Cache-Control: no-store`。若公开域名使用 Cloudflare 缓存规则，将这两个频道清单路径设为绕过缓存。
+
+R2 失败时，可在构建产物的 1 天保留期内从该频道最新的目标运行选择 **Re-run failed jobs**，单独重跑同步任务。重跑较早的运行会把频道指回对应历史版本。
+
 ## 文档索引
 
 - [安全配置](docs/安全配置.md)：默认 Root 凭据与敏感信息边界。

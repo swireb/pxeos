@@ -55,14 +55,21 @@ python3 tests/pxeos_release_manifest_test.py
 python3 tests/pxeos_build_version_test.py
 ```
 
-## 发布与清单（3）
+## 发布与清单（4）
 
 - 脚本及核对范围如下。
 
 ```text
 release_naming_test.py  # 离线核对发布命名和 Beta 全架构契约。
 pxeos_release_manifest_test.py  # 离线核对发布清单和固定发布频道。
+pxeos_r2_sync_test.py  # 用本地 rclone 替身验证可选配置、版本化清单 URL、上传范围和频道发布顺序。
 pxeos_build_version_test.py  # 以只读 GitHub 查询替身、时间 fixture 和临时 overlay，核对构建前一次选定 Release/Beta 最终 tag、同一分钟重名后缀、全部架构传播、历史/频道清单与镜像同值、跨时区/跨日及不重采样、本地 Local、CI 缺号/非法号拒绝、复制失败不写号、控制台 API/PXEOS 分列、网络诊断安全读取，以及已选 tag 被占用时发布前失败停止。
+```
+
+在 Linux 上运行 R2 离线回归。
+
+```shell
+/home/sysadmin/.codex/bin/codex-build-test python3 -B tests/pxeos_r2_sync_test.py
 ```
 
 - 统一版本测试只提取或调用版本函数、构建入口的依赖检查前缀及带命令替身的局部函数，不启动真实 PXEOS、内核或 initramfs 构建，不安装依赖、下载制品或访问 GitHub。Windows 的 Git Bash 可能缺少 IANA 时区数据，时间 fixture 会模拟北京时间转换并检查生产代码传入的北京时间时区；符号链接测试在平台不允许创建时明确跳过。通过这些测试不能推断真实 Actions、Linux 构建、设备启动或发布已验证；运行时的新版本显示仍须重新构建和发布 initramfs 才会生效。
