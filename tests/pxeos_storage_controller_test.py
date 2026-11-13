@@ -1,12 +1,21 @@
 """Storage-only control flow tests; run explicitly by the user, no real NAS."""
 from pathlib import Path
+import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 LIB = Path(__file__).parents[1] / "Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/storage-io.sh"
+
+
+def setUpModule():
+    if (os.environ.get("PXEOS_STARTUP_TEST_ISOLATED") != "1"
+            or Path(__file__).resolve() != Path("/pxeos/tests/pxeos_storage_controller_test.py")
+            or Path("/sys").exists() or os.access("/proc/sysrq-trigger", os.W_OK)):
+        raise RuntimeError("Run tests/pxeos_storage_controller_test.py directly to enter the PXEOS test sandbox")
 
 
 class StorageControllerTests(unittest.TestCase):
@@ -1058,4 +1067,7 @@ BAD_CAPABILITIES
 
 
 if __name__ == "__main__":
+    if os.environ.get("PXEOS_STARTUP_TEST_ISOLATED") != "1":
+        runner = Path(__file__).with_name("run-startup-regression.sh")
+        os.execv("/usr/bin/bash", ["/usr/bin/bash", str(runner), Path(__file__).name, *sys.argv[1:]])
     unittest.main()

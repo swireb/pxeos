@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # 合并后的 PXEOS 回归测试；每个原脚本在独立子 shell 中运行。
 set -euo pipefail
+if [[ ${PXEOS_STARTUP_TEST_ISOLATED:-} != 1 ]]; then
+    exec /usr/bin/bash "$(dirname -- "${BASH_SOURCE[0]}")/run-startup-regression.sh" "${0##*/}" "$@"
+fi
+[[ $0 == /pxeos/tests/pxeos_network_storage_regression.sh && ! -e /sys && ! -w /proc/sysrq-trigger ]] || exit 125
 
 # ===== 原脚本：tests/pxeos_network_regression.sh =====
 (
@@ -96,8 +100,7 @@ printf 'PASS: PXEOS network diagnostics regression\n'
 
 # ===== PXEOS 启动网络与 SSH 服务控制台回归 =====
 (
-# 启动脚本测试只替换 PATH 中的命令，并在临时目录中保存 DHCP/服务日志；
-# 不会操作宿主机网络、守护进程或 SSH 主机密钥。
+# 启动脚本使用测试替身，在隔离环境的临时目录保存 DHCP 和服务日志。
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
@@ -122,6 +125,10 @@ cat >"$tmp/mock/udhcpc" <<'EOF'
 #!/usr/bin/env bash
 printf 'udhcpc: started, v1.37.0\nudhcpc: broadcasting discover\n'
 exit "${PXEOS_DHCP_RC:-0}"
+EOF
+cat >"$tmp/mock/reboot" <<'EOF'
+#!/usr/bin/env bash
+printf 'reboot\n' >>"${PXEOS_NETWORK_REBOOT_TRACE:?}"
 EOF
 cat >"$tmp/mock/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -161,9 +168,12 @@ sed \
   -e 's|linkstate=$(/bin/cat /sys/class/net/$iface/carrier)|linkstate=1|' \
   -e 's|sleep [0-9][0-9]*|:|g' \
   -e 's|read -r -t 60|:|' \
+  -e "s|reboot\$|$tmp/mock/reboot|" \
   "$network" >"$tmp/S40network"
 
-PATH="$tmp/mock:$PATH" bash "$tmp/S40network" >"$tmp/network-success.out" 2>&1
+PXEOS_NETWORK_REBOOT_TRACE="$tmp/network-reboot" PATH="$tmp/mock:$PATH" \
+    bash "$tmp/S40network" >"$tmp/network-success.out" 2>&1
+[[ ! -e $tmp/network-reboot ]] || fail 'DHCP 成功时调用了重启替身'
 grep -Eq '^\[INFO\]  Starting interface eth0 and waiting for link\.+Done$' "$tmp/network-success.out" || fail '网络启动缺少统一接口状态行'
 grep -Eq '^\[INFO\]  Acquiring DHCP lease on eth0\.+Done$' "$tmp/network-success.out" || fail 'DHCP 缺少统一完成状态行'
 grep -Fqx '[INFO]  IPv4 address: 192.0.2.10/24.' "$tmp/network-success.out" || fail 'DHCP 缺少 IPv4 结果行'
@@ -172,10 +182,12 @@ grep -Fqx '[INFO]  IPv4 address: 192.0.2.10/24.' "$tmp/network-success.out" || f
 grep -Fq 'udhcpc: started' "$tmp/log/dhcp.log" || fail 'DHCP 原始日志未保存'
 
 set +e
-PXEOS_DHCP_RC=42 PATH="$tmp/mock:$PATH" bash "$tmp/S40network" >"$tmp/network-failure.out" 2>&1
+PXEOS_DHCP_RC=42 PXEOS_NETWORK_REBOOT_TRACE="$tmp/network-reboot" PATH="$tmp/mock:$PATH" \
+    bash "$tmp/S40network" >"$tmp/network-failure.out" 2>&1
 rc=$?
 set -e
 [[ $rc -eq 1 ]] || fail "DHCP 失败路径退出码: $rc"
+[[ -f $tmp/network-reboot && $(<"$tmp/network-reboot") == reboot ]] || fail 'DHCP 失败时须调用一次重启替身'
 grep -Eq '^\[INFO\]  Acquiring DHCP lease on eth0\.+Failed \(exit 42\)$' "$tmp/network-failure.out" || fail 'DHCP 失败未保留原始返回码'
 grep -Fq 'Details: ' "$tmp/network-failure.out" || fail 'DHCP 失败未指向诊断日志'
 grep -Fq 'udhcpc: started' "$tmp/log/dhcp.log" || fail 'DHCP 失败日志未保存'
