@@ -8,7 +8,7 @@ import unittest
 
 
 class StorageHelperFixture(unittest.TestCase):
-    def test_actual_filesystem_receipts_and_bounded_streams(self):
+    def run_filesystem_fixture(self, *args):
         root = Path(__file__).resolve().parents[1]
         source = root / 'Buildroot/package/rootpxe-storage-io/src'
         flags = shlex.split(subprocess.check_output(
@@ -20,9 +20,14 @@ class StorageHelperFixture(unittest.TestCase):
                             str(root / 'tests/storage_fs_fixture.c'),
                             str(source / 'storage_context.c'), str(source / 'storage_fs.c'),
                             *flags, '-o', str(binary)], check=True)
-            # Includes an unbounded stream larger than 200 MiB. All bytes stay in this local
-            # temporary fixture; no production path or mount entry is opened.
-            subprocess.run([str(binary)], check=True)
+            subprocess.run([str(binary), *args], check=True, timeout=60, cwd=directory)
+
+    def test_actual_filesystem_receipts_and_bounded_streams(self):
+        # Includes an unbounded stream larger than 200 MiB, with temporary files only.
+        self.run_filesystem_fixture()
+
+    def test_read_backpressure_preserves_full_stream_but_rejects_closed_and_short_streams(self):
+        self.run_filesystem_fixture('read')
 
     def test_parsers_and_identity_syscall_order(self):
         root = Path(__file__).resolve().parents[1]

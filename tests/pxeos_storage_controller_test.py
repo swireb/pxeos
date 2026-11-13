@@ -458,6 +458,161 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
         ''')
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_read_progress_observes_stopped_forwarder_without_losing_successful_done(self):
+        for code, done in ((23, "no"), (0, "yes")):
+            with self.subTest(forward_exit=code):
+                result = self.run_controller(f"forward_exit={code}\n" + r'''
+                    rootpxe_task_log_append() { printf '%s\n' "$*" >>"$tmp/diagnostics"; }
+                    rootpxe_storage_call() {
+                        printf '{"nextSequence":"2","ack":{"proof":{"%s":{"size":"7"}}}}' "$proof_key"
+                    }
+                    head() {
+                        command head "$@" || return $?
+                        printf '%s\n' "$BASHPID" >"$tmp/forwarder"
+                        return "$forward_exit"
+                    }
+                    proof_key=$(printf '%s' fixture/file.img | sha256sum | cut -d ' ' -f1)
+                    printf '{"execution":{}}' >"$tmp/context.json"
+                    printf '1\n' >"$tmp/next-sequence"
+                    mkfifo "$tmp/events" "$tmp/data"
+                    # The controller still owns a data FIFO reader after head exits.
+                    exec {rootpxe_storage_data_fd}<>"$tmp/data"
+                    printf payload >&"$rootpxe_storage_data_fd"
+                    exec {rootpxe_storage_request_fd}>"$tmp/requests"
+                    (
+                        printf '%s\n' '{"event":"intent"}'
+                        until [[ -s $tmp/forwarder ]]; do sleep 0.01; done
+                        while kill -0 "$(<"$tmp/forwarder")" 2>/dev/null; do sleep 0.01; done
+                        printf '%s\n' '{"event":"progress","stage":"read","bytes":"7"}'
+                        sleep 0.2
+                        printf '%s\n' '{"event":"result"}' '{"event":"done"}'
+                    ) >"$tmp/events" & rootpxe_storage_pid=$!
+                    exec {rootpxe_storage_result_fd}<"$tmp/events"
+                    status=0
+                    rootpxe_restore_read_target=/dev/mockp1 rootpxe_storage_exec read fixture/file.img - || status=$?
+                    kill "$rootpxe_storage_pid" 2>/dev/null || true
+                    wait "$rootpxe_storage_pid" 2>/dev/null || true
+                    cat "$tmp/diagnostics" >&2
+                    exit "$status"
+                ''', timeout=3)
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertEqual(result.stdout, "payload")
+                self.assertIn(f"forward_exitcode={code} forward_wait=progress helper_done={done}", result.stderr)
+
+    def test_live_read_survives_31_seconds_without_a_control_event(self):
+        result = self.run_controller(r'''
+            rootpxe_storage_call() {
+                printf '{"nextSequence":"2","ack":{"proof":{"%s":{"size":"7"}}}}' "$proof_key"
+            }
+            proof_key=$(printf '%s' fixture/file.img | sha256sum | cut -d ' ' -f1)
+            printf '{"execution":{}}' >"$tmp/context.json"
+            printf '1\n' >"$tmp/next-sequence"
+            mkfifo "$tmp/events" "$tmp/data"
+            exec {rootpxe_storage_data_fd}<>"$tmp/data"
+            exec {rootpxe_storage_request_fd}>"$tmp/requests"
+            (
+                printf '%s\n' '{"event":"intent"}'
+                # Start the pause only after the controller acknowledged intent.
+                until [[ $(wc -l <"$tmp/requests") -ge 2 ]]; do sleep 0.01; done
+                sleep 31
+                printf payload >&"$rootpxe_storage_data_fd"
+                printf '%s\n' '{"event":"result"}'
+                until [[ $(wc -l <"$tmp/requests") -ge 3 ]]; do sleep 0.01; done
+                printf '%s\n' '{"event":"done"}'
+            ) >"$tmp/events" & rootpxe_storage_pid=$!
+            exec {rootpxe_storage_result_fd}<"$tmp/events"
+            status=0
+            rootpxe_storage_exec read fixture/file.img - || status=$?
+            wait "$rootpxe_storage_pid" 2>/dev/null || true
+            exit "$status"
+        ''', timeout=40)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "payload")
+
+    def test_read_silence_is_only_retriable_during_live_data_transfer(self):
+        for case, code, acks in (
+            ("helper_exited", 1, 2),
+            ("partial_line", 1, 2),
+            ("invalid_line", 1, 2),
+            ("deadline", 1, 2),
+            ("forward_failed", 23, 2),
+            ("forward_completed", 0, 3),
+            ("result_without_done", 1, 3),
+            ("done_without_result", 1, 2),
+            ("before_intent", 1, 1),
+        ):
+            with self.subTest(case=case):
+                result = self.run_controller(f"case_name={case}\n" + r'''
+                    rootpxe_storage_call() {
+                        printf '{"nextSequence":"2","ack":{"proof":{"%s":{"size":"7"}}}}' "$proof_key"
+                    }
+                    rootpxe_task_log_append() { printf '%s\n' "$*" >>"$tmp/diagnostics"; }
+                    head() {
+                        if [[ $case_name == forward_failed ]]; then
+                            command head "$@" || return $?
+                            return 23
+                        fi
+                        exec head "$@"
+                    }
+                    read() {
+                        # Keep Bash's real timeout, EOF and partial read statuses;
+                        # only shorten the default 30 s wait in these cases.
+                        local -a args=("$@")
+                        local i
+                        for i in "${!args[@]}"; do
+                            if [[ ${args[i]} == -t && ${args[i+1]} == 30 ]]; then
+                                args[i+1]=0.12
+                                break
+                            fi
+                        done
+                        builtin read "${args[@]}"
+                    }
+                    proof_key=$(printf '%s' fixture/file.img | sha256sum | cut -d ' ' -f1)
+                    printf '{"execution":{}}' >"$tmp/context.json"
+                    printf '1\n' >"$tmp/next-sequence"
+                    mkfifo "$tmp/events" "$tmp/data"
+                    exec {rootpxe_storage_data_fd}<>"$tmp/data"
+                    exec {rootpxe_storage_request_fd}>"$tmp/requests"
+                    if [[ $case_name == deadline ]]; then
+                        rootpxe_failure_deadline=$(($(date +%s)+2))
+                    fi
+                    (
+                        case $case_name in before_intent) sleep 1; exit 0 ;; esac
+                        printf '%s\n' '{"event":"intent"}'
+                        until [[ $(wc -l <"$tmp/requests") -ge 2 ]]; do sleep 0.01; done
+                        case $case_name in
+                            helper_exited) exit 7 ;;
+                            partial_line) printf '{"event":'; sleep 1 ;;
+                            invalid_line) printf '%s\n' '{invalid'; sleep 1 ;;
+                            deadline) exec sleep 3 ;;
+                            forward_failed) printf payload >&"$rootpxe_storage_data_fd"; sleep 1 ;;
+                            done_without_result) printf '%s\n' '{"event":"done"}'; sleep 1 ;;
+                            *)
+                                printf payload >&"$rootpxe_storage_data_fd"
+                                sleep 0.25
+                                printf '%s\n' '{"event":"result"}'
+                                until [[ $(wc -l <"$tmp/requests") -ge 3 ]]; do sleep 0.01; done
+                                if [[ $case_name == forward_completed ]]; then
+                                    printf '%s\n' '{"event":"done"}'
+                                else
+                                    sleep 1
+                                fi ;;
+                        esac
+                    ) >"$tmp/events" & rootpxe_storage_pid=$!
+                    exec {rootpxe_storage_result_fd}<"$tmp/events"
+                    status=0
+                    rootpxe_restore_read_target=/dev/mockp1 rootpxe_storage_exec read fixture/file.img - || status=$?
+                    wait "$rootpxe_storage_pid" 2>/dev/null || true
+                    printf 'request_count=%s\n' "$(wc -l <"$tmp/requests")" >&2
+                    cat "$tmp/diagnostics" >&2
+                    exit "$status"
+                ''', timeout=4)
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertIn(f"request_count={acks}", result.stderr)
+                self.assertIn(f"helper_done={'yes' if code == 0 else 'no'}", result.stderr)
+                if case in ("forward_failed", "forward_completed"):
+                    self.assertIn(f"forward_exitcode={code} forward_wait=poll", result.stderr)
+
     def test_smb_mount_waits_for_the_real_child_and_preserves_failure(self):
         result = self.run_controller('''
             mount.cifs() { printf joined >"$rootpxe_storage_workspace/mount-ended"; return 17; }

@@ -324,7 +324,7 @@ rootpxe_storage_local_payload() {
 # of its own read FIFO. Every fixed write must reach EOF at its declared size.
 rootpxe_storage_exec() (
     local operation=$1 path=$2 argument=${3:-} sequence command event phase response data_pid='' data_status=0 write_fd='' expected key read_timeout remaining
-    local helper_done=no forward_wait=not_started
+    local helper_done=no forward_wait=not_started read_phase=intent read_status
     trap '
         if [[ -n $data_pid ]]; then
             kill -TERM "$data_pid" 2>/dev/null || true
@@ -373,14 +373,43 @@ rootpxe_storage_exec() (
             remaining=$(rootpxe_failure_remaining) || break
             (( remaining >= read_timeout )) || read_timeout=$remaining
         fi
-        IFS= read -r -t "$read_timeout" -u "$rootpxe_storage_result_fd" event || break
-        phase=$(jq -r '.event' <<<"$event") || break
+        event=''
+        read_status=0
+        if IFS= read -r -t "$read_timeout" -u "$rootpxe_storage_result_fd" event; then
+            phase=$(jq -r '.event' <<<"$event") || break
+        else
+            read_status=$?
+            # During bulk reads, a quiet helper may still be reading from
+            # storage. Only a timeout with no partial event is a liveness poll.
+            [[ $operation == read && $read_phase == data && $read_status -gt 128 && -z $event ]] || break
+            phase=progress
+        fi
         if [[ $phase == progress ]]; then
-            jq -e '.stage|IN("read","write","readback")' >/dev/null <<<"$event" || break
-            [[ $(jq -r '.bytes' <<<"$event") =~ ^[0-9]+$ ]] || break
+            if (( read_status == 0 )); then
+                jq -e '.stage|IN("read","write","readback")' >/dev/null <<<"$event" || break
+                [[ $(jq -r '.bytes' <<<"$event") =~ ^[0-9]+$ ]] || break
+            fi
+            # This controller retains a data FIFO reader, so the helper may
+            # not see EPIPE when the actual reader (head) has exited.
+            if [[ $operation == read && -n $data_pid ]] && ! kill -0 "$data_pid" 2>/dev/null; then
+                wait "$data_pid" || data_status=$?
+                data_pid=''
+                if (( read_status == 0 )); then forward_wait=progress; else forward_wait=poll; fi
+                if (( data_status != 0 )); then
+                    kill -TERM "$rootpxe_storage_pid" 2>/dev/null || true
+                    return "$data_status"
+                fi
+            fi
+            if (( read_status != 0 )); then
+                kill -0 "$rootpxe_storage_pid" 2>/dev/null || break
+                if [[ -n ${rootpxe_failure_deadline:-} ]]; then
+                    rootpxe_failure_remaining >/dev/null || break
+                fi
+            fi
             continue
         fi
         if [[ $phase == done ]]; then
+            [[ $operation != read || $read_phase == result ]] || break
             helper_done=yes
             if [[ -n $data_pid ]]; then
                 wait "$data_pid" || data_status=$?
@@ -390,6 +419,9 @@ rootpxe_storage_exec() (
             return "$data_status"
         fi
         [[ $phase == intent || $phase == created || $phase == result ]] || break
+        if [[ $operation == read ]]; then
+            [[ $phase == intent && $read_phase == intent || $phase == result && $read_phase == data ]] || break
+        fi
         response=$(rootpxe_storage_call publish-checkpoint --data-urlencode "event=$event") || break
         if [[ $operation == read && $phase == intent ]]; then
             key=$(printf '%s' "$path" | sha256sum | cut -d ' ' -f1) || break
@@ -402,6 +434,9 @@ rootpxe_storage_exec() (
         if [[ $operation == write && $argument == - && $phase == result ]]; then rootpxe_storage_local_payload "$event" || break; fi
         jq -er '.nextSequence | strings' <<<"$response" >"$rootpxe_storage_workspace/next-sequence" || break
         jq -c '.ack' <<<"$response" >&"$rootpxe_storage_request_fd" || break
+        if [[ $operation == read ]]; then
+            if [[ $phase == intent ]]; then read_phase=data; else read_phase=result; fi
+        fi
     done
     kill -TERM "$rootpxe_storage_pid" 2>/dev/null || true
     return 1
