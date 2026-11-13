@@ -53,8 +53,16 @@ class StorageHelperFixture(unittest.TestCase):
                             '-D_FILE_OFFSET_BITS=64', '-I', str(source),
                             str(root / 'tests/storage_fs_fixture.c'),
                             str(source / 'storage_context.c'), str(source / 'storage_fs.c'),
+                            '-DROOTPXE_TEST_STATX_RACE', '-Wl,--wrap=statx',
                             *flags, '-o', str(binary)], check=True)
-            subprocess.run([str(binary), *args], check=True, timeout=60, cwd=directory)
+            result = subprocess.run([str(binary), *args], check=True, timeout=60, cwd=directory,
+                                    text=True, stdout=subprocess.PIPE)
+            fixture_directories = result.stdout.splitlines()
+            self.assertTrue(fixture_directories, 'filesystem fixture did not report its work directory')
+            for fixture_directory in fixture_directories:
+                path = Path(directory, fixture_directory).resolve()
+                self.assertEqual(path.parent, Path(directory).resolve())
+                self.assertFalse(path.exists(), f'filesystem fixture left {path}')
 
     def test_actual_filesystem_receipts_and_bounded_streams(self):
         # Includes an unbounded stream larger than 200 MiB, with temporary files only.
@@ -65,6 +73,9 @@ class StorageHelperFixture(unittest.TestCase):
 
     def test_read_progress_follows_elapsed_time(self):
         self.run_filesystem_fixture('progress')
+
+    def test_read_binds_stream_length_to_the_original_intent_proof(self):
+        self.run_filesystem_fixture('read-proof')
 
     def test_parsers_and_identity_syscall_order(self):
         root = Path(__file__).resolve().parents[1]
@@ -82,7 +93,7 @@ class StorageHelperFixture(unittest.TestCase):
                             str(root / 'tests/storage_helper_fixture.c'),
                             str(source / 'storage_context.c'), str(source / 'storage_mount.c'),
                             *['-Wl,--wrap=' + name for name in wrapped], *flags, '-o', str(binary)], check=True)
-            subprocess.run([str(binary)], check=True)
+            subprocess.run([str(binary)], check=True, timeout=60, cwd=directory)
 
 
 if __name__ == '__main__':
