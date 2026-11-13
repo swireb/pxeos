@@ -196,6 +196,20 @@ pxeos_mpa_permit_regression.sh  # 以临时文件覆盖 MPA 下载许可的本�
 pxeos_php_retirement_regression.sh  # 旧 PHP 运行时及产品 USB 制作/发布入口退役、本地诊断/badblocks mock 和强制 checkin 边界。
 ```
 
+### 手工注册 HTTPS 跨组件集成
+
+主仓的 `backend/internal/httpapi/manual_registration_pxeos_integration_test.go` 串联真实 HTTPS 服务、实际注册审批与临时 SQLite，以及 PXEOS 生产注册脚本中的 curl/jq 和 S99 启动分支。服务端和客户端均在启动测试运行器的独立网络命名空间内，控制台选择使用替身；不访问宿主总线、真实存储或块设备。
+
+先在受限测试窗口编译 HTTP API 包的测试二进制，将其保存到主仓 `backend/.build-cache` 内。以下为专用入口，从主仓根目录调用；`HTTPAPI_TEST_BINARY` 指向该二进制的绝对路径。编译和执行均须经过 `codex-build-test` 及已核对的资源包装器：共享父限额 8 GiB 内存/32 GiB swap，子任务 2 GiB 内存/0 swap、单 CPU，磁盘上的 `TMPDIR`，Go 使用 `GOMAXPROCS=1`、`GOMEMLIMIT=768MiB` 和 `-p 1`。专用入口只执行固定测试名，不接受额外测试参数。
+
+```shell
+bash packages/pxeos/tests/run-startup-regression.sh --manual-http-integration "$HTTPAPI_TEST_BINARY"
+```
+
+16个用例覆盖仅注册、注册后部署、注册后采集三种模式各自的正常提交、首次 commit 已完成但回复连接断开后的幂等重放、提交前取消、确认时返回编辑后重新确认、确认后注册权限撤销，以及部署镜像变为未就绪时的服务端拒绝。检查实际数据库只产生一份主机/任务、S99 消费六字段 handoff 后的任务身份与 deploy→down/capture→up 映射、交接文件删除，以及仅注册、取消或拒绝后不进入任务分支。仅注册完成后的明确关机选择与取消后的单次重启请求均由记录脚本模拟；没有执行真实电源命令。2026-11-13 专用运行实际通过16/16，未跳过；普通 Go 测试未进入隔离运行器时会明确跳过本测试。
+
+S99 测试副本只替换一次 handoff 目录赋值，其他分支执行生产代码；任务入口使用记录桩保存已消费字段，并在隔离目录创建 recovery 标记后退出。逐例清除标记，避免用例间污染。本验证不执行真实任务 check-in、镜像传输、磁盘写入或任务完成后的真实电源动作。维护模式的 PE 由 iPXE 直接 SAN 引导，实机 PE 启动不属于这些用例的验证范围。
+
 ## 脚本审计回归（3）
 
 - 脚本及核对范围如下。
@@ -246,14 +260,16 @@ pxeos_lvm_udev_rules_regression.sh
 
 ## 网络存储离线回归
 
-- `pxeos_storage_helper_test.py` 使用本机 C 编译器、`pkg-config`、json-c 和 OpenSSL 开发依赖编译并运行临时测试程序，覆盖有界流、对象回执、解析和身份系统调用顺序。
+- `pxeos_storage_helper_test.py` 使用本机 C 编译器、`pkg-config`、json-c 和 OpenSSL 开发依赖编译并运行临时测试程序，覆盖有界流、对象回执、解析和身份系统调用顺序。文件系统 fixture 会在测试的私有工作目录创建并清理数据，单个测试流超过 200 MiB。运行前将 `TMPDIR` 指向磁盘目录，避免将测试数据写入 tmpfs。
 - `storage_helper_fixture.c`是配套本地隔离fixture，不构建Buildroot产物，不应挂载或访问真实NAS/块设备。身份顺序注入用例不能代替真实数值UID/GID权限验证。
 - `pxeos_storage_controller_test.py` 使用 Python、Bash、jq 和私有临时普通文件调用当前 `storage-io.sh` 控制流，以受控进程/回调替身核对原 owner/attempt、身份/能力拒绝、发布前各失败点、冻结 finish、只读收尾、原代际发布/回滚、只清原范围、等待 helper 后释放及失败不释放。旧 marker 或目录名不能认领已发布执行，越出原 shadow 的 payload 在 helper 命令前拒绝；SMB 挂载取消仍须等待实际子进程。该入口不编译 C，不访问真实 NAS 或块设备，不能代替原生 helper/身份验证。
 - `storage-test-support.sh` 是存储相关 shell/Python fixture 共用的测试支持文件，不是独立测试入口。它加载当前控制器、构造认证 JSON/owner/attempt/boot 上下文并限定私有工作区；仅在原生进程边界提供能力/连接/preflight 替身，在管线回归中以受限普通文件替代远端字节读写，保留真实 producer、压缩与 wait 控制流，不提供真实挂载或 NAS 变更。
 - `pxeos_capture_regression.sh` 覆盖捕获和还原管线、完成回调、许可、源盘布局与 extfs。`pxeos_capture_resume_regression.sh` 覆盖元数据校验、私有副本清理与许可。`pxeos_capture_direct_regression.sh` 覆盖直接捕获的 MAC 暂存和发布，原执行恢复由 controller Python 入口覆盖。
 - `pxeos_network_storage_regression.sh` 核对网络存储及 SSH 调试入口。Partclone 和任务标识使用各自的定向回归入口。
 
-用户可在具备本机依赖的隔离环境从子模块根执行：
+网络存储、手工注册和存储控制器测试会执行 PXEOS 启动或电源操作脚本。三个入口自动使用 `run-startup-regression.sh`，需要采用合并 `/usr` 布局的 Linux、bubblewrap 和可用的用户命名空间。隔离中只读挂载 PXEOS 源码和运行依赖，使用独立的进程与网络命名空间、设备目录和临时目录。宿主总线不可见，电源管理命令映射到拒绝替身。隔离建立失败时退出。使用 `bash tests/run-startup-regression.sh --probe` 查看隔离属性，使用 `bash tests/pxeos_startup_isolation_test.sh` 验证隔离建立失败和伪造标记都会被拒绝。这两个检查均不执行电源命令。
+
+将 `TMPDIR` 指向磁盘上的可写目录后，从子模块根执行：
 
 ```shell
 python3 -B tests/pxeos_storage_controller_test.py
@@ -261,6 +277,7 @@ python3 -B tests/pxeos_storage_helper_test.py
 bash tests/pxeos_capture_regression.sh
 bash tests/pxeos_capture_resume_regression.sh
 bash tests/pxeos_network_storage_regression.sh
+bash tests/pxeos_manual_registration_regression.sh
 bash tests/pxeos_partclone_progress_regression.sh
 bash tests/pxeos_task_identity_regression.sh
 ```
