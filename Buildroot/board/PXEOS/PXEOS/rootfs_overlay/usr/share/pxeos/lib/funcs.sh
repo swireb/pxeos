@@ -6337,26 +6337,34 @@ saveGRUB() {
     local disk="$1"
     local disk_number="$2"
     local imagePath="$3"
-    local sgdisk="$4"
+    local sgdisk="${4:-}"
     [[ -z $disk ]] && handleError "No disk passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $disk_number ]] && handleError "No drive number passed (${FUNCNAME[0]})\n   Args Passed: $*"
     [[ -z $imagePath ]] && handleError "No image path passed (${FUNCNAME[0]})\n   Args Passed: $*"
     # Determine the number of sectors to copy
     # Hack Note: print $4+0 causes the column to be interpretted as a number
     #            so the comma is tossed
-    local count=$(flock $disk sfdisk -d $disk 2>/dev/null | awk '/start=[ ]*[1-9]/{print $4+0}' | sort -n | head -n1)
-    local has_grub=$(dd if=$disk bs=512 count=1 2>&1 | grep -i 'grub')
+    local partition_table count has_grub
+    partition_table=$(flock "$disk" sfdisk -d "$disk" 2>/dev/null) || return 1
+    count=$(awk '/start=[ ]*[1-9]/{print $4+0}' <<<"$partition_table" | sort -n | head -n1)
+    [[ $count =~ ^[1-9][0-9]*$ ]] || return 1
+    has_grub=$(
+        set +e
+        dd if="$disk" bs=512 count=1 2>/dev/null | grep -i 'grub'
+        status=("${PIPESTATUS[@]}")
+        [[ ${status[0]} -eq 0 && ${status[1]} -le 1 ]]
+    ) || return 1
     local hasgrubfilename=""
     if [[ -n $has_grub ]]; then
         hasGrubFileName "$imagePath" "$disk_number" "$sgdisk"
-        touch $hasgrubfilename
+        touch "$hasgrubfilename" || return 1
     fi
     # Ensure that no more than 1MiB of data is copied (already have this size used elsewhere)
     [[ $count -gt 2048 ]] && count=2048
     [[ $count -eq 8 || $count -eq 63 ]] && count=1
     local mbrfilename=""
     MBRFileName "$imagePath" "$disk_number" "mbrfilename" "$sgdisk"
-    dd if=$disk of=$mbrfilename count=$count bs=512 >/dev/null 2>&1
+    dd if="$disk" of="$mbrfilename" count="$count" bs=512 >/dev/null 2>&1
 }
 # Checks for the existence of the grub embedding area in the image directory.
 # Echos 1 for true, and 0 for false.
@@ -6588,22 +6596,22 @@ savePartitionTablesAndBootLoaders() {
                     ;;
             esac
             dots "$strdots"
-            saveGRUB "$disk" "$disk_number" "$imagePath"
-            flock $disk sfdisk -d $disk 2>/dev/null > $sfdiskfilename
+            saveGRUB "$disk" "$disk_number" "$imagePath" || handleError "Could not save MBR boot metadata (${FUNCNAME[0]})"
+            flock "$disk" sfdisk -d "$disk" 2>/dev/null > "$sfdiskfilename" || handleError "Could not save MBR partition table (${FUNCNAME[0]})"
             echo "Done"
             debugPause
             [[ $have_extended_partition -ge 1 ]] && saveAllEBRs "$disk" "$disk_number" "$imagePath"
             ;;
         1)
             dots "Saving Partition Tables (GPT)"
-            saveGRUB "$disk" "$disk_number" "$imagePath" "true"
+            saveGRUB "$disk" "$disk_number" "$imagePath" "true" || handleError "Could not save GPT boot metadata (${FUNCNAME[0]})"
             sgdisk -b "$imagePath/d${disk_number}.mbr" $disk >/dev/null 2>&1
             if [[ ! $? -eq 0 ]]; then
                 echo "Failed"
                 debugPause
                 handleError "Error trying to save GPT partition tables (${FUNCNAME[0]})\n   Args Passed: $*"
             fi
-            flock $disk sfdisk -d $disk 2>/dev/null > $sfdiskfilename
+            flock "$disk" sfdisk -d "$disk" 2>/dev/null > "$sfdiskfilename" || handleError "Could not save GPT partition table (${FUNCNAME[0]})"
             echo "Done"
             ;;
     esac
