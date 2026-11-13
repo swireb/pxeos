@@ -267,6 +267,16 @@ bash tests/pxeos_task_identity_regression.sh
 
 三架构构建需核对 helper 及依赖进入各自的 initramfs。真实存储需验证 NFS 3/4.0/4.1/4.2 和 SMB 2.1/3.0/3.0.2/3.1.1 的固定及自动协商、实际挂载和非 guest 会话、NFS AUTH_SYS `0/0` 与 NAS 权限、原工作者未停保护、可信同一主机跨 boot 恢复、数据管线失败及响应丢失。完整范围见根项目[存储系统待验矩阵](../../../docs/存储系统.md#初始化边界与未验证事项)。
 
+### 本地读取性能对照
+
+从 PXEOS 仓库运行。基线提交必须存在于本地 Git 历史，脚本通过 `git show` 读取该提交的 C 源码和 Bash 控制器。运行环境需要 Linux、Python 3.11+、Bash、jq、C 编译器和 json-c/OpenSSL 开发依赖。编译参数默认取自 `pkg-config`，也可用 `ROOTPXE_STORAGE_BENCHMARK_FLAGS` 指定可直接执行的目标 ABI 所需的头文件和链接参数。
+
+```bash
+/home/sysadmin/.codex/bin/codex-build-test python3 -B tests/pxeos_storage_read_benchmark.py --baseline 00384223
+```
+
+`old` 用 `cat` 向 FIFO 写入，模拟旧版直接读取的数据路径。`baseline` 和 `current` 运行各自的 C 存储助手及 Bash 控制器，由本地替身应答存储检查点。三条路径都用同一个 96 MiB 暖缓存普通文件和接收端 `sha256sum`，两条助手路径还校验其返回的 SHA-256 和字节数。脚本在 1 路和 4 路并发下分别轮换三种路径的执行顺序，各测 3 次并输出吞吐和 CPU 时间中位数。另测一轮记录控制器的 `jq` 调用次数，计数轮的耗时不计入中位数。基准不经过 NAS 或网络，共享主机负载会影响实测耗时，结果无法外推到万台部署。
+
 `pxeos_image_format_regression.sh` 覆盖仅 Gzip/Zstd、级别 0 真正未压缩、退役格式拒绝以及超过 200 MiB 的单文件编解码往返；Partclone 使用普通文件复制替身。
 
 `pxeos_checkin_format_regression.sh` 以真实 JSON parser 验证 0 保留、退役格式及非法级别拒绝，存储清理专用响应不要求镜像编解码字段。

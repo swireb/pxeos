@@ -124,9 +124,11 @@ test_dispatch(){
     rootpxe_apply_hostname_for_disk(){ printf 'forbidden\n' >>"$tmp/hostname-calls"; }
     rootpxe_apply_cloud_init(){ rootpxe_deployment_identity_hostname_result=false; rootpxe_deployment_identity_cloud_init_result=true; }
     rootpxe_deployment_identity_report_result(){ [[ $1 == false && $2 == false && $3 == true ]] || fail 'restore template receipt changed'; }
+    rootpxe_prepare_uefi_boot(){ printf '%s\n' "$@" >>"$tmp/uefi-disks"; }
     rootpxe_fixture_imgcomplete(){ :; }
     handleError(){ fail "$*"; }
     completeTasking || fail 'template restore completion rejected'
+    [[ -f $tmp/uefi-disks && $(<"$tmp/uefi-disks") == /dev/fixture ]] || fail 'restore tail did not prepare UEFI for the fixture disk'
     [[ ! -e $tmp/hostname-calls ]] || fail 'restore tail called independent hostname branch for Cloud template'
 }
 case ${1:-all} in

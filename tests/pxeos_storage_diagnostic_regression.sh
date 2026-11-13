@@ -43,6 +43,12 @@ grep -Fq 'error=远端文件或目录已改变' "$log" || fail 'controlled Chine
 grep -Fq 'sequence=9 phase=result operation=mkdir-owned' "$log" || fail 'actual checkpoint context missing'
 [[ $(cat "$tmp/console") == 'Storage request failed (HTTP 409). Check task log.' ]] || fail 'console exposed detailed or non-English diagnostic'
 
+MOCK_RESPONSE='{"error":"本机 NFS 保留源端口繁忙，请稍后重试","reasonCode":"STORAGE_PREFLIGHT_TARGET_INSPECT_FAILED"}'
+status=0
+rootpxe_storage_call preflight >"$tmp/reserved-port-output" 2>"$tmp/reserved-port-console" || status=$?
+[[ $status == 1 && ! -s $tmp/reserved-port-output ]] || fail 'reserved-port rejection changed return'
+grep -Fq 'endpoint=preflight HTTP 409 reasonCode=STORAGE_PREFLIGHT_TARGET_INSPECT_FAILED error=本机 NFS 保留源端口繁忙，请稍后重试' "$log" || fail 'reserved-port diagnostic missing'
+
 # Callers frequently discard stdout. Failure details must still reach the
 # existing task log and stderr without changing the nonzero return.
 MOCK_RESPONSE='{"error":"存储执行绑定已失效"}'

@@ -365,7 +365,7 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
             rootpxe_safe_relative_path() { printf '%s' "$1"; }
             rootpxe_storage_ensure_parents() { :; }
             rootpxe_storage_call() { printf '{"nextSequence":"4","ack":{}}'; }
-            printf '%s\\n' '{"event":"result","operation":"write","path":"dev/27/2/payload/file.img.000","node":{"size":"7","sha256":"fixture"}}' '{"event":"done"}' >"$tmp/events"
+            printf '%s\\n' '{"event":"intent"}' '{"event":"created"}' '{"event":"result","operation":"write","path":"dev/27/2/payload/file.img.000","node":{"size":"7","sha256":"fixture"}}' '{"event":"done"}' >"$tmp/events"
             exec {rootpxe_storage_request_fd}>"$tmp/requests"
             exec {rootpxe_storage_result_fd}<"$tmp/events"
             printf payload | rootpxe_storage_write_payload "$tmp/image/file.img"
@@ -449,11 +449,12 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
             printf '{"execution":{}}' >"$tmp/context.json"
             printf 1 >"$tmp/next-sequence"
             printf metadata >"$tmp/metadata"
-            printf '%s\\n' '{"event":"done"}' >"$tmp/events"
+            rootpxe_storage_call() { printf '{"nextSequence":"4","ack":{}}'; }
+            printf '%s\\n' '{"event":"intent"}' '{"event":"created"}' '{"event":"result"}' '{"event":"done"}' >"$tmp/events"
             exec {rootpxe_storage_request_fd}>"$tmp/requests"
             exec {rootpxe_storage_result_fd}<"$tmp/events"
             rootpxe_storage_exec write dev/27/2/metadata "$tmp/metadata"
-            jq -e '.operation=="write" and .lengthMode=="fixed" and .expectedSize=="8"' "$tmp/requests" >/dev/null
+            head -n 1 "$tmp/requests" | jq -e '.operation=="write" and .lengthMode=="fixed" and .expectedSize=="8"' >/dev/null
             [[ $(cat "$tmp/data") == metadata && ! -e $tmp/payloads.ndjson ]]
         ''')
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -529,6 +530,160 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "payload")
 
+    def test_live_write_survives_31_seconds_without_a_control_event(self):
+        result = self.run_controller(r'''
+            rootpxe_storage_call() { printf '%s\n' '{"nextSequence":"2","ack":{}}'; }
+            printf '{"execution":{}}' >"$tmp/context.json"
+            printf '1\n' >"$tmp/next-sequence"
+            printf payload >"$tmp/payload"
+            mkfifo "$tmp/events" "$tmp/data"
+            exec {rootpxe_storage_request_fd}>"$tmp/requests"
+            (
+                exec {data_fd}<>"$tmp/data"
+                printf '%s\n' '{"event":"intent"}'
+                until [[ $(wc -l <"$tmp/requests") -ge 2 ]]; do sleep 0.01; done
+                printf '%s\n' '{"event":"created"}'
+                until [[ $(wc -l <"$tmp/requests") -ge 3 ]]; do sleep 0.01; done
+                head -c 7 <&"$data_fd" >"$tmp/written"
+                sleep 31
+                printf '%s\n' '{"event":"result"}'
+                until [[ $(wc -l <"$tmp/requests") -ge 4 ]]; do sleep 0.01; done
+                printf '%s\n' '{"event":"done"}'
+            ) >"$tmp/events" & rootpxe_storage_pid=$!
+            exec {rootpxe_storage_result_fd}<"$tmp/events"
+            status=0
+            rootpxe_storage_exec write dev/27/2/metadata "$tmp/payload" || status=$?
+            wait "$rootpxe_storage_pid" 2>/dev/null || true
+            [[ $(<"$tmp/written") == payload ]] || exit 93
+            exit "$status"
+        ''', timeout=40)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_progress_events_are_validated_in_one_parse(self):
+        for event, expected in (
+            ('{"event":"progress","stage":"readback","bytes":"2048"}', 0),
+            ('{"event":"progress","stage":"unknown","bytes":"2048"}', 1),
+            ('{"event":"progress","stage":"read","bytes":"20\\n48"}', 1),
+            ('{"event":"progress","stage":"read","bytes":null}', 1),
+            ('{"event":"progress","stage":"read","bytes":"2048"}{}', 1),
+        ):
+            with self.subTest(event=event):
+                result = self.run_controller(r'''
+                    jq() {
+                        local input
+                        if [[ $* == *'.event'* || $* == *'.stage'* || $* == *'.bytes'* ]]; then
+                            input=$(cat)
+                            if [[ $input == *'"progress"'* ]]; then printf '.\n' >>"$tmp/parses"; fi
+                            command jq "$@" <<<"$input"
+                        else
+                            command jq "$@"
+                        fi
+                    }
+                    printf '{"execution":{}}' >"$tmp/context.json"
+                    printf '1\n' >"$tmp/next-sequence"
+                    : >"$tmp/parses"
+                    exec {rootpxe_storage_request_fd}>"$tmp/requests"
+                ''' + f"\nprintf '%s\\n' '{event}' '{{\"event\":\"done\"}}' >\"$tmp/events\"\n" + r'''
+                    exec {rootpxe_storage_result_fd}<"$tmp/events"
+                    status=0
+                    rootpxe_storage_exec stat image || status=$?
+                    cat "$tmp/parses"
+                    exit "$status"
+                ''')
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertEqual(result.stdout, ".\n")
+
+    def test_write_silence_requires_the_created_receipt_and_live_workers(self):
+        for case, code, requests in (
+            ("before_created", 1, 2),
+            ("progress_before_intent", 1, 1),
+            ("progress_before_created", 1, 2),
+            ("partial_line", 1, 3),
+            ("helper_exited", 1, 3),
+            ("producer_failed", 23, 3),
+            ("producer_failed_at_result", 23, 3),
+            ("result_rejected", 1, 3),
+            ("missing_done", 1, 4),
+            ("progress_after_result", 1, 4),
+            ("early_done", 1, 3),
+            ("early_result", 1, 2),
+            ("duplicate_created", 1, 3),
+            ("duplicate_result", 1, 4),
+            ("deadline", 1, 3),
+        ):
+            with self.subTest(case=case):
+                result = self.run_controller(f"case_name={case}\n" + r'''
+                    read() {
+                        local -a args=("$@")
+                        local i
+                        for i in "${!args[@]}"; do
+                            if [[ ${args[i]} == -t && ${args[i+1]} == 30 ]]; then
+                                args[i+1]=0.12
+                                break
+                            fi
+                        done
+                        builtin read "${args[@]}"
+                    }
+                    cat() {
+                        command cat "$@" || return $?
+                        if [[ ${2:-} == "$tmp/payload" && $case_name == producer_failed* ]]; then return 23; fi
+                    }
+                    rootpxe_storage_call() {
+                        if [[ $case_name == result_rejected && $3 == *'"event":"result"'* ]]; then return 1; fi
+                        printf '%s\n' '{"nextSequence":"2","ack":{}}'
+                    }
+                    emit() { printf '{"event":"%s"}\n' "$1"; }
+                    progress() { printf '%s\n' '{"event":"progress","stage":"write","bytes":"7"}'; }
+                    wait_for_requests() {
+                        until [[ $(wc -l <"$tmp/requests") -ge $1 ]]; do sleep 0.01; done
+                    }
+                    printf '{"execution":{}}' >"$tmp/context.json"
+                    printf '1\n' >"$tmp/next-sequence"
+                    printf payload >"$tmp/payload"
+                    mkfifo "$tmp/events" "$tmp/data"
+                    exec {rootpxe_storage_request_fd}>"$tmp/requests"
+                    if [[ $case_name == deadline ]]; then rootpxe_failure_deadline=$(($(date +%s)+2)); fi
+                    (
+                        exec {data_fd}<>"$tmp/data"
+                        if [[ $case_name == progress_before_intent ]]; then progress; fi
+                        emit intent
+                        wait_for_requests 2
+                        case $case_name in
+                            before_created) exec sleep 3 ;;
+                            progress_before_created) progress ;;
+                            early_result) emit result; exec sleep 3 ;;
+                        esac
+                        emit created
+                        wait_for_requests 3
+                        head -c 7 <&"$data_fd" >/dev/null
+                        case $case_name in
+                            partial_line) printf '{"event":'; exec sleep 3 ;;
+                            helper_exited) exit 7 ;;
+                            producer_failed|deadline) exec sleep 3 ;;
+                            early_done) emit done; exec sleep 3 ;;
+                            duplicate_created) emit created; exec sleep 3 ;;
+                        esac
+                        emit result
+                        case $case_name in
+                            duplicate_result) wait_for_requests 4; emit result ;;
+                            progress_before_intent|progress_before_created|progress_after_result)
+                                wait_for_requests 4
+                                if [[ $case_name == progress_after_result ]]; then progress; fi
+                                emit done
+                                exit 0 ;;
+                        esac
+                        exec sleep 3
+                    ) >"$tmp/events" & rootpxe_storage_pid=$!
+                    exec {rootpxe_storage_result_fd}<"$tmp/events"
+                    status=0
+                    rootpxe_storage_exec write dev/27/2/metadata "$tmp/payload" || status=$?
+                    wait "$rootpxe_storage_pid" 2>/dev/null || true
+                    printf '%s\n' "$(wc -l <"$tmp/requests")"
+                    exit "$status"
+                ''', timeout=5)
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertEqual(int(result.stdout), requests)
+
     def test_read_silence_is_only_retriable_during_live_data_transfer(self):
         for case, code, acks in (
             ("helper_exited", 1, 2),
@@ -538,8 +693,10 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
             ("forward_failed", 23, 2),
             ("forward_completed", 0, 3),
             ("result_without_done", 1, 3),
+            ("progress_after_result", 1, 3),
             ("done_without_result", 1, 2),
             ("before_intent", 1, 1),
+            ("progress_before_intent", 1, 1),
         ):
             with self.subTest(case=case):
                 result = self.run_controller(f"case_name={case}\n" + r'''
@@ -576,8 +733,12 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
                     if [[ $case_name == deadline ]]; then
                         rootpxe_failure_deadline=$(($(date +%s)+2))
                     fi
+                    progress() { printf '%s\n' '{"event":"progress","stage":"read","bytes":"7"}'; }
                     (
-                        case $case_name in before_intent) sleep 1; exit 0 ;; esac
+                        case $case_name in
+                            before_intent) exec sleep 1 ;;
+                            progress_before_intent) progress ;;
+                        esac
                         printf '%s\n' '{"event":"intent"}'
                         until [[ $(wc -l <"$tmp/requests") -ge 2 ]]; do sleep 0.01; done
                         case $case_name in
@@ -592,11 +753,12 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
                                 sleep 0.25
                                 printf '%s\n' '{"event":"result"}'
                                 until [[ $(wc -l <"$tmp/requests") -ge 3 ]]; do sleep 0.01; done
-                                if [[ $case_name == forward_completed ]]; then
-                                    printf '%s\n' '{"event":"done"}'
-                                else
-                                    sleep 1
-                                fi ;;
+                                case $case_name in
+                                    forward_completed|progress_before_intent|progress_after_result)
+                                        if [[ $case_name == progress_after_result ]]; then progress; fi
+                                        printf '%s\n' '{"event":"done"}' ;;
+                                    *) exec sleep 1 ;;
+                                esac ;;
                         esac
                     ) >"$tmp/events" & rootpxe_storage_pid=$!
                     exec {rootpxe_storage_result_fd}<"$tmp/events"

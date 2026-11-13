@@ -106,7 +106,8 @@ rootpxe_storage_log_rejection() {
         '存储执行绑定或检查点无效，已停止本次操作'|'存储执行绑定已失效'|'存储配置或路径无效'|\
         '存储目录包含链接、特殊文件、跨文件系统路径或目录环'|'远端文件或目录已改变'|\
         '远端协议响应无效或超出安全上限'|'存储访问被拒绝，请检查存储访问凭证'|\
-        '存储为只读，无法写入'|'远端不支持所需存储协议'|'存储网络连接或读取失败') ;;
+        '存储为只读，无法写入'|'远端不支持所需存储协议'|'存储网络连接或读取失败'|\
+        '本机 NFS 保留源端口繁忙，请稍后重试') ;;
         *) safe_error='存储请求未成功，已停止本次操作' ;;
     esac
     if [[ $endpoint == publish-checkpoint ]]; then
@@ -324,7 +325,8 @@ rootpxe_storage_local_payload() {
 # of its own read FIFO. Every fixed write must reach EOF at its declared size.
 rootpxe_storage_exec() (
     local operation=$1 path=$2 argument=${3:-} sequence command event phase response data_pid='' data_status=0 write_fd='' expected key read_timeout remaining
-    local helper_done=no forward_wait=not_started read_phase=intent read_status
+    local helper_done=no forward_wait=not_started transfer_phase='' read_status
+    if [[ $operation == read || $operation == write ]]; then transfer_phase=intent; fi
     trap '
         if [[ -n $data_pid ]]; then
             kill -TERM "$data_pid" 2>/dev/null || true
@@ -376,22 +378,25 @@ rootpxe_storage_exec() (
         event=''
         read_status=0
         if IFS= read -r -t "$read_timeout" -u "$rootpxe_storage_result_fd" event; then
-            phase=$(jq -r '.event' <<<"$event") || break
+            phase=$(jq -ers '
+                select(length == 1 and (.[0] | type == "object")) | .[0] |
+                if .event == "progress" then
+                    select((.stage | IN("read", "write", "readback")) and
+                           (.bytes | tostring | test("\\A[0-9]+\\z")))
+                else . end | .event |
+                select(IN("progress", "done", "intent", "created", "result"))' <<<"$event") || break
         else
             read_status=$?
-            # During bulk reads, a quiet helper may still be reading from
-            # storage. Only a timeout with no partial event is a liveness poll.
-            [[ $operation == read && $read_phase == data && $read_status -gt 128 && -z $event ]] || break
+            # Bulk I/O may include a quiet remote read, write or verification.
+            # Only a timeout with no partial event is a liveness poll.
+            [[ $transfer_phase == data && $read_status -gt 128 && -z $event ]] || break
             phase=progress
         fi
         if [[ $phase == progress ]]; then
-            if (( read_status == 0 )); then
-                jq -e '.stage|IN("read","write","readback")' >/dev/null <<<"$event" || break
-                [[ $(jq -r '.bytes' <<<"$event") =~ ^[0-9]+$ ]] || break
-            fi
-            # This controller retains a data FIFO reader, so the helper may
-            # not see EPIPE when the actual reader (head) has exited.
-            if [[ $operation == read && -n $data_pid ]] && ! kill -0 "$data_pid" 2>/dev/null; then
+            [[ -z $transfer_phase || $transfer_phase == data ]] || break
+            # The controller's data FIFO reader can hide a read forwarder's
+            # exit from the helper. A failed write producer can look like EOF.
+            if [[ $transfer_phase == data && -n $data_pid ]] && ! kill -0 "$data_pid" 2>/dev/null; then
                 wait "$data_pid" || data_status=$?
                 data_pid=''
                 if (( read_status == 0 )); then forward_wait=progress; else forward_wait=poll; fi
@@ -409,18 +414,29 @@ rootpxe_storage_exec() (
             continue
         fi
         if [[ $phase == done ]]; then
-            [[ $operation != read || $read_phase == result ]] || break
+            [[ -z $transfer_phase || $transfer_phase == result ]] || break
             helper_done=yes
             if [[ -n $data_pid ]]; then
                 wait "$data_pid" || data_status=$?
                 forward_wait=done
             fi
             data_pid=''
+            if (( data_status != 0 )); then kill -TERM "$rootpxe_storage_pid" 2>/dev/null || true; fi
             return "$data_status"
         fi
-        [[ $phase == intent || $phase == created || $phase == result ]] || break
-        if [[ $operation == read ]]; then
-            [[ $phase == intent && $read_phase == intent || $phase == result && $read_phase == data ]] || break
+        case "$operation:$transfer_phase:$phase" in
+            read:intent:intent|read:data:result|write:intent:intent|write:created:created|write:data:result) ;;
+            read:*|write:*) break ;;
+        esac
+        if [[ $operation == write && $phase == result && -n $data_pid ]]; then
+            # A successful native result requires producer EOF. Check its
+            # exit status before acknowledging the result or recording it.
+            wait "$data_pid" || data_status=$?
+            data_pid=''
+            if (( data_status != 0 )); then
+                kill -TERM "$rootpxe_storage_pid" 2>/dev/null || true
+                return "$data_status"
+            fi
         fi
         response=$(rootpxe_storage_call publish-checkpoint --data-urlencode "event=$event") || break
         if [[ $operation == read && $phase == intent ]]; then
@@ -434,9 +450,11 @@ rootpxe_storage_exec() (
         if [[ $operation == write && $argument == - && $phase == result ]]; then rootpxe_storage_local_payload "$event" || break; fi
         jq -er '.nextSequence | strings' <<<"$response" >"$rootpxe_storage_workspace/next-sequence" || break
         jq -c '.ack' <<<"$response" >&"$rootpxe_storage_request_fd" || break
-        if [[ $operation == read ]]; then
-            if [[ $phase == intent ]]; then read_phase=data; else read_phase=result; fi
-        fi
+        case "$operation:$phase" in
+            write:intent) transfer_phase=created ;;
+            read:intent|write:created) transfer_phase=data ;;
+            read:result|write:result) transfer_phase=result ;;
+        esac
     done
     kill -TERM "$rootpxe_storage_pid" 2>/dev/null || true
     return 1

@@ -27,12 +27,28 @@ static int ack(struct storage_context *c,struct json_object *event,int request,i
 static struct json_object *event_for(struct storage_context *c,const char *phase,const char *op,const char *path,const char *to,uint64_t seq){struct json_object *o=json_object_new_object();char number[21];snprintf(number,sizeof(number),"%llu",(unsigned long long)seq);json_object_object_add(o,"event",json_object_new_string(phase));json_object_object_add(o,"operation",json_object_new_string(op));json_object_object_add(o,"path",json_object_new_string(path));if(to&&*to)json_object_object_add(o,"to",json_object_new_string(to));json_object_object_add(o,"sequence",json_object_new_string(number));json_object_object_add(o,"execution",json_object_get(c->owner));return o;}
 static int stream_progress(struct storage_fs *fs,const char *stage,uint64_t bytes){struct json_object *event=json_object_new_object();char count[21];snprintf(count,sizeof(count),"%llu",(unsigned long long)bytes);json_object_object_add(event,"event",json_object_new_string("progress"));json_object_object_add(event,"stage",json_object_new_string(stage));json_object_object_add(event,"bytes",json_object_new_string(count));int rc=rx_emit(fs->result,event);json_object_put(event);return rc;}
 
+static int64_t monotonic_ms(void) {
+    struct timespec stamp;
+    if (clock_gettime(CLOCK_MONOTONIC, &stamp)) return -1;
+    return (int64_t)stamp.tv_sec * 1000 + stamp.tv_nsec / 1000000;
+}
+
+static int stream_progress_if_due(struct storage_fs *fs, const char *stage,
+                                  uint64_t bytes, int64_t *last_progress) {
+    int64_t now = monotonic_ms();
+    if (now < 0) return -1;
+    if (now - *last_progress < 1000) return 0;
+    if (stream_progress(fs, stage, bytes)) return -1;
+    *last_progress = now;
+    return 0;
+}
+
 /* Only the local output pipe may be backpressured here. Do not send keepalive
  * events during a remote read or while waiting for a checkpoint ACK. */
 static int write_read_output(struct storage_fs *fs,int data,const unsigned char *buffer,
-                             size_t length,uint64_t count,int64_t *next_progress) {
+                             size_t length,uint64_t count,int64_t *last_progress) {
     const int progress_ms=10000, stalled_ms=300000;
-    int64_t stalled_since=-1;
+    int64_t stalled_since=-1, next_progress=-1;
     while(length){
         ssize_t n=write(data,buffer,length);
         if(n>0){
@@ -45,18 +61,18 @@ static int write_read_output(struct storage_fs *fs,int data,const unsigned char 
             return -1;
         }
         if(!rx_parent_alive(fs->context))return -1;
-        struct timespec stamp;
-        if(clock_gettime(CLOCK_MONOTONIC,&stamp))return -1;
-        int64_t now=(int64_t)stamp.tv_sec*1000+stamp.tv_nsec/1000000;
+        int64_t now=monotonic_ms();
+        if(now<0)return -1;
         if(stalled_since<0)stalled_since=now;
-        if(!*next_progress)*next_progress=now+progress_ms;
+        if(next_progress<0)next_progress=now+progress_ms;
         int64_t until_stalled=stalled_since+stalled_ms-now;
         if(until_stalled<=0)return -1;
-        if(now>=*next_progress){
+        if(now>=next_progress){
             if(stream_progress(fs,"read",count))return -1;
-            *next_progress=now+progress_ms;
+            *last_progress=now;
+            next_progress=now+progress_ms;
         }
-        int64_t until_progress=*next_progress-now;
+        int64_t until_progress=next_progress-now;
         int timeout=(int)(until_progress<until_stalled?until_progress:until_stalled);
         struct pollfd output={.fd=data,.events=POLLOUT};
         int ready=poll(&output,1,timeout);
@@ -65,7 +81,75 @@ static int write_read_output(struct storage_fs *fs,int data,const unsigned char 
     return 0;
 }
 
-static int stream_file(struct storage_fs *fs,int fd,int data,int writing,uint64_t limit,struct json_object **details){unsigned char buffer[RX_DATA_MAX],digest[EVP_MAX_MD_SIZE];unsigned length=0;uint64_t count=0,progress=0;int64_t next_read_progress=0;struct statx before,after;if(rx_stat_fd(fd,&before)||!S_ISREG(before.stx_mode))return -1;if(!writing){int flags=fcntl(data,F_GETFL);if(flags<0||fcntl(data,F_SETFL,flags|O_NONBLOCK))return -1;}EVP_MD_CTX *hash=EVP_MD_CTX_new();if(!hash||EVP_DigestInit_ex(hash,EVP_sha256(),NULL)!=1){EVP_MD_CTX_free(hash);return -1;}int rc=-1;for(;;){if(!rx_parent_alive(fs->context))goto out;size_t want=sizeof(buffer);if(!writing){if(count==before.stx_size)break;if(before.stx_size-count<want)want=(size_t)(before.stx_size-count);}else if(limit&&limit-count<want)want=(size_t)(limit-count);if(!want)break;ssize_t n=read(writing?data:fd,buffer,want);if(n<0&&errno==EINTR)continue;if(n<0||(!writing&&!n))goto out;if(!n)break;if(UINT64_MAX-count<(uint64_t)n||count+(uint64_t)n>INT64_MAX)goto out;if((writing?rx_write_all(fd,buffer,(size_t)n):write_read_output(fs,data,buffer,(size_t)n,count,&next_read_progress))||EVP_DigestUpdate(hash,buffer,(size_t)n)!=1)goto out;count+=(uint64_t)n;if(count-progress>=1048576){if(stream_progress(fs,writing?"write":"read",count))goto out;progress=count;}}if(writing&&fsync(fd))goto out;if(rx_stat_fd(fd,&after)||(!writing&&!same_runtime(&before,&after))||after.stx_size!=count||EVP_DigestFinal_ex(hash,digest,&length)!=1||length!=32)goto out;if(writing){unsigned char verified[EVP_MAX_MD_SIZE];unsigned verified_length=0;uint64_t readback=0,readback_progress=0;struct statx sealed=after;if(lseek(fd,0,SEEK_SET)<0||EVP_DigestInit_ex(hash,EVP_sha256(),NULL)!=1)goto out;while(readback<count){size_t want=count-readback<sizeof(buffer)?(size_t)(count-readback):sizeof(buffer);ssize_t n=read(fd,buffer,want);if(n<0&&errno==EINTR)continue;if(n<=0||EVP_DigestUpdate(hash,buffer,(size_t)n)!=1)goto out;readback+=(uint64_t)n;if(readback-readback_progress>=1048576){if(stream_progress(fs,"readback",readback))goto out;readback_progress=readback;}}if(EVP_DigestFinal_ex(hash,verified,&verified_length)!=1||verified_length!=32||memcmp(digest,verified,32)||rx_stat_fd(fd,&after)||!same_runtime(&sealed,&after))goto out;}char hex[65];for(unsigned i=0;i<32;i++)snprintf(hex+2*i,3,"%02x",digest[i]);*details=rx_node_json(&after);json_object_object_add(*details,"sha256",json_object_new_string(hex));rc=0;out:EVP_MD_CTX_free(hash);return rc;}
+static int stream_file(struct storage_fs *fs, int fd, int data, int writing,
+                       uint64_t limit, struct json_object **details) {
+    unsigned char buffer[RX_DATA_MAX], digest[EVP_MAX_MD_SIZE];
+    unsigned length = 0;
+    uint64_t count = 0;
+    struct statx before, after;
+    if (rx_stat_fd(fd, &before) || !S_ISREG(before.stx_mode)) return -1;
+    if (!writing) {
+        int flags = fcntl(data, F_GETFL);
+        if (flags < 0 || fcntl(data, F_SETFL, flags | O_NONBLOCK)) return -1;
+    }
+    int64_t last_progress = monotonic_ms();
+    if (last_progress < 0) return -1;
+    EVP_MD_CTX *hash = EVP_MD_CTX_new();
+    if (!hash || EVP_DigestInit_ex(hash, EVP_sha256(), NULL) != 1) {
+        EVP_MD_CTX_free(hash);
+        return -1;
+    }
+    int rc = -1;
+    for (;;) {
+        if (!rx_parent_alive(fs->context)) goto out;
+        size_t want = sizeof(buffer);
+        if (!writing) {
+            if (count == before.stx_size) break;
+            if (before.stx_size - count < want) want = (size_t)(before.stx_size - count);
+        } else if (limit && limit - count < want) {
+            want = (size_t)(limit - count);
+        }
+        if (!want) break;
+        ssize_t n = read(writing ? data : fd, buffer, want);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 || (!writing && !n)) goto out;
+        if (!n) break;
+        if (UINT64_MAX - count < (uint64_t)n || count + (uint64_t)n > INT64_MAX) goto out;
+        if ((writing ? rx_write_all(fd, buffer, (size_t)n) :
+                       write_read_output(fs, data, buffer, (size_t)n, count, &last_progress)) ||
+            EVP_DigestUpdate(hash, buffer, (size_t)n) != 1) goto out;
+        count += (uint64_t)n;
+        if (stream_progress_if_due(fs, writing ? "write" : "read", count, &last_progress)) goto out;
+    }
+    if (writing && fsync(fd)) goto out;
+    if (rx_stat_fd(fd, &after) || (!writing && !same_runtime(&before, &after)) ||
+        after.stx_size != count || EVP_DigestFinal_ex(hash, digest, &length) != 1 || length != 32) goto out;
+    if (writing) {
+        unsigned char verified[EVP_MAX_MD_SIZE];
+        unsigned verified_length = 0;
+        uint64_t readback = 0;
+        struct statx sealed = after;
+        if (lseek(fd, 0, SEEK_SET) < 0 || EVP_DigestInit_ex(hash, EVP_sha256(), NULL) != 1) goto out;
+        while (readback < count) {
+            size_t want = count - readback < sizeof(buffer) ? (size_t)(count - readback) : sizeof(buffer);
+            ssize_t n = read(fd, buffer, want);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0 || EVP_DigestUpdate(hash, buffer, (size_t)n) != 1) goto out;
+            readback += (uint64_t)n;
+            if (stream_progress_if_due(fs, "readback", readback, &last_progress)) goto out;
+        }
+        if (EVP_DigestFinal_ex(hash, verified, &verified_length) != 1 || verified_length != 32 ||
+            memcmp(digest, verified, 32) || rx_stat_fd(fd, &after) || !same_runtime(&sealed, &after)) goto out;
+    }
+    char hex[65];
+    for (unsigned i = 0; i < 32; i++) snprintf(hex + 2*i, 3, "%02x", digest[i]);
+    *details = rx_node_json(&after);
+    json_object_object_add(*details, "sha256", json_object_new_string(hex));
+    rc = 0;
+out:
+    EVP_MD_CTX_free(hash);
+    return rc;
+}
 int rx_command(struct storage_fs *fs,struct json_object *command,int request,int data,int result){fs->result=result;const char *op=rx_string(command,"operation",24),*path=rx_string(command,"path",4095),*to=rx_string(command,"to",4095);struct json_object *owner=NULL,*proof=NULL;uint64_t seq;if(!op||!path||rx_sequence(command,&seq)||seq>=UINT64_MAX-2||fs->last_sequence==UINT64_MAX||seq!=fs->last_sequence+1||!json_object_object_get_ex(command,"execution",&owner)||!json_object_equal(owner,fs->context->owner))return -1;int mutate=!strcmp(op,"write")||!strcmp(op,"mkdir-owned")||!strcmp(op,"rename-owned")||!strcmp(op,"remove-owned");if(!path_allowed(fs->context,path,mutate)||(to&&!path_allowed(fs->context,to,mutate)))return -1;
     struct json_object *event=event_for(fs->context,"intent",op,path,to,seq),*details=NULL;if(ack(fs->context,event,request,result,&proof)){json_object_put(event);return -1;}json_object_put(event);int fd=-1,parent=-1,rc=-1;char name[256];struct statx before,after;
     if(!strcmp(op,"stat")||!strcmp(op,"list")||!strcmp(op,"read")||!strcmp(op,"seal")){fd=open_bound(fs,path,proof,O_RDONLY);if(fd<0||rx_stat_fd(fd,&before))goto out;details=rx_node_json(&before);if(!strcmp(op,"list")){if(!S_ISDIR(before.stx_mode))goto out;DIR *dir=fdopendir(dup(fd));if(!dir)goto out;struct json_object *names=json_object_new_array();struct dirent *entry;unsigned count=0;int list_error=0;for(;;){errno=0;entry=readdir(dir);if(!entry){list_error=errno!=0;break;}if(!strcmp(entry->d_name,".")||!strcmp(entry->d_name,".."))continue;if(++count>4096||!rx_relative(entry->d_name,0)||strchr(entry->d_name,'/')){closedir(dir);json_object_put(names);goto out;}json_object_array_add(names,json_object_new_string(entry->d_name));}if(closedir(dir))list_error=1;if(list_error){json_object_put(names);goto out;}json_object_object_add(details,"names",names);}else if(!strcmp(op,"read")){if(fs->context->data_write)goto out;json_object_put(details);details=NULL;if(stream_file(fs,fd,data,0,0,&details))goto out;}if(rx_stat_fd(fd,&after)||(!strcmp(op,"list")&&!same_runtime(&before,&after)))goto out;rc=0;

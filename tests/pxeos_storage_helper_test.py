@@ -4,10 +4,44 @@ from pathlib import Path
 import shlex
 import subprocess
 import tempfile
+import time
 import unittest
+from unittest.mock import patch
+
+import pxeos_storage_read_benchmark as benchmark
 
 
 class StorageHelperFixture(unittest.TestCase):
+    def test_benchmark_reaps_worker_group_when_the_shell_exits_first(self):
+        worker = 'sleep 3 & printf "%s\\n" "$!" >child.pid; exit 7'
+        communicate = subprocess.Popen.communicate
+        with tempfile.TemporaryDirectory(prefix='rootpxe-benchmark-cleanup-') as directory:
+            path = Path(directory)
+
+            def short_communicate(process, timeout):
+                pid_file = path / '0/child.pid'
+                deadline = time.monotonic() + 2
+                while not pid_file.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(process.wait(timeout=2), 7)
+                return communicate(process, timeout=0.1)
+
+            with patch.object(benchmark, 'WORKER', worker), patch.object(subprocess.Popen, 'communicate', short_communicate):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    benchmark.run_case('old', 'unused', 'unused', 'unused', 1, '', 1, path, False)
+
+            child = Path('/proc') / (path / '0/child.pid').read_text().strip() / 'stat'
+            deadline = time.monotonic() + 2
+            while True:
+                try:
+                    state = child.read_text().rsplit(')', 1)[1].split()[0]
+                except FileNotFoundError:
+                    break
+                if state == 'Z':
+                    break
+                self.assertLess(time.monotonic(), deadline, 'benchmark left a worker running')
+                time.sleep(0.01)
+
     def run_filesystem_fixture(self, *args):
         root = Path(__file__).resolve().parents[1]
         source = root / 'Buildroot/package/rootpxe-storage-io/src'
@@ -28,6 +62,9 @@ class StorageHelperFixture(unittest.TestCase):
 
     def test_read_backpressure_preserves_full_stream_but_rejects_closed_and_short_streams(self):
         self.run_filesystem_fixture('read')
+
+    def test_read_progress_follows_elapsed_time(self):
+        self.run_filesystem_fixture('progress')
 
     def test_parsers_and_identity_syscall_order(self):
         root = Path(__file__).resolve().parents[1]

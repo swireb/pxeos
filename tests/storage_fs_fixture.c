@@ -62,9 +62,16 @@ static void write_bytes(int fd,uint64_t size) {
     while(size){size_t n=size<sizeof(buffer)?(size_t)size:sizeof(buffer);if(rx_write_all(fd,buffer,n))_exit(12);size-=n;}
 }
 
+static int64_t elapsed_clock_ms(void) {
+    struct timespec stamp;
+    assert(!clock_gettime(CLOCK_MONOTONIC, &stamp));
+    return (int64_t)stamp.tv_sec * 1000 + stamp.tv_nsec / 1000000;
+}
+
 /* queued_data reaches the pipe before the created ACK, so a zero-size file at
  * that event proves that bulk bytes cannot cross the receipt barrier. */
 static void one_case(uint64_t expected,uint64_t actual,int fixed,int reject_result) {
+    int64_t progress_started=elapsed_clock_ms();
     char temporary[]="/tmp/rootpxe-fs-fixture.XXXXXX";assert(mkdtemp(temporary));
     int root=open(temporary,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);assert(root>=0);
     assert(!mkdirat(root,"dev",0700));assert(!mkdirat(root,"dev/27",0700));assert(!mkdirat(root,"dev/27/2",0700));assert(!mkdirat(root,"dev/27/2/payload",0700));
@@ -74,8 +81,11 @@ static void one_case(uint64_t expected,uint64_t actual,int fixed,int reject_resu
     if(!child){close(request[1]);close(result[0]);close(data[1]);struct storage_fs fs={.root=root,.context=&context};assert(!rx_stat_fd(root,&fs.root_stat));struct json_object *c=command(&context,"dev/27/2/payload/file",1,fixed,expected);int rc=rx_command(&fs,c,request[0],data[0],result[1]);json_object_put(c);if(reject_result){assert(rc&&fs.last_sequence==0);c=command(&context,"dev/27/2/payload",4,0,0);json_object_object_add(c,"operation",json_object_new_string("seal"));assert(rx_command(&fs,c,request[0],data[0],result[1]));json_object_put(c);}close(result[1]);_exit(rc?7:0);}
     close(request[0]);close(result[1]);close(data[0]);
     pid_t producer=fork();assert(producer>=0);if(!producer){close(request[1]);close(result[0]);write_bytes(data[1],actual);close(data[1]);_exit(0);}close(data[1]);
-    int created=0,results=0,refused=0;struct json_object *event;
-    while((event=rx_read_json(result[0],65536,1))){const char *phase=rx_string(event,"event",8);if(!strcmp(phase,"progress")){json_object_put(event);continue;}
+    int created=0,results=0,refused=0,progress_events=0;struct json_object *event;
+    while((event=rx_read_json(result[0],65536,1))){const char *phase=rx_string(event,"event",8);if(!strcmp(phase,"progress")){
+        const char *stage=rx_string(event,"stage",16);
+        assert(stage&&(!strcmp(stage,"write")||!strcmp(stage,"readback")));
+        progress_events++;json_object_put(event);continue;}
         const char *path=rx_string(event,"path",4095);assert(path);
         if(!strcmp(phase,"created")){int fd=openat(root,path,O_RDONLY|O_NOFOLLOW);struct stat st;assert(fd>=0&&!fstat(fd,&st)&&st.st_size==0);close(fd);created++;}
         if(!strcmp(phase,"result")){results++;if(reject_result){close(request[1]);request[1]=-1;refused=1;json_object_put(event);continue;}}
@@ -84,6 +94,7 @@ static void one_case(uint64_t expected,uint64_t actual,int fixed,int reject_resu
     if(request[1]>=0)close(request[1]);close(result[0]);int status=0;assert(waitpid(child,&status,0)==child&&WIFEXITED(status));
     int success=fixed?expected==actual:1;if(reject_result)success=0;assert((WEXITSTATUS(status)==0)==success);assert(created>=1);if(success)assert(results==1);if(reject_result)assert(refused&&results==1);
     int producer_status;assert(waitpid(producer,&producer_status,0)==producer);assert(WIFEXITED(producer_status)&&WEXITSTATUS(producer_status)==0);
+    assert(progress_events<=(elapsed_clock_ms()-progress_started)/1000+1&&"write/readback progress exceeded its shared rate");
     assert(!unlinkat(root,"dev/27/2/payload/file",0));
     assert(!unlinkat(root,"dev/27/2/payload",AT_REMOVEDIR));assert(!unlinkat(root,"dev/27/2",AT_REMOVEDIR));assert(!unlinkat(root,"dev/27",AT_REMOVEDIR));assert(!unlinkat(root,"dev",AT_REMOVEDIR));close(root);assert(!rmdir(temporary));json_object_put(context.owner);
 }
@@ -97,7 +108,8 @@ static void two_files_one_fifo(void) {
     assert(results==2);close(request[1]);close(result[0]);int status;assert(waitpid(child,&status,0)==child&&WIFEXITED(status)&&!WEXITSTATUS(status));assert(!unlinkat(root,"dev/27/2/a",0)&&!unlinkat(root,"dev/27/2/b",0));assert(!unlinkat(root,"dev/27/2",AT_REMOVEDIR)&&!unlinkat(root,"dev/27",AT_REMOVEDIR)&&!unlinkat(root,"dev",AT_REMOVEDIR)&&!unlinkat(root,"data",0));close(root);assert(!rmdir(temporary));json_object_put(context.owner);
 }
 
-static void read_case(int close_output, int truncate_source) {
+static void read_case(int close_output, int truncate_source, int measure_progress) {
+    int64_t progress_started=elapsed_clock_ms();
     char temporary[]="/tmp/rootpxe-read-fixture.XXXXXX";
     assert(mkdtemp(temporary));
     int root=open(temporary,O_RDONLY|O_DIRECTORY);
@@ -105,7 +117,7 @@ static void read_case(int close_output, int truncate_source) {
     assert(!mkdirat(root,"image",0700));
     int source=openat(root,"image/part.img",O_CREAT|O_RDWR|O_EXCL,0600);
     assert(source>=0);
-    const size_t image_size=2*1024*1024;
+    const size_t image_size=(measure_progress ? 16 : 2)*1024*1024;
     write_bytes(source,image_size);
 
     int request[2],result[2],data[2];
@@ -140,7 +152,7 @@ static void read_case(int close_output, int truncate_source) {
         unsigned char first;
         assert(read(data[0],&first,1)==1);
         assert(!ftruncate(source,0));
-    }else{
+    }else if(!measure_progress){
         /* Keep the output FIFO full for longer than the shell's control timeout.
          * A heartbeat must describe real bytes written and must precede 30 s. */
         struct timespec started, now;
@@ -175,14 +187,17 @@ static void read_case(int close_output, int truncate_source) {
         }
         close(data[0]);
     }
-    int results=0;
+    int results=0,progress_events=0;
     if(!missing_progress){
         while((event=rx_read_json(result[0],65536,1))){
             const char *phase=rx_string(event,"event",8);
             if(!strcmp(phase,"result")){
                 results++;
                 send_ack(request[1],root,event,0);
-            }else assert(!strcmp(phase,"progress"));
+            }else{
+                assert(!strcmp(phase,"progress"));
+                progress_events++;
+            }
             json_object_put(event);
         }
     }
@@ -195,6 +210,7 @@ static void read_case(int close_output, int truncate_source) {
     assert(!rmdir(temporary));
     json_object_put(context.owner);
     assert(!missing_progress&&"a full output FIFO stopped local progress");
+    if(measure_progress)assert(progress_events<=(elapsed_clock_ms()-progress_started)/1000+1&&"read progress exceeded its rate");
     assert(WIFEXITED(status));
     if(close_output||truncate_source){
         assert(WEXITSTATUS(status)==7&&results==0&&received<image_size);
@@ -203,11 +219,57 @@ static void read_case(int close_output, int truncate_source) {
     }
 }
 
+static int benchmark_helper(const char *root_path, const char *request_path,
+                            const char *data_path, const char *result_path) {
+    int root = open(root_path, O_RDONLY | O_DIRECTORY);
+    assert(root >= 0);
+    struct storage_context context = {.parent=getppid()};
+    strcpy(context.image_path, "image");
+    context.owner = json_tokener_parse("{\"taskType\":\"deploy\"}");
+    int request = open(request_path, O_RDONLY);
+    int data = open(data_path, O_WRONLY);
+    int result = open(result_path, O_WRONLY);
+    assert(request >= 0 && data >= 0 && result >= 0);
+    struct storage_fs fs = {.root=root,.context=&context};
+    assert(!rx_stat_fd(root, &fs.root_stat));
+    struct json_object *command = rx_read_json(request, RX_COMMAND_MAX, 1);
+    assert(command);
+    int rc = rx_command(&fs, command, request, data, result);
+    if (!rc) {
+        struct json_object *done = json_tokener_parse("{\"event\":\"done\",\"sequence\":\"2\"}");
+        rc = rx_emit(result, done);
+        json_object_put(done);
+    }
+    json_object_put(command);
+    json_object_put(context.owner);
+    close(request);
+    close(result);
+    close(data);
+    close(root);
+    return rc ? 7 : 0;
+}
+
 int main(int argc,char **argv) {
+    if (argc == 6 && !strcmp(argv[1], "benchmark-helper")) {
+        return benchmark_helper(argv[2], argv[3], argv[4], argv[5]);
+    }
+    if (argc == 3 && !strcmp(argv[1], "benchmark-proof")) {
+        int root = open(argv[2], O_RDONLY | O_DIRECTORY);
+        assert(root >= 0);
+        struct json_object *proof = proof_for(root, "image/part.img");
+        assert(!rx_emit(STDOUT_FILENO, proof));
+        json_object_put(proof);
+        close(root);
+        return 0;
+    }
     if(argc==2&&!strcmp(argv[1],"read")){
-        read_case(0,0);
-        read_case(1,0);
-        read_case(0,1);
+        read_case(0,0,0);
+        read_case(1,0,0);
+        read_case(0,1,0);
+        return 0;
+    }
+    if(argc==2&&!strcmp(argv[1],"progress")){
+        read_case(0,0,1);
         return 0;
     }
     one_case(4,3,1,0);one_case(3,4,1,0);one_case(3,3,1,0);one_case(3,3,1,1);one_case(0,3,0,1);one_case(0,209715207,0,0);two_files_one_fifo();return 0;
