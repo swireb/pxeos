@@ -126,6 +126,7 @@ set_request_state() {
     case $last_code in
         SESSION_EXPIRED|AUTH_REVOKED) request_state='relogin' ;;
         BOOTSTRAP_EXPIRED) request_state='bootstrap' ;;
+        PXEOS_KERNELS_REQUIRED) request_state='kernels_required' ;;
         REGISTRATION_CONFLICT)
             case $last_reason in
                 REGISTRATION_NOT_FOUND|REGISTRATION_NOT_PENDING|REGISTRATION_EXPIRED|MAC_ALREADY_REGISTERED|REGISTRATION_EXISTS) request_state='restart' ;;
@@ -341,6 +342,9 @@ confirm_and_commit() {
             set_request_state
             case $request_state in
                 relogin) return 10;; bootstrap) return 11;;
+                kernels_required)
+                    say 'PXEOS kernel prerequisites are unavailable. Ask an administrator to check the kernel configuration before restarting manual registration.'
+                    return 13;;
                 handoff_invalid) say 'Task handoff is invalid. No disk operation was started.'; return 14;;
                 restart)
                     reason=$(reason_message)

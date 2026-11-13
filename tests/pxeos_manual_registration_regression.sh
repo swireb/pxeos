@@ -373,10 +373,11 @@ case "$scenario.$action.$count" in
   commit-known-reason.options.2) body='{"taskType":"none","images":[],"groups":[{"id":0,"name":"No group"}],"page":1,"hasNext":false}' ;;
   commit-known-reason.confirm.1) body="{\"confirmed\":true,\"hostName\":\"$host\",\"imageId\":42,\"imageName\":\"Ready\",\"groupId\":0,\"groupName\":\"No group\",\"taskType\":\"none\",\"dangerous\":false}" ;;
   commit-known-reason.commit.1) printf '{"code":"REGISTRATION_CONFLICT","message":"untrusted server text","reason":"MAC_ALREADY_REGISTERED"}' >"$out"; printf '409'; exit 0 ;;
-  direct-missing-token.login.1|direct-bad-mac.login.1) body='{"ticket":"ticket-direct","expiresInSeconds":600}' ;;
-  direct-missing-token.options.1|direct-bad-mac.options.1) body='{"taskType":"deploy","images":[{"id":42,"name":"Ready"}],"groups":[],"page":1,"hasNext":false}' ;;
-  direct-missing-token.options.2|direct-bad-mac.options.2) body='{"taskType":"deploy","images":[],"groups":[{"id":0,"name":"No group"}],"page":1,"hasNext":false}' ;;
-  direct-missing-token.confirm.1|direct-bad-mac.confirm.1) body="{\"confirmed\":true,\"hostName\":\"$host\",\"imageId\":42,\"imageName\":\"Ready\",\"groupId\":0,\"groupName\":\"No group\",\"taskType\":\"deploy\",\"dangerous\":true}" ;;
+  direct-*.login.1) body='{"ticket":"ticket-direct","expiresInSeconds":600}' ;;
+  direct-*.options.1) body='{"taskType":"deploy","images":[{"id":42,"name":"Ready"}],"groups":[],"page":1,"hasNext":false}' ;;
+  direct-*.options.2) body='{"taskType":"deploy","images":[],"groups":[{"id":0,"name":"No group"}],"page":1,"hasNext":false}' ;;
+  direct-*.confirm.1) body="{\"confirmed\":true,\"hostName\":\"$host\",\"imageId\":42,\"imageName\":\"Ready\",\"groupId\":0,\"groupName\":\"No group\",\"taskType\":\"deploy\",\"dangerous\":true}" ;;
+  direct-kernels-required.commit.1) printf '{"code":"PXEOS_KERNELS_REQUIRED","message":"untrusted kernel error secret"}' >"$out"; printf '409'; exit 0 ;;
   direct-missing-token.commit.1) body='{"completed":true,"hostId":9,"taskId":10,"taskType":"deploy","mac":"00:11:22:33:44:55","message":"done"}' ;;
   direct-bad-mac.commit.1) body='{"completed":true,"hostId":9,"taskId":10,"taskType":"deploy","mac":"00:11:22:33:44:66","executionToken":"ABCDEFGHIJKLMNOP","message":"done"}' ;;
   *) body='{"code":"SERVICE_UNAVAILABLE","message":"unexpected mock call"}' ;;
@@ -420,6 +421,13 @@ run_case commit-known-reason 1
 [[ ! -s $tmp/reboot.log ]] || fail 'known commit rejection rebooted unexpectedly'
 grep -Fq 'This device is already registered.' "$tmp/dialog.log" || fail 'known commit rejection did not show the trusted reason'
 ! grep -Fq 'untrusted server text' "$tmp/dialog.log" || fail 'server error text reached the console'
+
+run_case direct-kernels-required 1
+[[ $(count_of commit) -eq 1 && $(count_of cancel) -eq 0 ]] || fail 'kernel admission rejection retried commit or sent cancellation'
+[[ ! -s $tmp/reboot.log && ! -s $tmp/poweroff.log && ! -e $tmp/handoff/context ]] || fail 'kernel admission rejection started a task or changed power state'
+! grep -Fq 'Network interrupted.' "$tmp/dialog.log" || fail 'kernel admission rejection was misclassified as a network retry'
+grep -Fq 'PXEOS kernel prerequisites are unavailable.' "$tmp/dialog.log" || fail 'kernel admission rejection did not show the trusted message'
+! grep -Fq 'untrusted kernel error secret' "$tmp/dialog.log" || fail 'server kernel error text reached the console'
 
 for scenario in direct-missing-token direct-bad-mac; do
   run_case "$scenario" 1
