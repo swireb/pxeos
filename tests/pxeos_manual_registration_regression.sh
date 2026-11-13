@@ -431,7 +431,7 @@ grep -Fq 'This device is already registered.' "$tmp/dialog.log" || fail 'known c
 run_case direct-template-invalid 1
 [[ $(count_of commit) -eq 1 && $(count_of hostname) -eq 2 && $(count_of cancel) -eq 0 ]] || fail 'template rejection did not return to editing without retrying commit'
 [[ ! -s $tmp/reboot.log && ! -s $tmp/poweroff.log && ! -e $tmp/handoff/context ]] || fail 'template rejection started a task or changed power state'
-grep -Fq 'Register only first, complete the host configuration, then deploy.' "$tmp/dialog.log" || fail 'template rejection did not explain how to proceed'
+grep -Fq 'Ask an administrator to fix it, or choose Register only.' "$tmp/dialog.log" || fail 'template rejection did not explain how to proceed'
 ! grep -Fq 'Network interrupted.' "$tmp/dialog.log" || fail 'template rejection was misclassified as a network retry'
 ! grep -Fq 'untrusted template detail' "$tmp/dialog.log" || fail 'server template error text reached the console'
 

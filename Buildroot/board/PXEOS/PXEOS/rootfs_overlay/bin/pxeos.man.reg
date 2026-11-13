@@ -15,7 +15,9 @@ trap cleanup EXIT
 trap on_signal HUP INT TERM
 response="$tmpdir/response.json"
 dialog_out="$tmpdir/dialog.out"
-last_code='' last_reason='' request_state='retry' ticket='' authenticated=0
+printf '{}\n' >"$tmpdir/network.json"
+printf '[]\n' >"$tmpdir/required-fields.json"
+last_code='' last_reason='' last_field='' request_state='retry' ticket='' authenticated=0
 
 die_console() { printf '[ERROR] %s\n' "$1" >/dev/console 2>/dev/null || printf '[ERROR] %s\n' "$1" >&2; exit 1; }
 
@@ -79,7 +81,7 @@ ui_error() { [[ $ui_rc -eq $DIALOG_ERROR ]]; }
 
 json_login() { jq -n --rawfile bootToken "$tmpdir/boot" --rawfile username "$tmpdir/user" --rawfile password "$tmpdir/pass" '{bootToken:$bootToken,username:$username,password:$password}' >"$tmpdir/login.json"; }
 json_options() { jq -n --rawfile ticket "$tmpdir/ticket" --rawfile taskType "$tmpdir/task" --rawfile image "$tmpdir/image" --argjson page "$1" '{ticket:$ticket,taskType:$taskType,imageId:($image|tonumber),page:$page}' >"$tmpdir/options.json"; }
-json_confirm() { jq -n --rawfile ticket "$tmpdir/ticket" --rawfile hostName "$tmpdir/hostname" --rawfile taskType "$tmpdir/task" --rawfile image "$tmpdir/image" --rawfile group "$tmpdir/group" '{ticket:$ticket,hostName:$hostName,taskType:$taskType,imageId:($image|tonumber),groupId:($group|tonumber)}' >"$tmpdir/confirm.json"; }
+json_confirm() { jq -n --rawfile ticket "$tmpdir/ticket" --rawfile hostName "$tmpdir/hostname" --rawfile taskType "$tmpdir/task" --rawfile image "$tmpdir/image" --rawfile group "$tmpdir/group" --slurpfile network "$tmpdir/network.json" '{ticket:$ticket,hostName:$hostName,taskType:$taskType,imageId:($image|tonumber),groupId:($group|tonumber)} + $network[0]' >"$tmpdir/confirm.json"; }
 json_commit() { jq -n --rawfile ticket "$tmpdir/ticket" '{ticket:$ticket,confirm:true}' >"$tmpdir/commit.json"; }
 # The bootstrap token is the cancellation authority even after login. The
 # server binds it to the ticket and returns either cancelled or completed.
@@ -92,10 +94,11 @@ post_json() {
     : >"$response"; : >"$tmpdir/curl.err"
 	request_state=''
     http=$(curl -q --silent --show-error --connect-timeout 5 --max-time 20 --max-redirs 0 --proto '=https' --proto-redir '=https' --pinnedpubkey "$manual_spki_pin" -k -H 'Content-Type: application/json' --data-binary "@$request" --output "$response" --write-out '%{http_code}' "${pxeapi%/}/manual/$action" 2>"$tmpdir/curl.err")
-    curl_rc=$?; last_code=''; last_reason=''
+    curl_rc=$?; last_code=''; last_reason=''; last_field=''
     if [[ $curl_rc -ne 0 || ! $http =~ ^2[0-9][0-9]$ ]]; then
         jq -e 'type == "object" and (.code|type == "string")' "$response" >/dev/null 2>&1 && last_code=$(jq -r '.code' "$response")
         jq -e 'type == "object" and (.reason|type == "string")' "$response" >/dev/null 2>&1 && last_reason=$(jq -r '.reason' "$response")
+        last_field=$(jq -r '.field // ""' "$response" 2>/dev/null)
         return 1
     fi
     jq -e 'type == "object"' "$response" >/dev/null 2>&1
@@ -111,7 +114,8 @@ reason_message() {
         IMAGE_NOT_READY) printf '%s' 'Selected image is not ready.' ;;
         IMAGE_FORMAT_INVALID) printf '%s' 'Selected image format is not supported.' ;;
         IMAGE_LAYOUT_INVALID) printf '%s' 'Selected deployment layout is invalid.' ;;
-        DEPLOYMENT_TEMPLATE_INVALID) printf '%s' 'The deployment template needs valid host configuration. Register only first, complete the host configuration, then deploy.' ;;
+        DEPLOYMENT_TEMPLATE_INVALID) printf '%s' 'Selected image deployment configuration is invalid. Ask an administrator to fix it, or choose Register only.' ;;
+        HOST_NETWORK_INVALID) printf '%s' "Enter a valid $(network_label "$last_field") for the installed system." ;;
         GROUP_NOT_FOUND) printf '%s' 'Selected group is unavailable.' ;;
         GROUP_NOT_ALLOWED) printf '%s' 'Selected image is not allowed for this group.' ;;
         HOSTNAME_INVALID) printf '%s' 'Host name is invalid.' ;;
@@ -269,6 +273,8 @@ choose_task() {
     done
 }
 choose_image() {
+    printf '{}\n' >"$tmpdir/network.json"
+    printf '[]\n' >"$tmpdir/required-fields.json"
     local page=1 selected id name; local -a item
     while :; do
         write_secret "$tmpdir/image" 0; json_options "$page"
@@ -296,12 +302,17 @@ choose_group() {
         json_options "$page"
         if ! post_json options "$tmpdir/options.json" || ! expect_options; then
             set_request_state; [[ $request_state == relogin ]] && return 10; [[ $request_state == bootstrap ]] && return 11
+            if [[ $request_state == edit ]]; then say "$(reason_message) Return to edit selections."; return 12; fi
             run_dialog --yesno 'Group list is unavailable. Retry? Press Esc to cancel.' 8 72
             ui_esc && { cancel_or_resume || continue; }
             ui_error && die_console 'Interactive console error.'
             [[ $ui_rc -eq 0 ]] || return 12
             continue
         fi
+        if ! jq -e '(.requiredHostFields // []) as $fields | ($fields|type) == "array" and all($fields[]; . == "systemIp" or . == "systemNetmask" or . == "systemGateway" or . == "systemDns1" or . == "systemDns2")' "$response" >/dev/null 2>&1; then
+            say 'Invalid network requirements response.'; return 12
+        fi
+        jq '(.requiredHostFields // []) | unique' "$response" >"$tmpdir/required-fields.json"
         item=(0 'No group'); while IFS=$'\t' read -r id name; do item+=("$id" "$name ($id)"); done < <(safe_groups)
         (( page > 1 )) && item+=(__previous 'Previous page'); jq -e '.hasNext == true' "$response" >/dev/null 2>&1 && item+=(__next 'Next page')
         run_dialog --menu "Select group (page $page)" 18 72 10 "${item[@]}"
@@ -311,12 +322,45 @@ choose_group() {
         selected=$(<"$dialog_out"); case $selected in __previous) ((page--));; __next) ((page++));; *) write_secret "$tmpdir/group" "$selected"; return 0;; esac
     done
 }
+network_label() {
+    case $1 in
+        systemIp) printf '%s' 'System IPv4 address' ;;
+        systemNetmask) printf '%s' 'Subnet mask' ;;
+        systemGateway) printf '%s' 'System gateway' ;;
+        systemDns1) printf '%s' 'System primary DNS' ;;
+        systemDns2) printf '%s' 'System secondary DNS' ;;
+        *) printf '%s' 'network field' ;;
+    esac
+}
+choose_network() {
+    local field value label requested=${1:-}
+    [[ $task == deploy ]] || return 0
+    for field in systemIp systemNetmask systemGateway systemDns1 systemDns2; do
+        jq -e --arg field "$field" 'index($field) != null' "$tmpdir/required-fields.json" >/dev/null 2>&1 || continue
+        [[ -z $requested || $requested == "$field" ]] || continue
+        label=$(network_label "$field")
+        value=$(jq -r --arg field "$field" '.[$field] // ""' "$tmpdir/network.json")
+        run_dialog --inputbox "$label" 9 72 "$value"
+        if ui_form_cancelled; then cancel_or_resume || return 12; fi
+        ui_error && die_console 'Interactive console error.'
+        [[ $ui_rc -eq 0 ]] || return 12
+        value=$(<"$dialog_out")
+        jq --arg field "$field" --arg value "$value" '.[$field]=$value' "$tmpdir/network.json" >"$tmpdir/network.next.json" || return 12
+        mv -- "$tmpdir/network.next.json" "$tmpdir/network.json"
+    done
+    return 0
+}
 confirm_and_commit() {
-    local confirmed_host confirmed_image confirmed_group confirmed_task dangerous summary
+    local confirmed_host confirmed_image confirmed_group confirmed_task dangerous summary field value
     while :; do
         json_confirm
         if ! post_json confirm "$tmpdir/confirm.json" || ! expect_confirm; then
             set_request_state; [[ $request_state == relogin ]] && return 10; [[ $request_state == bootstrap ]] && return 11
+            if [[ $last_reason == HOST_NETWORK_INVALID ]] && jq -e --arg field "$last_field" 'index($field) != null' "$tmpdir/required-fields.json" >/dev/null 2>&1; then
+                say "$(reason_message)"
+                choose_network "$last_field" || return 12
+                continue
+            fi
             reason=$(reason_message)
             [[ -n $reason ]] || reason='Registration details were rejected.'
             say "$reason Return to edit selections."; return 12
@@ -325,8 +369,13 @@ confirm_and_commit() {
         confirmed_image=$(jq -r '(.imageName // "No image")|tostring|gsub("[^ -~]"; "?")' "$response")
         confirmed_group=$(jq -r '(.groupName // "No group")|tostring|gsub("[^ -~]"; "?")' "$response")
         confirmed_task=$(jq -r '.taskType // "unknown"' "$response"); dangerous=$(jq -r '.dangerous == true' "$response")
-        summary="Host: $confirmed_host\nTask: $confirmed_task\nImage: $confirmed_image\nGroup: $confirmed_group\n\nConfirm registration?"; [[ $dangerous == true ]] && summary="WARNING: this task can overwrite data.\n\n$summary"
-        run_dialog --yesno "$summary" 16 72
+        summary="Host: $confirmed_host\nTask: $confirmed_task\nImage: $confirmed_image\nGroup: $confirmed_group"; [[ $dangerous == true ]] && summary="WARNING: this task can overwrite data.\n\n$summary"
+        for field in systemIp systemNetmask systemGateway systemDns1 systemDns2; do
+            value=$(jq -r --arg field "$field" '.[$field] // "" | tostring | gsub("[^ -~]"; "?")' "$response")
+            [[ -z $value ]] || summary="$summary\n$(network_label "$field"): $value"
+        done
+        summary="$summary\n\nConfirm registration?"
+        run_dialog --yesno "$summary" 22 72
         if ui_esc; then cancel_or_resume || continue; fi
         ui_error && die_console 'Interactive console error.'
         [[ $ui_rc -eq 0 ]] || return 12
@@ -380,6 +429,7 @@ while :; do
     [[ $rc -eq 10 ]] && { login || exit 1; continue; }
     [[ $rc -eq 11 ]] && { say 'Bootstrap expired. Re-enter manual registration from the boot menu.'; exit 1; }
     [[ $rc -eq 0 ]] || continue
+    choose_network || continue
     confirm_and_commit; rc=$?
     [[ $rc -eq 10 ]] && { login || exit 1; continue; }
     [[ $rc -eq 11 ]] && { say 'Bootstrap expired. Re-enter manual registration from the boot menu.'; exit 1; }
