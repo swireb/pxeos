@@ -111,6 +111,7 @@ reason_message() {
         IMAGE_NOT_READY) printf '%s' 'Selected image is not ready.' ;;
         IMAGE_FORMAT_INVALID) printf '%s' 'Selected image format is not supported.' ;;
         IMAGE_LAYOUT_INVALID) printf '%s' 'Selected deployment layout is invalid.' ;;
+        DEPLOYMENT_TEMPLATE_INVALID) printf '%s' 'The deployment template needs valid host configuration. Register only first, complete the host configuration, then deploy.' ;;
         GROUP_NOT_FOUND) printf '%s' 'Selected group is unavailable.' ;;
         GROUP_NOT_ALLOWED) printf '%s' 'Selected image is not allowed for this group.' ;;
         HOSTNAME_INVALID) printf '%s' 'Host name is invalid.' ;;

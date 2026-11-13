@@ -2,6 +2,10 @@
 # Manual-registration client regression.  All endpoint, console and reboot
 # interactions below are command mocks; it never touches a device or network.
 set -euo pipefail
+if [[ ${PXEOS_STARTUP_TEST_ISOLATED:-} != 1 ]]; then
+    exec /usr/bin/bash "$(dirname -- "${BASH_SOURCE[0]}")/run-startup-regression.sh" "${0##*/}" "$@"
+fi
+[[ $0 == /pxeos/tests/pxeos_manual_registration_regression.sh && ! -e /sys && ! -w /proc/sysrq-trigger ]] || exit 125
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 client="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.man.reg"
@@ -312,6 +316,7 @@ case $args in
   *'Host name'*)
     count=0; [[ -f $state/hostname ]] && count=$(<"$state/hostname"); count=$((count+1)); printf '%s' "$count" >"$state/hostname"
     [[ ${PXEOS_TEST_SCENARIO:-} == commit-no-cancel && $count -eq 2 ]] && exit 10
+    [[ ${PXEOS_TEST_SCENARIO:-} == direct-template-invalid && $count -eq 2 ]] && exit 255
     printf 'node-%s' "${PXEOS_TEST_SCENARIO:-default}" >&2 ;;
   *'Select task'*)
     case ${PXEOS_TEST_SCENARIO:-} in direct-*) printf 'deploy' >&2 ;; *) printf 'none' >&2 ;; esac ;;
@@ -378,6 +383,7 @@ case "$scenario.$action.$count" in
   direct-*.options.2) body='{"taskType":"deploy","images":[],"groups":[{"id":0,"name":"No group"}],"page":1,"hasNext":false}' ;;
   direct-*.confirm.1) body="{\"confirmed\":true,\"hostName\":\"$host\",\"imageId\":42,\"imageName\":\"Ready\",\"groupId\":0,\"groupName\":\"No group\",\"taskType\":\"deploy\",\"dangerous\":true}" ;;
   direct-kernels-required.commit.1) printf '{"code":"PXEOS_KERNELS_REQUIRED","message":"untrusted kernel error secret"}' >"$out"; printf '409'; exit 0 ;;
+  direct-template-invalid.commit.1) printf '{"code":"RECONFIRM_REQUIRED","reason":"DEPLOYMENT_TEMPLATE_INVALID","message":"untrusted template detail"}' >"$out"; printf '409'; exit 0 ;;
   direct-missing-token.commit.1) body='{"completed":true,"hostId":9,"taskId":10,"taskType":"deploy","mac":"00:11:22:33:44:55","message":"done"}' ;;
   direct-bad-mac.commit.1) body='{"completed":true,"hostId":9,"taskId":10,"taskType":"deploy","mac":"00:11:22:33:44:66","executionToken":"ABCDEFGHIJKLMNOP","message":"done"}' ;;
   *) body='{"code":"SERVICE_UNAVAILABLE","message":"unexpected mock call"}' ;;
@@ -421,6 +427,13 @@ run_case commit-known-reason 1
 [[ ! -s $tmp/reboot.log ]] || fail 'known commit rejection rebooted unexpectedly'
 grep -Fq 'This device is already registered.' "$tmp/dialog.log" || fail 'known commit rejection did not show the trusted reason'
 ! grep -Fq 'untrusted server text' "$tmp/dialog.log" || fail 'server error text reached the console'
+
+run_case direct-template-invalid 1
+[[ $(count_of commit) -eq 1 && $(count_of hostname) -eq 2 && $(count_of cancel) -eq 0 ]] || fail 'template rejection did not return to editing without retrying commit'
+[[ ! -s $tmp/reboot.log && ! -s $tmp/poweroff.log && ! -e $tmp/handoff/context ]] || fail 'template rejection started a task or changed power state'
+grep -Fq 'Register only first, complete the host configuration, then deploy.' "$tmp/dialog.log" || fail 'template rejection did not explain how to proceed'
+! grep -Fq 'Network interrupted.' "$tmp/dialog.log" || fail 'template rejection was misclassified as a network retry'
+! grep -Fq 'untrusted template detail' "$tmp/dialog.log" || fail 'server template error text reached the console'
 
 run_case direct-kernels-required 1
 [[ $(count_of commit) -eq 1 && $(count_of cancel) -eq 0 ]] || fail 'kernel admission rejection retried commit or sent cancellation'
