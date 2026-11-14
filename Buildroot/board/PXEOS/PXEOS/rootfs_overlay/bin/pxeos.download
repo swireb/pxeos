@@ -26,6 +26,7 @@ trap rootpxe_download_cleanup_initialization_private EXIT
 trap 'rootpxe_download_cleanup_initialization_private; exit 130' INT
 trap 'rootpxe_download_cleanup_initialization_private; exit 143' TERM
 rootpxe_partition_progress_initialize_runtime
+unset rootpxe_deploy_plan_stage
 . /bin/pxeos.mount
 . /bin/pxeos.checkmount
 # An initialization-only retry must never overwrite its authoritative resume
@@ -61,8 +62,10 @@ preparePartitions() {
     case $imgType in
         mps)
             [[ ! -d $imagePath ]] && handleError "Unable to locate image store ($0)\n   Args Passed: $*"
+            rootpxe_stage partitioning "partition layout preparing"
             restorePartitionTablesAndBootLoaders "$hd" 1 "$imagePath" "$osid" "$imgPartitionType"
             runPartprobe "$hd"
+            rootpxe_deploy_plan_stage=prepare_partitions
             gptcheck="$global_gptcheck"
             ;;
         mpa)
@@ -72,11 +75,13 @@ preparePartitions() {
                 if [[ ${rootpxe_mpa_permit_is_batch:-no} == yes ]]; then
                     rootpxe_activate_disk_permit_binding "$disk" deploy_write || handleError "PXEOS_STAGE=prepare_partitions CODE=DISK_PERMIT_BINDING_CHANGED REASON=target_disk_identity_or_operation_mismatch"
                 fi
+                if [[ $disk_number -eq 1 ]]; then rootpxe_stage partitioning "partition layout preparing"; fi
                 restorePartitionTablesAndBootLoaders "$disk" "$disk_number" "$imagePath" "$osid" "$imgPartitionType"
                 runPartprobe "$disk"
                 gptcheck="$global_gptcheck"
                 let disk_number+=1
             done
+            if [[ $disk_number -gt 1 ]]; then rootpxe_deploy_plan_stage=prepare_partitions; fi
             ;;
     esac
 }
@@ -237,12 +242,16 @@ if [[ ${imgType:-} == [Nn] ]]; then
     # NVMe reformat may have changed logical geometry; resolve once more before
     # the final sfdisk write and verify the table after applying it.
     rootpxe_validate_deployment_layout "$hd" "$originalSchemaFile" "$deploymentLayoutFile" "$sector_metadata" || handleError "PXEOS_STAGE=layout_validation CODE=INVALID_DEPLOYMENT_LAYOUT REASON=post_format_validation_failed"
+    rootpxe_stage partitioning "partition layout preparing"
     if ! rootpxe_apply_deployment_layout "$hd" "$sector_metadata"; then
         handleError "PXEOS_STAGE=layout_apply CODE=${rootpxe_layout_apply_code:-LAYOUT_APPLY_FAILED} REASON=${rootpxe_layout_apply_reason:-unknown}${rootpxe_layout_diagnostics_file:+ DIAGNOSTICS=${rootpxe_layout_diagnostics_file}}"
     fi
     rootpxe_restore_deployment_boot_code "$hd" 1 "$imagePath" "$originalSchemaFile" || handleError "PXEOS_STAGE=layout_apply CODE=BOOT_CODE_RESTORE_FAILED REASON=boot_code_metadata_invalid"
+    rootpxe_deploy_plan_stage=prepare_partitions
 fi
-[[ $nombr -ne 1 ]] && rootpxe_stage prepare_partitions "partition layout prepared"
+if [[ ${rootpxe_deploy_plan_stage:-} == prepare_partitions ]]; then
+    rootpxe_stage prepare_partitions "partition layout prepared"
+fi
 # Build one immutable, full plan only after the permitted target layout exists.
 # Raw dd remains a single disk item because it has no safe internal boundaries.
 case ${imgType:-} in

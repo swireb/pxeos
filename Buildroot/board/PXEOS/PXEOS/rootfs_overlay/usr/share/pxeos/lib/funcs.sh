@@ -223,6 +223,7 @@ rootpxe_partition_progress_send_snapshot() {
     payload=$(cat "$snapshot" 2>/dev/null) || return 0
     [[ -n $payload ]] || return 0
     stage=init
+    if [[ ${type:-} == down ]]; then stage=${rootpxe_deploy_plan_stage:-init}; fi
     if rootpxe_progress_data_phase_active; then
         stage=capture; [[ ${type:-} =~ ^([Dd][Oo][Ww][Nn]|down)$ ]] && stage=restore
     fi

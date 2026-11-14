@@ -38,16 +38,22 @@ for function_name in applySfdiskPartitions restoreEBR; do
     sed -n "/^$function_name() {/,/^}/p" "$overlay/usr/share/pxeos/lib/partition-funcs.sh" >"$tmp/$function_name"
     assert grep -Fq 'rootpxe_require_unused_target_disks' "$tmp/$function_name"
 done
-awk '/^rootpxe_bind_granted_deploy_targets / {emit=1} emit {print} emit && /^\[\[ \$nombr -ne 1 \]\] && rootpxe_stage prepare_partitions / {exit}' "$download" >"$tmp/normal-write-snippet"
-for scenario in matching format_allowed format_failed; do
+awk '/^rootpxe_bind_granted_deploy_targets / {emit=1} /^# Build one immutable/ {exit} emit {print}' "$download" >"$tmp/normal-write-snippet"
+sed -n '/^preparePartitions() {/,/^}/p' "$download" >"$tmp/preparePartitions"
+for scenario in matching format_allowed format_failed skip_fixed fixed multi raw; do
     trace="$tmp/n-$scenario.trace"; : >"$trace"; status=0
     (
         rootpxe_bind_granted_deploy_targets() { printf 'binding\n' >>"$trace"; }
         rootpxe_require_unused_target_disks() { printf 'guard\n' >>"$trace"; }
         enableWriteCache() { printf 'cache\n' >>"$trace"; }
-        rootpxe_stage() { :; }
+        rootpxe_stage() { printf "%s\n" "$1" >>"$trace"; }
         rootpxe_deployment_identity_policy_enabled(){ return 1; }
-        preparePartitions() { :; }
+        . "$tmp/preparePartitions"
+        restorePartitionTablesAndBootLoaders() { printf 'table-write\n' >>"$trace"; }
+        runPartprobe() { printf 'readback\n' >>"$trace"; }
+        # All paths and tools below are inert fixture values.
+        osid=50; imgPartitionType=all; global_gptcheck=0
+        rootpxe_mpa_permit_is_batch=no
         handleError() { printf 'error\n' >>"$trace"; exit 91; }
         validateImageSectorSize() {
             printf 'sector-check\n' >>"$trace"
@@ -60,20 +66,66 @@ for scenario in matching format_allowed format_failed; do
         rootpxe_restore_deployment_boot_code() { printf 'boot-write\n' >>"$trace"; }
         rootpxe_console_message() { :; }
         type=down; imgType=n; nombr=0; hd=/dev/mock0; disks=/dev/mock0
-        sector_metadata=mock.partitions; originalSchemaFile=mock.schema; deploymentLayoutFile=mock.layout; imagePath=mock.image
+        sector_metadata=mock.partitions; originalSchemaFile=mock.schema; deploymentLayoutFile=mock.layout
+        imagePath="$tmp/image"
+        mkdir -p "$imagePath"
+        case $scenario in
+            raw) imgType=dd ;;
+            skip_fixed) imgType=mps; nombr=1 ;;
+            fixed) imgType=mps ;;
+            multi) imgType=mpa; disks="/dev/mock0 /dev/mock1" ;;
+        esac
         . "$tmp/normal-write-snippet"
+        printf 'snapshot:%s\n' "${rootpxe_deploy_plan_stage:-init}" >>"$trace"
     ) || status=$?
     if [[ $scenario == format_failed ]]; then
         assert test "$status" -eq 91
         assert absent "$trace" 'table-write'
         assert absent "$trace" 'boot-write'
+        assert absent "$trace" 'prepare_partitions'
+    elif [[ $scenario == raw || $scenario == skip_fixed ]]; then
+        assert test "$status" -eq 0
+        assert absent "$trace" 'partitioning'
+        assert grep -Fxq 'snapshot:init' "$trace"
     else
         assert test "$status" -eq 0
-        assert before "$trace" 'sector-check' 'resolve'
-        assert before "$trace" 'resolve' 'table-write'
-        [[ $scenario == matching ]] && assert absent "$trace" 'format'
-        [[ $scenario == format_allowed ]] && assert before "$trace" 'format' 'table-write'
+        assert before "$trace" 'partitioning' 'table-write'
+        assert before "$trace" 'table-write' 'prepare_partitions'
+        assert test "$(grep -cFx partitioning "$trace")" -eq 1
+        assert grep -Fxq 'snapshot:prepare_partitions' "$trace"
+        if [[ $scenario == matching || $scenario == format_allowed ]]; then
+            assert before "$trace" 'sector-check' 'resolve'
+            assert before "$trace" 'resolve' 'partitioning'
+            [[ $scenario != matching ]] || assert absent "$trace" 'format'
+            [[ $scenario != format_allowed ]] || assert before "$trace" 'format' 'table-write'
+        fi
     fi
 done
+sed -n '/^rootpxe_partition_progress_send_snapshot() {/,/^}/p' "$funcs" >"$tmp/send-snapshot"
+(
+    . "$tmp/send-snapshot"
+    taskid=41; task_token=abcdef0123456789; mac=001122334455; web=https://invalid.invalid/
+    type=down; rootpxe_deploy_plan_stage=prepare_partitions
+    printf '{}' >"$tmp/plan.json"
+    rootpxe_progress_data_phase_active() { [[ ${active:-no} == yes ]]; }
+    rootpxe_task_curl() { printf '%s\n' "$@" >>"$tmp/phase-args"; }
+    rootpxe_partition_progress_send_snapshot "$tmp/plan.json"
+    active=yes rootpxe_partition_progress_send_snapshot "$tmp/plan.json"
+    type=up rootpxe_partition_progress_send_snapshot "$tmp/plan.json"
+    grep '^stage=' "$tmp/phase-args" >"$tmp/phases"
+    printf 'stage=prepare_partitions\nstage=restore\nstage=init\n' >"$tmp/expected"
+)
+assert cmp "$tmp/phases" "$tmp/expected"
+reporter="$overlay/bin/pxeos.statusreporter"
+sed -n '/^rootpxe_progress_report_once() {/,/^}/p' "$reporter" >"$tmp/report-once"
+(
+    . "$tmp/report-once"
+    rootpxe_capture_poll_cancel() { :; }
+    rootpxe_progress_data_phase_active() { return 1; }
+    rootpxe_progress_send_heartbeat() { printf 'heartbeat\n' >>"$tmp/report"; }
+    rootpxe_progress_send_snapshot() { printf 'snapshot\n' >>"$tmp/report"; }
+    rootpxe_progress_report_once
+)
+assert test "$(cat "$tmp/report")" = heartbeat
 printf 'Prewrite order: %s checks, %s failures\n' "$checks" "$failures"
 [[ $failures -eq 0 ]]
