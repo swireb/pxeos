@@ -301,10 +301,15 @@ rootpxe_import_kernel_args() {
         key=${item%%=*}; value=${item#*=}; value=${value//+_+/ }; value=${value//+__+/ }
         rootpxe_kernel_key_allowed "$key" || continue
         [[ $value != *$'\n'* && $value != *$'\r'* ]] || continue
+        if [[ $key == task_token && -n ${rootpxe_deploy_retry_token:-} ]]; then
+            continue
+        fi
         printf -v "$key" '%s' "$value"
         export "$key"
     done < <(tr ' ' '\n' </proc/cmdline)
-    [[ -z ${task_token:-} && -n ${token:-} ]] && task_token=$token
+    if [[ -z ${task_token:-} ]]; then
+        task_token=${rootpxe_deploy_retry_token:-${token:-}}
+    fi
     export task_token
 }
 rootpxe_import_kernel_args
@@ -3441,7 +3446,7 @@ rootpxe_error_wait_for_retry() {
         report_confirmed=yes
     fi
     timeout_message="Timeout action: $rootpxe_failure_action."
-    [[ -z ${rootpxe_deploy_control_dir:-} ]] || timeout_message='PXEOS remains available for a new PXE boot.'
+    [[ -z ${rootpxe_deploy_control_dir:-} ]] || timeout_message='PXEOS remains available for retry.'
     if [[ $report_confirmed == yes ]]; then
         rootpxe_console_message ERROR 'Task paused. Error reported to RootPXE.'
     else
@@ -3449,7 +3454,8 @@ rootpxe_error_wait_for_retry() {
     fi
     rootpxe_console_message INFO 'SSH is available for troubleshooting.'
     if [[ -n ${rootpxe_deploy_control_dir:-} ]]; then
-        rootpxe_console_message INFO 'Boot into PXE again to start a new deployment.'
+        rootpxe_console_message INFO 'Select Retry in the web UI to start the deployment again.'
+        return 2
     elif [[ $report_confirmed == yes && ( -z ${rootpxe_storage_workspace:-} || ( ${rootpxe_storage_released:-no} == yes && ${rootpxe_storage_stopped:-no} == yes && -z ${rootpxe_storage_pid:-} ) ) ]]; then
         rootpxe_console_message INFO 'Select Retry in the web UI to resume.'
     else

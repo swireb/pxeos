@@ -340,7 +340,7 @@ checkin_rootpxe() {
     local lmac
     # 按约定：使用服务端下发的任务主机 MAC（kernel cmdline 的 mac），不要在此处探测真实网卡
     lmac="$mac"
-    local out checkin_payload_file
+    local out checkin_payload_file control_token control_attempt
     local rootpxe_capture_checkin_id=""
     if [[ ${type:-} == up ]]; then
         rootpxe_capture_checkin_id=$(tr -d "-" </proc/sys/kernel/random/uuid) || return 1
@@ -362,6 +362,12 @@ checkin_rootpxe() {
         # HTTPS connection. Do not send it to an HTTP endpoint or a redirect.
         [[ ${rootpxe_api:-} == https://* ]] || return 1
         checkin_tls_args=(-ks --proto '=https' --proto-redir '=https' --max-redirs 0 --pinnedpubkey "$manual_spki_pin")
+    fi
+    if [[ -n ${rootpxe_deploy_control_dir:-} ]]; then
+        rootpxe_source_core_library deploy-control.sh || return 1
+        rootpxe_storage_boot_id=$(cat /proc/sys/kernel/random/boot_id) || return 1
+        rootpxe_storage_sysuuid=$sysuuid_local
+        rootpxe_publish_deploy_control "$task_token" "${rootpxe_deploy_retry_attempt:-}" || return 1
     fi
     while true; do
         waitFlag=""
@@ -406,6 +412,14 @@ checkin_rootpxe() {
         fi
         out=$body
         [[ $out == \{* ]] || { handleError "RootPXE checkin requires a JSON response ($0)"; return 1; }
+        if [[ -n ${rootpxe_deploy_control_dir:-} ]] && jq -e 'has("executionToken")' >/dev/null 2>&1 <<<"$out"; then
+            control_token=$(jq -er '.executionToken | strings' <<<"$out") || return 1
+            control_attempt=$(jq -er '.progressAttempt | numbers' <<<"$out") || return 1
+            [[ $control_token =~ ^[A-Za-z0-9._~+/=-]{16,512}$ && $control_attempt =~ ^[1-9][0-9]*$ ]] || return 1
+            rootpxe_publish_deploy_control "$control_token" "$control_attempt" || return 1
+            task_token=$control_token
+            export task_token
+        fi
         rootpxe_apply_json_checkin "$out" || handleError "RootPXE checkin returned invalid JSON ($0)"
         if [[ $waitFlag == "1" ]]; then
             [[ -z $waitMsg ]] && waitMsg="No open slots on server, waiting for queue"
@@ -429,9 +443,6 @@ checkin_rootpxe() {
         echo -n "0" > /tmp/pxeos.shutdown 2>/dev/null || true
     fi
     task_token=${execution_token:-${task_token:-}}; export task_token
-    if [[ ${taskType:-} == deploy && -n ${rootpxe_deploy_control_dir:-} ]]; then
-        rootpxe_source_core_library deploy-control.sh && rootpxe_publish_deploy_control || return 1
-    fi
     rootpxe_require_task_context || handleError "RootPXE: missing execution token ($0)"
     if [[ ${rootpxe_storage_only:-no} == yes ]]; then
         type=$pxe_type; pxeType=$type
