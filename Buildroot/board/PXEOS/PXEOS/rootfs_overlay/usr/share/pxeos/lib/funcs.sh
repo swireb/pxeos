@@ -3320,7 +3320,11 @@ rootpxe_failure_begin() {
         rootpxe_failure_deadline=$((rootpxe_failure_started_at + rootpxe_failure_wait_sec))
         printf '%s\n' "$rootpxe_failure_action" >/tmp/pxeos.failure_action || return 1
         rootpxe_console_message WARN 'Task failed. The configured failure wait has started.'
-        rootpxe_console_message INFO "Failure wait: ${rootpxe_failure_wait_sec}s from first failure. Timeout action: $rootpxe_failure_action."
+        if [[ -n ${rootpxe_deploy_control_dir:-} ]]; then
+            rootpxe_console_message INFO "Failure wait: ${rootpxe_failure_wait_sec}s from first failure. PXEOS will stay available."
+        else
+            rootpxe_console_message INFO "Failure wait: ${rootpxe_failure_wait_sec}s from first failure. Timeout action: $rootpxe_failure_action."
+        fi
     fi
     # Only the first acknowledged report can update the checkin policy. Its
     # wait still starts at the original failure, never at this response.
@@ -3420,7 +3424,7 @@ rootpxe_error_wait_for_retry() {
     # exec below does not run EXIT traps; stop the old sampler before any
     # error reporting, polling or admission of an administrator retry.
     killStatusReporter
-    local response=${4:-} status remaining request_timeout report_confirmed=no api="${pxeapi:-$web}"
+    local response=${4:-} status remaining request_timeout report_confirmed=no api="${pxeapi:-$web}" timeout_message
     rootpxe_failure_begin || return 1
     if [[ ${3:-} != console_shown ]]; then
         rootpxe_task_console_failure ERROR "$1"
@@ -3435,22 +3439,26 @@ rootpxe_error_wait_for_retry() {
         rootpxe_failure_begin "$response" || return 1
         report_confirmed=yes
     fi
+    timeout_message="Timeout action: $rootpxe_failure_action."
+    [[ -z ${rootpxe_deploy_control_dir:-} ]] || timeout_message='PXEOS remains available for a new PXE boot.'
     if [[ $report_confirmed == yes ]]; then
         rootpxe_console_message ERROR 'Task paused. Error reported to RootPXE.'
     else
-        rootpxe_console_message WARN 'Error report is not confirmed. Waiting for the configured failure action.'
+        rootpxe_console_message WARN "Error report is not confirmed. $timeout_message"
     fi
     rootpxe_console_message INFO 'SSH is available for troubleshooting.'
-    if [[ $report_confirmed == yes && ( -z ${rootpxe_storage_workspace:-} || ( ${rootpxe_storage_released:-no} == yes && ${rootpxe_storage_stopped:-no} == yes && -z ${rootpxe_storage_pid:-} ) ) ]]; then
+    if [[ -n ${rootpxe_deploy_control_dir:-} ]]; then
+        rootpxe_console_message INFO 'Boot into PXE again to start a new deployment.'
+    elif [[ $report_confirmed == yes && ( -z ${rootpxe_storage_workspace:-} || ( ${rootpxe_storage_released:-no} == yes && ${rootpxe_storage_stopped:-no} == yes && -z ${rootpxe_storage_pid:-} ) ) ]]; then
         rootpxe_console_message INFO 'Select Retry in the web UI to resume.'
     else
         rootpxe_console_message WARN 'Retry is unavailable until error reporting and storage cleanup are confirmed.'
-        rootpxe_console_message INFO 'Waiting for the configured failure action; any remote protection remains held.'
+        rootpxe_console_message INFO "Any remote protection remains held. $timeout_message"
     fi
-    rootpxe_console_message INFO "Timeout: ${rootpxe_failure_wait_sec}s from first failure. Timeout action: $rootpxe_failure_action."
+    rootpxe_console_message INFO "Timeout: ${rootpxe_failure_wait_sec}s from first failure. $timeout_message"
     while :; do
         if ! remaining=$(rootpxe_failure_remaining); then
-            rootpxe_console_message WARN "Wait timed out. Timeout action: $rootpxe_failure_action."
+            rootpxe_console_message WARN "Wait timed out. $timeout_message"
             return 2
         fi
         status=''
@@ -3461,7 +3469,7 @@ rootpxe_error_wait_for_retry() {
                 --data-urlencode "mac=$mac" "${api}task-status" 2>/dev/null) || status=''
         fi
         status=$(jq -er 'if type == "object" and (.status | type) == "string" then .status else empty end' <<<"$status" 2>/dev/null) || status=''
-        if [[ $status == queued ]]; then
+        if [[ $status == queued && -z ${rootpxe_deploy_control_dir:-} ]]; then
             if [[ -z ${rootpxe_storage_workspace:-} || ( ${rootpxe_storage_released:-no} == yes && ${rootpxe_storage_stopped:-no} == yes && -z ${rootpxe_storage_pid:-} ) ]]; then
                 rootpxe_console_message INFO 'Retry requested. Resuming task.'
                 rootpxe_storage_reset_retry_state || return 1
@@ -6164,8 +6172,12 @@ handleError() {
         exit "$return_code"
     fi
     if [[ -z $isdebug ]]; then
-        printf '[WARN]  System will reboot in 60s.\n'
-        usleep 60000000
+        if [[ -n ${rootpxe_deploy_control_dir:-} ]]; then
+            printf '[WARN]  Deployment failed. PXEOS remains available.\n'
+        else
+            printf '[WARN]  System will reboot in 60s.\n'
+            usleep 60000000
+        fi
     else
         debugPause
     fi

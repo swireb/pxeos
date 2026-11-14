@@ -39,7 +39,8 @@ if [[ -n $mode && $mode != +(*debug*) && -z $type ]]; then
 else
     case $type in
         down)
-            pxeos.download
+            rootpxe_source_core_library deploy-control.sh || exit 75
+            rootpxe_run_deployment || exit 75
             ;;
         up)
             pxeos.upload

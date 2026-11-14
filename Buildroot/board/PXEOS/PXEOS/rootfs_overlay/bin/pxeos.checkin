@@ -110,7 +110,7 @@ rootpxe_apply_json_partition_inventory() {
 }
 
 rootpxe_write_checkin_json_payload() {
-    local output_file="$1" token_file capabilities storage_capabilities storage_boot identity_versions='[1]' old_umask result
+    local output_file="$1" token_file capabilities storage_capabilities storage_boot identity_versions='[1]' old_umask result abort_control=false
     [[ ${taskid:-} =~ ^[1-9][0-9]*$ && -n ${task_token:-} && -n ${lmac:-} ]] || return 1
     [[ -n $output_file && ! -L $output_file ]] || return 1
     capabilities=$(rootpxe_deployment_identity_capabilities_json) && rootpxe_deployment_identity_capabilities_valid "$capabilities" || return 1
@@ -131,7 +131,9 @@ rootpxe_write_checkin_json_payload() {
     token_file=$(mktemp /tmp/rootpxe-checkin-token.XXXXXX) || { umask "$old_umask"; return 1; }
     chmod 600 "$token_file" || { rm -f -- "$token_file"; umask "$old_umask"; return 1; }
     printf '%s' "$task_token" >"$token_file" || { rm -f -- "$token_file"; umask "$old_umask"; return 1; }
+	[[ -z ${rootpxe_deploy_control_dir:-} ]] || abort_control=true
 	jq -cn \
+        --argjson deployAbortControl "$abort_control" \
         --arg captureCheckinId "${rootpxe_capture_checkin_id:-}" \
         --argjson taskId "$taskid" \
 		--rawfile token "$token_file" \
@@ -140,7 +142,7 @@ rootpxe_write_checkin_json_payload() {
         --argjson versions "$identity_versions" \
         --argjson capabilities "$capabilities" \
         --argjson storageCapabilities "$storage_capabilities" --arg storageBootId "$storage_boot" \
-		'{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",cloudInitCapability:"linux-nocloud-v5",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities,captureProtocol:"mac-direct-v1",captureCheckinId:$captureCheckinId,storageProtocolVersions:[1],storageCapabilities:$storageCapabilities,storageBootId:$storageBootId}' >"$output_file"
+		'{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",cloudInitCapability:"linux-nocloud-v5",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities,captureProtocol:"mac-direct-v1",captureCheckinId:$captureCheckinId,storageProtocolVersions:[1],storageCapabilities:$storageCapabilities,storageBootId:$storageBootId,deployAbortControl:$deployAbortControl}' >"$output_file"
 	result=$?
 	: >"$token_file"
 	rm -f -- "$token_file"
@@ -347,7 +349,7 @@ checkin_rootpxe() {
         [[ $rootpxe_capture_checkin_id =~ ^[a-f0-9]{32}$ ]] || return 1
     fi
     local body
-    local http_code
+    local http_code retry_abort_conflict=yes
     local waitFlag=""
     local waitMsg=""
     local retryAfterSec=5
@@ -367,8 +369,8 @@ checkin_rootpxe() {
         waitFlag=""
         waitMsg=""
         retryAfterSec=5
-        # Do not use curl -f here. A 4xx means the administrator withdrew the
-        # task before checkin completed; it is a safe reboot, not a PXEOS error.
+        # Read the status even on 4xx so an authenticated deployment can
+        # recover a stop request that raced the first admission response.
 		umask 077
 		checkin_payload_file=$(mktemp /tmp/rootpxe-checkin-request.XXXXXX) || handleError "RootPXE checkin context is invalid ($0)"
 		chmod 600 "$checkin_payload_file" || { rm -f -- "$checkin_payload_file"; handleError "RootPXE checkin context is invalid ($0)"; }
@@ -391,6 +393,10 @@ checkin_rootpxe() {
         fi
         http_code=${out##*$'\n'}
         body=${out%$'\n'*}
+        if [[ $http_code == 409 && ${retry_abort_conflict:-no} == yes && -n ${rootpxe_deploy_control_dir:-} ]]; then
+            retry_abort_conflict=no
+            continue
+        fi
         if [[ $http_code =~ ^4[0-9][0-9]$ ]]; then
             # The task may have been aborted after the kernel started but
             # before checkin.  No task callback is allowed after this point.
@@ -407,6 +413,14 @@ checkin_rootpxe() {
             continue
         fi
         out=$body
+        if [[ -n ${rootpxe_deploy_control_dir:-} ]] && jq -e '.status == "aborting"' >/dev/null 2>&1 <<<"$out"; then
+            rootpxe_json_assign_text "$out" execution_token '.executionToken' || return 1
+            rootpxe_json_assign "$out" progress_attempt '.progressAttempt' || return 1
+            [[ $execution_token =~ ^[a-f0-9]{64}$ && $progress_attempt =~ ^[1-9][0-9]*$ ]] || return 1
+            rootpxe_source_core_library deploy-control.sh && rootpxe_publish_deploy_control || return 1
+            : >"$rootpxe_deploy_control_dir/stop"
+            return 2
+        fi
         [[ $out == \{* ]] || { handleError "RootPXE checkin requires a JSON response ($0)"; return 1; }
         rootpxe_apply_json_checkin "$out" || handleError "RootPXE checkin returned invalid JSON ($0)"
         if [[ $waitFlag == "1" ]]; then
@@ -431,6 +445,9 @@ checkin_rootpxe() {
         echo -n "0" > /tmp/pxeos.shutdown 2>/dev/null || true
     fi
     task_token=${execution_token:-${task_token:-}}; export task_token
+    if [[ ${taskType:-} == deploy && -n ${rootpxe_deploy_control_dir:-} ]]; then
+        rootpxe_source_core_library deploy-control.sh && rootpxe_publish_deploy_control || return 1
+    fi
     rootpxe_require_task_context || handleError "RootPXE: missing execution token ($0)"
     if [[ ${rootpxe_storage_only:-no} == yes ]]; then
         type=$pxe_type; pxeType=$type

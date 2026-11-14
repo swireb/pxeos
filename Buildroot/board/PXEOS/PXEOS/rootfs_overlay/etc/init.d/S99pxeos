@@ -141,6 +141,11 @@ fi
 
 pxeos
 rc=$?
+if [[ $rc -eq 75 || ( $rc -ne 0 && $type == down ) ]]; then
+    pxeos_init_message INFO 'Deployment stopped. PXEOS remains available.'
+    pxeos_init_message INFO 'Boot into PXE again to restart the task.'
+    exit "$rc"
+fi
 if [[ $rc -eq 0 && -f /tmp/pxeos.storage-recovery-only && ! -L /tmp/pxeos.storage-recovery-only && -O /tmp/pxeos.storage-recovery-only ]]; then
     pxeos_init_message INFO "Storage recovery ended with code: $rc. No disk or power action will be repeated."
     exit "$rc"

@@ -24,6 +24,8 @@ define PXEOS_INSTALL_TARGET_CMDS
 	$(STRIPCMD) $(STRIP_STRIP_ALL) $(TARGET_DIR)/bin/pxeosmbrfix
 	$(INSTALL) -D -m 0755 $(@D)/src/pxeosfatgrow $(TARGET_DIR)/bin/pxeosfatgrow
 	$(STRIPCMD) $(STRIP_STRIP_ALL) $(TARGET_DIR)/bin/pxeosfatgrow
+	$(INSTALL) -D -m 0755 $(@D)/src/pxeos-deploy-worker $(TARGET_DIR)/bin/pxeos-deploy-worker
+	$(STRIPCMD) $(STRIP_STRIP_ALL) $(TARGET_DIR)/bin/pxeos-deploy-worker
 endef
 
 $(eval $(generic-package))
