@@ -325,7 +325,7 @@ rootpxe_storage_local_payload() {
 # of its own read FIFO. Every fixed write must reach EOF at its declared size.
 rootpxe_storage_exec() (
     local operation=$1 path=$2 argument=${3:-} sequence command event phase response data_pid='' data_status=0 write_fd='' expected key read_timeout remaining
-    local helper_done=no forward_wait=not_started transfer_phase='' read_status
+    local helper_done=no forward_wait=not_started transfer_phase='' read_status preflight=/dev/null
     if [[ $operation == read || $operation == write ]]; then transfer_phase=intent; fi
     trap '
         if [[ -n $data_pid ]]; then
@@ -352,8 +352,15 @@ rootpxe_storage_exec() (
     exec {command_lock}>"$rootpxe_storage_workspace/command.lock"; flock -x "$command_lock" || return 1
     sequence=$(cat "$rootpxe_storage_workspace/next-sequence") || return 1
     [[ $sequence =~ ^[1-9][0-9]*$ && ${#sequence} -le 20 ]] || return 1
+    if [[ $operation == read && -f $rootpxe_storage_workspace/preflight.json ]]; then
+        preflight="$rootpxe_storage_workspace/preflight.json"
+    fi
     command=$(jq -cn --arg operation "$operation" --arg path "$path" --arg sequence "$sequence" \
-      --slurpfile context "$rootpxe_storage_workspace/context.json" '{operation:$operation,path:$path,sequence:$sequence,execution:$context[0].execution}') || return 1
+      --slurpfile context "$rootpxe_storage_workspace/context.json" --slurpfile preflight "$preflight" '
+        {operation:$operation,path:$path,sequence:$sequence,execution:$context[0].execution} |
+        if $operation == "read" and .execution.taskType == "deploy" and
+           $context[0].storageOnly != true and ([$preflight[] | objects | .cleanupOnly] == [false])
+        then .skipReadDigest = true else . end') || return 1
     if [[ $operation == rename-owned ]]; then command=$(jq -c --arg to "$argument" '.+{to:$to}' <<<"$command") || return 1; fi
     if [[ $operation == write ]]; then
         exec {write_fd}>"$rootpxe_storage_workspace/data" || return 1
@@ -443,8 +450,12 @@ rootpxe_storage_exec() (
             key=$(printf '%s' "$path" | sha256sum | cut -d ' ' -f1) || break
             expected=$(jq -er --arg key "$key" '.ack.proof[$key].size | strings' <<<"$response") || break
             [[ $expected =~ ^[0-9]+$ ]] || break
-            if [[ $argument == - ]]; then head -c "$expected" <&"$rootpxe_storage_data_fd" &
-            else [[ $argument == "$rootpxe_storage_workspace/"* && ! -L $argument ]] || break; head -c "$expected" <&"$rootpxe_storage_data_fd" >"$argument" & fi
+            if [[ $argument == - ]]; then
+                dd bs=128K count="$expected" iflag=count_bytes,fullblock status=none <&"$rootpxe_storage_data_fd" &
+            else
+                [[ $argument == "$rootpxe_storage_workspace/"* && ! -L $argument ]] || break
+                dd bs=128K count="$expected" iflag=count_bytes,fullblock status=none <&"$rootpxe_storage_data_fd" >"$argument" &
+            fi
             data_pid=$!
         fi
         if [[ $operation == write && $argument == - && $phase == result ]]; then rootpxe_storage_local_payload "$event" || break; fi

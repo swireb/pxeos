@@ -19,7 +19,31 @@
 static int change_fd = -1, change_at_stat, source_stats;
 static ino_t change_ino;
 static off_t change_size;
+static unsigned sequential_hints;
+static unsigned digest_contexts, digest_updates;
+static const char *read_digest_option;
+static int storage_only_read;
+
 #ifdef ROOTPXE_TEST_STATX_RACE
+EVP_MD_CTX *__real_EVP_MD_CTX_new(void);
+int __real_EVP_DigestUpdate(EVP_MD_CTX *, const void *, size_t);
+EVP_MD_CTX *__wrap_EVP_MD_CTX_new(void) {
+    digest_contexts++;
+    return __real_EVP_MD_CTX_new();
+}
+int __wrap_EVP_DigestUpdate(EVP_MD_CTX *hash, const void *data, size_t size) {
+    digest_updates++;
+    return __real_EVP_DigestUpdate(hash, data, size);
+}
+
+int __wrap_posix_fadvise64(int fd, off_t offset, off_t length, int advice) {
+    struct stat st;
+    assert(!fstat(fd, &st) && S_ISREG(st.st_mode));
+    assert(offset == 0 && length == 0 && advice == POSIX_FADV_SEQUENTIAL);
+    sequential_hints++;
+    return EOPNOTSUPP;
+}
+
 int __real_statx(int, const char *, int, unsigned, struct statx *);
 int __wrap_statx(int fd, const char *path, int flags, unsigned mask, struct statx *st) {
     int rc = __real_statx(fd, path, flags, mask, st);
@@ -86,6 +110,20 @@ static void write_bytes(int fd,uint64_t size) {
     while(size){size_t n=size<sizeof(buffer)?(size_t)size:sizeof(buffer);if(rx_write_all(fd,buffer,n))_exit(12);size-=n;}
 }
 
+static void assert_digest(struct json_object *event, int expected, uint64_t size) {
+    struct json_object *node = NULL, *digest = NULL;
+    assert(json_object_object_get_ex(event, "node", &node));
+    assert(json_object_object_get_ex(node, "sha256", &digest) == expected);
+    if (expected) {
+        const char *value = json_object_get_string(digest);
+        assert(value && strlen(value) == 64 && rx_hex(value, 64));
+        if (size == 3)
+            assert(!strcmp(value, "cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860"));
+        if (size == 4)
+            assert(!strcmp(value, "2481a63c85a62cf889d2b149f1a52e985a9341750173fe01eff50cc27b5941b5"));
+    }
+}
+
 static int64_t elapsed_clock_ms(void) {
     struct timespec stamp;
     assert(!clock_gettime(CLOCK_MONOTONIC, &stamp));
@@ -102,7 +140,7 @@ static void one_case(uint64_t expected,uint64_t actual,int fixed,int reject_resu
     int request[2],result[2],data[2];assert(!pipe(request)&&!pipe(result)&&!pipe(data));
     struct storage_context context={0};strcpy(context.protocol,"nfs");strcpy(context.stage,"dev/27/2");strcpy(context.lock,".locks/key");strcpy(context.image_path,"image");context.data_write=1;context.parent=getpid();context.owner=json_tokener_parse("{\"taskType\":\"capture\",\"nonce\":\"fixture\"}");
     pid_t child=fork();assert(child>=0);
-    if(!child){close(request[1]);close(result[0]);close(data[1]);struct storage_fs fs={.root=root,.context=&context};assert(!rx_stat_fd(root,&fs.root_stat));struct json_object *c=command(&context,"dev/27/2/payload/file",1,fixed,expected);int rc=rx_command(&fs,c,request[0],data[0],result[1]);json_object_put(c);if(reject_result){assert(rc&&fs.last_sequence==0);c=command(&context,"dev/27/2/payload",4,0,0);json_object_object_add(c,"operation",json_object_new_string("seal"));assert(rx_command(&fs,c,request[0],data[0],result[1]));json_object_put(c);}close(result[1]);_exit(rc?7:0);}
+    if(!child){close(request[1]);close(result[0]);close(data[1]);struct storage_fs fs={.root=root,.context=&context};assert(!rx_stat_fd(root,&fs.root_stat));struct json_object *c=command(&context,"dev/27/2/payload/file",1,fixed,expected);int rc=rx_command(&fs,c,request[0],data[0],result[1]);assert(!sequential_hints);if(!fixed||expected==actual)assert(digest_contexts==1&&digest_updates>=2);json_object_put(c);if(reject_result){assert(rc&&fs.last_sequence==0);c=command(&context,"dev/27/2/payload",4,0,0);json_object_object_add(c,"operation",json_object_new_string("seal"));assert(rx_command(&fs,c,request[0],data[0],result[1]));json_object_put(c);}close(result[1]);_exit(rc?7:0);}
     close(request[0]);close(result[1]);close(data[0]);
     pid_t producer=fork();assert(producer>=0);if(!producer){close(request[1]);close(result[0]);write_bytes(data[1],actual);close(data[1]);_exit(0);}close(data[1]);
     int created=0,results=0,refused=0,progress_events=0;struct json_object *event;
@@ -112,7 +150,7 @@ static void one_case(uint64_t expected,uint64_t actual,int fixed,int reject_resu
         progress_events++;json_object_put(event);continue;}
         const char *path=rx_string(event,"path",4095);assert(path);
         if(!strcmp(phase,"created")){int fd=openat(root,path,O_RDONLY|O_NOFOLLOW);struct stat st;assert(fd>=0&&!fstat(fd,&st)&&st.st_size==0);close(fd);created++;}
-        if(!strcmp(phase,"result")){results++;if(reject_result){close(request[1]);request[1]=-1;refused=1;json_object_put(event);continue;}}
+        if(!strcmp(phase,"result")){assert_digest(event,1,actual);results++;if(reject_result){close(request[1]);request[1]=-1;refused=1;json_object_put(event);continue;}}
         assert(request[1]>=0);send_ack(request[1],root,event,0);json_object_put(event);
     }
     if(request[1]>=0)close(request[1]);close(result[0]);int status=0;assert(waitpid(child,&status,0)==child&&WIFEXITED(status));
@@ -159,6 +197,7 @@ static void read_case(int close_output, int truncate_source, int measure_progres
         assert(!rx_stat_fd(root,&fs.root_stat));
         struct json_object *c=command(&context,"image/part.img",1,0,0);
         json_object_object_add(c,"operation",json_object_new_string("read"));
+        json_object_object_add(c,"skipReadDigest",json_object_new_boolean(1));
         int rc=rx_command(&fs,c,request[0],data[1],result[1]);
         json_object_put(c);
         _exit(rc?7:0);
@@ -244,7 +283,8 @@ static void read_case(int close_output, int truncate_source, int measure_progres
     }
 }
 
-static void read_proof_case(size_t original_size, size_t replacement_size, int at_stat) {
+static void read_proof_case(size_t original_size, size_t replacement_size, int at_stat, int check_hint,
+                            const char *task_type, int expected_digest, int reject_command) {
     char temporary[] = "rootpxe-proof-fixture.XXXXXX";
     assert(mkdtemp(temporary));
     puts(temporary);
@@ -259,7 +299,10 @@ static void read_proof_case(size_t original_size, size_t replacement_size, int a
     assert(!pipe(request) && !pipe(result) && !pipe(data));
     struct storage_context context = {.parent=getpid()};
     strcpy(context.image_path, "image");
-    context.owner = json_tokener_parse("{\"taskType\":\"deploy\"}");
+    context.owner = json_object_new_object();
+    json_object_object_add(context.owner, "taskType", json_object_new_string(task_type));
+    if (storage_only_read)
+        context.json = json_tokener_parse("{\"storageOnly\":true}");
     pid_t child = fork();
     assert(child >= 0);
     if (!child) {
@@ -275,19 +318,31 @@ static void read_proof_case(size_t original_size, size_t replacement_size, int a
         }
         struct json_object *c = command(&context, "image/part.img", 1, 0, 0);
         json_object_object_add(c, "operation", json_object_new_string("read"));
+        if (read_digest_option)
+            json_object_object_add(c, "skipReadDigest", json_tokener_parse(read_digest_option));
         int rc = rx_command(&fs, c, request[0], data[1], result[1]);
         if (at_stat) assert(source_stats >= at_stat);
+        if (check_hint) assert(sequential_hints == 1);
+        if (!at_stat) {
+            assert(digest_contexts == (unsigned)expected_digest);
+            assert((digest_updates != 0) == (expected_digest && original_size != 0));
+        }
         json_object_put(c);
         close(data[1]); close(result[1]);
         _exit(rc ? 7 : 0);
     }
     close(request[0]); close(result[1]); close(data[1]);
-    int results = 0;
+    int intents = 0, results = 0;
     struct json_object *event;
     while ((event = rx_read_json(result[0], 65536, 1))) {
         const char *phase = rx_string(event, "event", 8);
         assert(phase && (!strcmp(phase, "intent") || !strcmp(phase, "result")));
-        if (!strcmp(phase, "result")) results++;
+        if (!strcmp(phase, "result")) {
+            assert_digest(event, expected_digest, original_size);
+            results++;
+        } else {
+            intents++;
+        }
         send_ack(request[1], root, event, 0);
         json_object_put(event);
     }
@@ -304,7 +359,10 @@ static void read_proof_case(size_t original_size, size_t replacement_size, int a
     close(root);
     assert(!rmdir(temporary));
     json_object_put(context.owner);
-    if (at_stat) {
+    if (context.json) json_object_put(context.json);
+    if (reject_command) {
+        assert(WEXITSTATUS(status) == 7 && intents == 0 && results == 0 && received == 0);
+    } else if (at_stat) {
         assert(WEXITSTATUS(status) == 7 && results == 0 && received == 0 &&
                "changed source escaped the original intent proof");
     } else {
@@ -312,29 +370,85 @@ static void read_proof_case(size_t original_size, size_t replacement_size, int a
     }
 }
 
+#ifdef ROOTPXE_TEST_BENCHMARK
+static int benchmark_data = -1, benchmark_ready, benchmark_gate;
+static int benchmark_released;
+static int64_t benchmark_first, benchmark_last;
+
+static int64_t benchmark_now(void) {
+    struct timespec stamp;
+    assert(!clock_gettime(CLOCK_MONOTONIC, &stamp));
+    return (int64_t)stamp.tv_sec * 1000000000 + stamp.tv_nsec;
+}
+
+ssize_t __real_write(int, const void *, size_t);
+ssize_t __wrap_write(int fd, const void *data, size_t size) {
+    if (fd != benchmark_data)
+        return __real_write(fd, data, size);
+    if (!benchmark_released) {
+        char token;
+        assert(__real_write(benchmark_ready, ".", 1) == 1);
+        assert(read(benchmark_gate, &token, 1) == 1 && token == '.');
+        benchmark_released = 1;
+    }
+    ssize_t written = __real_write(fd, data, size);
+    if (written > 0) {
+        benchmark_last = benchmark_now();
+        if (!benchmark_first) benchmark_first = benchmark_last;
+    }
+    return written;
+}
+#endif
+
 static int benchmark_helper(const char *root_path, const char *request_path,
                             const char *data_path, const char *result_path) {
     int root = open(root_path, O_RDONLY | O_DIRECTORY);
     assert(root >= 0);
     struct storage_context context = {.parent=getppid()};
     strcpy(context.image_path, "image");
-    context.owner = json_tokener_parse("{\"taskType\":\"deploy\"}");
+    int local = open("context.json", O_RDONLY);
+    assert(local >= 0);
+    context.json = rx_read_json(local, RX_COMMAND_MAX, 0);
+    assert(context.json && !close(local));
+    assert(json_object_object_get_ex(context.json, "execution", &context.owner));
+    const char *protocol = rx_string(context.json, "protocol", 3);
+    if (protocol) strcpy(context.protocol, protocol);
     int request = open(request_path, O_RDONLY);
     int data = open(data_path, O_WRONLY);
     int result = open(result_path, O_WRONLY);
     assert(request >= 0 && data >= 0 && result >= 0);
     struct storage_fs fs = {.root=root,.context=&context};
     assert(!rx_stat_fd(root, &fs.root_stat));
+#ifdef ROOTPXE_TEST_BENCHMARK
+    const char *ready = getenv("ROOTPXE_BENCHMARK_READY");
+    if (ready) {
+        benchmark_ready = atoi(ready);
+        benchmark_gate = atoi(getenv("ROOTPXE_BENCHMARK_GATE"));
+        benchmark_data = data;
+    }
+#endif
     struct json_object *command = rx_read_json(request, RX_COMMAND_MAX, 1);
     assert(command);
     int rc = rx_command(&fs, command, request, data, result);
     if (!rc) {
-        struct json_object *done = json_tokener_parse("{\"event\":\"done\",\"sequence\":\"2\"}");
+        char message[96];
+        snprintf(message, sizeof(message), "{\"event\":\"done\",\"sequence\":\"%llu\"}",
+                 (unsigned long long)fs.last_sequence);
+        struct json_object *done = json_tokener_parse(message);
         rc = rx_emit(result, done);
         json_object_put(done);
+#ifdef ROOTPXE_TEST_BENCHMARK
+        if (!rc && ready) {
+            int timing = open("timing", O_WRONLY | O_CREAT | O_EXCL, 0600);
+            assert(timing >= 0);
+            assert(dprintf(timing, "%lld %lld %lld\n", (long long)benchmark_first,
+                           (long long)benchmark_last, (long long)benchmark_now()) > 0);
+            assert(!close(timing));
+        }
+#endif
     }
     json_object_put(command);
-    json_object_put(context.owner);
+    json_object_put(context.json);
     close(request);
     close(result);
     close(data);
@@ -366,15 +480,38 @@ int main(int argc,char **argv) {
         return 0;
     }
     if(argc==2&&!strcmp(argv[1],"read-proof")){
-        read_proof_case(0,0,0);
-        read_proof_case(4,4,0);
+        read_digest_option = "true";
+        read_proof_case(0,0,0,0,"deploy",0,0);
+        read_proof_case(4,4,0,0,"deploy",0,0);
         for (int at_stat=1;at_stat<=2;at_stat++) {
-            read_proof_case(4,2,at_stat);
-            read_proof_case(4,8,at_stat);
-            read_proof_case(4,0,at_stat);
-            read_proof_case(0,8,at_stat);
-            read_proof_case(4,4,at_stat);
+            read_proof_case(4,2,at_stat,0,"deploy",0,0);
+            read_proof_case(4,8,at_stat,0,"deploy",0,0);
+            read_proof_case(4,0,at_stat,0,"deploy",0,0);
+            read_proof_case(0,8,at_stat,0,"deploy",0,0);
+            read_proof_case(4,4,at_stat,0,"deploy",0,0);
         }
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "read-hint")) {
+        read_proof_case(4, 4, 0, 1, "deploy", 1, 0);
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "read-digest")) {
+        read_digest_option = "true";
+        read_proof_case(4, 4, 0, 0, "deploy", 0, 0);
+        read_proof_case(4, 4, 0, 0, "capture", 0, 1);
+        storage_only_read = 1;
+        read_proof_case(4, 4, 0, 0, "deploy", 0, 1);
+        storage_only_read = 0;
+        read_digest_option = "false";
+        read_proof_case(4, 4, 0, 0, "deploy", 1, 0);
+        read_digest_option = "\"true\"";
+        read_proof_case(4, 4, 0, 0, "deploy", 0, 1);
+        read_digest_option = "null";
+        read_proof_case(4, 4, 0, 0, "deploy", 0, 1);
+        read_digest_option = NULL;
+        read_proof_case(4, 4, 0, 0, "deploy", 1, 0);
+        read_proof_case(4, 4, 0, 0, "capture", 1, 0);
         return 0;
     }
     one_case(4,3,1,0);one_case(3,4,1,0);one_case(3,3,1,0);one_case(3,3,1,1);one_case(0,3,0,1);one_case(0,209715207,0,0);two_files_one_fifo();return 0;

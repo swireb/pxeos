@@ -6,7 +6,6 @@ import subprocess
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
 
 import pxeos_storage_read_benchmark as benchmark
 
@@ -14,21 +13,16 @@ import pxeos_storage_read_benchmark as benchmark
 class StorageHelperFixture(unittest.TestCase):
     def test_benchmark_reaps_worker_group_when_the_shell_exits_first(self):
         worker = 'sleep 3 & printf "%s\\n" "$!" >child.pid; exit 7'
-        communicate = subprocess.Popen.communicate
         with tempfile.TemporaryDirectory(prefix='rootpxe-benchmark-cleanup-') as directory:
             path = Path(directory)
-
-            def short_communicate(process, timeout):
-                pid_file = path / '0/child.pid'
-                deadline = time.monotonic() + 2
-                while not pid_file.exists() and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                self.assertEqual(process.wait(timeout=2), 7)
-                return communicate(process, timeout=0.1)
-
-            with patch.object(benchmark, 'WORKER', worker), patch.object(subprocess.Popen, 'communicate', short_communicate):
-                with self.assertRaises(subprocess.TimeoutExpired):
-                    benchmark.run_case('old', 'unused', 'unused', 'unused', 1, '', 1, path, False)
+            original = benchmark.WORKER
+            try:
+                benchmark.WORKER = worker
+                with self.assertRaisesRegex(RuntimeError, 'first worker exits'):
+                    benchmark.run_case('old', 'unused', 'unused', [('unused', 1, '')], 1, path,
+                                       timeout=2)
+            finally:
+                benchmark.WORKER = original
 
             child = Path('/proc') / (path / '0/child.pid').read_text().strip() / 'stat'
             deadline = time.monotonic() + 2
@@ -54,6 +48,8 @@ class StorageHelperFixture(unittest.TestCase):
                             str(root / 'tests/storage_fs_fixture.c'),
                             str(source / 'storage_context.c'), str(source / 'storage_fs.c'),
                             '-DROOTPXE_TEST_STATX_RACE', '-Wl,--wrap=statx',
+                            '-Wl,--wrap=posix_fadvise64',
+                            '-Wl,--wrap=EVP_MD_CTX_new', '-Wl,--wrap=EVP_DigestUpdate',
                             *flags, '-o', str(binary)], check=True)
             result = subprocess.run([str(binary), *args], check=True, timeout=60, cwd=directory,
                                     text=True, stdout=subprocess.PIPE)
@@ -76,6 +72,12 @@ class StorageHelperFixture(unittest.TestCase):
 
     def test_read_binds_stream_length_to_the_original_intent_proof(self):
         self.run_filesystem_fixture('read-proof')
+
+    def test_read_continues_when_sequential_hint_is_unsupported(self):
+        self.run_filesystem_fixture('read-hint')
+
+    def test_read_omits_payload_digest_only_for_explicit_deploy_requests(self):
+        self.run_filesystem_fixture('read-digest')
 
     def test_parsers_and_identity_syscall_order(self):
         root = Path(__file__).resolve().parents[1]

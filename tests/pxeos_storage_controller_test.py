@@ -406,8 +406,8 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
                         fi
                         printf '{"nextSequence":"2","ack":{"proof":{"%s":{"size":"7"}}}}' "$proof_key"
                     }
-                    head() {
-                        command head "$@" || return $?
+                    dd() {
+                        command dd "$@" || return $?
                         case $case_name in
                             failed_forward) return 23 ;;
                             missing_done)
@@ -452,6 +452,94 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
                 ]
                 self.assertEqual(diagnostics, expected)
 
+    def test_read_digest_policy_requires_confirmed_normal_deploy(self):
+        result = self.run_controller(r'''
+            set -e
+            rootpxe_storage_call() {
+                printf '{"nextSequence":"2","ack":{"proof":{"%s":{"size":"0"}}}}' "$proof_key"
+            }
+            proof_key=$(printf '%s' fixture/file.img | sha256sum | cut -d ' ' -f1)
+            printf '1\n' >"$tmp/next-sequence"
+            for protocol in nfs smb; do
+                for task in deploy capture; do
+                    for cleanup in false true missing null wrong-type absent storage-only; do
+                        storage_only=false
+                        [[ $cleanup != storage-only ]] || storage_only=true
+                        jq -cn --arg protocol "$protocol" --arg task "$task" --argjson storageOnly "$storage_only" \
+                            '{protocol:$protocol,execution:{taskType:$task},storageOnly:$storageOnly}' >"$tmp/context.json"
+                        case $cleanup in
+                            absent) rm -f -- "$tmp/preflight.json" ;;
+                            missing) printf '{}' >"$tmp/preflight.json" ;;
+                            wrong-type) printf '{"cleanupOnly":"false"}' >"$tmp/preflight.json" ;;
+                            storage-only) printf '{"cleanupOnly":false}' >"$tmp/preflight.json" ;;
+                            *) printf '{"cleanupOnly":%s}' "$cleanup" >"$tmp/preflight.json" ;;
+                        esac
+                        printf '%s\n' '{"event":"intent"}' '{"event":"result"}' '{"event":"done"}' >"$tmp/events"
+                        exec {rootpxe_storage_request_fd}>"$tmp/requests"
+                        exec {rootpxe_storage_result_fd}<"$tmp/events"
+                        exec {rootpxe_storage_data_fd}</dev/null
+                        rootpxe_storage_exec read fixture/file.img -
+                        expected=false
+                        [[ $task != deploy || $cleanup != false ]] || expected=true
+                        head -n1 "$tmp/requests" | jq -e --argjson expected "$expected" \
+                            'if $expected then .skipReadDigest == true else has("skipReadDigest") | not end'
+                        exec {rootpxe_storage_request_fd}>&-
+                        exec {rootpxe_storage_result_fd}<&-
+                        exec {rootpxe_storage_data_fd}<&-
+                    done
+                done
+            done
+        ''', timeout=18)
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+
+    def test_read_forwarder_preserves_consecutive_fifo_byte_boundaries(self):
+        result = self.run_controller(r'''
+            set -e
+            dd() {
+                [[ $1 == bs=128K && $3 == iflag=count_bytes,fullblock && $4 == status=none ]] || return 91
+                printf '%s\n' "$2" >>"$tmp/limits"
+                command dd "$@"
+            }
+            rootpxe_storage_call() {
+                local data=${3#event=} path key size
+                path=$(jq -r '.path' <<<"$data")
+                key=$(printf '%s' "$path" | sha256sum | cut -d ' ' -f1)
+                case $path in
+                    fixture/first) size=131075 ;;
+                    fixture/empty) size=0 ;;
+                    fixture/last) size=7 ;;
+                    *) return 92 ;;
+                esac
+                printf '{"nextSequence":"2","ack":{"proof":{"%s":{"size":"%s"}}}}' "$key" "$size"
+            }
+            { head -c 131072 /dev/zero; printf '\377\000\200'; } >"$tmp/first"
+            printf '\000last\377\n' >"$tmp/last"
+            printf '{"execution":{}}' >"$tmp/context.json"
+            printf '1\n' >"$tmp/next-sequence"
+            for path in fixture/first fixture/empty fixture/last; do
+                printf '{"event":"intent","path":"%s"}\n{"event":"result","path":"%s"}\n{"event":"done"}\n' "$path" "$path"
+            done >"$tmp/events"
+            mkfifo "$tmp/data"
+            cat "$tmp/first" "$tmp/last" >"$tmp/data" &
+            producer=$!
+            exec {rootpxe_storage_data_fd}<"$tmp/data"
+            exec {rootpxe_storage_request_fd}>"$tmp/requests"
+            exec {rootpxe_storage_result_fd}<"$tmp/events"
+            rootpxe_storage_exec read fixture/first - >"$tmp/stdout"
+            rootpxe_storage_exec read fixture/empty - >"$tmp/empty"
+            rootpxe_storage_exec read fixture/last "$tmp/local"
+            wait "$producer"
+            cmp "$tmp/first" "$tmp/stdout"
+            [[ ! -s $tmp/empty ]]
+            cmp "$tmp/last" "$tmp/local"
+            if [[ ! -f $tmp/limits || $(cat "$tmp/limits") != $'count=131075\ncount=0\ncount=7' ]]; then
+                printf 'Expected one bounded block copier per file.\n' >&2
+                exit 93
+            fi
+            cmp -s /dev/null - <&"$rootpxe_storage_data_fd"
+        ''', timeout=6)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_metadata_file_write_keeps_fixed_size_contract(self):
         result = self.run_controller('''
             set -e
@@ -476,8 +564,8 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
                     rootpxe_storage_call() {
                         printf '{"nextSequence":"2","ack":{"proof":{"%s":{"size":"7"}}}}' "$proof_key"
                     }
-                    head() {
-                        command head "$@" || return $?
+                    dd() {
+                        command dd "$@" || return $?
                         printf '%s\n' "$BASHPID" >"$tmp/forwarder"
                         return "$forward_exit"
                     }
@@ -485,7 +573,7 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
                     printf '{"execution":{}}' >"$tmp/context.json"
                     printf '1\n' >"$tmp/next-sequence"
                     mkfifo "$tmp/events" "$tmp/data"
-                    # The controller still owns a data FIFO reader after head exits.
+                    # The controller still owns a data FIFO reader after the forwarder exits.
                     exec {rootpxe_storage_data_fd}<>"$tmp/data"
                     printf payload >&"$rootpxe_storage_data_fd"
                     exec {rootpxe_storage_request_fd}>"$tmp/requests"
@@ -713,12 +801,12 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
                         printf '{"nextSequence":"2","ack":{"proof":{"%s":{"size":"7"}}}}' "$proof_key"
                     }
                     rootpxe_task_log_append() { printf '%s\n' "$*" >>"$tmp/diagnostics"; }
-                    head() {
+                    dd() {
                         if [[ $case_name == forward_failed ]]; then
-                            command head "$@" || return $?
+                            command dd "$@" || return $?
                             return 23
                         fi
-                        exec head "$@"
+                        exec dd "$@"
                     }
                     read() {
                         # Keep Bash's real timeout, EOF and partial read statuses;
