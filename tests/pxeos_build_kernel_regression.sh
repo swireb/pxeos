@@ -392,7 +392,11 @@ expect_line "$ROOT_DIR/build.sh" '            compiledfile="../fssource$arch/out
 
 for arch in x86 x64 arm64; do
     config="$ROOT_DIR/configs/kernel${arch}.config"
-    expect_line "$config" '# CONFIG_MODULES is not set'
+    for option in MODULES=y ATA=m SATA_AHCI=m SATA_AHCI_PLATFORM=m ATA_PIIX=m \
+        SCSI=y BLK_DEV_SD=y USB_STORAGE=y BLK_DEV_NVME=y BLK_DEV_RAM=y EXT2_FS=y \
+        SCSI_SAS_LIBSAS=m SCSI_SAS_ATA=y SCSI_AIC94XX=m SCSI_MVSAS=m SCSI_PM8001=m; do
+        expect_line "$config" "CONFIG_$option"
+    done
     expect_line "$config" 'CONFIG_BLOCK=y'
     expect_line "$config" 'CONFIG_CRYPTO=y'
     expect_line "$config" 'CONFIG_F2FS_FS=y'
@@ -434,3 +438,72 @@ fi
 printf 'PASS: PXEOS 内核与 ARM64 配置契约。\n'
 )
 # ===== 原脚本结束：tests/pxeos_kernel_config_regression.sh =====
+
+(
+# Exercise real packaging helpers with a synthetic modules_install tree.
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+source "$root/kernel_modules.sh"
+tmp=$(mktemp -d)
+trap 'rm -rf -- "$tmp"' EXIT
+PROJECT_DIRECTORY="$tmp/project"
+buildPath="$tmp"
+KERNEL_VERSION=6.18.59
+PXEOS_BUILD_VERSION=Local-261115-0800
+mkdir -p "$PROJECT_DIRECTORY"/{configs,patch/kernel,KernelPackages}
+cp -- "$root/configs/kernelx64.config" "$PROJECT_DIRECTORY/configs/"
+id=$(rootpxe_modules_build_id x64)
+release="$KERNEL_VERSION-pxeos-$id-000000000001"
+stage="$tmp/install"
+modules="$stage/lib/modules/$release"
+mkdir -p -- "$modules"
+printf 'kernel/drivers/ata/libata.ko\nkernel/drivers/ata/ahci.ko\nkernel/drivers/scsi/libsas/libsas.ko\n' >"$modules/modules.order"
+printf 'fixture\n' >"$modules/modules.dep.bin"
+printf 'fixture\n' >"$modules/modules.alias.bin"
+ln -s /host-build-must-not-leak "$modules/build"
+ln -s /host-source-must-not-leak "$modules/source"
+
+if rootpxe_modules_extract x64 "$tmp/overlay" 2>"$tmp/error"; then exit 1; fi
+grep -Fq 'Missing PXEOS kernel module package' "$tmp/error"
+package="$tmp/kernel-modules/x64.tar.gz"
+for missing in modules.dep.bin ahci libsas; do
+    mv "$modules/modules.order" "$modules/order.original"
+    if [[ $missing == modules.dep.bin ]]; then
+        cp "$modules/order.original" "$modules/modules.order"
+        mv "$modules/modules.dep.bin" "$modules/dep.original"
+    else
+        grep -vF "/$missing.ko" "$modules/order.original" >"$modules/modules.order"
+    fi
+    if rootpxe_modules_package x64 "$id" "$release" "$stage" 2>"$tmp/error"; then exit 1; fi
+    [[ ! -e $package ]]
+    mv "$modules/order.original" "$modules/modules.order"
+    if [[ -f $modules/dep.original ]]; then mv "$modules/dep.original" "$modules/modules.dep.bin"; fi
+done
+if (tar() { return 1; }; rootpxe_modules_package x64 "$id" "$release" "$stage"); then exit 1; fi
+[[ ! -e $package ]]
+rootpxe_modules_package x64 "$id" "$release" "$stage"
+rootpxe_modules_extract x64 "$tmp/overlay"
+[[ $(<"$tmp/overlay/etc/pxeos-storage-kernel") == "$release" ]]
+[[ $(<"$tmp/overlay/etc/modprobe.d/pxeos-storage.conf") == $'blacklist libata\nblacklist ahci\nblacklist libsas' ]]
+[[ ! -L $tmp/overlay/lib/modules/$release/build && ! -L $tmp/overlay/lib/modules/$release/source ]]
+PXEOS_BUILD_VERSION=Local-261115-0801
+if rootpxe_modules_extract x64 "$tmp/overlay" 2>"$tmp/error"; then exit 1; fi
+grep -Fq 'does not match this x64 build' "$tmp/error"
+PXEOS_BUILD_VERSION=Local-261115-0800
+printf 'changed patch\n' >"$PROJECT_DIRECTORY/patch/kernel/test.patch"
+if rootpxe_modules_extract x64 "$tmp/overlay" 2>"$tmp/error"; then exit 1; fi
+grep -Fq 'does not match this x64 build' "$tmp/error"
+
+for channel in release beta; do
+    for arch in x64 x86 arm64; do
+        workflow="$root/.github/workflows/$channel.yml"
+        producer=$(sed -n "/^  build_kernel_$arch:/,/^  build_[a-z0-9_]*:/p" "$workflow")
+        consumer=$(sed -n "/^  build_initrd_$arch:/,/^  [a-z0-9_]*:/p" "$workflow")
+        grep -Fq "name: kernel-modules-$arch" <<<"$producer"
+        grep -Fq "path: kernel-modules/$arch.tar.gz" <<<"$producer"
+        grep -Fq "needs: [release_metadata, download_filesystem_packages, build_kernel_$arch]" <<<"$consumer"
+        grep -Fq "name: kernel-modules-$arch" <<<"$consumer"
+    done
+done
+printf 'PASS: PXEOS 模块包的版本配套、自动加载策略及构建依赖。\n'
+)

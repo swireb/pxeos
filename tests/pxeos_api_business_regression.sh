@@ -1446,7 +1446,7 @@ unset originalSchemaFile rootpxe_resolved_layout_file fixed_size_partitions sche
 
 # Windows 名称重试与 Cloud-init 重试都不得重写分区。
 resume_script=$tmp/resume.sh
-awk '/^findHDDInfo$/{on=1} on' "$download" | sed -e "s|/bin/pxeos.imgcomplete|$tmp/pxeos.imgcomplete|g" >"$resume_script"
+awk '/^findHDDInfo([[:blank:]]|$)/{on=1} on' "$download" | sed -e "s|/bin/pxeos.imgcomplete|$tmp/pxeos.imgcomplete|g" >"$resume_script"
 printf '%s\n' 'printf "%s\n" complete >>"$RESUME_TRACE"' >"$tmp/pxeos.imgcomplete"
 RESUME_TRACE=$tmp/resume-trace; export RESUME_TRACE
 findHDDInfo(){ hd=/dev/mock2; disks=$hd; }

@@ -132,6 +132,11 @@ if [[ $mode == manreg ]]; then
     fi
 fi
 
+if ! pxeos-storage-probe wait; then
+    pxeos_init_message ERROR 'Storage probe incomplete. PXEOS remains available.'
+    exit 75
+fi
+
 if [[ $mdraid == true ]]; then
     mdadm --auto-detect
     mdadm --assemble --scan

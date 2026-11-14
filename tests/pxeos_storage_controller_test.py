@@ -63,7 +63,7 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
             checkin.write_text(checkin.read_text() + "\ntype=down; img=fixture; imgType=mps; imgFormat=5; imgPartitionType=all; nombr=1; taskid=41; task_token=fixture; mac=fixture; web=http://fixture/; rootpxe_partclone_progress_run_id=fixture\n")
             finish = path / "finish.sh"
             finish.write_text((overlay / "bin/pxeos.imgcomplete").read_text())
-            source = (overlay / "bin/pxeos.download").read_text()
+            source = (overlay / "bin/pxeos.download").read_text().replace("pxeos-storage-probe wait", ":")
             source = source.replace("/bin/pxeos.checkmount", str(mount)).replace("/bin/pxeos.checkimgvar", str(mount)).replace("/bin/pxeos.inventory", str(mount))
 
             source = source.replace("/usr/share/pxeos/lib/funcs.sh", str(funcs)).replace("/bin/pxeos.checkin", str(checkin)).replace("/bin/pxeos.mount", str(mount))
@@ -88,7 +88,7 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
                 checkin.write_text(f"printf checkin >>'{path / 'calls'}'\nrootpxe_storage_only=yes; rootpxe_restart_after_cleanup={restart}\n")
                 mount = path / "mount.sh"
                 mount.write_text(":\n")
-                source = (overlay / "bin/pxeos.download").read_text().split("rootpxe_download_cleanup_initialization_private()", 1)[0]
+                source = (overlay / "bin/pxeos.download").read_text().replace("pxeos-storage-probe wait", ":").split("rootpxe_download_cleanup_initialization_private()", 1)[0]
                 source = source.replace("/usr/share/pxeos/lib/funcs.sh", str(funcs)).replace("/bin/pxeos.checkin", str(checkin)).replace("/bin/pxeos.mount", str(mount)).replace("/tmp/pxeos.storage-recovery-only", str(path / "marker"))
                 source += "exit 92\n"
                 script = path / "download.sh"
@@ -247,7 +247,7 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
                 checkin.write_text("rootpxe_storage_only=yes\n")
                 mount = path / "mount.sh"
                 mount.write_text(":\n")
-                prefix = (overlay / "bin" / entry).read_text().split("\nfi", 1)[0] + "\nfi\nexit 99\n"
+                prefix = (overlay / "bin" / entry).read_text().replace("pxeos-storage-probe wait", ":").split("\nfi", 1)[0] + "\nfi\nexit 99\n"
                 prefix = prefix.replace("/usr/share/pxeos/lib/funcs.sh", str(controller))
                 prefix = prefix.replace("/bin/pxeos.checkin", str(checkin)).replace("/bin/pxeos.mount", str(mount))
                 script = path / entry
@@ -291,7 +291,7 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
 
     def test_storage_only_marker_skips_power_only_after_success(self):
         overlay = LIB.parents[4]
-        source = (overlay / "etc/init.d/S99pxeos").read_text()
+        source = (overlay / "etc/init.d/S99pxeos").read_text().replace("pxeos-storage-probe wait", ":")
         for status, action in ((0, "shutdown"), (2, "shutdown"), (2, "reboot")):
             with self.subTest(status=status, action=action), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory)

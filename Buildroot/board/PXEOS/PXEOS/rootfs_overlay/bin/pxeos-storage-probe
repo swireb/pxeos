@@ -1,0 +1,153 @@
+#!/bin/bash
+
+state_dir=/run/pxeos-storage
+wait_seconds=30
+
+storage_disk_snapshot() {
+    local disk path dev size seq
+    for disk in /sys/class/block/*; do
+        [[ -e $disk && ! -e $disk/partition ]] || continue
+        path=$(readlink -f -- "$disk") || return 1
+        [[ $path != */virtual/block/* ]] || continue
+        IFS= read -r dev <"$disk/dev" || return 1
+        # Match the physical major numbers used by the PXEOS disk selector.
+        case ${dev%%:*} in
+            3|8|179|202|253|259) ;;
+            *) continue ;;
+        esac
+        IFS= read -r size <"$disk/size" || return 1
+        [[ $size =~ ^[0-9]+$ ]] || return 1
+        [[ $size != 0 ]] || continue
+        IFS= read -r seq <"$disk/diskseq" || return 1
+        [[ $seq =~ ^[0-9]+$ ]] || return 1
+        printf '%s\t%s\n' "$path" "$seq"
+    done
+}
+
+storage_no_terminal_error() {
+    local kernel_log terminal_error
+    if ! kernel_log=$(dmesg); then
+        echo 'Unable to read storage probe diagnostics from the kernel.'
+        return 1
+    fi
+    terminal_error=$(grep -Em1 '(^|[[:space:]])ata[0-9]+([.][0-9]+)?: (EH pending after [0-9]+ tries, giving up|reset failed, giving up|disable device)[[:space:]]*$' <<<"$kernel_log")
+    if [[ -n $terminal_error ]]; then
+        printf 'ATA error recovery failed: %s\n' "$terminal_error"
+        return 1
+    fi
+}
+
+probe_storage() {
+    local kernel module_path module modalias aliases sysfs_device
+    local -A matching=([libata]=1) delayed=()
+    local -a controllers=()
+
+    if ! IFS= read -r kernel </etc/pxeos-storage-kernel; then
+        echo 'Storage module package is missing.'
+        return 1
+    fi
+    if [[ $kernel != "$(uname -r)" ]]; then
+        echo 'Storage module package does not match the running kernel version.'
+        return 1
+    fi
+    module_path="/lib/modules/$kernel"
+    if [[ ! -s $module_path/pxeos-storage.modules || ! -r $module_path/modules.dep.bin ||
+          ! -r $module_path/modules.alias.bin ]]; then
+        echo 'Storage module list or dependency index is missing.'
+        return 1
+    fi
+
+    # Resolve actual hardware before loading modules. Some legacy drivers
+    # return ENODEV when explicitly loaded without matching hardware.
+    while IFS= read -r module; do
+        delayed[$module]=1
+    done <"$module_path/pxeos-storage.modules"
+    for sysfs_device in /sys/bus/*/devices/*/modalias; do
+        [[ -e $sysfs_device ]] || continue
+        if ! IFS= read -r modalias <"$sysfs_device"; then
+            [[ ! -e $sysfs_device ]] && continue
+            echo 'Unable to read the storage driver matching information.'
+            return 1
+        fi
+        [[ -n $modalias ]] || continue
+        aliases=$(modprobe -R "$modalias" 2>/dev/null) || continue
+        for module in $aliases; do
+            module=${module//-/_}
+            if [[ ${delayed[$module]:-} ]]; then
+                matching[$module]=1
+                controllers+=("${sysfs_device%/modalias}")
+            fi
+        done
+    done
+    while IFS= read -r module; do
+        [[ ${matching[$module]+loaded} ]] || continue
+        if ! modprobe "$module" >/dev/null; then
+            printf 'Failed to load storage module %s.\n' "$module"
+            return 1
+        fi
+    done <"$module_path/pxeos-storage.modules"
+
+    if ! udevadm settle --timeout=15 >/dev/null; then
+        echo 'Storage device events did not settle in udev.'
+        return 1
+    fi
+
+    for sysfs_device in "${controllers[@]}"; do
+        if [[ ! -L $sysfs_device/driver ]]; then
+            printf 'No driver bound to discovered storage controller %s.\n' "$sysfs_device"
+            return 1
+        fi
+    done
+
+    storage_no_terminal_error || return 1
+    if ! storage_disk_snapshot >"$state_dir/disks"; then
+        echo 'Unable to record the discovered physical disks.'
+        return 1
+    fi
+}
+
+case ${1:-} in
+    start)
+        umask 077
+        if ! mkdir -- "$state_dir" 2>/dev/null; then
+            [[ -d $state_dir ]] && exit 0
+            exit 1
+        fi
+        (
+            if probe_storage >"$state_dir/error.tmp"; then
+                printf 'ready\n' >"$state_dir/result.tmp"
+            else
+                cat "$state_dir/error.tmp" >"$state_dir/result.tmp"
+            fi
+            mv -f -- "$state_dir/result.tmp" "$state_dir/result"
+        ) </dev/null >"$state_dir/probe.log" 2>&1 &
+        ;;
+    wait|check)
+        if [[ ! -d $state_dir ]]; then
+            echo 'Storage probe has not started.' >&2
+            exit 75
+        fi
+        # Only poll a RAM-backed result file. A thread stuck waiting on the
+        # storage controller may never respond to a signal or to wait(2).
+        deadline=$((SECONDS + wait_seconds))
+        while [[ $1 == wait && ! -r $state_dir/result && $SECONDS -lt $deadline ]]; do
+            sleep 1
+        done
+        if [[ ! -r $state_dir/result ]]; then
+            echo 'Storage probe timed out. Check the kernel log and retry after the probe finishes.' >&2
+            exit 75
+        fi
+        result=$(<"$state_dir/result")
+        if [[ $result == ready ]]; then
+            storage_no_terminal_error >&2 || exit 75
+            if snapshot=$(storage_disk_snapshot) && [[ $snapshot == "$(<"$state_dir/disks")" ]]; then
+                exit 0
+            fi
+            echo 'The physical disk set changed after storage discovery. Stop the task and inspect the disks.' >&2
+            exit 75
+        fi
+        printf '%s\n' "${result:-Storage probe failed.}" >&2
+        exit 75
+        ;;
+    *) exit 2 ;;
+esac

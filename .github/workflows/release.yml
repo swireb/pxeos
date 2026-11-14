@@ -93,6 +93,14 @@ jobs:
           path: dist
           retention-days: 1
 
+      - name: Save kernel modules for initrd
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernel-modules-arm64
+          path: kernel-modules/arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
   build_kernel_x86:
     name: 构建内核 · I386
     needs: release_metadata
@@ -116,6 +124,14 @@ jobs:
         with:
           name: distribution-files-kernel-x86
           path: dist
+          retention-days: 1
+
+      - name: Save kernel modules for initrd
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernel-modules-x86
+          path: kernel-modules/x86.tar.gz
+          if-no-files-found: error
           retention-days: 1
 
   build_kernel_x64:
@@ -143,9 +159,17 @@ jobs:
           path: dist
           retention-days: 1
 
+      - name: Save kernel modules for initrd
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernel-modules-x64
+          path: kernel-modules/x64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
   build_initrd_arm64:
     name: 构建根文件系统 · ARM64
-    needs: [release_metadata, download_filesystem_packages]
+    needs: [release_metadata, download_filesystem_packages, build_kernel_arm64]
     runs-on: ubuntu-24.04
     env:
       PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
@@ -153,6 +177,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+      - name: Download matching kernel modules
+        uses: actions/download-artifact@v8
+        with:
+          name: kernel-modules-arm64
+          path: kernel-modules
+
       - name: Restore Buildroot DL cache
         uses: actions/cache@v5
         with:
@@ -191,7 +221,7 @@ jobs:
 
   build_initrd_x86:
     name: 构建根文件系统 · I386
-    needs: [release_metadata, download_filesystem_packages]
+    needs: [release_metadata, download_filesystem_packages, build_kernel_x86]
     runs-on: ubuntu-24.04
     env:
       PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
@@ -199,6 +229,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+      - name: Download matching kernel modules
+        uses: actions/download-artifact@v8
+        with:
+          name: kernel-modules-x86
+          path: kernel-modules
+
       - name: Restore Buildroot DL cache
         uses: actions/cache@v5
         with:
@@ -237,7 +273,7 @@ jobs:
 
   build_initrd_x64:
     name: 构建根文件系统 · AMD64
-    needs: [release_metadata, download_filesystem_packages]
+    needs: [release_metadata, download_filesystem_packages, build_kernel_x64]
     runs-on: ubuntu-24.04
     env:
       PXEOS_BUILD_VERSION: ${{ needs.release_metadata.outputs.tag_name }}
@@ -245,6 +281,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+      - name: Download matching kernel modules
+        uses: actions/download-artifact@v8
+        with:
+          name: kernel-modules-x64
+          path: kernel-modules
+
       - name: Restore Buildroot DL cache
         uses: actions/cache@v5
         with:

@@ -10,3 +10,5 @@ buildroot*.tar.xz
 linux-*.tar.xz
 # 本地内核构建克隆的固件仓库为可再生运行数据。
 /linux-firmware/
+
+/kernel-modules/

@@ -210,7 +210,7 @@ class BuildVersionTests(unittest.TestCase):
             + 'rootpxe_build_stamp_version() { printf "unexpected stamp\\n"; }\n'
             + 'make() { printf "unexpected build\\n"; return 99; }\n'
             + f'PROJECT_DIRECTORY={shlex.quote(bash_path(ROOT))}\n'
-            + 'BUILDROOT_VERSION=2026.02.1\n'
+            + 'BUILDROOT_VERSION=2026.02.1\nfsDownloadOnly=y\n'
             + f'cd {shlex.quote(bash_path(self.workdir))}\nif buildFilesystem x64; then rc=0; else rc=$?; fi; exit "$rc"\n',
             PXEOS_BUILD_VERSION="Release-261014-0101",
         )

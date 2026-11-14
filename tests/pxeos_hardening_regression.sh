@@ -280,6 +280,7 @@ rootpxe_disk_stable_identity(){ case "$1" in /dev/first) printf '%s\n' ID_FIRST;
 disks='/dev/first /dev/second'
 rootpxe_plan_mpa_disk_permits "$mpa_image" || fail mpa-plan-rejected
 [[ ${rootpxe_mpa_permit_is_batch:-} == yes && ${rootpxe_mpa_permit_args[*]} == 'ID_FIRST deploy_write ID_SECOND deploy_write' ]] || fail mpa-plan-not-per-disk
+pxeos-storage-probe() { [[ $1 == check ]]; }
 if getHardDisk; then fail mpa-fdrive-outside-mapping-accepted; fi
 fdrive=
 getHardDisk || fail mpa-mapping-rejected

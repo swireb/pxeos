@@ -29,7 +29,7 @@ cp "$(dirname "$funcs")/cloud-init.sh" "$tmp/cloud-init.sh"
 cp "$(dirname "$funcs")/linux-hostname.sh" "$tmp/linux-hostname.sh"
 cp "$(dirname "$funcs")/uefi-boot.sh" "$tmp/uefi-boot.sh"
 download_functions="$tmp/download-functions.sh"
-awk '/^preparePartitions\(\)/,/^findHDDInfo$/{ if ($0 ~ /^findHDDInfo$/) exit; print }' "$download" >"$download_functions"
+awk '/^preparePartitions\(\)/,/^findHDDInfo([[:blank:]]|$)/{ if ($0 ~ /^findHDDInfo([[:blank:]]|$)/) exit; print }' "$download" >"$download_functions"
 set +u; source "$test_funcs"; set -u
 source "$(dirname "$funcs")/deployment-identity.sh"
 source "$download_functions"
@@ -39,6 +39,7 @@ imgType=mpa imagePath="$tmp/image" osid=1 imgPartitionType=all disks='/dev/diskA
 rootpxe_mpa_permit_is_batch=yes
 mkdir "$imagePath"
 rootpxe_console_message(){ :; }
+rootpxe_stage(){ :; }
 rootpxe_activate_disk_permit_binding(){ printf 'activate:%s:%s\n' "$1" "$2" >>"$events"; }
 restorePartitionTablesAndBootLoaders(){ printf 'table:%s:%s\n' "$1" "$2" >>"$events"; }
 runPartprobe(){ printf 'partprobe:%s\n' "$1" >>"$events"; }
@@ -95,7 +96,7 @@ awk -v funcs="$test_funcs" -v stubs="$entry_stubs" '
   /^\. \/usr\/share\/pxeos\/lib\/funcs\.sh( \|\| exit 1)?$/ { print ". \"" funcs "\" || exit 1"; print ". \"" stubs "\""; next }
   /^\. \/bin\/pxeos\.(checkin|mount|checkmount|checkimgvar)$/ { print ":"; next }
   /^\. \/bin\/pxeos\.inventory / { print ":"; next }
-  /^findHDDInfo$/ { print "hd=/dev/diskA; disks=\"/dev/diskA /dev/diskB\""; next }
+  /^findHDDInfo([[:blank:]]|$)/ { print "hd=/dev/diskA; disks=\"/dev/diskA /dev/diskB\""; next }
   { print }
 ' "$download" >"$entry"
 : >"$events"
@@ -104,6 +105,7 @@ awk -v funcs="$test_funcs" -v stubs="$entry_stubs" '
     type=down imgType=mpa imgPartitionType=all imgFormat=0 imgLegacy=0
     img=fixture imagePath="$tmp/image" osid=0 nombr=0 mac=000c2958c550 taskid=1 task_token=0123456789abcdef
     web=https://test/ originalSchemaFile= rootpxe_resolved_lvm_layout_file=
+    pxeos-storage-probe() { [[ $1 == wait ]]; }
     source "$entry"
 )
 expected_entry=$'preflight\nplan\nwait-full-batch\nverify:/dev/diskA\nverify:/dev/diskB\nactivate:/dev/diskA\ntable:/dev/diskA\nactivate:/dev/diskB\ntable:/dev/diskB\npayload:/dev/diskA\npayload:/dev/diskB\ncomplete'

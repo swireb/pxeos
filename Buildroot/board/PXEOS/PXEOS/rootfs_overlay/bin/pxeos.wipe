@@ -1,4 +1,5 @@
 #!/bin/bash
+pxeos-storage-probe wait || exit 75
 . /usr/share/pxeos/lib/funcs.sh || exit 1
 clearScreen
 displayBanner
@@ -6,7 +7,7 @@ disks=""
 disk=""
 hd=""
 [[ -z $seconds ]] && seconds=60
-getHardDisk
+getHardDisk || exit $?
 rootpxe_console_message WARN 'The following hard disk will be erased.'
 rootpxe_console_message WARN "Target disk: $hd"
 rootpxe_console_message WARN "Power off this computer within $seconds seconds to cancel."
@@ -18,20 +19,24 @@ case $wipemode in
     nvme)
         rootpxe_console_message INFO "Starting NVMe format wipe for $hd."
         usleep 10000000
+        pxeos-storage-probe check || exit 75
         nvme format $hd --force
         ;;
     full)
         rootpxe_console_message INFO "Starting full shred wipe for $hd."
         usleep 10000000
+        pxeos-storage-probe check || exit 75
         shred -f -v -z -n 3 "$hd"
         ;;
     normal)
         rootpxe_console_message INFO "Starting normal shred wipe for $hd."
         usleep 10000000
+        pxeos-storage-probe check || exit 75
         shred -f -v -n 1 "$hd"
         ;;
     fast|fastwipe)
         rootpxe_console_message INFO "Writing zeros to the start of $hd."
+        pxeos-storage-probe check || exit 75
         dd if=/dev/zero of="$hd" bs=512 count=100000
         ;;
 esac

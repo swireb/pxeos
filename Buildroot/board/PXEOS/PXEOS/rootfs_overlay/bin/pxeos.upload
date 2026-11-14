@@ -1,4 +1,5 @@
 #!/bin/bash
+pxeos-storage-probe wait || exit 75
 . /usr/share/pxeos/lib/funcs.sh || exit 1
 rootpxe_task_log_initialize || printf '[WARN]  Task log: unavailable.\n' >&2
 . /bin/pxeos.checkin
@@ -34,7 +35,7 @@ trap 'rootpxe_upload_cleanup_session; exit 130' INT
 trap 'rootpxe_upload_cleanup_session; exit 143' TERM
 pxeos.statusreporter "$mac" "${pxeapi:-$web}" "$taskid" "$rootpxe_partclone_progress_run_id" partclone &
 statusReporter="$!"
-findHDDInfo
+findHDDInfo || exit $?
 rootpxe_capture_disks=()
 if [[ ${imgType:-} == mpa ]]; then
     for disk in $disks; do

@@ -456,9 +456,12 @@ done
 grep -Fq 'pxeos.debug' "$s99" || fail 'S99 未进入调试脚本'
 ! awk '/\[Yy\]\[Ee\]\[Ss\]\|\[Yy\]\)/, /^[[:space:]]*;;/ { print }' "$s99" | grep -Eq '(^|[[:space:]])pxeos([[:space:]]|$)|reboot|poweroff' || fail 'S99 调试分支进入正常任务或电源路径'
 
-for command in mdadm pxeos pxeos.debug poweroff reboot sleep loadkeys; do
+for command in mdadm pxeos pxeos.debug pxeos-storage-probe poweroff reboot sleep loadkeys; do
     cat >"$tmp/mock/$command" <<'EOF'
 #!/usr/bin/env bash
+if [[ ${0##*/} == pxeos-storage-probe ]]; then
+    exit "${PXEOS_S99_STORAGE_RC:-0}"
+fi
 printf '%s:%s\n' "$(basename "$0")" "$*" >>"$PXEOS_S99_LOG"
 case "$(basename "$0")" in
   pxeos) exit "${PXEOS_S99_PXEOS_RC:-0}" ;;
@@ -487,6 +490,14 @@ chmod +x "$tmp/S99pxeos"
 PXEOS_S99_LOG="$tmp/debug-s99.log" PATH="$tmp/mock:$PATH" \
     mdraid=true isdebug=yes bash "$tmp/S99pxeos"
 [[ $(<"$tmp/debug-s99.log") == 'pxeos.debug:' ]] || fail '调试模式执行了 RAID、正常任务或电源操作'
+
+# A blocked storage probe must leave the diagnostic environment running.
+: >"$tmp/blocked-s99.log"
+rc=0
+PXEOS_S99_LOG="$tmp/blocked-s99.log" PXEOS_S99_STORAGE_RC=75 PATH="$tmp/mock:$PATH" \
+    mdraid=true isdebug='' type=down bash "$tmp/S99pxeos" || rc=$?
+[[ $rc -eq 75 ]] || fail '等待存储探测失败后退出码错误'
+! grep -Eq '^(mdadm|pxeos|reboot|poweroff):' "$tmp/blocked-s99.log" || fail '存储异常时执行了任务或电源操作'
 
 run_normal_s99() {
     local name="$1"

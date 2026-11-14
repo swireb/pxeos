@@ -11,6 +11,7 @@ PROJECT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$PROJECT_DIRECTORY/dependencies.sh"
 source "$PROJECT_DIRECTORY/download_helpers.sh"
 source "$PROJECT_DIRECTORY/build_version.sh" || exit 1
+source "$PROJECT_DIRECTORY/kernel_modules.sh" || exit 1
 
 Usage() {
     echo -e "Usage: $0 [-knfvh?] [-a x64]"
@@ -352,6 +353,13 @@ rootpxe_build_seed_verified_sources() {
 
 function buildFilesystem() {
     local arch="$1" filesystem_config="$PROJECT_DIRECTORY/configs/fs$1.config"
+    local old_release module_overlay rootfs_overlay
+    if [[ ${fsDownloadOnly:-n} != y ]]; then
+        module_overlay="$buildPath/kernel-modules/overlay-$arch"
+        # A repeated filesystem build must not retain modules from an older kernel.
+        rm -rf -- "$module_overlay" || return 1
+        rootpxe_modules_extract "$arch" "$module_overlay" || return 1
+    fi
     local brURL="https://buildroot.org/downloads/buildroot-$BUILDROOT_VERSION.tar.xz"
     local archive="buildroot-$BUILDROOT_VERSION.tar.xz"
     echo "Preparing buildroot $BUILDROOT_VERSION on $arch build:"
@@ -425,24 +433,33 @@ function buildFilesystem() {
         fi
     fi
 
+    rootfs_overlay=$(sed -n 's/^BR2_ROOTFS_OVERLAY="\(.*\)"$/\1/p' .config) || return 1
+    # Buildroot interprets overlay names as a whitespace-separated list. Keep the
+    # generated entry relative to the Buildroot directory.
+    if [[ -r output/target/etc/pxeos-storage-kernel ]] &&
+       IFS= read -r old_release <output/target/etc/pxeos-storage-kernel &&
+       [[ $old_release =~ ^[[:alnum:].+_-]+-pxeos-[[:xdigit:]]{16}-[[:xdigit:]]{12}$ ]]; then
+        rm -rf -- "output/target/lib/modules/$old_release" || return 1
+    fi
+    local -a rootfs_args=("BR2_ROOTFS_OVERLAY=$rootfs_overlay ../kernel-modules/overlay-$arch")
     rootpxe_build_seed_verified_sources || return 1
 
     if [[ $verbose == "y" ]]; then
         case "${arch}" in
             x64)
-                make | tee "buildroot$arch.log"
+                make "${rootfs_args[@]}" | tee "buildroot$arch.log"
                 status=${PIPESTATUS[0]}
                 ;;
             x86)
-                make ARCH=i486 | tee "buildroot$arch.log"
+                make ARCH=i486 "${rootfs_args[@]}" | tee "buildroot$arch.log"
                 status=${PIPESTATUS[0]}
                 ;;
             arm64)
-                make ARCH=aarch64 CROSS_COMPILE=aarch64-linux-gnu- | tee "buildroot$arch.log"
+                make ARCH=aarch64 CROSS_COMPILE=aarch64-linux-gnu- "${rootfs_args[@]}" | tee "buildroot$arch.log"
                 status=${PIPESTATUS[0]}
                 ;;
             *)
-                make | tee "buildroot$arch.log"
+                make "${rootfs_args[@]}" | tee "buildroot$arch.log"
                 status=${PIPESTATUS[0]}
                 ;;
         esac
@@ -451,19 +468,19 @@ function buildFilesystem() {
         PING_LOOP_PID=$!
         case "${arch}" in
             x64)
-                make > "buildroot$arch.log" 2>&1
+                make "${rootfs_args[@]}" > "buildroot$arch.log" 2>&1
                 status=$?
                 ;;
             x86)
-                make ARCH=i486 > "buildroot$arch.log" 2>&1
+                make ARCH=i486 "${rootfs_args[@]}" > "buildroot$arch.log" 2>&1
                 status=$?
                 ;;
             arm64)
-                make ARCH=aarch64 CROSS_COMPILE=aarch64-linux-gnu- > "buildroot$arch.log" 2>&1
+                make ARCH=aarch64 CROSS_COMPILE=aarch64-linux-gnu- "${rootfs_args[@]}" > "buildroot$arch.log" 2>&1
                 status=$?
                 ;;
             *)
-                make > "buildroot$arch.log" 2>&1
+                make "${rootfs_args[@]}" > "buildroot$arch.log" 2>&1
                 status=$?
                 ;;
         esac
@@ -496,6 +513,7 @@ function buildFilesystem() {
 
 function buildKernel() {
     local arch="$1"
+    rm -f -- "$buildPath/kernel-modules/$arch.tar.gz" || return 1
     local kernelCDNURL="https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_VERSION:0:1}.x/linux-$KERNEL_VERSION.tar.xz"
     local kernelFallbackURL="https://www.kernel.org/pub/linux/kernel/v${KERNEL_VERSION:0:1}.x/linux-$KERNEL_VERSION.tar.xz"
     local archive="linux-$KERNEL_VERSION.tar.xz"
@@ -534,8 +552,8 @@ function buildKernel() {
 
     dots "Preparing kernel source"
     cd "kernelsource$arch" || { echo "Couldn't change directory to kernelsource$arch"; exit 2; }
-    make mrproper
-    cp "$PROJECT_DIRECTORY/configs/kernel$arch.config" .config
+    make mrproper || return 1
+    cp "$PROJECT_DIRECTORY/configs/kernel$arch.config" .config || return 1
     echo "Done"
     if [[ -f $PROJECT_DIRECTORY/patch/kernel/linux.patch ]]; then
         dots " * Applying patch"
@@ -547,92 +565,41 @@ function buildKernel() {
     else
         echo " * WARNING: Did not find a patch file building vanilla kernel without patches!"
     fi
+    local image_target=bzImage build_id build_nonce release module_stage
+    local -a kernel_args=()
+    case $arch in
+        x86) kernel_args=(ARCH=i386) ;;
+        arm64) kernel_args=(ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-); image_target=Image ;;
+    esac
     if [[ $confirm != n ]]; then
         read -rp "We are ready to build. Would you like to edit the config file [y|n]?" config
         if [[ $config == y ]]; then
-            case "${arch}" in
-                x64)
-                    make menuconfig
-                    ;;
-                x86)
-                    make ARCH=i386 menuconfig
-                    ;;
-                arm64)
-                    make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- menuconfig
-                    ;;
-                *)
-                    make menuconfig
-                    ;;
-            esac
-        else
-            echo "Ok, running make oldconfig instead to ensure the config is clean."
-            case "${arch}" in
-                x64)
-                    make oldconfig
-                    ;;
-                x86)
-                    make ARCH=i386 oldconfig
-                    ;;
-                arm64)
-                    make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- oldconfig
-                    ;;
-                *)
-                    make oldconfig
-                    ;;
-            esac
+            make "${kernel_args[@]}" menuconfig || return 1
         fi
         read -rp "We are ready to build are you [y|n]?" ready
-        if [[ $ready == y ]]; then
-            echo "This make take a long time. Get some coffee, you'll be here a while!"
-            case "${arch}" in
-                x64)
-                    make -j "$(nproc)" bzImage
-                    status=$?
-                    ;;
-                x86)
-                    make ARCH=i386 -j "$(nproc)" bzImage
-                    status=$?
-                    ;;
-                arm64)
-                    make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j "$(nproc)" Image
-                    status=$?
-                    ;;
-                *)
-                    make -j "$(nproc)" bzImage
-                    status=$?
-                    ;;
-            esac
-        else
-            echo "Nothing to build!? Skipping."
+        if [[ $ready != y ]]; then
             cd ..
-            return
+            return 1
         fi
-        [[ $status -gt 0 ]] && exit $status
-    else
-        case "${arch}" in
-            x64)
-                make oldconfig
-                make -j "$(nproc)" bzImage
-                status=$?
-                ;;
-            x86)
-                make ARCH=i386 oldconfig
-                make ARCH=i386 -j "$(nproc)" bzImage
-                status=$?
-                ;;
-            arm64)
-                make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- oldconfig
-                make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j "$(nproc)" Image
-                status=$?
-                ;;
-            *)
-                make oldconfig
-                make -j "$(nproc)" bzImage
-                status=$?
-                ;;
-        esac
     fi
-    [[ $status -gt 0 ]] && exit $status
+    build_id=$(rootpxe_modules_build_id "$arch") || return 1
+    build_nonce=$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n') || return 1
+    [[ $build_nonce =~ ^[0-9a-f]{12}$ ]] || return 1
+    scripts/config --set-str LOCALVERSION "" --disable LOCALVERSION_AUTO || return 1
+    kernel_args+=("LOCALVERSION=-pxeos-$build_id-$build_nonce")
+    make "${kernel_args[@]}" olddefconfig || return 1
+    for setting in MODULES=y ATA=m SATA_AHCI=m SATA_AHCI_PLATFORM=m ATA_PIIX=m \
+        SCSI=y BLK_DEV_SD=y USB_STORAGE=y BLK_DEV_NVME=y BLK_DEV_RAM=y EXT2_FS=y \
+        SCSI_SAS_LIBSAS=m SCSI_SAS_ATA=y SCSI_AIC94XX=m SCSI_MVSAS=m SCSI_PM8001=m; do
+        if ! grep -Fqx "CONFIG_$setting" .config; then
+            printf 'Unexpected kernel configuration for %s: CONFIG_%s is required.\n' "$arch" "$setting" >&2
+            return 1
+        fi
+    done
+    make "${kernel_args[@]}" -j "$(nproc)" "$image_target" modules || return 1
+    release=$(make "${kernel_args[@]}" -s kernelrelease) || return 1
+    module_stage="$PWD/pxeos-modules"
+    make "${kernel_args[@]}" INSTALL_MOD_PATH="$module_stage" INSTALL_MOD_STRIP=1 modules_install || return 1
     cd ..
     mkdir -p dist
     cd dist || { echo "Couldn't change directory to dist"; exit 1; }
@@ -654,6 +621,7 @@ function buildKernel() {
     cp "$compiledfile" "$kernelfile" || { cd ..; return 1; }
     sha256sum "$kernelfile" > "${kernelfile}.sha256" || { cd ..; return 1; }
     cd ..
+    rootpxe_modules_package "$arch" "$build_id" "$release" "$module_stage"
 }
 
 function dots() {
@@ -690,10 +658,10 @@ function addKernelPackages() {
 
 for buildArch in $arch
 do
-    if [[ -z $buildKernelOnly ]]; then
-        buildFilesystem "$buildArch" || exit $?
-    fi
     if [[ -z $buildFSOnly ]]; then
         buildKernel "$buildArch" || exit $?
+    fi
+    if [[ -z $buildKernelOnly ]]; then
+        buildFilesystem "$buildArch" || exit $?
     fi
 done

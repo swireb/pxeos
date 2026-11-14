@@ -1,11 +1,12 @@
 #!/bin/bash
+pxeos-storage-probe wait || exit 75
 . /usr/share/pxeos/lib/funcs.sh || exit 1
 clearScreen
 displayBanner
 disks=""
 disk=""
 hd=""
-getHardDisk
+getHardDisk || exit $?
 [[ -z $winuser ]] && handleError "Invalid User Account ($0)\n   Args Passed: $*"
 blCont=0
 blStop=0

@@ -124,7 +124,7 @@ done
 # operations. Its permit/layout/plan branches must precede the shared copy hook.
 download="$overlay/bin/pxeos.download"
 sed -n '/^rootpxe_stage "${resumeStage:-init}"/p' "$download" >"$tmp/download-body.sh"
-awk '/^findHDDInfo$/ {copy=1} copy' "$download" | sed "s#/bin/pxeos.imgcomplete#$tmp/finish.sh#g" >>"$tmp/download-body.sh"
+awk '/^findHDDInfo([[:blank:]]|$)/ {copy=1} copy' "$download" | sed "s#/bin/pxeos.imgcomplete#$tmp/finish.sh#g" >>"$tmp/download-body.sh"
 findHDDInfo(){ hd=/dev/fixture; disks=/dev/fixture; }
 rootpxe_require_unused_target_disks(){ printf 'target-check\n' >>"$trace"; }
 rootpxe_require_single_disk_layout_metadata(){ :; }

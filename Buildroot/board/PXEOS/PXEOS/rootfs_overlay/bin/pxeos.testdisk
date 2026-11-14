@@ -1,4 +1,5 @@
 #!/bin/bash
+pxeos-storage-probe wait || exit 75
 . /usr/share/pxeos/lib/funcs.sh || exit 1
 clearScreen
 displayBanner
@@ -7,7 +8,7 @@ disk=""
 hd=""
 parts=""
 part=""
-getHardDisk "true"
+getHardDisk "true" || exit $?
 [[ -z $disks ]] && handleError "No Hard disks not found! ($0)\n   Args Passed: $*"
 for disk in $disks; do
 rootpxe_console_message INFO "Starting TestDisk on $disk."

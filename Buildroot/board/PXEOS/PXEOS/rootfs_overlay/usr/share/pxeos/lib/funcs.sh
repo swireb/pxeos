@@ -5813,15 +5813,23 @@ resolve_path() {
 getHardDisk() {
     hd=""
     disks=""
+    pxeos-storage-probe check || return 75
+    local rc
+    rootpxe_select_hard_disks "$@" && pxeos-storage-probe check && return 0
+    rc=$?
+    hd=""
+    disks=""
+    return "$rc"
+}
 
+rootpxe_select_hard_disks() {
     # Get valid devices (filter out 0B disks) once, keeping lsblk enumeration order
     local devs
     devs=$(lsblk -dpno KNAME,SIZE -I 3,8,9,179,202,253,259 | awk '$2 != "0B" && !seen[$1]++ { print $1 }')
 
     if [[ -n ${fdrive:-} && ( ${imgType:-} != mpa || ${type:-} != down ) ]]; then
-        local found_match=0
         for spec in ${fdrive//,/ }; do
-            local spec_resolved spec_norm spec_normalized matched
+            local spec_resolved spec_normalized matched
             spec_resolved=$(resolve_path "$spec")
             spec_normalized=$(normalize "$spec")
             matched=0
@@ -5850,7 +5858,6 @@ getHardDisk() {
                       "x$spec_normalized" == "x$uuid" ]]; then
                     [[ -n $isdebug ]] && debugEcho "Matched spec $spec to device $dev (size=$size, serial=$serial, wwn=$wwn, uuid=$uuid)."
                     matched=1
-                    found_match=1
                     disks="$disks $dev"
                     # remove matched dev from the pool
                     devs="$(echo " $devs " | sed "s# $dev # #g; s/^ *//; s/ *$//")"
@@ -5858,12 +5865,14 @@ getHardDisk() {
                 fi
             done
 
-            [[ $matched -eq 0 ]] && rootpxe_console_message WARN "Drive spec $spec does not match any available device." >&2
+            if [[ $matched -eq 0 ]]; then
+                rootpxe_console_message ERROR "Drive spec $spec does not match any available device." >&2
+                return 75
+            fi
         done
 
-        [[ $found_match -eq 0 ]] && handleError "Fatal: No valid drives found for 'Host Primary Disk'='$fdrive'."
-
         disks=$(echo "$disks" | xargs)
+        [[ -n $disks ]] || return 75
 
     elif [[ "x$imgType" == "xmpa" && "x$type" == "xdown" ]]; then
         # mpa target selection is a positional image-to-device binding, never
@@ -5947,7 +5956,7 @@ getHardDisk() {
 # Finds the hard drive info and set's up the type
 findHDDInfo() {
     dots "Looking for disk device(s)"
-    getHardDisk
+    getHardDisk || return $?
     if [[ -z $hd || -z $disks ]]; then
         echo "Failed"
         debugPause

@@ -1,4 +1,5 @@
 #!/bin/bash
+pxeos-storage-probe wait || exit 75
 . /usr/share/pxeos/lib/funcs.sh || exit 1
 . /bin/pxeos.checkin
 
@@ -132,7 +133,7 @@ debugPause
 echo "Done"
 debugPause
 dots "Getting disks to scan"
-getHardDisk 'true'
+getHardDisk 'true' || exit $?
 if [[ -z $disks ]]; then
     echo "Failed"
     debugPause

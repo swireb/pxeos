@@ -486,6 +486,10 @@ cat >"$tmp/mock-s99/sleep" <<'EOF'
 #!/usr/bin/env bash
 :
 EOF
+cat >"$tmp/mock-s99/pxeos-storage-probe" <<'EOF'
+#!/usr/bin/env bash
+[[ $1 == wait ]]
+EOF
 chmod +x "$tmp/mock-s99"/* "$tmp/S99pxeos"
 : >"$tmp/s99.log"
 if ! PXEOS_S99_HANDOFF="$tmp/s99-handoff" PXEOS_S99_LOG="$tmp/s99.log" PATH="$tmp/mock-s99:$PATH" mode=manreg isdebug='' shutdown=0 bash "$tmp/S99pxeos" >"$tmp/s99.out" 2>&1; then

@@ -392,3 +392,11 @@ R2 失败时，可在构建产物的 1 天保留期内从该频道最新的目�
 - [故障处理](docs/故障处理.md)：capture/restore、attention、finish 与联调清单。
 - [文档格式](docs/文档格式.md)：现有文档格式规范。
 - [测试目录说明](tests/README.md)：说明定向回归脚本、运行边界和 fixtures 的用途。
+
+## ATA 与 SAS 磁盘启动探测
+
+完整构建先生成各架构内核及对应模块包，再把模块装入同架构根文件系统。单独运行 `-f` 时，使用同一构建目录和同一个 `PXEOS_BUILD_VERSION`，并先运行对应架构的 `-k`。只下载 Buildroot 源码的命令仍可独立运行。更新 PXEOS 时，把内核与 initrd 成对更新。
+
+网络和 SSH 启动后，PXEOS 在后台探测 ATA 控制器及依赖 libata 的 SAS HBA。控制台上的磁盘任务最多等待 30 秒。探测超时、驱动加载或绑定失败、ATA 报告终止恢复，或者已发现的物理盘集合发生变化时，PXEOS 停止磁盘任务并保留诊断入口。超时后可以用 `pxeos-storage-probe wait` 查看结果，待探测完成后重新发起任务。正常空 SATA 端口允许继续。探测前已无任何识别信息的磁盘与空端口无法区分。若任务必须写入指定磁盘，应配置其稳定标识。显式指定多个目标时，任一目标缺失都会停止任务。
+
+这项改动覆盖 ATA 及其依赖的 SAS 探测链路。Intel VMD 第二根总线属于独立的 NVMe 兼容项。FOG 原补丁在 Linux 6.18.59 上可应用，但第二根总线创建失败时可能解引用空指针或遗留第一根总线。Intel PCI 维护分支的 v10 系列从 `9ec146e311d1` 到 `e71e4d9a2a36`，原序列不能直接应用到 6.18.59。本次未引入该补丁。[FOG 补丁](https://github.com/FOGProject/fos/blob/master/patch/kernel/linux.patch) [Intel v10](https://git.kernel.org/pub/scm/linux/kernel/git/pci/pci.git/commit/?id=e71e4d9a2a36)

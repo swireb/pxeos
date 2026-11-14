@@ -426,7 +426,7 @@ class CabextractDownloadTests(unittest.TestCase):
             self.assertIn("run: ./build.sh -i --fs-download-only", workflow)
             for arch in ("arm64", "x86", "x64"):
                 self.assertIn(
-                    f"  build_initrd_{arch}:\n    needs: [release_metadata, download_filesystem_packages]",
+                    f"    needs: [release_metadata, download_filesystem_packages, build_kernel_{arch}]",
                     workflow,
                 )
 

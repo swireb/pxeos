@@ -1,4 +1,5 @@
 #!/bin/bash
+pxeos-storage-probe wait || exit 75
 . /usr/share/pxeos/lib/funcs.sh || exit 1
 rootpxe_task_log_initialize || printf '[WARN]  Task log: unavailable.\n' >&2
 . /bin/pxeos.checkin
@@ -113,7 +114,7 @@ putDataBack() {
             ;;
     esac
 }
-findHDDInfo
+findHDDInfo || exit $?
 sector_metadata="$imagePath/d1.partitions"
 if [[ ${resumeStage:-} == customizing_hostname || ${resumeStage:-} == cloud_init ]]; then
     # 已完成恢复的重试只重取 deploy_write 许可，继续冻结的初始化。

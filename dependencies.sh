@@ -13,6 +13,7 @@ declare -ar common_dependencies=(
     "tar"
     "git"
     "make"
+    "kmod"
     "gcc"
     "flex"
     "bison"

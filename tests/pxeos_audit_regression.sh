@@ -39,6 +39,7 @@ set +u; source "$tmp/funcs.sh"; set -u
 storage_test_pipeline_boundaries
 rootpxe_require_unused_target_disks(){ :; } # 本段仅使用恢复流程 mock。
 lsblk() { printf '%s\n' '/dev/mock-b 2G' '/dev/mock-a 1G'; }
+pxeos-storage-probe() { [[ $1 == check ]]; }
 imgType=mpa; type=up; fdrive=''; largesize=''; getHardDisk
 [[ $disks == '/dev/mock-b /dev/mock-a' && $hd == /dev/mock-b ]] || fail 'mpa capture did not retain every enumerated disk'
 mkdir -p "$tmp/capture"

@@ -42,7 +42,7 @@ sudo() {
     esac
 }
 '''
-COMMON = "wget tar git make gcc flex bison cpio file rsync patch unzip bzip2 findutils autoconf libtool autopoint"
+COMMON = "wget tar git make kmod gcc flex bison cpio file rsync patch unzip bzip2 findutils autoconf libtool autopoint"
 DEB = COMMON + " libelf-dev xz-utils g++ libncurses-dev"
 RPM = COMMON + " elfutils-libelf-devel perl xz gcc-c++ ncurses-devel"
 

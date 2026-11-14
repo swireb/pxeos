@@ -18,7 +18,7 @@ case "$test_name" in
         command=(/manual-pxeos-integration.test -test.run '^TestManualPXEOSHTTPSIntegration$' -test.v -test.timeout=90s)
         shift
         ;;
-    pxeos_network_storage_regression.sh|pxeos_manual_registration_regression.sh|pxeos_capture_metadata_test.sh)
+    pxeos_network_storage_regression.sh|pxeos_manual_registration_regression.sh|pxeos_capture_metadata_test.sh|pxeos_storage_probe_regression.sh)
         command=(/usr/bin/bash "/pxeos/tests/$test_name")
         ;;
     pxeos_storage_controller_test.py)

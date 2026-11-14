@@ -1,4 +1,5 @@
 #!/bin/bash
+pxeos-storage-probe wait || exit 75
 . /usr/share/pxeos/lib/funcs.sh || exit 1
 [[ $deployed -eq 1 ]] && . /bin/pxeos.checkin
 rootpxe_api="${pxeapi:-$web}"
@@ -7,7 +8,7 @@ if [[ ${taskid:-0} =~ ^[1-9][0-9]*$ ]]; then
     task_mode=1
     rootpxe_require_task_context || handleError "RootPXE: inventory task context is invalid ($0)"
 fi
-getHardDisk
+getHardDisk || exit $?
 doInventory
 gpu_array_length=${#graphics_vendors_array[@]}
 inventory_section() {

@@ -1,4 +1,5 @@
 #!/bin/bash
+pxeos-storage-probe wait || exit 75
 . /usr/share/pxeos/lib/funcs.sh || exit 1
 clearScreen
 displayBanner
@@ -6,7 +7,7 @@ dots "Locating disk devices"
 disks=""
 disk=""
 hd=""
-getHardDisk "true"
+getHardDisk "true" || exit $?
 if [[ -z $disks ]]; then
     echo "Failed"
     debugPause
