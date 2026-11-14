@@ -17,6 +17,7 @@ defaults:
 
 jobs:
   release_metadata:
+    name: 准备发布信息
     runs-on: ubuntu-24.04
     outputs:
       release_name: ${{ steps.naming.outputs.release_name }}
@@ -46,6 +47,7 @@ jobs:
           printf 'release_name=%s\ntag_name=%s\n' "$release_name" "$tag_name" >> "$GITHUB_OUTPUT"
 
   download_filesystem_packages:
+    name: 下载文件系统依赖
     needs: release_metadata
     runs-on: ubuntu-24.04
     env:
@@ -67,6 +69,7 @@ jobs:
         run: ./build.sh -i --fs-download-only
 
   build_kernel_arm64:
+    name: 构建内核 · ARM64
     needs: release_metadata
     runs-on: ubuntu-24.04
     env:
@@ -91,6 +94,7 @@ jobs:
           retention-days: 1
 
   build_kernel_x86:
+    name: 构建内核 · I386
     needs: release_metadata
     runs-on: ubuntu-24.04
     env:
@@ -115,6 +119,7 @@ jobs:
           retention-days: 1
 
   build_kernel_x64:
+    name: 构建内核 · AMD64
     needs: release_metadata
     runs-on: ubuntu-24.04
     env:
@@ -139,6 +144,7 @@ jobs:
           retention-days: 1
 
   build_initrd_arm64:
+    name: 构建根文件系统 · ARM64
     needs: [release_metadata, download_filesystem_packages]
     runs-on: ubuntu-24.04
     env:
@@ -184,6 +190,7 @@ jobs:
           retention-days: 30
 
   build_initrd_x86:
+    name: 构建根文件系统 · I386
     needs: [release_metadata, download_filesystem_packages]
     runs-on: ubuntu-24.04
     env:
@@ -229,6 +236,7 @@ jobs:
           retention-days: 30
 
   build_initrd_x64:
+    name: 构建根文件系统 · AMD64
     needs: [release_metadata, download_filesystem_packages]
     runs-on: ubuntu-24.04
     env:
@@ -274,6 +282,7 @@ jobs:
           retention-days: 30
 
   release:
+    name: 发布GitHub
     needs:
       [
         release_metadata,
@@ -371,6 +380,7 @@ jobs:
             --resource-dir distribution-files
 
   sync_r2:
+    name: 同步对象存储
     needs: [release_metadata, release]
     runs-on: ubuntu-24.04
     permissions:
