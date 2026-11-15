@@ -764,6 +764,111 @@ grep -Fxq 'reboot:-f' "$normal_log" || fail '普通失败重启路径改变'
 normal_log=$(run_normal_s99 normal-failure-poweroff 9 '' shutdown)
 grep -Fxq 'poweroff:' "$normal_log" || fail '普通失败关机路径改变'
 [[ ! -e $tmp/.pxeos-quiet-shutdown && ! -L $tmp/.pxeos-quiet-shutdown ]] || fail '普通失败关机路径错误创建静默标记'
+for rc in 76 77; do
+    normal_log=$(type=down run_normal_s99 "deploy-deadline-$rc" "$rc" '' '')
+    if [[ $rc -eq 76 ]]; then
+        grep -Fxq 'reboot:-f' "$normal_log" || fail '部署监督器确认的重启动作未分派'
+    else
+        grep -Fxq 'poweroff:' "$normal_log" || fail '部署监督器确认的关机动作未分派'
+    fi
+    [[ $(<"$normal_log.rc") == 75 ]] || fail '部署失败动作返回后进入了任务成功流程'
+done
 printf 'PASS: PXEOS SSH debug mode regression\n'
 )
 # ===== PXEOS SSH 调试模式回归结束 =====
+
+# The real deployment loop runs under the same hard startup isolation.
+(
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+lib="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib"
+temp=$(mktemp -d)
+trap 'rm -rf -- "$temp"' EXIT
+export TEST_CONTROL_LIB="$lib" TEST_CONTROL_DIR="$temp"
+cat >"$temp/deadline.sh" <<'DEADLINE'
+#!/bin/bash
+. "$TEST_CONTROL_LIB/funcs.sh" || exit 125
+. "$TEST_CONTROL_LIB/deploy-control.sh" || exit 125
+taskid=1 mac=001122334455 task_token=fixture-token-000001 pxeapi=https://fixture.invalid/
+rootpxe_console_message() { :; }
+killStatusReporter() { :; }
+date() { printf '160\n'; }
+sleep() { /usr/bin/sleep .02; }
+rootpxe_task_curl() {
+    case $TEST_CONTROL_CASE in
+        revoked) printf '{"status":"failed"}\n403\n';;
+        deleted) printf '{"status":"deleted"}\n200\n';;
+        superseded) printf '{"status":"superseded"}\n200\n';;
+        queued) printf '{"status":"queued"}\n200\n';;
+        *) printf '{"status":"failed"}\n200\n';;
+    esac
+}
+pxeos-deploy-worker() {
+    [[ $TEST_CONTROL_CASE != invalid-worker-status ]] || return 77
+    shift
+    ( "$@" ) && return 0
+    return 1
+}
+failed_worker() {
+    rootpxe_storage_boot_id=11111111-1111-1111-1111-111111111111 rootpxe_storage_sysuuid=
+    progress_attempt=2 rootpxe_failure_started_at=100 rootpxe_failure_deadline=700
+    rootpxe_failure_wait_sec=600 rootpxe_failure_action=reboot
+    rootpxe_publish_deploy_control "$task_token" "$progress_attempt" || return 125
+    local action=shutdown state=failed wait_seconds=60
+    [[ $TEST_CONTROL_CASE != reboot ]] || action=reboot
+    [[ $TEST_CONTROL_CASE != early ]] || wait_seconds=3600
+    [[ $TEST_CONTROL_CASE != unknown ]] || state=attention
+    if [[ $TEST_CONTROL_CASE == cleanup-unconfirmed ]]; then
+        rootpxe_storage_workspace=/tmp/test-unreleased-storage rootpxe_storage_released=no
+    fi
+    rootpxe_error_wait_for_retry 'fixture failure' PXEOS_ERROR console_shown "{\"accepted\":true,\"status\":\"$state\",\"waitSec\":$wait_seconds,\"failureAction\":\"$action\"}"
+}
+rootpxe_run_deployment failed_worker "$TEST_CONTROL_DIR"
+DEADLINE
+for scenario in shutdown reboot deleted superseded queued revoked early unknown cleanup-unconfirmed invalid-worker-status; do
+    rc=0
+    TEST_CONTROL_CASE="$scenario" timeout 3 /usr/bin/bash "$temp/deadline.sh" || rc=$?
+    expected=75
+    [[ $scenario != reboot ]] || expected=76
+    [[ $scenario != shutdown ]] || expected=77
+    case $scenario in early|unknown|cleanup-unconfirmed) expected=124 ;; esac
+    [[ $rc -eq $expected ]] || { printf 'FAIL: 部署监督进程场景 %s，预期 %s 实际 %s\n' "$scenario" "$expected" "$rc" >&2; exit 1; }
+done
+printf 'PASS: deployment timeout policy delegation\n'
+)
+
+# A committed safety rejection enters failure waiting before any runtime setup.
+(
+set -e
+set +u
+root=$(cd "$(dirname "$0")/.." && pwd)
+overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
+. "$overlay/usr/share/pxeos/lib/funcs.sh"
+eval "$(sed -n '/^checkin_rootpxe() {/,/^}/p' "$overlay/bin/pxeos.checkin")"
+type=up taskid=41 mac=001122334455 task_token=fixture-original-token
+rootpxe_api=https://fixture.invalid/ manual_direct_task=no
+rootpxe_write_checkin_json_payload() { :; }
+rootpxe_cleanup_session() { :; }
+rootpxe_task_curl() {
+    printf '%s\n%s' '{"accepted":true,"status":"failed","errorCode":"IMAGE_TASK_CONFLICT","executionToken":"fixture-current-token","progressAttempt":3,"waitSec":60,"failureAction":"shutdown"}' 409
+}
+rootpxe_error_wait_for_retry() {
+    [[ $1 == 'PXEOS_STAGE=checkin CODE=IMAGE_TASK_CONFLICT' && $task_token == fixture-current-token && $progress_attempt == 3 ]] || return 99
+    jq -e '.accepted and .status == "failed" and .waitSec == 60 and .failureAction == "shutdown"' >/dev/null <<<"$4" || return 98
+    return 75
+}
+rootpxe_apply_json_checkin() { exit 99; }
+rc=0
+checkin_rootpxe || rc=$?
+[[ $rc == 75 ]]
+printf 'PASS: committed checkin failure enters configured wait before runtime setup\n'
+
+rootpxe_task_curl() {
+    printf '%s\n%s' '{"success":false,"reasonCode":"STORAGE_REJECTED","error":"previous capture owner still active"}' 409
+}
+rootpxe_error_wait_for_retry() { exit 98; }
+rc=0
+checkin_rootpxe || rc=$?
+[[ $rc == 75 ]]
+printf 'PASS: storage rejection before admission stops without default reboot or worker callback\n'
+)

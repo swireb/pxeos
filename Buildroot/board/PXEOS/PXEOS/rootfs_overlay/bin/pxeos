@@ -40,7 +40,15 @@ else
     case $type in
         down)
             rootpxe_source_core_library deploy-control.sh || exit 75
-            rootpxe_run_deployment || exit 75
+            if rootpxe_run_deployment; then
+                exit 0
+            else
+                case $? in
+                    76) exit 76 ;;
+                    77) exit 77 ;;
+                    *) exit 75 ;;
+                esac
+            fi
             ;;
         up)
             pxeos.upload

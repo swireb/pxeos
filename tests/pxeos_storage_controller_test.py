@@ -170,7 +170,7 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
                     rootpxe_failure_wait_sec=60 rootpxe_failure_action=shutdown
                     taskid=41 task_token=fixture mac=fixture pxeapi=http://fixture/
                     status=0; rootpxe_error_wait_for_retry failure CODE console_shown || status=$?
-                    [[ $status == 2 && $clock == 160 && $(cat "$tmp/reports") == report ]]
+                    [[ $status == 75 && $clock == 160 && $(cat "$tmp/reports") == report ]]
                     [[ $(cat "$tmp/failure_action") == shutdown ]]
                     [[ ! -e $tmp/unexpected-poll ]]
                 '''.replace("CODE", str(code)), timeout=2)
@@ -190,18 +190,45 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
                     [[ $previous != --max-time ]] || timeout=$argument
                     previous=$argument
                 done
-                (( timeout > 0 && timeout <= rootpxe_failure_deadline - clock && timeout <= 20 )) || { : >"$tmp/invalid-budget"; exit 93; }
-                printf '{"status":"queued"}'
+                if (( clock < rootpxe_failure_deadline )); then
+                    (( timeout > 0 && timeout <= rootpxe_failure_deadline - clock && timeout <= 20 )) || { : >"$tmp/invalid-budget"; exit 93; }
+                else
+                    [[ $timeout == 5 ]] || { : >"$tmp/invalid-budget"; exit 93; }
+                fi
+                printf '{"status":"queued"}\\n200'
             }
             rootpxe_storage_reset_retry_state() { exit 92; }
             rootpxe_storage_released=no rootpxe_storage_stopped=yes
             rootpxe_failure_wait_sec=60 rootpxe_failure_action=reboot
             taskid=41 task_token=fixture mac=fixture pxeapi=http://fixture/
             status=0; rootpxe_error_wait_for_retry failure CODE console_shown '{"accepted":true,"waitSec":60}' || status=$?
-            [[ $status == 2 && $clock == 160 && $rootpxe_storage_released == no ]]
+            [[ $status == 75 && $clock == 160 && $rootpxe_storage_released == no ]]
             [[ ! -e $tmp/invalid-budget ]]
         ''', timeout=2)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_capture_failure_timeout_requires_current_failed_status(self):
+        for final_reply, exit_status in ((r'{"status":"failed"}\n200', 2), (r'{}\n403', 75), (r'{"status":"running"}\n200', 75)):
+            with self.subTest(final_reply=final_reply):
+                result = self.run_controller(r'''
+                    set -e
+                    clock=100
+                    date() { printf '%s\n' "$clock"; }
+                    sleep() { clock=$((clock + $1)); }
+                    rootpxe_require_task_context() { :; }
+                    killStatusReporter() { :; }
+                    rootpxe_task_curl() {
+                        if (( clock < 160 )); then printf '{"status":"failed"}\n200'
+                        else printf 'FINAL_REPLY'; fi
+                    }
+                    rootpxe_failure_wait_sec=60 rootpxe_failure_action=shutdown
+                    taskid=41 task_token=fixture mac=fixture pxeapi=http://fixture/
+                    status=0
+                    rootpxe_error_wait_for_retry failure CODE console_shown '{"accepted":true,"status":"failed","waitSec":60,"failureAction":"shutdown"}' || status=$?
+                    [[ $status == EXPECTED_STATUS && $clock == 160 ]]
+                    [[ $(cat "$tmp/failure_action") == shutdown ]]
+                '''.replace('FINAL_REPLY', final_reply).replace('EXPECTED_STATUS', str(exit_status)), timeout=2)
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_failed_recovery_joins_the_original_helper_and_retains_evidence(self):
         result = self.run_controller('''

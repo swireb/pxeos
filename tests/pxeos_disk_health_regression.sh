@@ -293,6 +293,21 @@ set -e
 [[ $(<"$tmp/empty-events") == $'inventory\nerror' ]] || fail 'empty disk report was not uploaded before task error'
 grep -Fq -- 'diskHealth={"version":1,"disks":[]}' "$tmp/curl-empty.args" || fail 'empty physical disk report was not uploaded'
 
+printf '%s\n' '{"blockdevices":[{"path":"/dev/sda","type":"disk","tran":"sata","size":1000}]}' >"$tmp/blank-disk.json"
+PATH="$tmp/bin:$PATH" PXEOS_LSBLK_JSON="$tmp/blank-disk.json" PXEOS_SMART_SDA="$tmp/smart-sda.json" \
+PXEOS_CURL_ARGS="$tmp/curl-blank.args" PXEOS_EVENT_TRACE="$tmp/blank-events" \
+bash -s -- "$library" "$checkin_health_block" <<'EOF'
+set -euo pipefail
+. "$1"
+. "$2"
+taskType=deploy; taskid=7; task_token=token; mac='aa:bb:cc:dd:ee:ff'; rootpxe_api='https://example.invalid/service/'
+rootpxe_require_task_context() { return 0; }
+handleError() { return 77; }
+rootpxe_report_disk_health_after_checkin
+EOF
+[[ $(<"$tmp/blank-events") == inventory ]] || fail 'blank physical disk did not pass post-checkin discovery'
+grep -Fq -- '"device":"/dev/sda"' "$tmp/curl-blank.args" || fail 'blank physical disk was omitted from health facts'
+
 : >"$tmp/empty-upload-failure-events"
 : >"$tmp/curl-empty-upload-failure.args"
 set +e

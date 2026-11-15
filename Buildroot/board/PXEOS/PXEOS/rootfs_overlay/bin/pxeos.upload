@@ -82,6 +82,7 @@ fi
 case $permit_result in
     0) ;;
     10) printf '%s\n' reboot > /tmp/pxeos.failure_action; exit 2 ;;
+    75) exit 75;;
     20) exit 2 ;;
     *) handleError "PXEOS_STAGE=permit CODE=DISK_PERMIT_DENIED REASON=capture_binding_not_confirmed" ;;
 esac

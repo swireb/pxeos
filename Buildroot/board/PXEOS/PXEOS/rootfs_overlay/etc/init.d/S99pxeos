@@ -104,7 +104,7 @@ pxeos_manual_task_handoff() {
     export taskid task_token mac type mdraid manual_spki_pin manual_direct_task mode
 }
 
-pxeos_apply_storage_failure_action() {
+pxeos_apply_failure_action() {
     case ${1:-} in
         reboot) pxeos_init_message INFO 'Running configured failure action: reboot.'; reboot -f >/dev/null 2>&1 ;;
         shutdown) pxeos_init_message INFO 'Running configured failure action: shutdown.'; poweroff >/dev/null 2>&1 ;;
@@ -213,7 +213,7 @@ if ! storage_probe_diagnostic=$(pxeos-storage-probe wait 2>&1); then
     storage_probe_diagnostic=${storage_probe_diagnostic:-Storage probe failed.}
     pxeos_init_message ERROR "$storage_probe_diagnostic"
     if storage_failure_action=$(pxeos_wait_storage_failure "$storage_probe_diagnostic" "$storage_probe_failed_at"); then
-        pxeos_apply_storage_failure_action "$storage_failure_action"
+        pxeos_apply_failure_action "$storage_failure_action"
     else
         pxeos_init_message WARN 'RootPXE did not confirm the storage failure or its timeout action.'
     fi
@@ -230,6 +230,12 @@ fi
 
 pxeos
 rc=$?
+if [[ $type == down ]]; then
+    case $rc in
+        76) pxeos_apply_failure_action reboot; exit 75 ;;
+        77) pxeos_apply_failure_action shutdown; exit 75 ;;
+    esac
+fi
 if [[ $rc -eq 75 || ( $rc -ne 0 && $type == down ) ]]; then
     pxeos_init_message INFO 'Deployment stopped. PXEOS remains available.'
     exit "$rc"

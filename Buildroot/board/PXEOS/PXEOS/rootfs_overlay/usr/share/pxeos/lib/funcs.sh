@@ -3100,12 +3100,17 @@ rootpxe_report_disk_permit_denial() {
     report_message="${rootpxe_disk_permit_report_message:-Disk permit response is invalid. Check the server protocol and task binding.} (HTTP ${status}"
     [[ -z ${rootpxe_disk_permit_code:-} ]] || report_message+=", ${rootpxe_disk_permit_code}"
     report_message+=')'
+    if [[ ${rootpxe_capture_direct:-no} == yes || -n ${rootpxe_storage_workspace:-} ]]; then
+        handleError "PXEOS_STAGE=permit CODE=PXEOS_DISK_PERMIT_DENIED $report_message"
+        return 75
+    fi
     if rootpxe_error_wait_for_retry "$report_message" PXEOS_DISK_PERMIT_DENIED; then
         result=0
     else
         result=$?
     fi
     [[ $result -eq 2 ]] && return 20
+    [[ $result -eq 75 ]] && return 75
     rootpxe_console_message WARN 'Disk permit failure reporting did not complete. Retrying in 5s.'
     sleep 5
     return 1
@@ -3128,7 +3133,7 @@ rootpxe_wait_for_disk_permit() {
                 else
                     result=$?
                 fi
-                [[ $result -eq 20 ]] && return 20
+                [[ $result -ne 20 && $result -ne 75 ]] || return "$result"
                 ;;
             *)
                 printf '%s\n' \
@@ -3206,14 +3211,14 @@ rootpxe_wait_for_disk_permit_batch() {
         fi
         # Batch replies intentionally disclose no per-disk detail.  Reuse the
         # existing bounded error reporter, then retry only after the service
-        # has accepted the attention state.
+        # has accepted the failed state.
         rootpxe_set_disk_permit_protocol_error batch
         if rootpxe_report_disk_permit_denial; then
             result=0
         else
             result=$?
         fi
-        [[ $result -eq 20 ]] && return 20
+        [[ $result -ne 20 && $result -ne 75 ]] || return "$result"
     done
 }
 
@@ -3448,12 +3453,18 @@ rootpxe_error_wait_for_retry() {
     timeout_message="Timeout action: $rootpxe_failure_action."
     [[ -z ${rootpxe_deploy_control_dir:-} ]] || timeout_message='PXEOS remains available for retry.'
     if [[ $report_confirmed == yes ]]; then
-        rootpxe_console_message ERROR 'Task paused. Error reported to RootPXE.'
+        rootpxe_console_message ERROR 'Error reported to RootPXE.'
     else
         rootpxe_console_message WARN "Error report is not confirmed. $timeout_message"
     fi
     rootpxe_console_message INFO 'SSH is available for troubleshooting.'
     if [[ -n ${rootpxe_deploy_control_dir:-} ]]; then
+        if [[ $report_confirmed == yes ]] &&
+            [[ -z ${rootpxe_storage_workspace:-} || ( ${rootpxe_storage_released:-no} == yes && ${rootpxe_storage_stopped:-no} == yes && -z ${rootpxe_storage_pid:-} ) ]] &&
+            jq -e '.status == "failed" and (.waitSec | type) == "number" and (.waitSec | floor) == .waitSec and .waitSec >= 60 and .waitSec <= 3600 and (.failureAction == "reboot" or .failureAction == "shutdown")' >/dev/null 2>&1 <<<"$response"; then
+            printf '%s\n' "$rootpxe_failure_deadline" "$rootpxe_failure_action" >"$rootpxe_deploy_control_dir/failure-policy" || return 1
+            rootpxe_console_message INFO "Failure wait: ${rootpxe_failure_wait_sec}s from first failure. Timeout action: $rootpxe_failure_action."
+        fi
         rootpxe_console_message INFO 'Select Retry in the web UI to start the deployment again.'
         return 2
     elif [[ $report_confirmed == yes && ( -z ${rootpxe_storage_workspace:-} || ( ${rootpxe_storage_released:-no} == yes && ${rootpxe_storage_stopped:-no} == yes && -z ${rootpxe_storage_pid:-} ) ) ]]; then
@@ -3463,35 +3474,45 @@ rootpxe_error_wait_for_retry() {
         rootpxe_console_message INFO "Any remote protection remains held. $timeout_message"
     fi
     rootpxe_console_message INFO "Timeout: ${rootpxe_failure_wait_sec}s from first failure. $timeout_message"
+    local status_result http_status
     while :; do
-        if ! remaining=$(rootpxe_failure_remaining); then
-            rootpxe_console_message WARN "Wait timed out. $timeout_message"
-            return 2
-        fi
+        remaining=$(rootpxe_failure_remaining) || remaining=0
         status=''
         if [[ $report_confirmed == yes ]]; then
-            request_timeout=$(( remaining < 20 ? remaining : 20 ))
-            status=$(rootpxe_task_curl -ks --connect-timeout "$(( remaining < 10 ? remaining : 10 ))" --max-time "$request_timeout" \
+            request_timeout=$(( remaining == 0 ? 5 : remaining < 20 ? remaining : 20 ))
+            status_result=$(rootpxe_task_curl -ks --connect-timeout "$(( request_timeout < 10 ? request_timeout : 10 ))" --max-time "$request_timeout" \
                 --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" \
-                --data-urlencode "mac=$mac" "${api}task-status" 2>/dev/null) || status=''
+                --data-urlencode "mac=$mac" -w '\n%{http_code}' "${api}task-status" 2>/dev/null) || status_result=''
+            http_status=${status_result##*$'\n'}
+            case $http_status in
+                200) status=$(jq -er 'if type == "object" and (.status | type) == "string" then .status else empty end' <<<"${status_result%$'\n'*}" 2>/dev/null) || status='' ;;
+                400|401|403|404|409) return 75 ;;
+            esac
         fi
-        status=$(jq -er 'if type == "object" and (.status | type) == "string" then .status else empty end' <<<"$status" 2>/dev/null) || status=''
         if [[ $status == queued && -z ${rootpxe_deploy_control_dir:-} ]]; then
             if [[ -z ${rootpxe_storage_workspace:-} || ( ${rootpxe_storage_released:-no} == yes && ${rootpxe_storage_stopped:-no} == yes && -z ${rootpxe_storage_pid:-} ) ]]; then
                 rootpxe_console_message INFO 'Retry requested. Resuming task.'
-                rootpxe_storage_reset_retry_state || return 1
-                rootpxe_reset_disk_permit_retry_state || return 1
+                rootpxe_storage_reset_retry_state || return 75
+                rootpxe_reset_disk_permit_retry_state || return 75
                 rootpxe_task_log_release_pin || true
                 unset rootpxe_failure_started_at rootpxe_failure_deadline rootpxe_failure_policy_confirmed rootpxe_failure_report_rejected
                 exec /bin/pxeos
             fi
         fi
-        if [[ $status == deleted || $status == cancelled || $status == superseded ]]; then
-            rootpxe_console_message INFO 'Task deleted or aborted. Stopping PXEOS.'
-            return 2
+        if [[ $status == deleted || $status == cancelled || $status == superseded || $status == running || $status == completed ]]; then
+            rootpxe_console_message INFO 'The failed task changed. Its timeout action was cancelled.'
+            return 75
         fi
-        remaining=$(rootpxe_failure_remaining) || return 2
-        sleep "$(( remaining < 5 ? remaining : 5 ))"
+        if (( remaining == 0 )); then
+            rootpxe_console_message WARN "Wait timed out. $timeout_message"
+            # An old attempt must not power off a new one, even when the
+            # retry arrives exactly at the end of the wait.
+            if [[ $status == failed || $status == attention ]]; then return 2; fi
+            return 75
+        fi
+        if remaining=$(rootpxe_failure_remaining); then
+            sleep "$(( remaining < 5 ? remaining : 5 ))"
+        fi
     done
 }
 
@@ -4994,7 +5015,7 @@ makeAllSwapSystems() {
 # change.  Recovery partitions can also be NTFS, so filesystem type alone is
 # unsafe.  A case-insensitive SYSTEM hive path proves a Windows installation;
 # this does not search for arbitrary unattend files.  Return 10 for no candidate and 11
-# for ambiguity so callers report a stable attention reason.
+# for ambiguity so callers report a stable failure reason.
 rootpxe_find_windows_system_partition() {
     local disk="$1" part candidate="" candidate_count=0
     [[ -n $disk ]] || return 10

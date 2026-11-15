@@ -139,6 +139,7 @@ if [[ ${resumeStage:-} == customizing_hostname || ${resumeStage:-} == cloud_init
         case $permit_result in
             0) break;;
             10) rootpxe_console_message INFO 'Task aborted or deleted. Stopping PXEOS.'; printf '%s\n' reboot > /tmp/pxeos.failure_action; exit 2;;
+            75) exit 75;;
             20) exit 2;;
             *) rootpxe_console_message WARN 'Disk permit wait was interrupted. Retrying in 5s.'; sleep 5;;
         esac
@@ -207,6 +208,7 @@ while :; do
             printf '%s\n' reboot > /tmp/pxeos.failure_action
             exit 2
             ;;
+        75) exit 75 ;;
         20) exit 2 ;;
         *)
             rootpxe_console_message WARN 'Disk permit wait was interrupted. Retrying in 5s.'

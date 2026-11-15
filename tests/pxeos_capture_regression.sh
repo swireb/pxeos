@@ -37,8 +37,8 @@ count=0
 count=$((count + 1))
 printf '%s' "$count" > "$count_file"
 if [ -n "${MOCK_CURL_ARGS:-}" ]; then printf '%s\n' "$*" > "$MOCK_CURL_ARGS"; fi
-if [ "${MOCK_CURL_MODE:-transient}" = attention ]; then
-    printf '%s\n' ' { "success" : false, "status" : "attention", "error" : "捕获分区清单结构无效" }'
+if [ "${MOCK_CURL_MODE:-transient}" = failed ]; then
+    printf '%s\n' ' { "success" : true, "status" : "failed", "error" : "捕获分区清单结构无效" }'
     exit 0
 fi
 if [ "$count" -eq 1 ]; then
@@ -111,22 +111,22 @@ grep -Fq 'planHash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 grep -Fq 'attempt=3' "$tmp/identity-curl-args" || fail 'identity finish omitted attempt'
 pass 'identity finish binds frozen plan and attempt'
 
-# 红测：服务端已将任务转为 attention 时，完成回调不能继续重试并掩盖首个错误。
+# 红测：服务端已将任务转为 failed 时，完成回调不能继续重试并掩盖首个错误。
 set +e
-PATH="$tmp/bin:$PATH" BASH_ENV="$tmp/bash_env" MOCK_CURL_MODE=attention MOCK_CURL_COUNT="$tmp/attention-curl-count" \
+PATH="$tmp/bin:$PATH" BASH_ENV="$tmp/bash_env" MOCK_CURL_MODE=failed MOCK_CURL_COUNT="$tmp/attention-curl-count" \
     MOCK_MARKER_CLEARED="$tmp/attention-marker-cleared" MOCK_JSON_CLEARED="$tmp/attention-json-cleared" \
     type=down taskid=1 task_token=secret mac=001122334455 web='http://mock/' \
     bash -e "$imgcomplete" >"$tmp/attention.out" 2>"$tmp/attention.err"
 attention_rc=$?
 set -e
-assert_eq "$attention_rc" 91 '服务端 attention 必须立刻进入故障等待，不能继续 finish 重试'
-assert_eq "$(cat "$tmp/attention-curl-count")" 1 '服务端 attention 后不得再次请求 finish'
+assert_eq "$attention_rc" 91 '服务端 failed 必须立刻进入故障等待，不能继续 finish 重试'
+assert_eq "$(cat "$tmp/attention-curl-count")" 1 '服务端 failed 后不得再次请求 finish'
 grep -Fqx '[ERROR] RootPXE rejected the finish callback.' "$tmp/attention.out" || fail '必须输出稳定的完成回调错误'
 ! grep -Fq '捕获分区清单结构无效' "$tmp/attention.out" || fail '不得输出服务端动态错误文本'
-grep -Fq 'PXEOS_STAGE=finish_notify CODE=FINISH_REJECTED' "$tmp/attention.err" || fail 'attention 必须交给统一故障等待处理'
-[[ ! -e $tmp/attention-marker-cleared && ! -e $tmp/attention-json-cleared ]] || fail 'attention 时不得清理 capture marker 或任务上下文'
-! grep -Fq '[INFO]  Task complete.' "$tmp/attention.out" || fail 'attention 时不得误报 Task complete'
-pass 'finish attention response stops retry and preserves the original error'
+grep -Fq 'PXEOS_STAGE=finish_notify CODE=FINISH_REJECTED' "$tmp/attention.err" || fail 'failed 必须交给统一故障等待处理'
+[[ ! -e $tmp/attention-marker-cleared && ! -e $tmp/attention-json-cleared ]] || fail 'failed 时不得清理 capture marker 或任务上下文'
+! grep -Fq '[INFO]  Task complete.' "$tmp/attention.out" || fail 'failed 时不得误报 Task complete'
+pass 'finish failed response stops retry and preserves the original error'
 
 # finish 已被服务端确认后，marker 的保守清理失败只能留下告警，不能把已完成
 # 的业务任务重新报告为失败或让终端显示提前完成。

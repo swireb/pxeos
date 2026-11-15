@@ -397,6 +397,27 @@ checkin_rootpxe() {
         http_code=${out##*$'\n'}
         body=${out%$'\n'*}
         if [[ $http_code =~ ^4[0-9][0-9]$ ]]; then
+            # A committed checkin failure has policy and an identity, unlike
+            # an unauthenticated or withdrawn request. Never start a worker.
+            if jq -e 'type == "object" and .accepted == true and .status == "failed"
+              and (.executionToken | type == "string" and test("^[A-Za-z0-9._~+/=-]{16,512}$"))
+              and (.progressAttempt | type == "number" and floor == . and . >= 1)
+              and (.errorCode | type == "string" and test("^[A-Z][A-Z0-9_]{0,63}$"))' >/dev/null 2>&1 <<<"$body"; then
+                control_token=$(jq -er '.executionToken' <<<"$body") || return 1
+                control_attempt=$(jq -er '.progressAttempt' <<<"$body") || return 1
+                if [[ -n ${rootpxe_deploy_control_dir:-} ]]; then
+                    rootpxe_publish_deploy_control "$control_token" "$control_attempt" || return 1
+                fi
+                task_token=$control_token progress_attempt=$control_attempt
+                export task_token progress_attempt
+                rootpxe_error_wait_for_retry "PXEOS_STAGE=checkin CODE=$(jq -er '.errorCode' <<<"$body")" PXEOS_ERROR "" "$body"
+                return $?
+            fi
+            if [[ $http_code == 409 ]] &&
+                jq -e 'type == "object" and (.reasonCode | strings | test("^STORAGE_[A-Z0-9_]+$"))' >/dev/null 2>&1 <<<"$body"; then
+                rootpxe_console_message WARN 'Storage admission was rejected. PXEOS remains available.'
+                return 75
+            fi
             # The server did not admit this request. Exit before any task callbacks.
             rootpxe_console_message INFO 'Task aborted or withdrawn. Stopping PXEOS.'
             printf '%s\n' reboot > /tmp/pxeos.failure_action

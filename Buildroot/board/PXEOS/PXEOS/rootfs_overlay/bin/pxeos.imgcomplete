@@ -61,6 +61,14 @@ while true; do
     else
         res=""
     fi
+    # 失败状态已经落库；停止 finish 重试，交给错误等待和存储收尾。
+    if jq -e '.status == "failed" or .status == "attention"' >/dev/null 2>&1 <<<"$res"; then
+        echo "Failed"
+        debugPause
+        rootpxe_console_message ERROR 'RootPXE rejected the finish callback.'
+        debugPause
+        handleError "PXEOS_STAGE=finish_notify CODE=FINISH_REJECTED REASON=rootpxe_finish_callback_attention"
+    fi
     if echo "$res" | grep -q '"success"[[:space:]]*:[[:space:]]*true'; then
         echo "Done"
         [[ ${rootpxe_capture_direct:-no} != yes ]] || rootpxe_capture_released=yes
@@ -76,15 +84,6 @@ while true; do
         rootpxe_cleanup_task_json
         rootpxe_capture_resume_cleanup
         break
-    fi
-    # 服务端已接受失败并将任务转为 attention 时，继续 finish 只会收到
-    # "Task is not running"，从而掩盖此处返回的原始失败原因。
-    if echo "$res" | grep -q '"status"[[:space:]]*:[[:space:]]*"attention"'; then
-        echo "Failed"
-        debugPause
-        rootpxe_console_message ERROR 'RootPXE rejected the finish callback.'
-        debugPause
-        handleError "PXEOS_STAGE=finish_notify CODE=FINISH_REJECTED REASON=rootpxe_finish_callback_attention"
     fi
     if [[ $count -lt 10 ]]; then
         echo "Failed"

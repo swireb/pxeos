@@ -36,8 +36,10 @@ rootpxe_deploy_control_request() {
 }
 
 rootpxe_deploy_poll() {
-    local response status
-    response=$(rootpxe_deploy_control_request) || return 1
+    local response="${1:-}" status
+    if [[ -z $response ]]; then
+        response=$(rootpxe_deploy_control_request) || return 1
+    fi
     status=$(jq -er '.status | strings' 2>/dev/null <<<"$response") || return 1
     [[ $status == superseded || $status == deleted ]] || return 1
     printf '%s\n' "$status" >"$rootpxe_deploy_control_dir/revocation" || return 1
@@ -76,9 +78,9 @@ rootpxe_run_deployment() (
     export rootpxe_deploy_control_dir
     trap 'rm -rf -- "$rootpxe_deploy_control_dir"' EXIT
     trap ': >"$rootpxe_deploy_control_dir/interrupted"; : >"$rootpxe_deploy_control_dir/stop"' HUP INT TERM
-    local poller rc state response credential attempt cleanup_warned current_attempt
+    local poller rc state response credential attempt cleanup_warned current_attempt wait_seconds
     local baseline="$rootpxe_deploy_control_dir/mountinfo-before"
-    local -a context
+    local -a context failure_policy
     while [[ ! -e $rootpxe_deploy_control_dir/interrupted ]]; do
         cat /proc/self/mountinfo >"$baseline" || return 1
         (
@@ -96,13 +98,32 @@ rootpxe_run_deployment() (
         : >"$rootpxe_deploy_control_dir/poll-done"
         wait "$poller" 2>/dev/null || true
         [[ ! -e $rootpxe_deploy_control_dir/interrupted ]] || return 75
-        [[ $rc -eq 0 || $rc -eq 1 || $rc -eq 75 ]] || return "$rc"
+        [[ $rc -eq 0 || $rc -eq 1 || $rc -eq 75 ]] || return 75
         if [[ ! -f $rootpxe_deploy_control_dir/revocation ]]; then
             [[ $rc -ne 0 ]] || return 0
             [[ -f $rootpxe_deploy_control_dir/context ]] || return "$rc"
+            failure_policy=()
+            if [[ -f $rootpxe_deploy_control_dir/failure-policy ]]; then
+                mapfile -t failure_policy <"$rootpxe_deploy_control_dir/failure-policy" || return 75
+                [[ ${#failure_policy[@]} -eq 2 && ${failure_policy[0]} =~ ^[1-9][0-9]{0,11}$ ]] || return 75
+                case ${failure_policy[1]} in reboot|shutdown) ;; *) return 75 ;; esac
+            fi
             while [[ ! -e $rootpxe_deploy_control_dir/interrupted ]]; do
+                wait_seconds=3
+                if (( ${#failure_policy[@]} )); then
+                    wait_seconds=$(( failure_policy[0] - $(date +%s) ))
+                    if (( wait_seconds <= 0 )); then
+                        response=$(rootpxe_deploy_control_request) || return 75
+                        rootpxe_deploy_poll "$response" && break
+                        [[ ! -e $rootpxe_deploy_control_dir/interrupted ]] || return 75
+                        jq -es 'length == 1 and .[0].status == "failed"' >/dev/null 2>&1 <<<"$response" || return 75
+                        # Only the supervisor may return the action codes.
+                        case ${failure_policy[1]} in reboot) return 76 ;; shutdown) return 77 ;; esac
+                    fi
+                    (( wait_seconds <= 3 )) || wait_seconds=3
+                fi
                 rootpxe_deploy_poll && break
-                sleep 3
+                sleep "$wait_seconds"
             done
         fi
         [[ ! -e $rootpxe_deploy_control_dir/interrupted ]] || return 75
@@ -147,7 +168,7 @@ rootpxe_run_deployment() (
             fi
             sleep 3
         done
-        rm -f -- "$rootpxe_deploy_control_dir/stop" "$rootpxe_deploy_control_dir/revocation" "$rootpxe_deploy_control_dir/poll-done" || return 75
+        rm -f -- "$rootpxe_deploy_control_dir/stop" "$rootpxe_deploy_control_dir/revocation" "$rootpxe_deploy_control_dir/poll-done" "$rootpxe_deploy_control_dir/failure-policy" || return 75
     done
     return 75
 )
