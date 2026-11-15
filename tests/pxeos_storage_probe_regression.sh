@@ -45,6 +45,16 @@ cat >"$tmp/mock/uname" <<'MOCK'
 #!/usr/bin/env bash
 printf 'test-kernel\n'
 MOCK
+cat >"$tmp/mock/cat" <<'MOCK'
+#!/usr/bin/env bash
+if [[ ${PXEOS_TEST_MODALIAS_FAILURE:-} == yes &&
+      ${*: -1} == "$PXEOS_TEST_DIR/sys/bus/pci/devices/a/modalias" ]]; then
+    printf 'test:a'
+    printf 'Input/output error\n' >&2
+    exit 1
+fi
+exec /usr/bin/cat "$@"
+MOCK
 cat >"$tmp/mock/modprobe" <<'MOCK'
 #!/usr/bin/env bash
 case "$*" in
@@ -83,6 +93,17 @@ expect_failure() {
     grep -Fqi "$reason" "$tmp/result"
 }
 
+case ${1:-} in
+    empty-alias)
+        mkdir -p "$tmp/sys/bus/acpi/devices/ACPI0004:01"
+        : >"$tmp/sys/bus/acpi/devices/ACPI0004:01/modalias"
+        ;;
+    unterminated-alias)
+        printf 'test:a' >"$tmp/sys/bus/pci/devices/a/modalias"
+        ;;
+    *) ;;
+esac
+
 pxeos-storage-probe start
 pxeos-storage-probe wait
 [[ $(<"$tmp/loaded") == $'ahci\nlibata\nata_piix' ]]
@@ -117,6 +138,10 @@ imgType=n; type=down; fdrive=''; largesize=''
 set_disk_for_write
 [[ $(cat "$tmp/selection.trace") == $'enumerate\nwrite:/dev/sda' ]]
 pxeos-storage-probe check
+if [[ ${1:-} == empty-alias || ${1:-} == unterminated-alias ]]; then
+    printf 'PASS: %s loads AHCI and selects the expected disk.\n' "$1"
+    exit 0
+fi
 blockdev() {
     [[ $1 == --getsize64 ]] || return 1
     case $2 in /dev/nvme0n1) echo 200000;; /dev/sda) echo 80000;; /dev/sdb) echo 20000;; esac
@@ -149,12 +174,41 @@ change_during_selection=yes set_disk_for_write || rc=$?
 mv "$tmp/sda" "$tmp/sys/class/block/sda"
 
 new_boot
+PXEOS_TEST_MODALIAS_FAILURE=yes pxeos-storage-probe start
+for action in wait check; do
+    rc=0
+    pxeos-storage-probe "$action" >"$tmp/result" 2>&1 || rc=$?
+    [[ $rc -eq 75 ]]
+    grep -Fq 'Unable to read the storage driver matching information' "$tmp/result"
+    grep -Fq '/sys/bus/pci/devices/a/modalias' "$tmp/result"
+done
+[[ ! -e $tmp/loaded ]]
+: >"$tmp/selection.trace"
+hd=/dev/sda
+disks='/dev/sda /dev/sdb'
+rc=0
+set_disk_for_write || rc=$?
+[[ $rc -eq 75 && ! -s $tmp/selection.trace && -z $hd && -z $disks ]]
+
+new_boot
 PXEOS_TEST_BLOCK=yes timeout 1 pxeos-storage-probe start
 expect_failure 'timed out'
 pxeos-storage-probe start
 touch "$tmp/resume"
 pxeos-storage-probe wait
 [[ $(<"$tmp/loaded") == $'ahci\nlibata\nata_piix' ]]
+
+new_boot
+PXEOS_TEST_BLOCK=yes timeout 1 pxeos-storage-probe start
+rc=0
+PXEOS_TEST_ATA_FAILURE=$'ata1: EH pending after 5 tries, giving up\nata2: reset failed, giving up' \
+    pxeos-storage-probe wait >"$tmp/result" 2>&1 || rc=$?
+touch "$tmp/resume"
+pxeos-storage-probe wait
+if [[ $rc -ne 75 || $(<"$tmp/result") != 'ATA error recovery failed: ata1: EH pending after 5 tries, giving up' ]]; then
+    printf '探测超时未返回首条明确 ATA 错误：%s\n' "$(<"$tmp/result")" >&2
+    exit 1
+fi
 
 new_boot
 rm "$tmp/sys/bus/pci/devices/a/driver"
@@ -189,4 +243,6 @@ pxeos-storage-probe start
 expect_failure 'missing'
 [[ ! -e $tmp/loaded ]]
 
+bash "$0" empty-alias
+bash "$0" unterminated-alias
 printf 'PASS: PXEOS 延后探测、异常拦截及晚完成后重试。\n'

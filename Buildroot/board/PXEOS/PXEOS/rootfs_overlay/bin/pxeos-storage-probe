@@ -26,7 +26,8 @@ storage_disk_snapshot() {
 
 storage_no_terminal_error() {
     local kernel_log terminal_error
-    if ! kernel_log=$(dmesg); then
+    if ! kernel_log=$(dmesg 2>/dev/null); then
+        [[ ${1:-} != timeout ]] || return 0
         echo 'Unable to read storage probe diagnostics from the kernel.'
         return 1
     fi
@@ -64,9 +65,9 @@ probe_storage() {
     done <"$module_path/pxeos-storage.modules"
     for sysfs_device in /sys/bus/*/devices/*/modalias; do
         [[ -e $sysfs_device ]] || continue
-        if ! IFS= read -r modalias <"$sysfs_device"; then
+        if ! modalias=$(cat -- "$sysfs_device"); then
             [[ ! -e $sysfs_device ]] && continue
-            echo 'Unable to read the storage driver matching information.'
+            printf 'Unable to read the storage driver matching information: %s\n' "$sysfs_device"
             return 1
         fi
         [[ -n $modalias ]] || continue
@@ -134,7 +135,9 @@ case ${1:-} in
             sleep 1
         done
         if [[ ! -r $state_dir/result ]]; then
-            echo 'Storage probe timed out. Check the kernel log and retry after the probe finishes.' >&2
+            if [[ $1 != wait ]] || storage_no_terminal_error timeout >&2; then
+                echo 'Storage probe timed out. Check the kernel log and retry after the probe finishes.' >&2
+            fi
             exit 75
         fi
         result=$(<"$state_dir/result")

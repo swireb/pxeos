@@ -104,6 +104,82 @@ pxeos_manual_task_handoff() {
     export taskid task_token mac type mdraid manual_spki_pin manual_direct_task mode
 }
 
+pxeos_apply_storage_failure_action() {
+    case ${1:-} in
+        reboot) pxeos_init_message INFO 'Running configured failure action: reboot.'; reboot -f >/dev/null 2>&1 ;;
+        shutdown) pxeos_init_message INFO 'Running configured failure action: shutdown.'; poweroff >/dev/null 2>&1 ;;
+    esac
+}
+
+pxeos_wait_storage_failure() (
+    local diagnostic="$1" failed_at="$2" api response policy wait_seconds action remaining http_status state
+    local rootpxe_failure_deadline
+    local handoff_id=${taskid:-} handoff_token=${task_token:-} handoff_mac=${mac:-}
+    local handoff_type=${type:-} handoff_pin=${manual_spki_pin:-} manual_direct=${manual_direct_task:-}
+    local -a tls=(-k)
+    . /usr/share/pxeos/lib/funcs.sh || return 1
+    api=${pxeapi:-${web:-}}
+    if [[ $manual_direct == yes ]]; then
+        taskid=$handoff_id; task_token=$handoff_token; mac=$handoff_mac; type=$handoff_type
+        [[ $api == https://* && $handoff_pin =~ ^sha256//[A-Za-z0-9+/]{43}=$ ]] || return 1
+        tls+=(--proto '=https' --proto-redir '=https' --pinnedpubkey "$handoff_pin")
+    elif [[ -n ${mode:-} && ${mode:-} != deploy && ${mode:-} != capture ]]; then
+        return 0
+    fi
+    case ${type:-} in down|up) ;; *) return 0 ;; esac
+    [[ -n $api ]] && rootpxe_require_task_context || return 0
+    [[ $failed_at =~ ^[1-9][0-9]*$ ]] || return 1
+    diagnostic=$(rootpxe_bound_callback_message "$diagnostic") || return 1
+    response=$(rootpxe_task_curl "${tls[@]}" --fail --silent --connect-timeout 2 --max-time 5 \
+        --data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac" \
+        --data-urlencode stage=storage_probe --data-urlencode errorCode=STORAGE_PROBE_FAILED \
+        --data-urlencode "message=$diagnostic" -w '\n%{http_code}' "${api%/}/error") || return 1
+    http_status=${response##*$'\n'}
+    [[ $http_status =~ ^2[0-9][0-9]$ ]] || return 1
+    policy=$(jq -ers '
+        select(length == 1) | .[0]
+        | select(.accepted == true and .status == "failed")
+        | select((.waitSec | type) == "number" and (.waitSec | floor) == .waitSec and .waitSec >= 60 and .waitSec <= 3600)
+        | select(.failureAction == "reboot" or .failureAction == "shutdown")
+        | [.waitSec, .failureAction] | @tsv
+    ' <<<"${response%$'\n'*}") || return 1
+    IFS=$'\t' read -r wait_seconds action <<<"$policy" || return 1
+    rootpxe_failure_deadline=$((failed_at + wait_seconds))
+    rootpxe_console_message WARN 'Task failed. The configured failure wait has started.' >&2
+    rootpxe_console_message INFO "Failure wait: ${wait_seconds}s from first failure. Timeout action: $action." >&2
+    rootpxe_console_message INFO 'SSH is available for troubleshooting.' >&2
+
+    local -a status_args=(--data-urlencode "taskid=$taskid" --data-urlencode "token=$task_token" --data-urlencode "mac=$mac")
+    while :; do
+        remaining=$(rootpxe_failure_remaining) || remaining=0
+        response=$(rootpxe_task_curl "${tls[@]}" --silent --connect-timeout 2 --max-time 5 \
+            "${status_args[@]}" -w '\n%{http_code}' "${api%/}/task-status") || response=''
+        http_status=${response##*$'\n'}
+        case $http_status in
+            200)
+                state=$(jq -ers 'select(length == 1) | .[0].status | strings' <<<"${response%$'\n'*}") || state=''
+                if [[ -n $state && $state != failed ]]; then
+                    rootpxe_console_message INFO 'The failed task changed. Its timeout action was cancelled.' >&2
+                    return 0
+                fi
+                if [[ $state == failed && $remaining == 0 ]]; then
+                    printf '%s\n' "$action"
+                    return
+                fi
+                ;;
+            400|401|403|404|409)
+                rootpxe_console_message INFO 'The failed task is no longer authorized. Its timeout action was cancelled.' >&2
+                return 0
+                ;;
+        esac
+        # Only a status query made at or after the deadline may authorize the action.
+        (( remaining > 0 )) || return 1
+        if remaining=$(rootpxe_failure_remaining); then
+            sleep "$(( remaining < 5 ? remaining : 5 ))"
+        fi
+    done
+)
+
 # SSH 调试模式只保留网络初始化后的登录入口，不能触发 RAID 组装、任务或电源操作。
 case $isdebug in
     [Yy][Ee][Ss]|[Yy])
@@ -132,7 +208,15 @@ if [[ $mode == manreg ]]; then
     fi
 fi
 
-if ! pxeos-storage-probe wait; then
+if ! storage_probe_diagnostic=$(pxeos-storage-probe wait 2>&1); then
+    storage_probe_failed_at=$(date +%s)
+    storage_probe_diagnostic=${storage_probe_diagnostic:-Storage probe failed.}
+    pxeos_init_message ERROR "$storage_probe_diagnostic"
+    if storage_failure_action=$(pxeos_wait_storage_failure "$storage_probe_diagnostic" "$storage_probe_failed_at"); then
+        pxeos_apply_storage_failure_action "$storage_failure_action"
+    else
+        pxeos_init_message WARN 'RootPXE did not confirm the storage failure or its timeout action.'
+    fi
     pxeos_init_message ERROR 'Storage probe incomplete. PXEOS remains available.'
     exit 75
 fi

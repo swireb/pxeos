@@ -460,18 +460,86 @@ for command in mdadm pxeos pxeos.debug pxeos-storage-probe poweroff reboot sleep
     cat >"$tmp/mock/$command" <<'EOF'
 #!/usr/bin/env bash
 if [[ ${0##*/} == pxeos-storage-probe ]]; then
+    [[ -z ${PXEOS_S99_STORAGE_ERROR:-} ]] || printf '%s\n' "$PXEOS_S99_STORAGE_ERROR" >&2
     exit "${PXEOS_S99_STORAGE_RC:-0}"
 fi
 printf '%s:%s\n' "$(basename "$0")" "$*" >>"$PXEOS_S99_LOG"
 case "$(basename "$0")" in
   pxeos) exit "${PXEOS_S99_PXEOS_RC:-0}" ;;
-  poweroff|reboot) exit "${PXEOS_S99_POWER_RC:-0}" ;;
+  poweroff|reboot)
+    if [[ -n ${PXEOS_FAILURE_CLOCK:-} ]]; then printf 'power_at:%s\n' "$(<"$PXEOS_FAILURE_CLOCK")" >>"$PXEOS_S99_LOG"; fi
+    exit "${PXEOS_S99_POWER_RC:-0}" ;;
+  sleep)
+    if [[ -n ${PXEOS_FAILURE_CLOCK:-} ]]; then printf '%s\n' "$(( $(<"$PXEOS_FAILURE_CLOCK") + $1 ))" >"$PXEOS_FAILURE_CLOCK"; fi ;;
 esac
 EOF
     chmod +x "$tmp/mock/$command"
 done
 
+cat >"$tmp/mock/date" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n ${PXEOS_FAILURE_CLOCK:-} && $* == +%s ]]; then cat "$PXEOS_FAILURE_CLOCK"; else exec /usr/bin/date "$@"; fi
+EOF
+chmod +x "$tmp/mock/date"
+
+cat >"$tmp/mock/curl" <<'EOF'
+#!/usr/bin/env bash
+headers= endpoint= format=
+while (( $# )); do
+    case $1 in
+        --dump-header) headers=$2; shift;;
+        --data-urlencode)
+            field=$2
+            case $field in
+                token@*) field="token=$(<"${field#token@}")";;
+                token=*) exit 2;;
+            esac
+            printf 'callback:%s\n' "$field" >>"$PXEOS_S99_LOG"
+            shift;;
+        --pinnedpubkey) printf 'pin:%s\n' "$2" >>"$PXEOS_S99_LOG"; shift;;
+        -w) format=$2; shift;;
+        *://*) endpoint=$1; printf 'endpoint:%s\n' "$endpoint" >>"$PXEOS_S99_LOG";;
+    esac
+    shift
+done
+if [[ ${PXEOS_S99_CALLBACK_FAIL:-} == yes ]]; then exit 22; fi
+http=200
+if [[ $endpoint == */task-status ]]; then
+    now=$(<"$PXEOS_FAILURE_CLOCK")
+    printf 'status_at:%s\n' "$now" >>"$PXEOS_S99_LOG"
+    state=failed
+    if (( now >= 120 )); then
+        case ${PXEOS_FAILURE_STATUS:-failed} in
+            revoked) http=403; state=unknown;;
+            deleted) http=404; state=deleted;;
+            cancelled|queued) state=$PXEOS_FAILURE_STATUS;;
+            unavailable) if (( now >= 160 )); then exit 28; fi;;
+        esac
+    fi
+    printf '{"status":"%s"}' "$state"
+else
+    http=${PXEOS_FAILURE_REPLY_HTTP:-200}
+    if [[ -n ${PXEOS_FAILURE_CLOCK:-} ]]; then printf '%s\n' "$(( $(<"$PXEOS_FAILURE_CLOCK") + 7 ))" >"$PXEOS_FAILURE_CLOCK"; fi
+    if [[ -n ${PXEOS_FAILURE_REPLY:-} ]]; then
+        printf '%s' "$PXEOS_FAILURE_REPLY"
+    else
+        printf '{"accepted":true,"status":"failed"}'
+    fi
+fi
+printf 'HTTP/1.1 %s Fixture\r\n\r\n' "$http" >"$headers"
+printf '%b' "${format//%\{http_code\}/$http}"
+EOF
+chmod +x "$tmp/mock/curl"
+
+mkdir -p "$tmp/lib"
+for library in "$overlay/usr/share/pxeos/lib/"*.sh; do
+    [[ ${library##*/} == funcs.sh ]] || ln -s "$library" "$tmp/lib/${library##*/}"
+done
+: >"$tmp/cmdline"
+sed "s|/proc/cmdline|$tmp/cmdline|g" "$overlay/usr/share/pxeos/lib/funcs.sh" >"$tmp/lib/funcs.sh"
 sed \
+    -e "s|/usr/share/pxeos/lib/funcs.sh|$tmp/lib/funcs.sh|g" \
+    -e "s|/tmp/pxeos-manual-task|$tmp/manual-handoff|g" \
     -e "s|/tmp/pxeos.shutdown|$tmp/pxeos.shutdown|g" \
     -e "s|/tmp/pxeos.failure_action|$tmp/pxeos.failure_action|g" \
     -e "s|/.pxeos-quiet-shutdown|$tmp/.pxeos-quiet-shutdown|g" \
@@ -498,6 +566,111 @@ PXEOS_S99_LOG="$tmp/blocked-s99.log" PXEOS_S99_STORAGE_RC=75 PATH="$tmp/mock:$PA
     mdraid=true isdebug='' type=down bash "$tmp/S99pxeos" || rc=$?
 [[ $rc -eq 75 ]] || fail '等待存储探测失败后退出码错误'
 ! grep -Eq '^(mdadm|pxeos|reboot|poweroff):' "$tmp/blocked-s99.log" || fail '存储异常时执行了任务或电源操作'
+! grep -q '^callback:' "$tmp/blocked-s99.log" || fail '无任务上下文仍上报存储异常'
+
+for test_case in deploy capture http-failure; do
+    : >"$tmp/task-probe.log"
+    task_mode=down
+    callback_fail=no
+    [[ $test_case != capture ]] || task_mode=up
+    [[ $test_case != http-failure ]] || callback_fail=yes
+    rc=0
+    PXEOS_S99_LOG="$tmp/task-probe.log" PXEOS_S99_STORAGE_RC=75 PATH="$tmp/mock:$PATH" \
+        PXEOS_S99_STORAGE_ERROR='ATA error recovery failed: ata1: EH pending after 5 tries, giving up' \
+        PXEOS_S99_CALLBACK_FAIL="$callback_fail" type="$task_mode" taskid=441 token=fixture-token-4410000 \
+        mac=aa:bb:cc:dd:ee:ff pxeapi=https://fixture.invalid/pxe/v1/ mdraid=true bash "$tmp/S99pxeos" || rc=$?
+    [[ $rc -eq 75 ]] || fail "$test_case 未通过诊断路径退出"
+    [[ $(grep -c '^endpoint:' "$tmp/task-probe.log") -eq 1 ]] || fail "$test_case 未执行一次启动错误回调"
+    for field in taskid=441 token=fixture-token-4410000 mac=aabbccddeeff stage=storage_probe errorCode=STORAGE_PROBE_FAILED \
+        'message=ATA error recovery failed: ata1: EH pending after 5 tries, giving up'; do
+        grep -Fxq "callback:$field" "$tmp/task-probe.log" || fail "$test_case 回调缺少字段 $field"
+    done
+    ! grep -Eq '^(mdadm|pxeos|reboot|poweroff):' "$tmp/task-probe.log" || fail "$test_case 探测失败后执行了任务或电源操作"
+done
+
+for test_case in reboot shutdown unconfirmed unexpected-state invalid-wait invalid-action redirect revoked deleted cancelled queued unavailable; do
+    : >"$tmp/failure-policy.log"
+    printf '100\n' >"$tmp/failure-clock"
+    type=down
+    policy='{"accepted":true,"status":"failed","waitSec":60,"failureAction":"reboot"}'
+    state=$test_case
+    http=200
+    case $test_case in
+        shutdown) type=up; policy='{"accepted":true,"status":"failed","waitSec":60,"failureAction":"shutdown"}';;
+        unconfirmed) policy='{"accepted":false,"status":"failed","waitSec":60,"failureAction":"reboot"}';;
+        unexpected-state) policy='{"accepted":true,"status":"attention","waitSec":60,"failureAction":"reboot"}';;
+        invalid-wait) policy='{"accepted":true,"status":"failed","waitSec":59,"failureAction":"reboot"}';;
+        invalid-action) policy='{"accepted":true,"status":"failed","waitSec":60,"failureAction":"other"}';;
+        redirect) http=302;;
+    esac
+    rc=0
+    PXEOS_S99_LOG="$tmp/failure-policy.log" PXEOS_S99_STORAGE_RC=75 PATH="$tmp/mock:$PATH" \
+        PXEOS_FAILURE_CLOCK="$tmp/failure-clock" PXEOS_FAILURE_REPLY="$policy" PXEOS_FAILURE_STATUS="$state" PXEOS_FAILURE_REPLY_HTTP="$http" \
+        type="$type" taskid=441 token=fixture-token-4410000 mac=aa:bb:cc:dd:ee:ff \
+        pxeapi=https://fixture.invalid/pxe/v1/ mdraid=true bash "$tmp/S99pxeos" || rc=$?
+    [[ $rc -eq 75 ]] || fail "$test_case 探测失败返回码错误"
+    [[ $(grep -c '^endpoint:.*/error$' "$tmp/failure-policy.log") -eq 1 ]] || fail "$test_case 重复发送探测失败"
+    ! grep -Eq '^(mdadm|pxeos):' "$tmp/failure-policy.log" || fail "$test_case 探测未就绪时启动磁盘任务"
+    case $test_case in
+        reboot|shutdown)
+            action='reboot:-f'
+            [[ $test_case != shutdown ]] || action='poweroff:'
+            grep -Fxq "$action" "$tmp/failure-policy.log" || fail "$test_case 未分派所配置的电源动作"
+            grep -Fxq 'status_at:160' "$tmp/failure-policy.log" || fail "$test_case 到期未复核任务身份"
+            [[ $(grep '^power_at:' "$tmp/failure-policy.log") == 'power_at:160' ]] || fail "$test_case 按确认时间重置了初次失败时限或重复分派"
+            ;;
+        *)
+            ! grep -Eq '^(poweroff|reboot):' "$tmp/failure-policy.log" || fail "$test_case 不应分派电源动作"
+            ;;
+    esac
+done
+
+cat >"$tmp/mock/pxeos.man.reg" <<'EOF'
+#!/usr/bin/env bash
+printf 'manual-registration\n' >>"$PXEOS_S99_LOG"
+exit "${PXEOS_S99_MANUAL_RC:-0}"
+EOF
+chmod +x "$tmp/mock/pxeos.man.reg"
+for test_case in normal maintenance registration; do
+    : >"$tmp/skip-probe-report.log"
+    storage_rc=75
+    task_mode=
+    case $test_case in
+        normal) storage_rc=0;;
+        maintenance) task_mode=maintenance;;
+        registration) task_mode=manreg;;
+    esac
+    rc=0
+    PXEOS_S99_LOG="$tmp/skip-probe-report.log" PXEOS_S99_STORAGE_RC="$storage_rc" PATH="$tmp/mock:$PATH" \
+        PXEOS_S99_PXEOS_RC=75 mode="$task_mode" type=down taskid=441 token=fixture-token-4410000 \
+        mac=aa:bb:cc:dd:ee:ff pxeapi=https://fixture.invalid/pxe/v1/ bash "$tmp/S99pxeos" || rc=$?
+    if [[ $test_case == registration ]]; then
+        [[ $rc -eq 0 && $(<"$tmp/skip-probe-report.log") == manual-registration ]] || fail '独立手动注册未正常返回'
+    else
+        [[ $rc -eq 75 ]] || fail "$test_case 未按原路径退出"
+    fi
+    ! grep -q '^callback:' "$tmp/skip-probe-report.log" || fail "$test_case 不应上报探测错误"
+done
+
+: >"$tmp/handoff-probe.log"
+mkdir "$tmp/manual-handoff"
+pin=sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+printf '%s\n' 552 fixture-token-5520000 aa:bb:cc:dd:ee:aa capture true "$pin" >"$tmp/manual-handoff/context"
+printf '%s\n' 'taskid=999 task_token=old-kernel-token-9990000 mac=11:22:33:44:55:66 type=down mode=manreg manual_spki_pin=old-pin' >"$tmp/cmdline"
+printf '100\n' >"$tmp/failure-clock"
+rc=0
+PXEOS_S99_LOG="$tmp/handoff-probe.log" PXEOS_S99_STORAGE_RC=75 PXEOS_S99_MANUAL_RC=20 PATH="$tmp/mock:$PATH" \
+    PXEOS_FAILURE_CLOCK="$tmp/failure-clock" PXEOS_FAILURE_STATUS=cancelled \
+    PXEOS_FAILURE_REPLY='{"accepted":true,"status":"failed","waitSec":60,"failureAction":"shutdown"}' \
+    mode=manreg pxeapi=https://fixture.invalid/pxe/v1/ bash "$tmp/S99pxeos" || rc=$?
+[[ $rc -eq 75 ]] || fail '手动抓取交接探测失败后未保留诊断环境'
+for record in callback:taskid=552 callback:token=fixture-token-5520000 callback:mac=aabbccddeeaa "pin:$pin"; do
+    grep -Fxq "$record" "$tmp/handoff-probe.log" || fail '回调未保留手动任务交接身份和固定公钥'
+done
+[[ $(grep -c '^endpoint:.*/task-status$' "$tmp/handoff-probe.log") -gt 0 &&
+   $(grep -Fxc "pin:$pin" "$tmp/handoff-probe.log") -eq $(grep -c '^endpoint:' "$tmp/handoff-probe.log") ]] || fail '手动任务等待时未继续校验固定公钥'
+! grep -Eq '999|old-|^(mdadm|pxeos|reboot|poweroff):' "$tmp/handoff-probe.log" || fail '探测回调受旧引导参数影响或启动了任务'
+: >"$tmp/cmdline"
 
 run_normal_s99() {
     local name="$1"
