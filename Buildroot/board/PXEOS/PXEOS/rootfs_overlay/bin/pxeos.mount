@@ -1,4 +1,16 @@
 #!/bin/bash
+# Managed tasks obtain storage only from authenticated JSON checkin.
+if [[ ${rootpxe_capture_direct:-no} != yes && -z ${rootpxe_storage_workspace:-} ]]; then
+    handleError "PXEOS_STAGE=storage CODE=STORAGE_CONTEXT_REQUIRED"
+fi
+if [[ ${protocol:-} == nfs ]]; then
+    if [[ ${rootpxe_capture_direct:-no} == yes ]]; then
+        nfs_version=${rootpxe_capture_nfs_version:-}
+    else
+        nfs_version=$(jq -er '.nfsVersion' "$rootpxe_storage_workspace/context.json") || handleError "PXEOS_STAGE=storage CODE=STORAGE_CONTEXT_REQUIRED"
+    fi
+    rootpxe_storage_init_nfs_identity "$nfs_version" || handleError "PXEOS_STAGE=storage CODE=STORAGE_NFS_MOUNT_FAILED REASON=nfs_client_identity_unavailable"
+fi
 # Direct capture uses only the authenticated connection policy, without a
 # shadow tree, target inspection, or per-file storage controller.
 if [[ ${rootpxe_capture_direct:-no} == yes ]]; then
@@ -24,8 +36,6 @@ if [[ ${rootpxe_capture_direct:-no} == yes ]]; then
     [[ $capture_mount_status == 0 ]] || handleError "Capture storage mount failed"
     return 0
 fi
-# Managed tasks obtain storage only from authenticated JSON checkin.
-[[ -n ${rootpxe_storage_workspace:-} ]] || handleError "PXEOS_STAGE=storage CODE=STORAGE_CONTEXT_REQUIRED"
 [[ ! -L /storage && ( ! -e /storage || -d /storage ) ]] || handleError "PXEOS_STAGE=storage CODE=STORAGE_MOUNTPOINT_UNSAFE"
 mkdir -p /storage || handleError "PXEOS_STAGE=storage CODE=STORAGE_MOUNTPOINT_UNAVAILABLE"
 umount /ntfs /bcdstore >/dev/null 2>&1 || true

@@ -182,6 +182,8 @@ cloud-init status --long
 
 部署的服务端与 PXEOS 继续分别核验 `configuredVersion/actualVersion`，helper 的版本与访问身份检查保持原链路。捕获使用当前认证 checkin 下发的 NFS/SMB 版本策略及 SMB 凭据挂载真实 NAS，不启动 shadow/helper writer。
 
+PXEOS 在部署或直接捕获首次尝试 NFSv4 挂载前，将认证任务的规范化主机 MAC 写入内核 NFS 客户端标识 `rootpxe-<mac>`。`auto` 可协商 NFSv4，也会初始化标识。ClamAV 和 PhotoRec 的远程 NFS 挂载使用自动协商，并在挂载前使用 PXE 启动参数中的主机 MAC 初始化同一标识。同一 MAC 的任务切换和重试复用该标识，主机 MAC 更换后标识随之变化。同一次启动期间，如果内核已有不同标识，或在标识为空时已有 NFSv4 挂载或客户端，PXEOS 会报告存储挂载失败并保留原状态。部署或捕获配置为 NFSv3 或 SMB 时跳过这一步。
+
 NAS 访问根预先存在；捕获按需创建根下 `dev` 和本机去冒号 MAC 目录，准备时只清空自己的 MAC 暂存（包括隐藏文件），不读、校验或快照旧正式镜像。导入仍使用原控制树和锁，部署、导出读取行为不变。
 
 - 部署读流，以及通过存储助手执行的受控写入和回读校验，按单调时钟限制本地进度事件，每秒最多一条。事件只供客户端检查转发进程，控制台分区进度由 Partclone 的状态上报提供。

@@ -19,6 +19,7 @@ fi
 echo "Done"
 debugPause
 dots "Mounting file system"
+rootpxe_storage_init_nfs_identity auto || handleError "PXEOS_STAGE=storage CODE=STORAGE_NFS_MOUNT_FAILED REASON=nfs_client_identity_unavailable"
 rootpxe_run_logged_typed_native storage-mount.log "$storage" mount -o nolock $storage /storage
 case $? in
     0)

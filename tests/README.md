@@ -111,6 +111,55 @@ pxeos_network_storage_regression.sh  # 合并的网络故障诊断、存储和�
 pxeos_task_identity_regression.sh  # 核对普通 JSON/form 存储身份、捕获协议、初始化回调和确认空磁盘结果。
 ```
 
+`pxeos_network_storage_regression.sh` 还使用临时文件和挂载替身核对 NFSv4 客户端标识。覆盖部署、直采、ClamAV 和 PhotoRec 的挂载入口，并检查维护入口会在初始化失败时停止。测试同时核对同一 MAC 的任务切换和重试、不同或无效 MAC、已有客户端或挂载、标识节点不可用，以及 NFSv3 和 SMB 跳过该初始化。
+
+## NFSv4.2 双客户端集成测试
+
+`pxeos_nfs_identity_integration.py` 使用三台新建的 x86_64 QEMU TCG 客体。两台客户端以相同 hostname、不同 MAC 连接同一台内核 NFSD。对照阶段核对默认 owner 重复及 client ID 更换。修复阶段执行仓库中的初始化函数，核对两个不同 owner 同时处于 confirmed 状态、client ID 稳定，两台客户端各持续至少 30 秒从 NFS 读取并校验内容，且会话和 READ 计数无重建、重传或异常。
+
+从 PXEOS 子模块目录运行。准备已解包的 QEMU/SeaBIOS 树、与测试内核匹配的 `7.0.0-43-generic` 模块，以及下列两个 Ubuntu amd64 软件包。入口核对软件包 SHA256，只解包到 `/tmp`。测试依赖 Python 3、Bash、BusyBox、`ldd`、`cpio`、`dpkg-deb`、`modprobe`、`zstd`、`ip`、`rpcbind` 和标准用户态命令。
+
+| 软件包 | SHA256 |
+| --- | --- |
+| `linux-image-7.0.0-43-generic_7.0.0-43.43_amd64.deb` | `fb44ae94b483fb2e04aa898b92863552bea8a92a6ea9b5f4610a7bd17ac5d4a1` |
+| `nfs-kernel-server_2.8.5-1ubuntu1_amd64.deb` | `8a0c35c9afae663ec9e7963edd946204129c74404502c65bd45835344d9e590f` |
+
+```shell
+/home/sysadmin/.codex/bin/codex-build-test python3 -B tests/pxeos_nfs_identity_integration.py \
+  --qemu-tree /path/to/extracted-qemu \
+  --kernel-deb /path/to/linux-image-7.0.0-43-generic_7.0.0-43.43_amd64.deb \
+  --server-deb /path/to/nfs-kernel-server_2.8.5-1ubuntu1_amd64.deb
+```
+
+客体仅通过本次创建的 Unix socketpair 通信，NFSD 只共享客体 RAM 中的测试文件。每阶段有超时，脚本仅清理自己启动的 QEMU 子进程。结果目录由 `LOG_DIR` 返回。该测试覆盖 Ubuntu 测试内核上的真实 NFSv4.2 协议与本次客户端初始化函数，PXEOS 发布产物、真实任务和生产吞吐需另行验收。
+
+2026-11-15 使用 Ubuntu `7.0.0-43-generic` 测试内核验证。对照组的两个地址共用 `Linux NFSv4.2 pxeos`，分别观察到 3 和 12 个不同 client ID。修复组的两个客户端重叠读取 41.22 秒，分别完成 35 次 256 KiB 读取和 SHA256 校验，40 次服务端采样均同时看到两个不同的 confirmed owner。每端的 READ 计数从 5 增至 175，重传、超时和错误均为 0。两端初次建立连接各有两次 EXCHANGE_ID 和一次 CREATE_SESSION，此后读期间三个会话计数均无增量。
+
+在同一命令末尾加 `--clients 50` 可以运行 50 客户端对照。每阶段使用一个 768 MiB 的 NFSD 客体和一个 1536 MiB 的客户端客体，各用 2 vCPU，需要同版本的 `bridge` 和 `veth` 内核模块。每个客户端使用独立网络与挂载命名空间、MAC、IP 和内核 NFS 状态。客户端统一在 20 秒挂载窗口开始尝试，随后有 115 秒直接读取窗口。读取窗口内才完成挂载的客户端也立即开始读取，并单独记录为晚挂载。每轮读取 256 KiB 并校验 SHA256，成功完成的客户端保持挂载直至观察窗口结束。
+
+`LOG_DIR` 下的两阶段串口日志和 `*-clients.json` 记录逐客户端命名空间、标识、挂载结果、第一及最后一次读取时刻、校验字节数和 RPC 计数。对照组记录挂载或读取阻塞。修复组须观察到 50 个不同的 confirmed owner，其 client ID 在读取期间至少稳定 30 秒，并且各客户端全部完成 18 轮读取。测试按固定节奏读取小数据，用于核对会话稳定性。
+
+2026-11-15 的 50 客户端对照在两组各 50 次成功挂载和 50 次实际开始读取后结束。对照组 0 个客户端完成读计划，共核对 157 轮、41,156,608 字节，服务端从 50 个地址观察到同一个 owner 和 1,326 个不同的 client ID。修复组 50 个客户端全部完成，共核对 900 轮、235,929,600 字节。服务端连续 113.32 秒观察到该组的 50 个 confirmed owner 及其稳定的 client ID。修复组各客户端读取期间 EXCHANGE_ID、CREATE_SESSION 和 DESTROY_SESSION 均无增量，RPC 重传、超时以及所采样操作的错误均为 0。此结果使用 Ubuntu `7.0.0-43-generic` 测试内核，验证范围为 NFSv4.2 身份、会话和数据完整性。
+
+## NFSv4.2 读取吞吐对照
+
+在上述命令末尾加 `--clients 50 --throughput`，额外需要宿主 `cc` 在 `/tmp` 编译只读测试工具 `pxeos_nfs_rate_reader.c`。按相同标识、不同标识、不同标识、相同标识的顺序运行四组。每组都重新启动隔离测试客体以获得新服务端和客户端状态，使用相同资源配置、16 MiB 的 RAM 文件、NFSv4.2 和 1 MiB 的 `rsize`。服务端客体在启动 NFSD 前也将最大块大小设为 1 MiB。客户端连续执行 1 MiB `O_DIRECT` 读取，绕过客户端页缓存。首次和末次可用读块只抽样检查 4 KiB，计时窗内无按块哈希或人为读取间隔。
+
+各组使用 20 秒共同挂载准备窗口，随后发布同一个客体单调时钟的 60 秒读取窗口，提前 7 秒通知客户端准备。晚挂载客户端仍可读取到共同截止时刻。只计入窗口内已经成功返回的字节，逐客户端记录首笔读取完成延迟、最后进展、实际读取错误和仍未返回的状态。总吞吐同时用客体窗口与宿主观测的起止日志间隔换算。CPU 与 NFSD 计数是覆盖读取窗口的近似采样。`throughput-comparison.json` 汇总四组结果与两次配对倍率，逐组报告和串口日志同在 `LOG_DIR`。结果反映这一 TCG 环境内的读取速率和会话行为，生产万兆链路吞吐需在实际环境实测。
+
+吞吐客体统一使用 `kho=off`，避免测试内核在启动时为未使用的 kexec handover 保留大量内存，影响 initramfs 解包。客体配置的内存限额保持一致。两个 QEMU 进程通过匿名 Unix 数据报 socketpair 转发 MTU 1500 的以太帧，客体之间的 NFS 继续使用 TCP。[Linux 内核参数说明](https://www.kernel.org/doc/html/latest/admin-guide/kernel-parameters.html) · [QEMU 数据报后端](https://github.com/qemu/qemu/blob/v10.2.1/net/dgram.c)
+
+2026-11-15 在 QEMU 10.2.1 和 Ubuntu `7.0.0-43-generic` 上完成四组。四组均为 50 个客户端，实际协商的 `rsize` 均为 1 MiB。速率只计算窗口内成功返回的字节。
+
+| 顺序 | 标识 | 成功返回字节 | 客体 MiB/s | 宿主窗口秒数 | 宿主 MiB/s | 零进展客户端 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| A1 | 相同 | 327,155,712 | 5.200 | 60.027 | 5.198 | 2 |
+| B1 | 唯一 | 2,102,394,880 | 33.417 | 59.934 | 33.453 | 0 |
+| B2 | 唯一 | 2,111,832,064 | 33.567 | 60.077 | 33.524 | 0 |
+| A2 | 相同 | 257,949,696 | 4.100 | 59.879 | 4.108 | 3 |
+
+唯一标识组的速率为相同标识组的 6.43 倍（AB）和 8.19 倍（BA），按宿主时间换算分别是 6.44 倍和 8.16 倍。相同标识组的 50 个地址分别产生 760 和 873 个不同 client ID。唯一标识组分别连续 57.59 秒和 59.45 秒观察到 50 个稳定的 confirmed owner，读取窗口内每端 EXCHANGE_ID、CREATE_SESSION、DESTROY_SESSION 无增量，且采样 RPC 重传、超时和错误均为 0。试运行未完成的批次保留原始输出，配对倍率使用同一数据报后端的四组。正式测试 scope 内存峰值为 1,167,831,040 字节，swap 峰值为 0，退出后无本轮 QEMU 进程残留。
+
 
 ## 捕获、恢复、存储与分区（19）
 

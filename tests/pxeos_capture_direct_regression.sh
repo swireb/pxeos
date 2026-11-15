@@ -225,9 +225,20 @@ mkfifo "$tmp/term-input"
  killStatusReporter
  [[ $(cat "$tmp/legacy-pause") == legacy ]] || fail legacy-sampler-cleanup-pause-changed
 )
-# Source the real direct mount entry with only the native mount replaced.
+# Source the real direct mount entry with a file fixture for kernel state.
 (
  sed "s|/storage|$tmp/storage|g" "$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/bin/pxeos.mount" >"$tmp/direct-mount.sh"
+ sed -n '/^rootpxe_normalize_mac() {/,/^}/p' "$lib/funcs.sh" >"$tmp/mac.sh"
+ sed -n -e "s|/sys/fs/nfs/net/nfs_client/identifier|$tmp/capture-nfs-id|g" \
+  -e "s|/proc/self/mountinfo|$tmp/capture-nfs-mountinfo|g" \
+  -e "s|/proc/fs/nfsfs/servers|$tmp/capture-nfs-servers|g" \
+  -e '/^rootpxe_storage_init_nfs_identity() {/,/^}/p' "$lib/storage-io.sh" >"$tmp/nfs-identity.sh"
+ . "$tmp/mac.sh"
+ . "$tmp/nfs-identity.sh"
+ : >"$tmp/capture-nfs-mountinfo"
+ : >"$tmp/capture-nfs-servers"
+ printf '(null)\n' >"$tmp/capture-nfs-id"
+ mac=$macWinSafe
  rootpxe_capture_direct=yes storage_server=192.0.2.1 storage_export=/capture-fixture
  mountpoint(){ return 1; }
  rootpxe_run_logged_typed_native(){ printf '%s\n' "$@" >"$tmp/mount-args"; }
@@ -235,6 +246,7 @@ mkfifo "$tmp/term-input"
  for version in auto 4.1;do
   protocol=nfs rootpxe_capture_nfs_version=$version
   . "$tmp/direct-mount.sh"
+  [[ $(cat "$tmp/capture-nfs-id") == "rootpxe-$macWinSafe" ]] || fail capture-NFS-identity-missing
   options=$(awk '$0=="-o" {getline;print;exit}' "$tmp/mount-args")
   [[ ,$options, == *,rw,* && ,$options, == *,proto=tcp,* && ,$options, == *,nolock,* ]] || fail "capture-NFS-missing-nolock-or-existing-flags: $version"
   if [[ $version == auto ]];then [[ ,$options, != *,vers=*, ]] || fail auto-version-policy-changed

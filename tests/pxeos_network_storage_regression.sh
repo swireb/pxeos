@@ -6,6 +6,162 @@ if [[ ${PXEOS_STARTUP_TEST_ISOLATED:-} != 1 ]]; then
 fi
 [[ $0 == /pxeos/tests/pxeos_network_storage_regression.sh && ! -e /sys && ! -w /proc/sysrq-trigger ]] || exit 125
 
+# NFS identity fixtures use temporary files and replace all mount commands.
+(
+root=$(cd "$(dirname "$0")/.." && pwd)
+overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
+tmp=$(mktemp -d)
+trap 'rm -rf -- "$tmp"' EXIT
+fail() { printf 'FAIL: NFS client identity: %s\n' "$*" >&2; exit 1; }
+lib="$overlay/usr/share/pxeos/lib"
+sed -n '/^rootpxe_normalize_mac() {/,/^}/p' "$lib/funcs.sh" >"$tmp/normalize.sh"
+sed -e "s|/sys/fs/nfs/net/nfs_client/identifier|$tmp/identifier|g" \
+    -e "s|/proc/self/mountinfo|$tmp/mountinfo|g" \
+    -e "s|/proc/fs/nfsfs/servers|$tmp/servers|g" "$lib/storage-io.sh" >"$tmp/storage-io.sh"
+sed "s|/storage|$tmp/mountpoint|g" "$overlay/bin/pxeos.mount" >"$tmp/mount.sh"
+. "$tmp/normalize.sh"
+. "$tmp/storage-io.sh"
+declare -F rootpxe_storage_init_nfs_identity >/dev/null || fail '身份初始化函数缺失'
+
+identity_path="$tmp/identifier"
+: >"$tmp/mountinfo"
+printf 'NV SERVER PORT USE HOSTNAME\n' >"$tmp/servers"
+printf '(null)\n' >"$identity_path"
+mac=AA:BB:CC:DD:EE:FF taskid=27 progress_attempt=1
+rootpxe_storage_init_nfs_identity auto || fail '首次初始化失败'
+expected=rootpxe-aabbccddeeff
+[[ $(cat "$identity_path") == "$expected" ]] || fail '标识未使用规范化 MAC'
+printf '%s\n' "$expected" >"$identity_path"
+taskid=38 progress_attempt=2
+rootpxe_storage_init_nfs_identity 4.2 || fail '任务切换后相同标识未被接受'
+[[ $(wc -c <"$identity_path") -eq $((${#expected} + 1)) ]] || fail '相同标识被重复写入'
+mac=aabbccddee00
+if rootpxe_storage_init_nfs_identity 4.1; then fail '覆盖了不同 MAC 的既有标识'; fi
+[[ $(cat "$identity_path") == "$expected" ]] || fail '既有标识被改写'
+for mac in '' not-a-mac 000000000000 ffffffffffff; do
+    if rootpxe_storage_init_nfs_identity 4.0; then fail '接受了无效 MAC'; fi
+done
+mac=aabbccddeeff
+
+printf '(null)\n' >"$identity_path"
+printf '37 29 0:42 / /mnt/image rw - nfs4 server:/image rw,vers=4.2\n' >"$tmp/mountinfo"
+if rootpxe_storage_init_nfs_identity auto; then fail '已有 NFSv4 挂载时初始化了标识'; fi
+[[ $(cat "$identity_path") == '(null)' ]] || fail '已有挂载的标识被改写'
+: >"$tmp/mountinfo"
+printf 'v4 7f000001 801 1 fixture\n' >>"$tmp/servers"
+if rootpxe_storage_init_nfs_identity auto; then fail '已有 NFSv4 客户端时初始化了标识'; fi
+[[ $(cat "$identity_path") == '(null)' ]] || fail '已有客户端的标识被改写'
+printf 'NV SERVER PORT USE HOSTNAME\n' >"$tmp/servers"
+rm -- "$identity_path"
+if rootpxe_storage_init_nfs_identity auto; then fail '标识节点缺失时没有拒绝'; fi
+[[ ! -e $identity_path ]] || fail '标识节点缺失时创建了文件'
+rootpxe_storage_init_nfs_identity 3 || fail 'NFSv3 检查了 NFSv4 标识'
+(
+    ln -s /dev/full "$identity_path"
+    cat() { printf '(null)\n'; }
+    if rootpxe_storage_init_nfs_identity auto; then fail '标识写入失败时没有拒绝'; fi
+)
+rm -- "$identity_path"
+: >"$identity_path"
+(
+    cat() { printf '(null)\n'; }
+    if rootpxe_storage_init_nfs_identity auto; then fail '标识回读不符时没有拒绝'; fi
+)
+
+mkdir "$tmp/context"
+rootpxe_storage_workspace="$tmp/context"
+protocol=nfs storage_server=fixture storage_export=/export
+handleError() { printf '%s\n' "$1" >&2; exit 91; }
+mountpoint() { printf 'mountpoint\n' >>"$tmp/trace"; return 1; }
+umount() { :; }
+dots() { :; }
+debugPause() { :; }
+rootpxe_storage_start() { :; }
+rootpxe_run_logged_typed_native() {
+    if [[ $3 == mount.cifs || ${rootpxe_capture_nfs_version:-} == 3 ]]; then
+        [[ ! -e $identity_path ]] || fail 'SMB 或 NFSv3 配置了 NFSv4 标识'
+        printf 'bypass\n' >>"$tmp/trace"
+        return 0
+    fi
+    [[ $(cat "$identity_path") == "$expected" ]] || fail '直采在安装内核标识前挂载';
+    printf 'direct\n' >>"$tmp/trace"
+}
+rootpxe_storage_native() {
+    [[ $1 == mount-nfs && $(cat "$identity_path") == "$expected" ]] || fail '受管部署在安装内核标识前挂载';
+    printf 'managed\n' >>"$tmp/trace"
+}
+printf '{"nfsVersion":"4.2"}\n' >"$tmp/context/context.json"
+: >"$identity_path"
+(rootpxe_capture_direct=yes rootpxe_capture_nfs_version=auto; . "$tmp/mount.sh")
+grep -qx direct "$tmp/trace" || fail '未运行直采挂载'
+: >"$identity_path"
+(rootpxe_capture_direct=no; . "$tmp/mount.sh")
+grep -qx managed "$tmp/trace" || fail '未运行受管挂载'
+: >"$tmp/trace"
+printf 'admin-owner\n' >"$identity_path"
+status=0
+(rootpxe_capture_direct=no; . "$tmp/mount.sh") >"$tmp/error" 2>&1 || status=$?
+[[ $status -eq 91 && ! -s $tmp/trace ]] || fail '标识失败后仍访问挂载点'
+grep -Fxq 'PXEOS_STAGE=storage CODE=STORAGE_NFS_MOUNT_FAILED REASON=nfs_client_identity_unavailable' "$tmp/error" || fail '标识失败未走存储错误路径'
+rm -- "$identity_path"
+(rootpxe_capture_direct=yes rootpxe_capture_nfs_version=3; . "$tmp/mount.sh")
+(rootpxe_capture_direct=yes protocol=smb rootpxe_capture_smb_version=auto smb_credentials_file=fixture; rootpxe_cleanup_smb_credentials() { :; }; . "$tmp/mount.sh")
+[[ $(grep -xc bypass "$tmp/trace") -eq 2 ]] || fail 'NFSv3 或 SMB 未沿用挂载入口'
+
+(
+    rootpxe_capture_direct=no
+    rootpxe_storage_native() {
+        case $1 in
+            mount-nfs)
+                [[ ! -e $identity_path && $(jq -r .nfsVersion "$tmp/context/context.json") == 3 ]] || fail '受管 NFSv3 未跳过标识'
+                printf 'managed-nfs3\n' >>"$tmp/trace"
+                ;;
+            resolve) printf '{"mountServer":"fixture","numericAddress":"192.0.2.1","port":445}\n' ;;
+            *) fail '未知的受管挂载调用' ;;
+        esac
+    }
+    mount.cifs() { fail '调用了非测试的 SMB 挂载'; }
+    rootpxe_storage_mount_smb() {
+        [[ ! -e $identity_path && $1 == //fixture/export ]] || fail '受管 SMB 未跳过标识'
+        printf 'managed-smb\n' >>"$tmp/trace"
+    }
+    rootpxe_cleanup_smb_credentials() { :; }
+    printf '{"nfsVersion":"3"}\n' >"$tmp/context/context.json"
+    . "$tmp/mount.sh"
+    protocol=smb storage_export=export smb_credentials_file=fixture
+    printf '{"smbVersion":"auto"}\n' >"$tmp/context/context.json"
+    . "$tmp/mount.sh"
+)
+grep -qx managed-nfs3 "$tmp/trace" || fail '未运行受管 NFSv3 挂载'
+grep -qx managed-smb "$tmp/trace" || fail '未运行受管 SMB 挂载'
+
+awk '/^dots "Mounting file system"/{mounting=1} mounting{print} /^rootpxe_run_logged_typed_native storage-mount.log/{exit}' \
+    "$overlay/bin/pxeos.photorec" >"$tmp/photorec-mount.sh"
+awk '/^dots "Mounting Clamav"/{mounting=1} mounting{print} /^pxeos_av_run_logged clamav_mount_remote/{exit}' \
+    "$overlay/bin/pxeos.av" | sed "s|/opt/pxeos/clamav|$tmp/clamav|g" >"$tmp/av-mount.sh"
+storage=fixture:/images clamav=fixture:/clamav
+rootpxe_run_logged_typed_native() {
+    [[ $3 == mount && $(cat "$identity_path") == "$expected" ]] || fail 'PhotoRec 在安装内核标识前挂载'
+    printf 'photorec\n' >>"$tmp/trace"
+}
+pxeos_av_run_logged() {
+    [[ $1 == clamav_mount_remote && $2 == mount && $(cat "$identity_path") == "$expected" ]] || fail 'ClamAV 在安装内核标识前挂载'
+    printf 'av\n' >>"$tmp/trace"
+}
+for maintenance in photorec av; do
+    : >"$identity_path"
+    ( . "$tmp/$maintenance-mount.sh" )
+    grep -qx "$maintenance" "$tmp/trace" || fail "$maintenance 未运行挂载"
+    : >"$tmp/trace"
+    printf 'admin-owner\n' >"$identity_path"
+    status=0
+    ( . "$tmp/$maintenance-mount.sh" ) >"$tmp/error" 2>&1 || status=$?
+    [[ $status -eq 91 && ! -s $tmp/trace ]] || fail "$maintenance 标识失败后未停止"
+    grep -Fxq 'PXEOS_STAGE=storage CODE=STORAGE_NFS_MOUNT_FAILED REASON=nfs_client_identity_unavailable' "$tmp/error" || fail "$maintenance 标识失败未走存储错误路径"
+done
+printf 'PASS: PXEOS NFS client identity regression\n'
+)
+
 # ===== 原脚本：tests/pxeos_network_regression.sh =====
 (
 # Network failure diagnostics use only temporary PATH mocks; no host NIC,

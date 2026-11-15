@@ -3,6 +3,26 @@
 # performed by the fixed helper after establishing the configured identity.
 rootpxe_storage_helper=/usr/sbin/rootpxe-storage-io
 
+rootpxe_storage_init_nfs_identity() {
+    case $1 in
+        3) return 0 ;;
+        auto|4.0|4.1|4.2) ;;
+        *) return 1 ;;
+    esac
+    local identifier=/sys/fs/nfs/net/nfs_client/identifier current address expected
+    address=$(rootpxe_normalize_mac "${mac:-}") || return 1
+    [[ $address != 000000000000 && $address != ffffffffffff ]] || return 1
+    expected="rootpxe-$address"
+    current=$(cat "$identifier" 2>/dev/null) || return 1
+    [[ $current != "$expected" ]] || return 0
+    [[ -z $current || $current == '(null)' ]] || return 1
+    # The kernel permits writes with live clients. Only initialize before NFSv4 use.
+    awk '$1 == "v4" || / - nfs4 / || (/ - nfs / && /[, ]vers=4([., ]|$)/) {exit 1}' \
+        /proc/fs/nfsfs/servers /proc/self/mountinfo || return 1
+    printf '%s' "$expected" 2>/dev/null >"$identifier" || return 1
+    [[ $(cat "$identifier" 2>/dev/null) == "$expected" ]]
+}
+
 rootpxe_storage_capabilities() {
     [[ -x $rootpxe_storage_helper ]] || return 1
     "$rootpxe_storage_helper" --capabilities | jq -ce '.version == 1 and .helper and .numericIdentity and .durablePublish' >/dev/null

@@ -97,6 +97,7 @@ parts=""
 part=""
 pxeos_av_prepare_task_log || true
 dots "Mounting Clamav"
+rootpxe_storage_init_nfs_identity auto || handleError "PXEOS_STAGE=storage CODE=STORAGE_NFS_MOUNT_FAILED REASON=nfs_client_identity_unavailable"
 [[ ! -d /opt/pxeos/clamav ]] && mkdir -p /opt/pxeos/clamav >/dev/null 2>&1
 pxeos_av_run_logged clamav_mount_remote mount -o nolock,proto=tcp,rsize=32768,wsize=32768,intr,noatime $clamav /opt/pxeos/clamav
 mount_rc=$?
