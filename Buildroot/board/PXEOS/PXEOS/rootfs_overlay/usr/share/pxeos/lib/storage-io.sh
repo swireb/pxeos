@@ -796,7 +796,7 @@ rootpxe_storage_reset_retry_state() {
     unset rootpxe_storage_workspace rootpxe_storage_nonce rootpxe_storage_worker_nonce rootpxe_storage_stage rootpxe_storage_lock
     unset rootpxe_storage_published capture_size_bytes rootpxe_final_capture_path
     unset rootpxe_storage_released rootpxe_storage_stopped rootpxe_storage_reconcile rootpxe_storage_recovery_completed
-    unset rootpxe_failure_started_at rootpxe_failure_deadline
+    unset rootpxe_failure_started_at rootpxe_failure_deadline rootpxe_failure_inventory_sent
 }
 
 rootpxe_capture_resume_published() {

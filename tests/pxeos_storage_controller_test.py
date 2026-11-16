@@ -140,6 +140,7 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
             rootpxe_console_message() { :; }
             rootpxe_require_task_context() { :; }
             rootpxe_bound_callback_message() { printf '%s' "$1"; }
+            rootpxe_send_hardware_inventory() { :; }
             rootpxe_task_curl() { return 7; }
             rootpxe_failure_wait_sec=60 rootpxe_failure_action=shutdown
             taskid=41 task_token=fixture mac=fixture pxeapi=http://fixture/
@@ -160,6 +161,7 @@ handleError() { printf '%s\n' "$*" >&2; exit 94; }
                     rootpxe_require_task_context() { :; }
                     rootpxe_task_console_failure() { :; }
                     rootpxe_bound_callback_message() { printf '%s' "$1"; }
+                    rootpxe_send_hardware_inventory() { :; }
                     rootpxe_error_response_reason() { :; }
                     killStatusReporter() { :; }
                     rootpxe_task_curl() {

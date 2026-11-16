@@ -1,0 +1,26 @@
+#!/bin/bash
+# Start after network setup; sampling never blocks the task startup.
+state=/run/pxeos-hardware
+case ${1:-start} in
+    start) ;;
+    stop)
+        if [[ -r $state/pid ]]; then
+            read -r reporter <"$state/pid"
+            [[ $reporter =~ ^[0-9]+$ ]] && kill "$reporter" 2>/dev/null || true
+        fi
+        exit 0
+        ;;
+    *) exit 0 ;;
+esac
+umask 077
+mkdir -p "$state" || exit 0
+chmod 700 "$state" || exit 0
+host='' token='' mac=''
+for arg in $(cat /proc/cmdline); do
+    case $arg in hardware_hostid=*) host=${arg#*=};; hardware_token=*) token=${arg#*=};; mac=*) mac=${arg#*=};; esac
+done
+if [[ $host =~ ^[1-9][0-9]*$ && $token =~ ^[a-f0-9]{64}$ && -n $mac ]]; then
+    printf '%s\n%s\n%s\n\n' "$host" "$token" "$mac" >"$state/context.tmp" && mv "$state/context.tmp" "$state/context"
+fi
+/bin/pxeos-hardware-reporter </dev/null >/dev/null 2>&1 &
+exit 0

@@ -17,6 +17,8 @@ rootpxe_source_core_library cloud-init.sh || return 1
 rootpxe_source_core_library linux-hostname.sh || return 1
 rootpxe_source_core_library uefi-boot.sh || return 1
 rootpxe_source_core_library task-http.sh || return 1
+rootpxe_source_core_library disk-health.sh || return 1
+rootpxe_source_core_library hardware-inventory.sh || return 1
 rootpxe_message_format_lib=/usr/share/pxeos/lib/message-format.sh
 [[ -r $rootpxe_message_format_lib ]] || rootpxe_message_format_lib="$(dirname "${BASH_SOURCE[0]}")/message-format.sh"
 [[ ! -r $rootpxe_message_format_lib ]] || . "$rootpxe_message_format_lib"
@@ -3361,6 +3363,10 @@ rootpxe_error_report() {
     rootpxe_require_task_context || return 1
     [[ -n $api ]] || return 1
     rootpxe_failure_begin || return 1
+    if [[ ${rootpxe_failure_inventory_sent:-no} != yes ]]; then
+        rootpxe_failure_inventory_sent=yes
+        rootpxe_send_hardware_inventory || true
+    fi
     message=$(rootpxe_bound_callback_message "$1") || return 1
     # Only resume-safe stages may be persisted independently of the diagnostic
     # message. A malformed, repeated, or arbitrary marker is intentionally not
@@ -3495,7 +3501,7 @@ rootpxe_error_wait_for_retry() {
                 rootpxe_storage_reset_retry_state || return 75
                 rootpxe_reset_disk_permit_retry_state || return 75
                 rootpxe_task_log_release_pin || true
-                unset rootpxe_failure_started_at rootpxe_failure_deadline rootpxe_failure_policy_confirmed rootpxe_failure_report_rejected
+                unset rootpxe_failure_started_at rootpxe_failure_deadline rootpxe_failure_policy_confirmed rootpxe_failure_report_rejected rootpxe_failure_inventory_sent
                 exec /bin/pxeos
             fi
         fi

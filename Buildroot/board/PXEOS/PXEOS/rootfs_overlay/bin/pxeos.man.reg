@@ -382,6 +382,20 @@ confirm_and_commit() {
         json_commit
         while :; do
             if post_json commit "$tmpdir/commit.json" && expect_commit; then
+                hardware_host=$(jq -r '.hostId' "$response")
+                hardware_token=$(jq -r '.hardwareToken // ""' "$response")
+                hardware_mac=$(jq -r '.mac' "$response")
+                if [[ -n $hardware_token && ! $hardware_token =~ ^[a-f0-9]{64}$ ]]; then
+                    say 'Hardware session handoff is invalid. No task was started.'
+                    return 14
+                fi
+                if [[ $hardware_host =~ ^[1-9][0-9]*$ && $hardware_token =~ ^[a-f0-9]{64}$ ]]; then
+                    (umask 077; mkdir -p /run/pxeos-hardware && chmod 700 /run/pxeos-hardware && printf '%s\n%s\n%s\n%s\n' "$hardware_host" "$hardware_token" "$hardware_mac" "$manual_spki_pin" > /run/pxeos-hardware/context.tmp && mv /run/pxeos-hardware/context.tmp /run/pxeos-hardware/context) || { say 'Hardware session handoff failed. Retry registration.'; return 14; }
+                    if [[ -r /run/pxeos-hardware/pid ]]; then
+                        read -r hardware_pid < /run/pxeos-hardware/pid
+                        [[ $hardware_pid =~ ^[0-9]+$ ]] && kill -USR1 "$hardware_pid" 2>/dev/null || true
+                    fi
+                fi
                 if [[ $task == none ]]; then
                     choose_completed_power_action
                 fi

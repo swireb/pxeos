@@ -89,10 +89,23 @@ rootpxe_collect_hardware_inventory() (
     temporary=$(mktemp -d /tmp/rootpxe-hardware-inventory.XXXXXX) || return 1
     trap 'rm -rf -- "$temporary"' EXIT
 
-    rootpxe_hardware_probe "$temporary/dmi" dmidecode --type 4,9,17,41
+    if [[ -d $sys/firmware/dmi/tables ]]; then
+        rootpxe_hardware_probe "$temporary/dmi" dmidecode --type 4,9,17,41
+    else
+        : >"$temporary/dmi"
+    fi
     rootpxe_hardware_probe "$temporary/lshw" lshw -json -class display -class network
+    jq -e 'if type == "array" then all(.[]; type == "object" and (.class | type == "string")) else type == "object" and (.class | type == "string") end' "$temporary/lshw" >/dev/null 2>&1 || printf '[]\n' >"$temporary/lshw"
     rootpxe_hardware_probe "$temporary/lsblk" lsblk --bytes --json --output PATH,TYPE,TRAN,SIZE,MODEL
-    if ! rootpxe_physical_disk_entries json "$temporary/lsblk" >"$temporary/disks" 2>/dev/null; then
+    if jq -e '
+        def valid_size: (type == "number" and floor == . and . >= 0) or (type == "string" and test("^[0-9]+$"));
+        def nodes: .blockdevices[] | recurse(.children[]?);
+        type == "object" and (.blockdevices | type) == "array" and
+        all(nodes; type == "object" and (.path | type == "string" and startswith("/dev/")) and
+          (.type | type == "string") and (.size | valid_size))
+    ' "$temporary/lsblk" >/dev/null 2>&1; then
+        rootpxe_physical_disk_entries json "$temporary/lsblk" >"$temporary/disks" 2>/dev/null || : >"$temporary/disks"
+    else
         : >"$temporary/disks"
     fi
     rootpxe_hardware_cpu_topology "$sys" >"$temporary/cpus"
@@ -117,6 +130,14 @@ rootpxe_send_hardware_inventory() {
     local inventory
     case "${taskType:-}" in deploy|capture) ;; *) return 0 ;; esac
     rootpxe_require_task_context >/dev/null 2>&1 || return 0
+    if [[ -s /run/pxeos-hardware/context ]]; then
+        if [[ -r /run/pxeos-hardware/pid ]]; then
+            local reporter
+            read -r reporter </run/pxeos-hardware/pid || return 0
+            [[ $reporter =~ ^[0-9]+$ ]] && kill -USR1 "$reporter" 2>/dev/null || true
+        fi
+        return 0
+    fi
     if ! inventory=$(rootpxe_collect_hardware_inventory 2>/dev/null); then
         rootpxe_console_message WARN 'Host hardware inventory was not collected.'
         return 0
@@ -127,7 +148,7 @@ rootpxe_send_hardware_inventory() {
         --data-urlencode "token=$task_token" \
         --data-urlencode "mac=$mac" \
         --data-urlencode "hardwareInventory=$inventory" \
-        "${rootpxe_api}inventory" >/dev/null 2>&1 || \
+        "${rootpxe_api:-${pxeapi:-$web}}inventory" >/dev/null 2>&1 || \
         rootpxe_console_message WARN 'Host hardware inventory was not sent.'
     return 0
 }

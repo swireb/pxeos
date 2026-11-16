@@ -1,0 +1,42 @@
+#!/bin/bash
+# One boot-scoped, read-only sampler. A context file may arrive after manual registration.
+set -u
+export LC_ALL=C
+lib=/usr/share/pxeos/lib
+. "$lib/task-http.sh" || exit 1
+unset rootpxe_storage_nonce rootpxe_capture_direct progress_attempt rootpxe_storage_worker_nonce rootpxe_storage_boot_id rootpxe_storage_sysuuid
+state=/run/pxeos-hardware
+mkdir -p "$state" || exit 1
+chmod 700 "$state" || exit 1
+mkdir "$state/lock" 2>/dev/null || exit 0
+trap 'rm -f "$state/pid"; rmdir "$state/lock" 2>/dev/null || true' EXIT
+wake=no
+trap 'wake=yes' USR1
+printf '%s\n' "$$" >"$state/pid"
+api=''
+for arg in $(cat /proc/cmdline); do case $arg in pxeapi=*) api=${arg#*=};; web=*) [[ -n $api ]] || api=${arg#*=};; esac; done
+[[ -n $api ]] || exit 1
+boot=$(cat /proc/sys/kernel/random/boot_id) || exit 1
+# A boot attempts collection at most once, even if init starts this process again.
+[[ ! -e $state/sampled ]] || exit 0
+: >"$state/sampled" || exit 1
+snapshot=$(timeout -k 1 20 bash -c '. /usr/share/pxeos/lib/disk-health.sh; . /usr/share/pxeos/lib/hardware-inventory.sh; rootpxe_collect_hardware_inventory' 2>/dev/null) || exit 0
+[[ -n $snapshot ]] || exit 0
+canonical=$(jq -Sc '.devices |= sort_by([.kind, (.location // ""), (.model // ""), (.mac // ""), tojson])' <<<"$snapshot") || exit 0
+while :; do
+    wake=no
+    if [[ -r $state/context ]]; then
+        mapfile -t context <"$state/context"
+        host=${context[0]:-}; token=${context[1]:-}; mac=${context[2]:-}; pin=${context[3]:-}
+        if [[ $host =~ ^[1-9][0-9]*$ && $token =~ ^[a-f0-9]{64}$ && -n $mac ]]; then
+            tls=(-k); [[ -z $pin ]] || tls+=(--proto '=https' --proto-redir '=https' --pinnedpubkey "$pin")
+            result=$(rootpxe_task_curl "${tls[@]}" -s --connect-timeout 3 --max-time 5 --data-urlencode "hostId=$host" --data-urlencode "token=$token" --data-urlencode "mac=$mac" --data-urlencode "bootId=$boot" --data-urlencode "sequence=1" --data-urlencode "hardwareInventory=$canonical" -w '\n%{http_code}' "${api%/}/hardware-inventory") || result=''
+            status=${result##*$'\n'}
+            if [[ $status == 200 ]] && jq -e '.success == true' >/dev/null 2>&1 <<<"${result%$'\n'*}"; then exit 0
+            elif [[ $status == 401 || $status == 403 ]]; then exit 0; fi
+        fi
+    fi
+    [[ $wake != yes ]] || continue
+    sleep 60 & sleeper=$!
+    wait "$sleeper" 2>/dev/null || { kill "$sleeper" 2>/dev/null || true; wait "$sleeper" 2>/dev/null || true; }
+done

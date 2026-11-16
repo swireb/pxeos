@@ -163,4 +163,4 @@ dmi_cpus($records) as $processors |
   )
 } |
 if $boot_mac != "" then .pxeBootMac = $boot_mac else . end |
-select((.devices | length) > 0 and (.devices | length) <= 128 and (tojson | utf8bytelength) <= 65536)
+select((.devices | length) <= 128 and (tojson | utf8bytelength) <= 65536)

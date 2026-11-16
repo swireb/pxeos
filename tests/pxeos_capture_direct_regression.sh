@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Local directories and small real processes only; no NAS or block devices.
 set -euo pipefail
+rootpxe_send_hardware_inventory() { :; }
 root=$(cd "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d /tmp/pxeos-capture-direct.XXXXXX)
 trap 'rm -rf -- "$tmp"' EXIT

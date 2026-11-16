@@ -1,7 +1,5 @@
 #!/bin/bash
 . /usr/share/pxeos/lib/funcs.sh || exit 1
-. /usr/share/pxeos/lib/disk-health.sh
-. /usr/share/pxeos/lib/hardware-inventory.sh
 RUN_CHKDSK=""
 OS_ID_WIN7=5
 OS_ID_WIN8=6
@@ -503,8 +501,8 @@ checkin_rootpxe() {
     fi
     rootpxe_console_message INFO "Storage protocol: ${protocol^^}"
     rootpxe_safe_relative_path "$img" >/dev/null || handleError "Invalid image path ($0)"
-    rootpxe_report_disk_health_after_checkin
     rootpxe_send_hardware_inventory
+    rootpxe_report_disk_health_after_checkin
     rootpxe_console_message INFO 'Check-in completed.'
     debugPause
 }

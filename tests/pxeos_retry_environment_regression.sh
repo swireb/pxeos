@@ -9,6 +9,7 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 . "$root/tests/storage-test-support.sh"
 ismajordebug=0
 . "$lib/funcs.sh"
+rootpxe_send_hardware_inventory() { :; }
 rootpxe_storage_capabilities() { :; }
 taskid=41 task_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa mac=aabbccddeeff
 taskType=capture progress_attempt=2 pxeapi=http://fixture/
@@ -43,7 +44,7 @@ rootpxe_clear_disk_permit() { :; }
 clock=100
 date() { printf '%s\n' "$clock"; }
 sleep() { clock=$((clock + $1)); }
-curl() { task_http_test_decode_curl_args "$@"; printf '{"status":"queued"}'; }
+curl() { task_http_test_decode_curl_args "$@"; printf '{"status":"queued"}\n200'; }
 for blocked in unreleased unstopped helper-pid; do
     status=0
     (
@@ -54,7 +55,7 @@ for blocked in unreleased unstopped helper-pid; do
         esac
         rootpxe_error_wait_for_retry failure CODE console_shown '{"accepted":true,"waitSec":60}'
     ) >"$tmp/blocked-console" 2>&1 || status=$?
-    [[ $status == 2 && ! -e $tmp/child-result && -r $old_workspace/context.json ]] || fail "unsafe retry crossed exec or skipped failure wait: $blocked"
+    [[ $status == 75 && ! -e $tmp/child-result && -r $old_workspace/context.json ]] || fail "unsafe retry crossed exec or skipped failure wait: $blocked"
 done
 status=0
 ( rootpxe_error_wait_for_retry failure CODE console_shown '{"accepted":true,"waitSec":60}' ) >"$tmp/console" 2>&1 || status=$?

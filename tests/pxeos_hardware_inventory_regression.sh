@@ -12,7 +12,7 @@ trap 'rm -rf "$tmp"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 [[ -f $library ]] || fail 'missing hardware inventory library'
 
-mkdir -p "$tmp/bin" "$tmp/sys/class/net" "$tmp/sys/bus/pci/slots/2"
+mkdir -p "$tmp/bin" "$tmp/sys/class/net" "$tmp/sys/bus/pci/slots/2" "$tmp/sys/firmware/dmi/tables"
 for entry in 'lan0 0000:03:00.0 02:00:00:00:01:01 2500' 'lan1 0000:04:00.0 02:00:00:00:02:02 1000'; do
     read -r interface address interface_mac speed <<<"$entry"
     mkdir -p "$tmp/sys/devices/$address" "$tmp/sys/class/net/$interface"
@@ -192,7 +192,9 @@ for cpu in 0 1 2; do
 done
 printf '%s\n' 'model name : Example ARM CPU' >"$tmp/cpuinfo"
 printf '%s\n' 'quiet mac=02:00:00:00:01:01' >"$tmp/legacy-cmdline"
+mv "$tmp/sys/firmware/dmi" "$tmp/arm-dmi"
 HARDWARE_DMI=/dev/null rootpxe_collect_hardware_inventory "$tmp/sys" "$tmp/cpuinfo" "$tmp/legacy-cmdline" >"$tmp/partial"
+mv "$tmp/arm-dmi" "$tmp/sys/firmware/dmi"
 jq -e '
     (has("pxeBootMac") | not) and
     ([.devices[] | select(.kind == "cpu") | [.model,.cores,.threads]] == [["Example ARM CPU",2,3]]) and
@@ -215,17 +217,32 @@ jq -e '
 ' "$tmp/incomplete" >/dev/null || fail 'missing hardware facts dropped devices or changed order'
 
 mkdir "$tmp/empty-sys"
-if HARDWARE_DMI=/dev/null HARDWARE_LSHW=/dev/null HARDWARE_LSBLK=/dev/null \
-    rootpxe_collect_hardware_inventory "$tmp/empty-sys" /dev/null "$tmp/legacy-cmdline" >"$tmp/empty"; then
-    fail 'empty probes produced a report'
-fi
-[[ ! -s $tmp/empty ]] || fail 'empty probes produced output'
+HARDWARE_DMI=/dev/null HARDWARE_LSHW=/dev/null HARDWARE_LSBLK=/dev/null \
+    rootpxe_collect_hardware_inventory "$tmp/empty-sys" /dev/null "$tmp/legacy-cmdline" >"$tmp/empty" || fail 'empty sources did not produce a valid empty report'
+jq -e '.version == 1 and .devices == []' "$tmp/empty" >/dev/null || fail 'empty sources are not an empty snapshot'
 
 jq -n '{blockdevices:[range(129) | {type:"disk",path:("/dev/sd"+tostring),size:1}]}' >"$tmp/oversized"
 if HARDWARE_LSBLK="$tmp/oversized" rootpxe_collect_hardware_inventory "$tmp/sys" "$tmp/cpuinfo" "$tmp/cmdline" >"$tmp/refused"; then
     fail 'device limit must refuse the report without truncating it'
 fi
 [[ ! -s $tmp/refused ]] || fail 'oversized inventory produced output'
+
+# Missing or failed sources remove only their own facts from the new report.
+mv "$tmp/sys/firmware/dmi" "$tmp/dmi-sys"
+rootpxe_collect_hardware_inventory "$tmp/sys" "$tmp/cpuinfo" "$tmp/cmdline" >"$tmp/no-dmi-report" || fail 'platform without DMI did not report supported hardware'
+mv "$tmp/dmi-sys" "$tmp/sys/firmware/dmi"
+HARDWARE_DMI="$tmp/nonexistent" rootpxe_collect_hardware_inventory "$tmp/sys" "$tmp/cpuinfo" "$tmp/cmdline" >"$tmp/bad-dmi-report" || fail 'failed DMI prevented fallback'
+jq -e '([.devices[] | select(.kind == "memory")] | length == 0) and ([.devices[] | select(.kind == "cpu" or .kind == "disk")] | length > 0)' "$tmp/bad-dmi-report" >/dev/null || fail 'DMI failure did not preserve other current facts'
+HARDWARE_LSHW="$tmp/nonexistent" rootpxe_collect_hardware_inventory "$tmp/sys" "$tmp/cpuinfo" "$tmp/cmdline" >"$tmp/bad-lshw-report" || fail 'failed lshw prevented other facts'
+jq -e '([.devices[] | select(.kind == "gpu")] | length == 0) and ([.devices[] | select(.kind == "disk" or .kind == "nic")] | length > 0)' "$tmp/bad-lshw-report" >/dev/null || fail 'lshw failure did not clear GPU or preserve current disks and NICs'
+printf '%s\n' '{"blockdevices":[]}' >"$tmp/no-disks"
+HARDWARE_LSBLK="$tmp/no-disks" rootpxe_collect_hardware_inventory "$tmp/sys" "$tmp/cpuinfo" "$tmp/cmdline" >"$tmp/no-disks-report" || fail 'valid diskless enumeration failed'
+jq -e '[.devices[] | select(.kind == "disk")] | length == 0' "$tmp/no-disks-report" >/dev/null || fail 'diskless enumeration included disks'
+for invalid in 'not json' '{"blockdevices":[{"type":"disk"}]}'; do
+    printf '%s\n' "$invalid" >"$tmp/bad-disks"
+    HARDWARE_LSBLK="$tmp/bad-disks" rootpxe_collect_hardware_inventory "$tmp/sys" "$tmp/cpuinfo" "$tmp/cmdline" >"$tmp/bad-disks-report" || fail 'bad disk source prevented other facts'
+    jq -e '([.devices[] | select(.kind == "disk")] | length == 0) and ([.devices[] | select(.kind == "cpu" or .kind == "gpu")] | length > 0)' "$tmp/bad-disks-report" >/dev/null || fail 'bad disk source did not clear disk or preserve other facts'
+done
 
 # The reporter runs with the existing authenticated task context, sends the
 # binding MAC separately from the measured PXE NIC, and isolates transport errors.
@@ -254,5 +271,5 @@ rootpxe_send_hardware_inventory || fail 'missing tools changed task result'
 
 health_line=$(grep -n '^[[:space:]]*rootpxe_report_disk_health_after_checkin$' "$checkin" | cut -d: -f1)
 hardware_line=$(grep -n '^[[:space:]]*rootpxe_send_hardware_inventory$' "$checkin" | cut -d: -f1)
-[[ -n $health_line && -n $hardware_line && $health_line -lt $hardware_line ]] || fail 'hardware report bypasses the post-checkin disk gate'
+[[ -n $health_line && -n $hardware_line && $hardware_line -lt $health_line ]] || fail 'hardware report must precede the disk gate'
 printf 'PASS: PXEOS hardware inventory regression\n'

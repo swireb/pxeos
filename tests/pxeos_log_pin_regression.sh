@@ -51,7 +51,7 @@ unset rootpxe_task_log_state
 rootpxe_task_log_initialize
 rootpxe_task_log_release_pin
 rootpxe_task_log_valid && fail released-pin-still-ready
-reset_line=$(grep -nF 'rootpxe_reset_disk_permit_retry_state || return 1' "$lib/funcs.sh" | cut -d: -f1)
+reset_line=$(grep -nF 'rootpxe_reset_disk_permit_retry_state || return 75' "$lib/funcs.sh" | cut -d: -f1)
 release_line=$(grep -nF 'rootpxe_task_log_release_pin || true' "$lib/funcs.sh" | cut -d: -f1)
 exec_line=$(grep -nE '^[[:space:]]*exec /bin/pxeos[[:space:]]*$' "$lib/funcs.sh" | cut -d: -f1)
 [[ $exec_line =~ ^[0-9]+$ ]] || fail retry-exec-not-unique
@@ -61,6 +61,7 @@ exec_line=$(grep -nE '^[[:space:]]*exec /bin/pxeos[[:space:]]*$' "$lib/funcs.sh"
 for name in rootpxe_failure_begin rootpxe_failure_remaining rootpxe_error_report; do
     eval "$(sed -n "/^$name() {/,/^}/p" "$lib/funcs.sh" | sed "s|/tmp/pxeos.failure_action|$tmp/failure_action|g")"
 done
+rootpxe_send_hardware_inventory() { :; }
 eval "$(sed -n '/^rootpxe_error_wait_for_retry() {/,/^}/p' "$lib/funcs.sh" | sed -e "s|/tmp/pxeos.failure_action|$tmp/failure_action|g" -e 's|exec /bin/pxeos|rootpxe_pin_test_exec /bin/pxeos|')"
 for release_failure in no yes; do
     (
@@ -73,7 +74,7 @@ for release_failure in no yes; do
         # The storage/new-process boundary has its own real-exec regression.
         rootpxe_storage_reset_retry_state(){ :; }
         rootpxe_reset_disk_permit_retry_state(){ printf RESET >"$tmp/retry-order"; }
-        curl(){ task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"; case "${*: -1}" in *task-status) printf '%s' '{"status":"queued"}' ;; *error) printf '%s\n200' '{"accepted":true,"waitSec":60}' ;; *) return 90 ;; esac; }
+        curl(){ task_http_test_decode_curl_args "$@"; set -- "${task_http_test_curl_args[@]}"; case "${*: -1}" in *task-status) printf '%s\n200' '{"status":"queued"}' ;; *error) printf '%s\n200' '{"accepted":true,"waitSec":60}' ;; *) return 90 ;; esac; }
         if [[ $release_failure == yes ]]; then rootpxe_task_log_release_pin(){ return 1; }; fi
         rootpxe_pin_test_exec(){
             [[ $* == /bin/pxeos && $(cat "$tmp/retry-order") == RESET && -r /proc/self/fd/$foreign ]] || exit 94

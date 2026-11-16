@@ -227,6 +227,7 @@ grep -q '^request-finished$' "$trace" || fail reporter_handoff_left_request_runn
 for name in rootpxe_failure_begin rootpxe_failure_remaining rootpxe_error_report; do
     eval "$(sed -n "/^$name() {/,/^}/p" "$funcs" | sed "s|/tmp/pxeos.failure_action|$tmp/failure_action|g")"
 done
+rootpxe_send_hardware_inventory() { :; }
 sed -n '/^rootpxe_error_wait_for_retry() {/,/^}/p' "$funcs" |
     sed -e "s#/tmp/pxeos.failure_action#$tmp/failure_action#g" \
         -e 's#exec /bin/pxeos#printf "exec\\n" >>"$trace"; return 77#' >"$tmp/error-wait.sh"
@@ -240,7 +241,7 @@ rootpxe_task_curl(){
     printf 'callback\n' >>"$trace"
     case "${*: -1}" in
         *error) printf '{"accepted":true,"waitSec":60,"failureAction":"reboot"}\n200';;
-        *task-status) printf '{"status":"queued"}';;
+        *task-status) printf '{"status":"queued"}\n200';;
         *) return 1;;
     esac
 }
