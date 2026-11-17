@@ -17,12 +17,35 @@ api=''
 for arg in $(cat /proc/cmdline); do case $arg in pxeapi=*) api=${arg#*=};; web=*) [[ -n $api ]] || api=${arg#*=};; esac; done
 [[ -n $api ]] || exit 1
 boot=$(cat /proc/sys/kernel/random/boot_id) || exit 1
-# A boot attempts collection at most once, even if init starts this process again.
-[[ ! -e $state/sampled ]] || exit 0
-: >"$state/sampled" || exit 1
-snapshot=$(timeout -k 1 20 bash -c '. /usr/share/pxeos/lib/disk-health.sh; . /usr/share/pxeos/lib/hardware-inventory.sh; rootpxe_collect_hardware_inventory' 2>/dev/null) || exit 0
-[[ -n $snapshot ]] || exit 0
-canonical=$(jq -Sc '.devices |= sort_by([.kind, (.location // ""), (.model // ""), (.mac // ""), tojson])' <<<"$snapshot") || exit 0
+# The probe publishes its terminal result atomically. Its absence includes
+# both not-yet-started and still-running states, never a confirmed no-disk result.
+probe_state=/run/pxeos-storage
+wait_log_after=30
+next_wait_log=$((SECONDS + wait_log_after))
+while [[ ! -r $probe_state/result ]]; do
+    if (( SECONDS >= next_wait_log )); then
+        printf '%s\n' '[WARN] Hardware inventory is waiting for storage discovery to finish.' >>/tmp/pxeos.hardware-inventory.log
+        next_wait_log=$((SECONDS + 60))
+    fi
+    sleep 5
+done
+
+# Keep the first valid snapshot in RAM so a restarted reporter can resume its
+# exact upload without sampling again, including after a lost acknowledgement.
+[[ ! -e $state/finished ]] || exit 0
+if [[ -s $state/sampled ]]; then
+    canonical=$(<"$state/sampled")
+else
+    while :; do
+        snapshot=$(timeout -k 1 20 bash -c '. /usr/share/pxeos/lib/disk-health.sh; . /usr/share/pxeos/lib/hardware-inventory.sh; rootpxe_collect_hardware_inventory' 2>/dev/null) || snapshot=''
+        canonical=$(jq -s -Sce 'select(length == 1) | .[0] | select(type == "object" and .version == 1 and (.devices | type == "array") and (.devices | length <= 128) and all(.devices[]; type == "object" and (.kind == "cpu" or .kind == "memory" or .kind == "disk" or .kind == "gpu" or .kind == "nic")) and (tojson | utf8bytelength <= 65536)) | .devices |= sort_by([.kind, (.location // ""), (.model // ""), (.mac // ""), tojson])' <<<"$snapshot" 2>/dev/null) || canonical=''
+        if [[ -n $canonical ]]; then
+            umask 077
+            if printf '%s\n' "$canonical" >"$state/sampled.tmp" && mv "$state/sampled.tmp" "$state/sampled"; then break; fi
+        fi
+        sleep 5
+    done
+fi
 while :; do
     wake=no
     if [[ -r $state/context ]]; then
@@ -32,8 +55,8 @@ while :; do
             tls=(-k); [[ -z $pin ]] || tls+=(--proto '=https' --proto-redir '=https' --pinnedpubkey "$pin")
             result=$(rootpxe_task_curl "${tls[@]}" -s --connect-timeout 3 --max-time 5 --data-urlencode "hostId=$host" --data-urlencode "token=$token" --data-urlencode "mac=$mac" --data-urlencode "bootId=$boot" --data-urlencode "sequence=1" --data-urlencode "hardwareInventory=$canonical" -w '\n%{http_code}' "${api%/}/hardware-inventory") || result=''
             status=${result##*$'\n'}
-            if [[ $status == 200 ]] && jq -e '.success == true' >/dev/null 2>&1 <<<"${result%$'\n'*}"; then exit 0
-            elif [[ $status == 401 || $status == 403 ]]; then exit 0; fi
+            if [[ $status == 200 ]] && jq -e '.success == true' >/dev/null 2>&1 <<<"${result%$'\n'*}"; then : >"$state/finished"; exit 0
+            elif [[ $status == 401 || $status == 403 ]]; then : >"$state/finished"; exit 0; fi
         fi
     fi
     [[ $wake != yes ]] || continue
