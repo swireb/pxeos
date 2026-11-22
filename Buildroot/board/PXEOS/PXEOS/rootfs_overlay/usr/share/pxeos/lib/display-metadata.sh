@@ -28,16 +28,9 @@ rootpxe_display_metadata_cleanup_mount() {
     rmdir -- "$mountpoint" >/dev/null 2>&1 || return 2
 }
 
-rootpxe_display_metadata_append_mount() {
-    local identity="$1" point="$2" rows="${rootpxe_display_metadata_mount_rows:-}"
-    [[ -n $rows && -f $rows ]] || return 1
-    rootpxe_display_metadata_safe_mountpoint "$point" || return 1
-    printf '%s\t%s\n' "$identity" "$point" >>"$rows"
-}
-
 rootpxe_display_metadata_unescape_fstab_field() {
     local value="$1" decoded
-    decoded=$(printf '%b' "${value//\\040/\\040}") || return 1
+    decoded=$(printf '%b' "$value") || return 1
     [[ $decoded != *$'\n'* && $decoded != *$'\r'* && $decoded != *$'\t'* ]] || return 1
     printf '%s\n' "$decoded"
 }

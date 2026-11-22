@@ -26,15 +26,22 @@ rootpxe_deployment_identity_request_private() {
     file=$(mktemp /tmp/rootpxe-deployment-initialization.XXXXXX) || return 1
     chmod 0600 "$file" || { rm -f -- "$file"; return 1; }
     jq -c '{version:1,unattendXml:.unattendXml}' <<<"$body" >"$file" || { rm -f -- "$file"; return 1; }
+    local previous="${rootpxe_deployment_initialization_private_file:-}"
+    if [[ -n $previous && -f $previous && ! -L $previous && $previous == /tmp/rootpxe-deployment-initialization.* ]]; then
+        rm -f -- "$previous"
+    fi
     rootpxe_deployment_initialization_private_file="$file"; export rootpxe_deployment_initialization_private_file
 }
 
 rootpxe_deployment_identity_cleanup_private() {
-    local file="${rootpxe_deployment_initialization_private_file:-}"
+    local file="${rootpxe_deployment_initialization_private_file:-}" plan="${rootpxe_deployment_identity_plan_file:-}"
     if [[ -n $file ]]; then
         [[ -f $file && ! -L $file && $file == /tmp/rootpxe-deployment-initialization.* ]] && rm -f -- "$file"
     fi
-    unset rootpxe_deployment_initialization_private_file
+    if [[ -n $plan ]]; then
+        [[ -f $plan && ! -L $plan && $plan == /tmp/rootpxe-deployment-identity-plan.* ]] && rm -f -- "$plan"
+    fi
+    unset rootpxe_deployment_initialization_private_file rootpxe_deployment_identity_plan_file
 }
 
 rootpxe_deployment_identity_private_value() {
@@ -73,10 +80,12 @@ rootpxe_deployment_identity_capabilities_valid() {
     jq -e 'type == "array" and length <= 16 and all(.[]; type == "string" and length > 0 and length <= 64 and test("^[a-z0-9-]+$")) and (length == (unique|length))' >/dev/null 2>&1 <<<"$1"
 }
 rootpxe_deployment_identity_capabilities_json() {
-    local capabilities='["hostname"]'
-    if rootpxe_deployment_identity_linux_hostname_capability_installed; then capabilities=$(jq -c '. + ["linux-hostname-offline-v1"]' <<<"$capabilities") || return 1; fi
-    if rootpxe_deployment_identity_windows_hostname_capability_installed; then capabilities=$(jq -c '. + ["windows-hostname-registry-v1"]' <<<"$capabilities") || return 1; fi
-    if rootpxe_deployment_identity_windows_sysprep_capability_installed; then capabilities=$(jq -c '. + ["windows-sysprep-template-v2"]' <<<"$capabilities") || return 1; fi
+    local -a caps=(hostname)
+    local capabilities
+    if rootpxe_deployment_identity_linux_hostname_capability_installed; then caps+=(linux-hostname-offline-v1); fi
+    if rootpxe_deployment_identity_windows_hostname_capability_installed; then caps+=(windows-hostname-registry-v1); fi
+    if rootpxe_deployment_identity_windows_sysprep_capability_installed; then caps+=(windows-sysprep-template-v2); fi
+    capabilities=$(jq -cn '$ARGS.positional' --args -- "${caps[@]}") || return 1
     rootpxe_deployment_identity_capabilities_valid "$capabilities" || return 1
     printf '%s\n' "$capabilities"
 }
@@ -95,6 +104,10 @@ rootpxe_deployment_identity_request_plan() {
     chmod 0600 "$file" || { rm -f -- "$file"; return 1; }
     printf '%s' "$body" >"$file" || { rm -f -- "$file"; return 1; }
     jq -e --argjson attempt "$progress_attempt" '.plan.version == 1 and (.plan.planId|type == "string" and length > 0) and (.planHash|type == "string" and test("^[0-9a-f]{64}$")) and .attempt == $attempt' "$file" >/dev/null || { rm -f -- "$file"; return 1; }
+    local previous="${rootpxe_deployment_identity_plan_file:-}"
+    if [[ -n $previous && -f $previous && ! -L $previous && $previous == /tmp/rootpxe-deployment-identity-plan.* ]]; then
+        rm -f -- "$previous"
+    fi
     rootpxe_deployment_identity_plan_file="$file"; export rootpxe_deployment_identity_plan_file
 }
 

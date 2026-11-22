@@ -39,6 +39,9 @@ case $wipemode in
         pxeos-storage-probe check || exit 75
         dd if=/dev/zero of="$hd" bs=512 count=100000
         ;;
+    *)
+        handleError "Unsupported wipe mode: ${wipemode:-<empty>} ($0)"
+        ;;
 esac
 rootpxe_console_message INFO 'Wiping complete.'
 . /bin/pxeos.nonimgcomplete

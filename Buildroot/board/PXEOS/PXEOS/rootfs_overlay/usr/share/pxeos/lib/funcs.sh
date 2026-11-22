@@ -4044,7 +4044,7 @@ doInventory() {
 }
 # Gets the location of the SAM registry if found
 getSAMLoc() {
-    local parent=/ntfs component
+    local parent="${1:-/ntfs}" component
     sam=''
     for component in Windows System32 config; do
         parent=$(rootpxe_resolve_casefold_directory "$parent" "$component") || return 1

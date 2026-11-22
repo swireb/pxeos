@@ -4,7 +4,7 @@
 
 using namespace std;
 
-main(int argc, char* argv[])
+int main(int argc, char* argv[])
 {
     string strLine;
     int intLineCnt = 0;
@@ -35,7 +35,7 @@ main(int argc, char* argv[])
     while( getline(inFile,strLine) )
     {
         intLineCnt++;
-        if( ! strLine.empty() );
+        if( ! strLine.empty() )
         {
             if ( intLineCnt == 28 )
             {
