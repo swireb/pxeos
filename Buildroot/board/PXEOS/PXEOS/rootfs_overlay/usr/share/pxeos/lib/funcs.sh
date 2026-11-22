@@ -585,12 +585,12 @@ rootpxe_redact_diagnostic() {
         [[ -n $value ]] && text="${text//"$value"/[REDACTED]}"
     done
     text=$(printf '%s' "$text" | sed -E \
-        -e "s/((['\"]?)[[:alnum:]_.-]*(cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*\\2[[:space:]]*[:=][[:space:]]*)\"([^\"\\\\]|\\\\.)*(\\\\)?$/\\1\"[REDACTED: incomplete quoted field]\"/Ig" \
-        -e "s/((['\"]?)[[:alnum:]_.-]*(cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*\\2[[:space:]]*[:=][[:space:]]*)'[^']*$/\\1'[REDACTED: incomplete quoted field]'/Ig" \
-        -e 's/(^|[[:space:],{?&])("?[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig|cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*"?[[:space:]]*[:=][[:space:]]*)"(\\.|[^"\\])*"/\1\2"[REDACTED]"/Ig' \
-        -e "s/(^|[[:space:],{?&])('[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig|cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*'|[[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig|cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*)([[:space:]]*[:=][[:space:]]*)'([^']*)'/\\1\\2\\5'[REDACTED]'/Ig" \
-        -e 's/(^|[[:space:],{?&])([[:alnum:]_.-]*(token|password|credential|secret|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig|cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*[[:space:]]*=[[:space:]]*)[^[:space:],&]+/\1\2[REDACTED]/Ig' \
-        -e 's@/tmp/rootpxe-cloud-vendor\.[[:alnum:]]{6}@[REDACTED]@g')
+        -e "s/((['\"]?)[[:alnum:]_.-]*(cloudInitVendorData|cloud_init_vendor_data|unattendXml)[[:alnum:]_.-]*\\2[[:space:]]*[:=][[:space:]]*)\"([^\"\\\\]|\\\\.)*(\\\\)?$/\\1\"[REDACTED: incomplete quoted field]\"/Ig" \
+        -e "s/((['\"]?)[[:alnum:]_.-]*(cloudInitVendorData|cloud_init_vendor_data|unattendXml)[[:alnum:]_.-]*\\2[[:space:]]*[:=][[:space:]]*)'[^']*$/\\1'[REDACTED: incomplete quoted field]'/Ig" \
+        -e 's/(^|[[:space:],{?&])("?[[:alnum:]_.-]*(token|password|credential|secret|unattendXml|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig|cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*"?[[:space:]]*[:=][[:space:]]*)"(\\.|[^"\\])*"/\1\2"[REDACTED]"/Ig' \
+        -e "s/(^|[[:space:],{?&])('[[:alnum:]_.-]*(token|password|credential|secret|unattendXml|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig|cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*'|[[:alnum:]_.-]*(token|password|credential|secret|unattendXml|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig|cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*)([[:space:]]*[:=][[:space:]]*)'([^']*)'/\\1\\2\\5'[REDACTED]'/Ig" \
+        -e 's/(^|[[:space:],{?&])([[:alnum:]_.-]*(token|password|credential|secret|unattendXml|cloudInitUserData|cloudInitMetaData|cloudInitNetworkConfig|cloudInitVendorData|cloud_init_vendor_data)[[:alnum:]_.-]*[[:space:]]*=[[:space:]]*)[^[:space:],&]+/\1\2[REDACTED]/Ig' \
+        -e 's@/tmp/rootpxe-(cloud-(init|meta|network|vendor)|deployment-initialization)\.[[:alnum:]]{6}@[REDACTED]@g')
     # Normalize only after redaction: a quoted JSON secret may itself contain
     # literal newline escapes.  Legacy complete argv has a dedicated label;
     # remove that line, not unlabelled native failure details.
@@ -1148,17 +1148,37 @@ rootpxe_capture_lvm_volumes_single() {
         return 1
     }
     rootpxe_capture_lvm_cleanup_exit() {
-        local primary_rc=$?
-        trap - EXIT
+        local primary_rc=$? xfs_still_mounted=no
+        trap - EXIT HUP INT TERM
         rm -f -- "$fifo" || true
-        if ! rootpxe_capture_lvm_cleanup_vg && [[ $primary_rc -eq 0 ]]; then
-            printf '%s|%s\n' LVM_CAPTURE_CLEANUP_FAILED vg_deactivation_failed >"$rootpxe_lvm_capture_status_file"
-            primary_rc=1
+        if [[ -n ${rootpxe_capture_xfs_mountpoint:-} ]]; then
+            if mountpoint -q "$rootpxe_capture_xfs_mountpoint" 2>/dev/null; then
+                if umount "$rootpxe_capture_xfs_mountpoint" >/dev/null 2>&1; then
+                    rmdir "$rootpxe_capture_xfs_mountpoint" >/dev/null 2>&1 || true
+                    unset rootpxe_capture_xfs_mountpoint
+                else
+                    xfs_still_mounted=yes
+                    printf '%s|%s|%s\n' XFS_CAPTURE_PREFLIGHT_FAILED xfs_unmount_failed "$rootpxe_capture_xfs_mountpoint" >"$rootpxe_lvm_capture_status_file"
+                    [[ $primary_rc -ne 0 ]] || primary_rc=1
+                fi
+            else
+                rmdir "$rootpxe_capture_xfs_mountpoint" >/dev/null 2>&1 || true
+                unset rootpxe_capture_xfs_mountpoint
+            fi
+        fi
+        if [[ $xfs_still_mounted == no ]]; then
+            if ! rootpxe_capture_lvm_cleanup_vg && [[ $primary_rc -eq 0 ]]; then
+                printf '%s|%s\n' LVM_CAPTURE_CLEANUP_FAILED vg_deactivation_failed >"$rootpxe_lvm_capture_status_file"
+                primary_rc=1
+            fi
         fi
         rm -rf -- "$stage" || true
         exit "$primary_rc"
     }
     trap rootpxe_capture_lvm_cleanup_exit EXIT
+    trap 'exit 143' TERM
+    trap 'exit 130' INT
+    trap 'exit 129' HUP
     pv_artifact="d1p${rootpxe_lvm_pv_number}.lvm.pv.meta"; vg_artifact="d1p${rootpxe_lvm_pv_number}.lvm.vg.cfg"
     rootpxe_safe_relative_path "$pv_artifact" >/dev/null && rootpxe_safe_relative_path "$vg_artifact" >/dev/null || return 1
     if rootpxe_activate_lvm_vg "$rootpxe_lvm_vg_uuid" "$rootpxe_lvm_vg_name"; then
@@ -1214,7 +1234,19 @@ rootpxe_capture_lvm_volumes_single() {
             rootpxe_partition_progress_item "d1:p${rootpxe_lvm_pv_number}:lv:${lv_uuid}" running 0 "开始复制逻辑卷"
             rootpxe_partition_progress_current_item "d1:p${rootpxe_lvm_pv_number}:lv:${lv_uuid}"
             rootpxe_partclone_progress_start_collector
-            if [[ $fs == xfs ]]; then LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.xfs "${rootpxe_partclone_progress_args[@]}" -cs "$lv_path" -O "$fifo" -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"; else LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.extfs "${rootpxe_partclone_progress_args[@]}" -cs "$lv_path" -O "$fifo" -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"; fi
+            if [[ $fs == xfs ]]; then
+                if declare -F rootpxe_capture_run_producer >/dev/null 2>&1; then
+                    LC_ALL=C TERM="$rootpxe_partclone_progress_term" rootpxe_capture_run_producer partclone.xfs "${rootpxe_partclone_progress_args[@]}" -cs "$lv_path" -O "$fifo" -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"
+                else
+                    LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.xfs "${rootpxe_partclone_progress_args[@]}" -cs "$lv_path" -O "$fifo" -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"
+                fi
+            else
+                if declare -F rootpxe_capture_run_producer >/dev/null 2>&1; then
+                    LC_ALL=C TERM="$rootpxe_partclone_progress_term" rootpxe_capture_run_producer partclone.extfs "${rootpxe_partclone_progress_args[@]}" -cs "$lv_path" -O "$fifo" -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"
+                else
+                    LC_ALL=C TERM="$rootpxe_partclone_progress_term" partclone.extfs "${rootpxe_partclone_progress_args[@]}" -cs "$lv_path" -O "$fifo" -f 1 -a0 2>"$rootpxe_partclone_progress_stderr_target"
+                fi
+            fi
             producer=$?; rootpxe_partclone_progress_wait; progress_decoder=$?; rootpxe_wait_for_writer "$rootpxe_last_writer_pid"; writer=$?
             [[ $producer -eq 0 ]] || { printf '%s|%s\n' LVM_LV_PARTCLONE_FAILED "lv_${lv_name}_${fs}" >"$rootpxe_lvm_capture_status_file"; rm -f "$fifo"; return 1; }
             [[ $progress_decoder -eq 0 ]] || { printf '%s|%s\n' LVM_LV_PARTCLONE_FAILED "lv_${lv_name}_${fs}_progress" >"$rootpxe_lvm_capture_status_file"; rm -f "$fifo"; return 1; }
@@ -1263,7 +1295,9 @@ rootpxe_capture_lvm_volumes_single() {
     )
     rootpxe_lvm_capture_status_rc=$?
     if [[ $rootpxe_lvm_capture_status_rc -ne 0 && -r $rootpxe_lvm_capture_status_file ]]; then
-        IFS='|' read -r rootpxe_lvm_capture_error_code rootpxe_lvm_capture_error_reason <"$rootpxe_lvm_capture_status_file" || true
+        local leaked_xfs_mount=''
+        IFS='|' read -r rootpxe_lvm_capture_error_code rootpxe_lvm_capture_error_reason leaked_xfs_mount <"$rootpxe_lvm_capture_status_file" || true
+        [[ -z $leaked_xfs_mount ]] || rootpxe_capture_xfs_mountpoint="$leaked_xfs_mount"
     fi
     rm -f -- "$rootpxe_lvm_capture_status_file"
     if [[ $rootpxe_lvm_capture_status_rc -ne 0 ]]; then
@@ -1525,7 +1559,7 @@ rootpxe_build_original_schema() {
             else if (tolower(label)=="dos" && (n+0) >= 5) { kind="logical"; parent=extended_number }
             printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", n,starts[n],sizes[n],types[n],label,artifact,flags[n],kind,parent
           }
-        }' "$original" >"$parts_file" || { rm -f "$parts_file"; return 1; }
+        }' "$original" >"$parts_file" || { rm -f "$parts_file" "$facts_file"; return 1; }
     local schema_version=1 sorted_parts=""
     if [[ $schema_table == mbr ]] && awk -F'\t' '$8 == "extended" || $8 == "logical" { found=1 } END { exit(found ? 0 : 1) }' "$parts_file"; then
         # v2 explicitly promises numeric order because sfdisk must see an
@@ -1765,8 +1799,11 @@ rootpxe_cleanup_task_json() {
     rootpxe_cleanup_derived_layout_files
     rootpxe_cleanup_deployment_partition_file
     rm -f -- "${deploymentLayoutFile:-}" "${originalSchemaFile:-}" "${partitionInventoryFile:-}" "${rootpxe_original_schema_file:-}" "${rootpxe_partition_inventory_file:-}" "${rootpxe_display_metadata_file:-}"
+    if [[ -n ${deploymentIdentityPolicyFile:-} && $deploymentIdentityPolicyFile == /tmp/pxeos.deployment-identity-policy.json && -f $deploymentIdentityPolicyFile && ! -L $deploymentIdentityPolicyFile ]]; then
+        rm -f -- "$deploymentIdentityPolicyFile"
+    fi
     rootpxe_cloud_init_cleanup_private || return 1
-    unset deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash rootpxe_original_schema_file rootpxe_partition_inventory_file rootpxe_display_metadata_file rootpxe_display_metadata_identities
+    unset deploymentLayoutFile originalSchemaFile partitionInventoryFile partitionInventoryHash rootpxe_original_schema_file rootpxe_partition_inventory_file rootpxe_display_metadata_file rootpxe_display_metadata_identities deploymentIdentityPolicyFile
     unset rootpxe_resolved_layout_file rootpxe_resolved_lvm_layout_file
 }
 
@@ -2176,6 +2213,9 @@ rootpxe_restore_lvm_volumes_single() {
         exit "$primary_rc"
     }
     trap rootpxe_restore_lvm_cleanup_exit EXIT
+    trap 'exit 143' TERM
+    trap 'exit 130' INT
+    trap 'exit 129' HUP
     [[ ${rootpxe_disk_permit_granted:-no} == yes && -r $plan ]] || { rootpxe_restore_lvm_fail LVM_RESTORE_PERMIT_FAILED permit_or_plan; return 1; }
     target_id=$(rootpxe_disk_stable_identity "$target_disk") || { rootpxe_restore_lvm_fail LVM_RESTORE_TARGET_IDENTITY_FAILED stable_identity; return 1; }
     [[ ${rootpxe_disk_permit_target_id:-} == "$target_id" && ${rootpxe_disk_permit_operation:-} =~ ^(deploy_write|nvme_format\+deploy_write)$ ]] || { rootpxe_restore_lvm_fail LVM_RESTORE_PERMIT_FAILED target_or_operation; return 1; }
@@ -2409,6 +2449,7 @@ rootpxe_validate_lvm_deployment_layout() {
     chmod 600 "$combined" || { rm -f -- "$combined" "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
     rootpxe_lvm_json_jq -s '{groups:.}' "$work"/*.plan.json >"$combined" || { rm -f -- "$combined" "$work"/*; rmdir "$work" 2>/dev/null || true; return 1; }
     rm -f -- "$work"/*; rmdir "$work" 2>/dev/null || true
+    rootpxe_register_derived_layout_file "$combined"
     rootpxe_resolved_lvm_layout_file="$combined"; export rootpxe_resolved_lvm_layout_file
 }
 
@@ -3262,6 +3303,28 @@ rootpxe_verify_disk_permit_binding() {
             "$rootpxe_disk_permit_bindings_file" >/dev/null 2>&1
     else
         [[ ${rootpxe_disk_permit_granted:-} == yes && ${rootpxe_disk_permit_target_id:-} == "$mapped_id" && ${rootpxe_disk_permit_operation:-} == "$mapped_operation" ]]
+    fi
+}
+
+rootpxe_update_disk_permit_binding_path() {
+    local old_disk="$1" new_disk="$2" target_id mapped_id mapped_operation tmp_map
+    [[ -n $old_disk && -n $new_disk && $new_disk == /dev/* ]] || return 1
+    [[ $old_disk != "$new_disk" ]] || return 0
+    [[ -r ${rootpxe_disk_permit_disk_map_file:-} && ! -L ${rootpxe_disk_permit_disk_map_file:-} ]] || return 1
+    IFS=$'\t' read -r _ mapped_id mapped_operation < <(awk -F '\t' -v disk="$old_disk" '
+      NF != 3 || $1 !~ /^\/dev\// || $2 !~ /^[A-Za-z0-9][A-Za-z0-9._:-]*$/ { bad=1 }
+      $1 == disk { row=$0; count++ }
+      END { if (!bad && count == 1) print row; else exit 1 }
+    ' "$rootpxe_disk_permit_disk_map_file") || return 1
+    target_id=$(rootpxe_disk_stable_identity "$new_disk") || return 1
+    [[ $target_id == "$mapped_id" ]] || return 1
+    tmp_map=$(mktemp /tmp/rootpxe-disk-permit-map.XXXXXX) || return 1
+    chmod 600 "$tmp_map" || { rm -f -- "$tmp_map"; return 1; }
+    awk -F '\t' -v OFS='\t' -v old="$old_disk" -v next_disk="$new_disk" '{ if ($1 == old) $1 = next_disk; print }' "$rootpxe_disk_permit_disk_map_file" >"$tmp_map" || { rm -f -- "$tmp_map"; return 1; }
+    mv -f -- "$tmp_map" "$rootpxe_disk_permit_disk_map_file" || { rm -f -- "$tmp_map"; return 1; }
+    if [[ ${rootpxe_disk_permit_bound_disk:-} == "$old_disk" ]]; then
+        rootpxe_disk_permit_bound_disk="$new_disk"
+        export rootpxe_disk_permit_bound_disk
     fi
 }
 
@@ -5033,13 +5096,15 @@ rootpxe_find_windows_system_partition() {
     for part in $parts; do
         fsTypeSetting "$part"
         [[ $fstype == ntfs ]] || continue
-        umount /ntfs >/dev/null 2>&1 || true
+        if mountpoint -q /ntfs 2>/dev/null; then
+            umount /ntfs >/dev/null 2>&1 || return 12
+        fi
         rootpxe_run_logged_typed_native ntfs-mount.log "$part" ntfs-3g -o ro "$part" /ntfs || continue
         if rootpxe_resolve_windows_system_hive /ntfs >/dev/null; then
             candidate="$part"
             ((candidate_count++))
         fi
-        umount /ntfs >/dev/null 2>&1 || true
+        umount /ntfs >/dev/null 2>&1 || return 12
     done
     case $candidate_count in
         1) printf '%s\n' "$candidate"; return 0 ;;
@@ -5253,7 +5318,6 @@ rootpxe_find_linux_root_filesystem() {
         # ext2/3/4 become extfs), which are not mount filesystem types.  Root
         # discovery must retain blkid's physical type and only inspect PVs.
         fs=$(blkid -p -o value -s TYPE "$part" 2>/dev/null) || continue
-        if [[ -n ${rootpxe_cloud_init_probe_disk:-} && ( $fs == btrfs || $fs == f2fs ) ]]; then probe_failed=1; continue; fi
         case $fs in
             LVM2_member)
                 lvm_parts="$lvm_parts $part"
@@ -5262,6 +5326,7 @@ rootpxe_find_linux_root_filesystem() {
                 candidate=$(rootpxe_linux_probe_root_candidate "$part" "$fs")
                 probe_rc=$?
                 if [[ $probe_rc -eq 0 ]]; then
+                    if [[ -n ${rootpxe_cloud_init_probe_disk:-} ]]; then probe_failed=1; continue; fi
                     candidates="$candidates $candidate"
                     continue
                 fi
@@ -5276,6 +5341,7 @@ rootpxe_find_linux_root_filesystem() {
                     probe_rc=$?
                     if [[ $probe_rc -ne 0 && $probe_rc -ne 1 ]]; then probe_failed=1; continue; fi
                     [[ $probe_rc -eq 0 ]] || continue
+                    if [[ -n ${rootpxe_cloud_init_probe_disk:-} ]]; then probe_failed=1; continue; fi
                     candidates="$candidates $candidate"
                 done <<<"$subvolids"
                 ;;
@@ -5284,6 +5350,7 @@ rootpxe_find_linux_root_filesystem() {
                 probe_rc=$?
                 if [[ $probe_rc -ne 0 && $probe_rc -ne 1 ]]; then probe_failed=1; continue; fi
                 [[ $probe_rc -eq 0 ]] || continue
+                if [[ -n ${rootpxe_cloud_init_probe_disk:-} && $fs == f2fs ]]; then probe_failed=1; continue; fi
                 candidates="$candidates $candidate"
                 ;;
         esac
@@ -5383,20 +5450,31 @@ rootpxe_apply_hostname_for_disk() {
             rootpxe_cloud_init_policy_enabled && return 0
             rootpxe_apply_linux_hostname_for_targets ${disks:-${1:-}}
             ;;
-        [1-2]|4|[5-7]|9|10|11) rootpxe_apply_windows_hostname_for_disk "$1" ;;
+        [1-2]|4|[5-7]|9|10|11) rootpxe_apply_windows_hostname_for_disk ${disks:-${1:-}} ;;
         *) return 0 ;;
     esac
 }
 
 rootpxe_apply_windows_hostname_for_disk() {
-    local disk="$1" system_part rc
-    system_part=$(rootpxe_find_windows_system_partition "$disk")
-    rc=$?
-    case $rc in
-        0) rootpxe_apply_windows_hostname "$system_part" ;;
-        10) handleError "PXEOS_STAGE=customizing_hostname CODE=WINDOWS_SYSTEM_PARTITION_NOT_FOUND" ;;
-        11) handleError "PXEOS_STAGE=customizing_hostname CODE=WINDOWS_SYSTEM_PARTITION_AMBIGUOUS" ;;
-        *) handleError "PXEOS_STAGE=customizing_hostname CODE=WINDOWS_SYSTEM_PARTITION_PROBE_FAILED" ;;
+    local disk part found_part="" found_count=0 rc
+    for disk in "$@"; do
+        [[ -n $disk ]] || continue
+        if [[ -n ${rootpxe_disk_permit_disk_map_file:-} ]]; then
+            rootpxe_verify_disk_permit_binding "$disk" deploy_write || handleError "PXEOS_STAGE=customizing_hostname CODE=WINDOWS_SYSTEM_PARTITION_PROBE_FAILED"
+        fi
+        part=$(rootpxe_find_windows_system_partition "$disk")
+        rc=$?
+        case $rc in
+            0) found_part="$part"; found_count=$((found_count + 1)) ;;
+            10) ;;
+            11) handleError "PXEOS_STAGE=customizing_hostname CODE=WINDOWS_SYSTEM_PARTITION_AMBIGUOUS" ;;
+            *) handleError "PXEOS_STAGE=customizing_hostname CODE=WINDOWS_SYSTEM_PARTITION_PROBE_FAILED" ;;
+        esac
+    done
+    case $found_count in
+        1) rootpxe_apply_windows_hostname "$found_part" ;;
+        0) handleError "PXEOS_STAGE=customizing_hostname CODE=WINDOWS_SYSTEM_PARTITION_NOT_FOUND" ;;
+        *) handleError "PXEOS_STAGE=customizing_hostname CODE=WINDOWS_SYSTEM_PARTITION_AMBIGUOUS" ;;
     esac
 }
 
@@ -5530,28 +5608,41 @@ rootpxe_apply_windows_hostname() {
     [[ ! -L /ntfs ]] || return 1
     mkdir -p /ntfs || return 1
     [[ -d /ntfs && ! -L /ntfs ]] || return 1
-    umount /ntfs >/dev/null 2>&1 || true
-    rootpxe_run_logged_typed_native ntfs-mount.log "$part" ntfs-3g -o remove_hiberfile,rw "$part" /ntfs || return 1
+    if mountpoint -q /ntfs 2>/dev/null; then
+        umount /ntfs >/dev/null 2>&1 || return 1
+    fi
+    local ntfs_mounted=no
+    rootpxe_windows_init_cleanup_signal() {
+        [[ -z ${xml_tmp:-} ]] || rm -f -- "$xml_tmp"
+        [[ $ntfs_mounted != yes ]] || umount /ntfs >/dev/null 2>&1 || true
+        exit 143
+    }
+    trap rootpxe_windows_init_cleanup_signal HUP INT TERM
+    rootpxe_run_logged_typed_native ntfs-mount.log "$part" ntfs-3g -o remove_hiberfile,rw "$part" /ntfs || { trap - HUP INT TERM; return 1; }
+    ntfs_mounted=yes
     if [[ ${changeHostname:-false} == true && $sysprep -eq 0 ]]; then
-        rootpxe_change_hostname_registry "$part" || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
+        rootpxe_change_hostname_registry "$part" || { umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
         rootpxe_deployment_identity_hostname_result=true
     fi
     if [[ $sysprep -eq 1 ]]; then
         rootpxe_initialization_failure_reason=windows_sysprep_path_unsafe_or_ambiguous
-        xml_path=$(rootpxe_resolve_windows_sysprep_unattend_path /ntfs) || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
+        xml_path=$(rootpxe_resolve_windows_sysprep_unattend_path /ntfs) || { umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
         rootpxe_initialization_failure_reason=windows_sysprep_xml_write_or_verify_failed
-        [[ -d ${xml_path%/*} && ! -L ${xml_path%/*} && ( ! -e $xml_path || ( -f $xml_path && ! -L $xml_path ) ) ]] || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
-        xml_tmp=$(mktemp "${xml_path%/*}/.unattend.rootpxe.XXXXXX") || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
-        chmod 0600 "$xml_tmp" && jq -j '.unattendXml' "$source_xml" >"$xml_tmp" || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
-        command -v xml >/dev/null 2>&1 && xml val -w "$xml_tmp" >/dev/null 2>&1 || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
-        expected_hash=$(sha256sum "$xml_tmp" 2>/dev/null | awk '{print $1}') || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
-        [[ $expected_hash =~ ^[0-9a-fA-F]{64}$ ]] || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
-        mv -f -- "$xml_tmp" "$xml_path" || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; return 1; }
-        actual_hash=$(sha256sum "$xml_path" 2>/dev/null | awk '{print $1}') || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
-        [[ $actual_hash == "$expected_hash" ]] || { umount /ntfs >/dev/null 2>&1 || true; return 1; }
+        [[ -d ${xml_path%/*} && ! -L ${xml_path%/*} && ( ! -e $xml_path || ( -f $xml_path && ! -L $xml_path ) ) ]] || { umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
+        xml_tmp=$(mktemp "${xml_path%/*}/.unattend.rootpxe.XXXXXX") || { umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
+        chmod 0600 "$xml_tmp" && jq -j '.unattendXml' "$source_xml" >"$xml_tmp" || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
+        command -v xml >/dev/null 2>&1 && xml val -w "$xml_tmp" >/dev/null 2>&1 || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
+        expected_hash=$(sha256sum "$xml_tmp" 2>/dev/null | awk '{print $1}') || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
+        [[ $expected_hash =~ ^[0-9a-fA-F]{64}$ ]] || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
+        mv -f -- "$xml_tmp" "$xml_path" || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
+        xml_tmp=""
+        actual_hash=$(sha256sum "$xml_path" 2>/dev/null | awk '{print $1}') || { umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
+        [[ $actual_hash == "$expected_hash" ]] || { umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
     fi
     rootpxe_initialization_failure_reason=windows_system_unmount_failed
-    umount /ntfs >/dev/null 2>&1 || return 1
+    umount /ntfs >/dev/null 2>&1 || { trap - HUP INT TERM; return 1; }
+    ntfs_mounted=no
+    trap - HUP INT TERM
     [[ $sysprep -ne 1 ]] || rootpxe_deployment_identity_sysprep_result=true
     unset rootpxe_initialization_failure_reason
     rootpxe_stage customizing_hostname "code=WINDOWS_INITIALIZATION_COMPLETE"
@@ -6116,14 +6207,14 @@ correctVistaMBR() {
             handleError "Couldn't remove /tmp.mbr file (${FUNCNAME[0]})\n   Args Passed: $*"
             ;;
     esac
-    fogmbrfix /tmp.mbr.txt /tmp.mbr.fix.txt >/dev/null 2>&1
+    pxeosmbrfix /tmp.mbr.txt /tmp.mbr.fix.txt >/dev/null 2>&1
     case $? in
         0)
             ;;
         *)
             echo "Failed"
             debugPause
-            handleError "fogmbrfix failed to operate (${FUNCNAME[0]})\n   Args Passed: $*"
+            handleError "pxeosmbrfix failed to operate (${FUNCNAME[0]})\n   Args Passed: $*"
             ;;
     esac
     rm /tmp.mbr.txt >/dev/null 2>&1
@@ -6180,9 +6271,10 @@ handleError() {
     safe_str=$(rootpxe_redact_diagnostic "$str")
     rootpxe_diagnostic_cleanup
     if [[ ${rootpxe_capture_direct:-no} == yes ]]; then rootpxe_capture_direct_quiesce; fi
-    # A fetched initialization payload may contain an XML credential or a
-    # password hash.  Remove it before any retry wait, diagnostics, or reboot.
+    # A fetched initialization payload may contain an XML credential, Cloud-init
+    # secret, or password hash. Remove them before retry wait, diagnostics, or reboot.
     declare -F rootpxe_deployment_identity_cleanup_private >/dev/null 2>&1 && rootpxe_deployment_identity_cleanup_private
+    declare -F rootpxe_cloud_init_cleanup_private >/dev/null 2>&1 && rootpxe_cloud_init_cleanup_private
     rootpxe_task_console_failure ERROR "$safe_str"
     rootpxe_failure_begin || exit 1
     #
@@ -6402,10 +6494,12 @@ saveGRUB() {
     # Determine the number of sectors to copy
     # Hack Note: print $4+0 causes the column to be interpretted as a number
     #            so the comma is tossed
-    local partition_table count has_grub
+    local partition_table count has_grub sector_size
     partition_table=$(flock "$disk" sfdisk -d "$disk" 2>/dev/null) || return 1
     count=$(awk '/start=[ ]*[1-9]/{print $4+0}' <<<"$partition_table" | sort -n | head -n1)
     [[ $count =~ ^[1-9][0-9]*$ ]] || return 1
+    sector_size=$(blockdev --getss "$disk" 2>/dev/null || true)
+    [[ $sector_size =~ ^[1-9][0-9]*$ ]] || sector_size=512
     has_grub=$(
         set +e
         dd if="$disk" bs=512 count=1 2>/dev/null | grep -i 'grub'
@@ -6417,12 +6511,12 @@ saveGRUB() {
         hasGrubFileName "$imagePath" "$disk_number" "$sgdisk"
         touch "$hasgrubfilename" || return 1
     fi
-    # Ensure that no more than 1MiB of data is copied (already have this size used elsewhere)
+    # Ensure that no more than 2048 logical sectors are copied (matches preflight & restore).
     [[ $count -gt 2048 ]] && count=2048
     [[ $count -eq 8 || $count -eq 63 ]] && count=1
     local mbrfilename=""
     MBRFileName "$imagePath" "$disk_number" "mbrfilename" "$sgdisk"
-    dd if="$disk" of="$mbrfilename" count="$count" bs=512 >/dev/null 2>&1
+    dd if="$disk" of="$mbrfilename" count="$count" bs="$sector_size" >/dev/null 2>&1
 }
 # Checks for the existence of the grub embedding area in the image directory.
 # Echos 1 for true, and 0 for false.
@@ -6746,7 +6840,21 @@ restorePartitionTablesAndBootLoaders() {
     else
         boot_count=$(rootpxe_preflight_raw_boot_sector_count "$tmpMBR") || { handleError "Invalid raw MBR boot artifact (${FUNCNAME[0]})"; return 1; }
     fi
+    unset rootpxe_nvme_reformatted_disk
     validateImageSectorSize "$disk" "$sector_partition_file"
+    if [[ -n ${rootpxe_nvme_reformatted_disk:-} && $rootpxe_nvme_reformatted_disk != "$disk" ]]; then
+        if [[ -n ${rootpxe_disk_permit_disk_map_file:-} ]]; then
+            rootpxe_update_disk_permit_binding_path "$disk" "$rootpxe_nvme_reformatted_disk" || { handleError "PXEOS_STAGE=sector_validation CODE=DISK_PERMIT_DENIED REASON=nvme_reformat_binding_update_failed"; return 1; }
+        fi
+        local old_disk="$disk" updated_disks="" item
+        disk="$rootpxe_nvme_reformatted_disk"
+        [[ ${hd:-} != "$old_disk" ]] || hd="$disk"
+        for item in ${disks:-}; do
+            [[ $item == "$old_disk" ]] && item="$disk"
+            updated_disks+="${updated_disks:+ }$item"
+        done
+        [[ -z $updated_disks ]] || disks="$updated_disks"
+    fi
     clearPartitionTables "$disk"
     majorDebugEcho "Partition table should be empty now."
     majorDebugShowCurrentPartitionTable "$disk" "$disk_number"

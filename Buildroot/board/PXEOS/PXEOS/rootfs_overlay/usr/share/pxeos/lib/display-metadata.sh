@@ -29,8 +29,23 @@ rootpxe_display_metadata_cleanup_mount() {
 }
 
 rootpxe_display_metadata_unescape_fstab_field() {
-    local value="$1" decoded
-    decoded=$(printf '%b' "$value") || return 1
+    local decoded="" rest="$1" oct val hex ch
+    while [[ $rest == *\\* ]]; do
+        decoded+="${rest%%\\*}"
+        rest="${rest#*\\}"
+        if [[ $rest =~ ^([0-3][0-7]{2})(.*)$ ]]; then
+            oct="${BASH_REMATCH[1]}"
+            rest="${BASH_REMATCH[2]}"
+            val=$((8#$oct))
+            (( val > 0 && val <= 255 )) || return 1
+            printf -v hex '\\x%02x' "$val"
+            printf -v ch '%b' "$hex"
+            decoded+="$ch"
+        else
+            decoded+='\'
+        fi
+    done
+    decoded+="$rest"
     [[ $decoded != *$'\n'* && $decoded != *$'\r'* && $decoded != *$'\t'* ]] || return 1
     printf '%s\n' "$decoded"
 }
@@ -120,7 +135,7 @@ rootpxe_display_metadata_begin() {
         part=${identity#*|}; fs=$(blkid -s TYPE -o value "$part" 2>/dev/null | tr -d '\r\n')
         rootpxe_linux_root_fstype_supported "$fs" || continue
         rootpxe_display_metadata_collect_fstab "$part" "$fs" "$identities" "${identity%%|*}" || {
-            local rc=$?; [[ $rc -eq 2 ]] && return 2; continue
+            local rc=$?; [[ $rc -eq 2 ]] && { rm -f -- "$rows"; unset rootpxe_display_metadata_mount_rows; return 2; }; continue
         }
     done
     rootpxe_display_metadata_file=$(mktemp /tmp/rootpxe-display-metadata.XXXXXX) || { rm -f -- "$rows"; return 1; }

@@ -123,6 +123,7 @@ rootpxe_deployment_identity_report_result() {
     case "$hostname:$sysprep:$cloud_init" in *[!a-z:]*|'') return 1;; esac
     [[ $hostname =~ ^(true|false)$ && $sysprep =~ ^(true|false)$ && $cloud_init =~ ^(true|false)$ ]] || return 1
     api="${pxeapi:-${web:-}}"; [[ -n $api ]] || return 1
+    api="${api%/}/"
     request=$(jq -cn --argjson taskId "$taskid" --arg token "$task_token" --arg mac "$mac" --arg planId "$(jq -r '.plan.planId' "$rootpxe_deployment_identity_plan_file")" --arg planHash "$(jq -r '.planHash' "$rootpxe_deployment_identity_plan_file")" --argjson attempt "$progress_attempt" --argjson hostname "$hostname" --argjson sysprep "$sysprep" --argjson cloudInit "$cloud_init" '{taskId:$taskId,token:$token,mac:$mac,planId:$planId,planHash:$planHash,attempt:$attempt,result:{hostname:$hostname,sysprep:$sysprep,cloudInit:$cloudInit}}') || return 1
     request=$(rootpxe_task_identity_json "$request") || return 1
     response=$(rootpxe_task_curl -ks --connect-timeout 10 --max-time 30 -H 'Content-Type: application/json' --data-binary "$request" -w $'\n%{http_code}' "${api}deployment-identity-result" 2>/dev/null) || return 1

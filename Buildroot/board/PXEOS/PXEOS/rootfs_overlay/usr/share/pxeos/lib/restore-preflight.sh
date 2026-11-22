@@ -226,7 +226,7 @@ rootpxe_preflight_validate_fixed_legacy_payloads() {
     if [[ $image_type == mps ]]; then
         rows=$(rootpxe_preflight_table_rows "$image_path/d1.partitions") || return 1
         while IFS='|' read -r part _ _ type; do rootpxe_preflight_extended_type "$type" || rootpxe_preflight_swap_type "$type" || rootpxe_validate_artifact_fragments "$image_path/d1p${part}.img" || return 1; done <<<"$rows"
-        rootpxe_preflight_fixed_boot_artifact "$image_path" 1
+        rootpxe_preflight_fixed_boot_artifact "$image_path" 1 || return 1
         rootpxe_preflight_no_unlisted_disk_facts "$image_path" 1
         return
     fi
@@ -453,7 +453,12 @@ rootpxe_validate_restore_artifacts() {
             elif [[ $image_type == mps ]]; then
                 rootpxe_preflight_table_rows "$image_path/d1.partitions" >/dev/null && rootpxe_preflight_fixed_boot_artifact "$image_path" 1
             else
-                rootpxe_fixed_restore_disk_facts "$image_path" >/dev/null && rootpxe_preflight_validate_fixed_legacy_payloads "$image_path" "$image_type"
+                facts=$(rootpxe_fixed_restore_disk_facts "$image_path") || return 1
+                while IFS='|' read -r number _; do
+                    rootpxe_preflight_regular_file "$image_path/d${number}.size" || return 1
+                    rootpxe_preflight_table_rows "$image_path/d${number}.partitions" >/dev/null || return 1
+                    rootpxe_preflight_fixed_boot_artifact "$image_path" "$number" || return 1
+                done <<<"$facts"
             fi
             ;;
         mps:[1-9]*|mpa:[1-9]*) rootpxe_preflight_validate_fixed_selected "$image_path" "$image_type" "$scope" ;;

@@ -103,7 +103,7 @@ if declare -F rootpxe_display_metadata_begin >/dev/null 2>&1; then
         rootpxe_console_message WARN 'Capture display metadata was unavailable; continuing without optional source mappings.'
     fi
 fi
-prepareUploadLocation "$imagePath"
+prepareUploadLocation "$imagePath" || handleError "PXEOS_STAGE=capture CODE=CAPTURE_ARTIFACT_PATH_INVALID REASON=capture_staging_prepare_failed"
 printf '%s\n%s\n' "$taskid" "$progress_attempt" > "$imagePath/.rootpxe-capture-taskid" || handleError "Could not initialize capture task marker ($0)"
 rootpxe_console_message INFO "Using image: $img."
 # A resizable single-disk image keeps the captured partition layout intact.

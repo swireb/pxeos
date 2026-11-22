@@ -51,8 +51,8 @@ if [[ ${rootpxe_capture_direct:-no} == yes ]]; then
     finish_args+=(--data-urlencode producerSucceeded=true --data-urlencode workerStopped=true)
 fi
 [[ -n ${capture_size_bytes:-} ]] && finish_args+=(--data-urlencode "sizeBytes=$capture_size_bytes")
-[[ -n ${rootpxe_partition_inventory_file:-} ]] && finish_args+=(--data-urlencode "partitionInventory=$(cat "$rootpxe_partition_inventory_file")")
-[[ -n ${rootpxe_original_schema_file:-} ]] && finish_args+=(--data-urlencode "originalSchema=$(cat "$rootpxe_original_schema_file")")
+[[ -n ${rootpxe_partition_inventory_file:-} ]] && finish_args+=(--data-urlencode "partitionInventory@$rootpxe_partition_inventory_file")
+[[ -n ${rootpxe_original_schema_file:-} ]] && finish_args+=(--data-urlencode "originalSchema@$rootpxe_original_schema_file")
 dots "Notifying RootPXE (finish)"
 while true; do
     # 在 bash -e 环境中，临时网络错误不能让命令替换提前终止重试循环。

@@ -59,15 +59,20 @@ rootpxe_deploy_retry_cleanup() {
     local baseline=$1 current=${2:-/proc/self/mountinfo} mounts path
     [[ -s $baseline && -r $current ]] || return 1
     mounts=$(rootpxe_deploy_mounts_to_clean "$baseline" "$current") || return 1
-    [[ -n $mounts ]] || return 0
-    # Unmount children before their parents and stacked mounts in reverse order.
-    while read -r _ _ path; do
-        [[ -n $path ]] || continue
-        printf -v path '%b' "$path"
-        umount -- "$path" || return 1
-    done < <(sort -k1,1nr -k2,2nr <<<"$mounts")
-    mounts=$(rootpxe_deploy_mounts_to_clean "$baseline" "$current") || return 1
-    [[ -z $mounts ]]
+    if [[ -n $mounts ]]; then
+        # Unmount children before their parents and stacked mounts in reverse order.
+        while read -r _ _ path; do
+            [[ -n $path ]] || continue
+            printf -v path '%b' "$path"
+            umount -- "$path" || return 1
+        done < <(sort -k1,1nr -k2,2nr <<<"$mounts")
+        mounts=$(rootpxe_deploy_mounts_to_clean "$baseline" "$current") || return 1
+        [[ -z $mounts ]] || return 1
+    fi
+    if [[ $current == /proc/self/mountinfo ]] && command -v vgchange >/dev/null 2>&1; then
+        vgchange -an >/dev/null 2>&1 || return 1
+    fi
+    return 0
 }
 
 rootpxe_run_deployment() (

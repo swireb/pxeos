@@ -37,35 +37,55 @@ int main(int argc, char* argv[])
         intLineCnt++;
         if( ! strLine.empty() )
         {
-            if ( intLineCnt == 28 )
+            if ( intLineCnt == 28 || intLineCnt == 29 )
             {
-                for( int i = 29; i < 33; i++ )
-                    strLine[i] = '0';
+                size_t colon = strLine.find(": ");
+                if ( colon == string::npos )
+                {
+                    cout << " Invalid xxd input format." << endl;
+                    return 1;
+                }
+                size_t hexStart = colon + 2;
+                if ( intLineCnt == 28 )
+                {
+                    if ( strLine.size() <= hexStart + 38 )
+                    {
+                        cout << " Truncated xxd input line." << endl;
+                        return 1;
+                    }
+                    for( size_t i = hexStart + 20; i < hexStart + 24; i++ )
+                        strLine[i] = '0';
 
-                for( int i = 34; i < 38; i++ )
-                    strLine[i] = '0';
-                strLine[46] = '2';
-                strLine[47] = '0';
-                strWriteBack += strLine;
+                    for( size_t i = hexStart + 25; i < hexStart + 29; i++ )
+                        strLine[i] = '0';
+                    strLine[hexStart + 37] = '2';
+                    strLine[hexStart + 38] = '0';
+                }
+                else
+                {
+                    if ( strLine.size() <= hexStart + 18 )
+                    {
+                        cout << " Truncated xxd input line." << endl;
+                        return 1;
+                    }
+                    strLine[hexStart] = '2';
+
+                    for( size_t i = hexStart + 15; i < hexStart + 18; i++ )
+                        strLine[i] = '0';
+
+                    strLine[hexStart + 18] = '8';
+                }
             }
-            else if (intLineCnt == 29 )
-            {
-                strLine[9] = '2';
-
-                for( int i = 24; i < 27; i++)
-                    strLine[i] = '0';
-
-                strLine[27] = '8';
-                strWriteBack += strLine;
-            }
-            else
-            {
-                strWriteBack += strLine;
-            }
-
+            strWriteBack += strLine;
             strWriteBack += "\n";
         }
     }
-    outFile<<strWriteBack;
+    outFile << strWriteBack;
+    outFile.flush();
+    if ( ! outFile )
+    {
+        cout << " Failed to write output file." << endl;
+        return 1;
+    }
     return 0;
 }

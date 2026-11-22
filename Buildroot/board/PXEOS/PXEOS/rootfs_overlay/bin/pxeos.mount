@@ -17,18 +17,34 @@ if [[ ${rootpxe_capture_direct:-no} == yes ]]; then
     [[ ! -L /storage && ( ! -e /storage || -d /storage ) ]] || handleError "Unsafe capture mount point"
     mkdir -p /storage || handleError "Capture mount point unavailable"
     if mountpoint -q /storage; then umount /storage || handleError "Capture mount point busy"; fi
+    capture_host="$storage_server"
+    capture_port=""
+    if [[ $capture_host =~ ^\[([^]]+)\]:([0-9]+)$ ]]; then
+        capture_host="${BASH_REMATCH[1]}"
+        capture_port="${BASH_REMATCH[2]}"
+    elif [[ $capture_host =~ ^\[([^]]+)\]$ ]]; then
+        capture_host="${BASH_REMATCH[1]}"
+    elif [[ $capture_host != *:*:* && $capture_host =~ ^([^:]+):([0-9]+)$ ]]; then
+        capture_host="${BASH_REMATCH[1]}"
+        capture_port="${BASH_REMATCH[2]}"
+    fi
     case $protocol in
         smb)
             case $rootpxe_capture_smb_version in
                 auto) capture_version=default;; 2.1|3.0|3.1.1) capture_version=$rootpxe_capture_smb_version;; 3.0.2) capture_version=3.02;; *) handleError "Invalid capture SMB version";;
             esac
-            rootpxe_run_logged_typed_native storage-mount.log storage mount.cifs "//$storage_server/$storage_export" /storage -o "iocharset=utf8,rw,serverino,vers=$capture_version,credentials=$smb_credentials_file"
+            capture_options="iocharset=utf8,rw,serverino,vers=$capture_version,credentials=$smb_credentials_file"
+            [[ -z $capture_port ]] || capture_options+=",port=$capture_port"
+            rootpxe_run_logged_typed_native storage-mount.log storage mount.cifs "//$capture_host/$storage_export" /storage -o "$capture_options"
             capture_mount_status=$?; rootpxe_cleanup_smb_credentials
             ;;
         nfs)
             capture_options=rw,nolock,proto=tcp
             [[ $rootpxe_capture_nfs_version == auto ]] || capture_options+=",vers=$rootpxe_capture_nfs_version"
-            rootpxe_run_logged_typed_native storage-mount.log storage mount -t nfs -o "$capture_options" "$storage_server:$storage_export" /storage
+            [[ -z $capture_port ]] || capture_options+=",port=$capture_port"
+            capture_nfs_host="$capture_host"
+            [[ $capture_nfs_host != *:* ]] || capture_nfs_host="[$capture_nfs_host]"
+            rootpxe_run_logged_typed_native storage-mount.log storage mount -t nfs -o "$capture_options" "$capture_nfs_host:$storage_export" /storage
             capture_mount_status=$?
             ;;
         *) handleError "Invalid capture storage protocol";;

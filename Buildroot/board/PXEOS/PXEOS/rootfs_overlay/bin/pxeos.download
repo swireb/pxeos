@@ -239,6 +239,7 @@ if [[ ${imgType:-} == [Nn] ]]; then
     unset rootpxe_nvme_reformatted_disk
     validateImageSectorSize "$hd" "$sector_metadata" || handleError "PXEOS_STAGE=sector_validation CODE=LOGICAL_SECTOR_MISMATCH REASON=sector_alignment_failed"
     if [[ -n ${rootpxe_nvme_reformatted_disk:-} ]]; then
+        rootpxe_update_disk_permit_binding_path "$hd" "$rootpxe_nvme_reformatted_disk" || handleError "PXEOS_STAGE=sector_validation CODE=DISK_PERMIT_DENIED REASON=nvme_reformat_binding_update_failed"
         hd=$rootpxe_nvme_reformatted_disk
         disks=$hd
     fi
@@ -267,6 +268,8 @@ if [[ $imgPartitionType != mbr ]]; then
     # first when present, then reconstruct the permitted LVM metadata/LVs.
     if [[ -z ${rootpxe_resolved_lvm_layout_file:-} ]] || jq -e '.partitions[] | select(.role != "lvm_pv" and .artifact != "")' "$originalSchemaFile" >/dev/null 2>&1; then
         putDataBack
+    elif jq -e '.partitions[] | select(.role == "swap" or .fs == "swap")' "$originalSchemaFile" >/dev/null 2>&1; then
+        makeAllSwapSystems "$hd" "$imagePath"
     fi
     if [[ -n ${rootpxe_resolved_lvm_layout_file:-} ]]; then
         rootpxe_restore_lvm_volumes "$imagePath" "$hd" || handleError "PXEOS_STAGE=restore_lvm CODE=${rootpxe_restore_lvm_error_code:-LVM_RESTORE_FAILED} REASON=${rootpxe_restore_lvm_error_reason:-unknown}"

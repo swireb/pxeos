@@ -92,7 +92,7 @@ rootpxe_linux_hostname_preflight() {
     done
     if [[ -e $root/etc/fstab || -L $root/etc/fstab ]]; then
         rootpxe_ci_metadata_safe "$root/etc/fstab" file || { rootpxe_lh_reject linux_hostname_path_unsafe; return 1; }
-        while read -r source mount_target rest; do
+        while read -r source mount_target rest || [[ -n ${source:-} ]]; do
             [[ -n $source && $source != \#* ]] || continue
             case $mount_target in /etc|/etc/*|*\\*) rootpxe_lh_reject linux_hostname_unsupported_mount; return 1;; esac
         done <"$root/etc/fstab"

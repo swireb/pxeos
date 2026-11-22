@@ -295,11 +295,11 @@ rootpxe_ci_mount_fstab() {
     fi
     if [[ -e $root/etc/fstab || -L $root/etc/fstab ]]; then
         rootpxe_ci_safe_write_directory "$root" /etc && rootpxe_ci_metadata_safe "$root/etc/fstab" file || return 1
-        while read -r source target declared options rest; do
+        while read -r source target declared options rest || [[ -n ${source:-} ]]; do
             [[ -n $source && $source != \#* ]] || continue
             case $target in
-                /usr/*) return 1;;
-                /var/*|/etc|/etc/cloud|/etc/cloud/*) [[ $requested != /var ]] || return 1;;
+                *\\*|/usr/bin|/usr/bin/*|/usr/sbin|/usr/sbin/*|/usr/lib|/usr/lib/*) return 1;;
+                /var/lib|/var/lib/cloud|/var/lib/cloud/*|/etc|/etc/cloud|/etc/cloud/*) [[ $requested != /var ]] || return 1;;
             esac
             [[ $target == "$requested" ]] || continue
             count=$((count + 1)); [[ $count -eq 1 && -n $declared && -n $options ]] || return 1
@@ -513,7 +513,7 @@ rootpxe_cloud_init_install_at_root() {
     rootpxe_cloud_init_error=""
     if (
         umask 077
-        local seed="$root/var/lib/cloud/seed/nocloud" file source path
+        local seed="$root/var/lib/cloud/seed/nocloud" file source path tmp_file expected_hash actual_hash
         rootpxe_ci_is_root || exit 43
         rootpxe_ci_readonly_preflight "$root" || exit $?
         rootpxe_ci_safe_write_directory "$root" /var/lib/cloud/seed/nocloud yes || exit 1
@@ -527,12 +527,24 @@ rootpxe_cloud_init_install_at_root() {
             esac
             path="$seed/$file"
             if [[ -n $source ]]; then
-                cp -- "$source" "$path" && chmod 600 "$path" && chown 0:0 "$path" || exit 1
+                expected_hash=$(rootpxe_ci_hash "$source") || exit 1
+                tmp_file=$(mktemp "$seed/.rootpxe-${file}.XXXXXX") || exit 1
+                if ! (cp -- "$source" "$tmp_file" && chmod 600 "$tmp_file" && chown 0:0 "$tmp_file" && mv -f -- "$tmp_file" "$path"); then
+                    rm -f -- "$tmp_file"
+                    exit 1
+                fi
+                actual_hash=$(rootpxe_ci_hash "$path") || exit 1
+                [[ $actual_hash == "$expected_hash" ]] || exit 1
             else rm -f -- "$path" || exit 1; fi
         done
         rootpxe_ci_safe_write_directory "$root" /etc/cloud/cloud.cfg.d yes || exit 1
         path="$root/etc/cloud/cloud.cfg.d/99-rootpxe-nocloud.cfg"
-        printf 'datasource_list: [NoCloud]\n' >"$path" && chmod 644 "$path" && chown 0:0 "$path" || exit 1
+        tmp_file=$(mktemp "$root/etc/cloud/cloud.cfg.d/.99-rootpxe-nocloud.XXXXXX") || exit 1
+        if ! (printf 'datasource_list: [NoCloud]\n' >"$tmp_file" && chmod 644 "$tmp_file" && chown 0:0 "$tmp_file" && mv -f -- "$tmp_file" "$path" && chmod 644 "$path" && chown 0:0 "$path"); then
+            rm -f -- "$tmp_file"
+            exit 1
+        fi
+        printf 'datasource_list: [NoCloud]\n' | cmp -s - "$path" || exit 1
     ); then result=0; else
         result=$?
         case $result in

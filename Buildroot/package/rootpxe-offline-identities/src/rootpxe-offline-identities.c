@@ -18,10 +18,10 @@ static int regular(const char *path)
            !S_ISLNK(status.st_mode);
 }
 
-static int le32(const unsigned char *value)
+static uint32_t le32(const unsigned char *value)
 {
-    return (int)value[0] | ((int)value[1] << 8) | ((int)value[2] << 16) |
-           ((int)value[3] << 24);
+    return (uint32_t)value[0] | ((uint32_t)value[1] << 8) |
+           ((uint32_t)value[2] << 16) | ((uint32_t)value[3] << 24);
 }
 
 static int ascii_case_equal(const char *actual, const char *expected)
@@ -227,9 +227,12 @@ static int selected_hostname_control_sets(hive_h *hive, hive_node_h root,
 
 static int valid_windows_hostname(const char *hostname)
 {
-    size_t i;
+    size_t i, length;
 
-    if (!hostname || !*hostname || strlen(hostname) > 15)
+    if (!hostname || !*hostname)
+        return 0;
+    length = strlen(hostname);
+    if (length > 15 || hostname[0] == '-' || hostname[length - 1] == '-')
         return 0;
     for (i = 0; hostname[i]; i++) {
         if (!(hostname[i] == '-' || (hostname[i] >= 'A' && hostname[i] <= 'Z') ||
@@ -237,7 +240,7 @@ static int valid_windows_hostname(const char *hostname)
               (hostname[i] >= '0' && hostname[i] <= '9')))
             return 0;
     }
-    return strspn(hostname, "0123456789") != strlen(hostname);
+    return strspn(hostname, "0123456789") != length;
 }
 
 /* Emit reged paths only after proving every selected persistent field exists

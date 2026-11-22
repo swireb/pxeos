@@ -174,7 +174,11 @@ rootpxe_uefi_read_entries() {
                 if [[ ${suffix,,} == /file\(* ]]; then
                     path=${suffix:6}
                     if [[ $path == *')'* ]]; then path=${path%%\)*}; else path=''; fi
-                elif [[ $suffix == /* || $suffix == \\* ]]; then path=$suffix
+                elif [[ $suffix == /* || $suffix == \\* ]]; then
+                    path=$suffix
+                    if [[ $path =~ ^(.+\.[Ee][Ff][Ii])[0-9a-fA-F]+$ ]]; then
+                        path=${BASH_REMATCH[1]}
+                    fi
                 fi
                 [[ -z $path ]] || path=$(rootpxe_uefi_path_key "$path")
                 if [[ $kind == MBR ]]; then
