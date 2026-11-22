@@ -4,7 +4,6 @@ set -uo pipefail
 shopt -s extglob
 root=$(cd "$(dirname "$0")/.." && pwd)
 funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/funcs.sh"
-export PATH="$root/tests/fixtures/msys-tools:$PATH"
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 failures=0

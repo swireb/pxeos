@@ -6,7 +6,6 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 overlay="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay"
 funcs="$overlay/usr/share/pxeos/lib/funcs.sh"
 . "$overlay/usr/share/pxeos/lib/restore-preflight.sh"
-export PATH="$root/tests/fixtures/msys-tools:$PATH"
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 failures=0 cases=0
