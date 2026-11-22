@@ -82,6 +82,7 @@ while true; do
             fi
         fi
         rootpxe_cleanup_task_json
+        declare -F rootpxe_deployment_identity_cleanup_plan >/dev/null 2>&1 && rootpxe_deployment_identity_cleanup_plan
         rootpxe_capture_resume_cleanup
         break
     fi

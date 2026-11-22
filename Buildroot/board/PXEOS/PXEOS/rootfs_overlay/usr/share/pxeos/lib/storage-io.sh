@@ -793,6 +793,9 @@ rootpxe_storage_reset_retry_state() {
     fi
     rootpxe_cleanup_task_json || return 1
     rootpxe_deployment_identity_cleanup_private || return 1
+    if declare -F rootpxe_deployment_identity_cleanup_plan >/dev/null 2>&1; then
+        rootpxe_deployment_identity_cleanup_plan || return 1
+    fi
     unset rootpxe_storage_workspace rootpxe_storage_nonce rootpxe_storage_worker_nonce rootpxe_storage_stage rootpxe_storage_lock
     unset rootpxe_storage_published capture_size_bytes rootpxe_final_capture_path
     unset rootpxe_storage_released rootpxe_storage_stopped rootpxe_storage_reconcile rootpxe_storage_recovery_completed

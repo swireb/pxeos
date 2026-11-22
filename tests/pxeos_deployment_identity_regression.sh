@@ -82,8 +82,13 @@ changeHostname=false
 curl(){ task_http_test_decode_curl_args "$@"; printf '{"version":1,"unattendXml":"<unattend>fixture</unattend>"}\n200'; }
 rootpxe_deployment_identity_request_private || fail 'Windows-only XML payload rejected'
 jq -e 'keys==["unattendXml","version"] and .unattendXml=="<unattend>fixture</unattend>"' "$rootpxe_deployment_initialization_private_file" >/dev/null || fail 'private payload contains extra material'
+private_file="$rootpxe_deployment_initialization_private_file"
+plan_file="$rootpxe_deployment_identity_plan_file"
 rootpxe_deployment_identity_cleanup_private
+[[ ! -e $private_file && -z ${rootpxe_deployment_initialization_private_file:-} ]] || fail 'private payload was not cleaned up'
+[[ -r ${rootpxe_deployment_identity_plan_file:-} && $rootpxe_deployment_identity_plan_file == "$plan_file" ]] || fail 'cleanup_private must preserve identity plan file for pxeos.imgcomplete'
 osid=50
 rootpxe_deployment_identity_private_enabled && fail 'Linux fetched private XML'
-rm -f -- "$rootpxe_deployment_identity_plan_file"
+rootpxe_deployment_identity_cleanup_plan
+[[ ! -e $plan_file && -z ${rootpxe_deployment_identity_plan_file:-} ]] || fail 'cleanup_plan did not remove identity plan file'
 printf 'PASS: Windows capability, native Cloud-init plan gate and three-field result\n'

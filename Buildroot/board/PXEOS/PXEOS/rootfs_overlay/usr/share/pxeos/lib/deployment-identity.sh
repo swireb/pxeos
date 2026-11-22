@@ -34,14 +34,19 @@ rootpxe_deployment_identity_request_private() {
 }
 
 rootpxe_deployment_identity_cleanup_private() {
-    local file="${rootpxe_deployment_initialization_private_file:-}" plan="${rootpxe_deployment_identity_plan_file:-}"
+    local file="${rootpxe_deployment_initialization_private_file:-}"
     if [[ -n $file ]]; then
         [[ -f $file && ! -L $file && $file == /tmp/rootpxe-deployment-initialization.* ]] && rm -f -- "$file"
     fi
+    unset rootpxe_deployment_initialization_private_file
+}
+
+rootpxe_deployment_identity_cleanup_plan() {
+    local plan="${rootpxe_deployment_identity_plan_file:-}"
     if [[ -n $plan ]]; then
         [[ -f $plan && ! -L $plan && $plan == /tmp/rootpxe-deployment-identity-plan.* ]] && rm -f -- "$plan"
     fi
-    unset rootpxe_deployment_initialization_private_file rootpxe_deployment_identity_plan_file
+    unset rootpxe_deployment_identity_plan_file
 }
 
 rootpxe_deployment_identity_private_value() {

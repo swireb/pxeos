@@ -1778,6 +1778,9 @@ rootpxe_cleanup_session() {
     if declare -F rootpxe_deployment_identity_cleanup_private >/dev/null 2>&1; then
         rootpxe_deployment_identity_cleanup_private
     fi
+    if declare -F rootpxe_deployment_identity_cleanup_plan >/dev/null 2>&1; then
+        rootpxe_deployment_identity_cleanup_plan
+    fi
 }
 
 # Resolve a task snapshot only; editing an image default can never alter this
