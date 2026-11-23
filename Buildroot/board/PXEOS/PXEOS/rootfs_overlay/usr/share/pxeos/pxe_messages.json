@@ -148,6 +148,7 @@
     "CAPTURE_PUBLISHED_METADATA_MISSING": "缺少已保存镜像信息",
     "CAPTURE_PIPELINE_SETUP_FAILED": "抓取准备失败",
     "CAPTURE_PIPELINE_FAILED": "抓取镜像失败",
+    "CAPTURE_DISK_SIZE_FAILED": "读取或写入源磁盘容量失败",
     "CAPTURE_WRITER_FAILED": "保存镜像数据失败",
     "CAPTURE_PARTCLONE_FAILED": "抓取分区失败",
     "CAPTURE_PROGRESS_SETUP_FAILED": "抓取进度准备失败",
@@ -202,6 +203,8 @@
     "LVM_RESTORE_PV_METADATA_MISMATCH": "物理卷元数据不符",
     "LVM_RESTORE_TARGET_IDENTITY_FAILED": "无法确认逻辑卷目标磁盘",
     "LVM_SWAP_RECREATE_FAILED": "重建交换分区失败",
+    "LVM_TARGET_DEACTIVATE_FAILED": "停用目标磁盘旧卷组失败",
+    "LVM_TARGET_WIPE_FAILED": "清理目标磁盘旧物理卷签名失败",
     "LVM_VG_ACTIVATION_FAILED": "卷组激活失败",
     "LVM_VG_CONFIG_RESTORE_FAILED": "恢复卷组配置失败",
     "LVM_XFS_DIRTY_LOG_REPLAY_MOUNT_FAILED": "挂载 XFS 日志重放失败",
@@ -333,6 +336,7 @@
     "source_disk_identity_changed": "源磁盘身份发生变化",
     "source_metadata_or_permit_binding_invalid": "源信息或操作许可绑定无效",
     "target_disk_identity_or_operation_mismatch": "目标磁盘或操作类型不一致",
+    "target_pv_wipe_failed": "清理目标物理卷残留签名失败",
     "target_set_empty": "目标磁盘集合为空",
     "target_write_not_started": "目标写入尚未开始",
     "temporary_file_cleanup_failed": "清理临时文件失败",
@@ -345,16 +349,20 @@
     "unable_to_create_decoder_fifo": "创建解码数据管道失败",
     "unable_to_create_restore_fifo": "创建写入数据管道失败",
     "unable_to_create_staged_replacement": "创建临时替换文件失败",
+    "unable_to_deactivate_target_vgs": "无法停用目标磁盘上的旧卷组",
     "unable_to_finalize_image_artifact": "整理镜像文件失败",
     "unable_to_finalize_storage_artifacts": "设置镜像文件权限失败",
     "unable_to_generate_partition_table": "生成分区表失败",
     "unable_to_initialize_partclone_progress": "初始化分区进度失败",
     "unable_to_prepare_decoder_fifo": "准备解码数据管道失败",
+    "unable_to_read_disk_size": "无法读取源磁盘容量",
     "unable_to_read_logical_sector_size": "读取逻辑扇区大小失败",
     "unable_to_read_target_sector": "读取目标扇区大小失败",
     "unable_to_record_capture_disk_binding": "记录抓取磁盘绑定失败",
     "unable_to_stage_replacement": "准备替换文件失败",
     "unable_to_start_capture_writer": "启动镜像保存失败",
+    "unable_to_wipe_target_pvs": "无法清理目标磁盘上的旧物理卷签名",
+    "unable_to_write_disk_size": "无法写入源磁盘容量元数据",
     "unsafe_target_path": "目标路径未通过安全检查",
     "unsupported_level_for_format": "镜像格式不支持此压缩级别",
     "unsupported_or_missing_format": "镜像格式缺失或不受支持",
@@ -427,7 +435,8 @@
     "uefi_boot_order_update_failed": "UEFI启动顺序更新失败",
     "uefi_boot_entry_readback_failed": "UEFI启动项读回不一致",
     "uefi_boot_workspace_failed": "无法准备UEFI检查目录",
-    "uefi_boot_cleanup_failed": "UEFI检查挂载清理失败"
+    "uefi_boot_cleanup_failed": "UEFI检查挂载清理失败",
+    "target_disk_too_small": "目标磁盘容量不足"
   },
   "messages": {
     "Task queued by RootPXE": "任务已排队",
@@ -490,7 +499,8 @@
     "finish: completed": "任务完成",
     "PXEOS 执行异常": "执行异常",
     "checking UEFI boot entry": "正在检查UEFI启动项",
-    "UEFI boot entry verified": "UEFI启动项检查完成"
+    "UEFI boot entry verified": "UEFI启动项检查完成",
+    "target disk fits original layout only; keeping remaining size": "目标磁盘仅能容纳原始布局，剩余空间分区保持原始大小"
   },
   "contextReasons": [
     "target_write_not_started",
@@ -717,6 +727,7 @@
       "CAPTURE_PUBLISHED_METADATA_MISSING": "Published image metadata is missing",
       "CAPTURE_PIPELINE_SETUP_FAILED": "Capture preparation failed",
       "CAPTURE_PIPELINE_FAILED": "Image capture failed",
+      "CAPTURE_DISK_SIZE_FAILED": "Capture source disk size read or write failed",
       "CAPTURE_WRITER_FAILED": "Saving image data failed",
       "CAPTURE_PARTCLONE_FAILED": "Partition capture failed",
       "CAPTURE_PROGRESS_SETUP_FAILED": "Capture progress preparation failed",
@@ -771,6 +782,8 @@
       "LVM_RESTORE_PV_METADATA_MISMATCH": "Physical volume metadata does not match",
       "LVM_RESTORE_TARGET_IDENTITY_FAILED": "Cannot identify logical volume target disk",
       "LVM_SWAP_RECREATE_FAILED": "Swap recreation failed",
+      "LVM_TARGET_DEACTIVATE_FAILED": "Deactivating old volume groups on target disk failed",
+      "LVM_TARGET_WIPE_FAILED": "Wiping old physical volume signatures on target disk failed",
       "LVM_VG_ACTIVATION_FAILED": "Volume group activation failed",
       "LVM_VG_CONFIG_RESTORE_FAILED": "Volume group configuration restore failed",
       "LVM_XFS_DIRTY_LOG_REPLAY_MOUNT_FAILED": "XFS log replay mount failed",
@@ -902,6 +915,7 @@
       "source_disk_identity_changed": "Source disk identity changed",
       "source_metadata_or_permit_binding_invalid": "Source metadata or permission binding is invalid",
       "target_disk_identity_or_operation_mismatch": "Target disk or operation does not match",
+      "target_pv_wipe_failed": "Wiping stale physical volume signatures failed",
       "target_set_empty": "Target disk set is empty",
       "target_write_not_started": "Target write has not started",
       "temporary_file_cleanup_failed": "Temporary file cleanup failed",
@@ -914,16 +928,20 @@
       "unable_to_create_decoder_fifo": "Decoder pipe creation failed",
       "unable_to_create_restore_fifo": "Write pipe creation failed",
       "unable_to_create_staged_replacement": "Temporary replacement file creation failed",
+      "unable_to_deactivate_target_vgs": "Old volume groups on target disk could not be deactivated",
       "unable_to_finalize_image_artifact": "Image file finalization failed",
       "unable_to_finalize_storage_artifacts": "Setting image file permissions failed",
       "unable_to_generate_partition_table": "Partition table generation failed",
       "unable_to_initialize_partclone_progress": "Partition progress initialization failed",
       "unable_to_prepare_decoder_fifo": "Decoder pipe preparation failed",
+      "unable_to_read_disk_size": "Source disk size could not be read",
       "unable_to_read_logical_sector_size": "Logical sector size could not be read",
       "unable_to_read_target_sector": "Target sector size could not be read",
       "unable_to_record_capture_disk_binding": "Capture disk binding could not be recorded",
       "unable_to_stage_replacement": "Replacement file preparation failed",
       "unable_to_start_capture_writer": "Image writer could not be started",
+      "unable_to_wipe_target_pvs": "Old physical volume signatures on target disk could not be wiped",
+      "unable_to_write_disk_size": "Source disk size metadata could not be written",
       "unsafe_target_path": "Target path did not pass safety checks",
       "unsupported_level_for_format": "Compression level is unsupported for this format",
       "unsupported_or_missing_format": "Image format is missing or unsupported",
@@ -996,7 +1014,8 @@
       "uefi_boot_order_update_failed": "UEFI boot order update failed",
       "uefi_boot_entry_readback_failed": "UEFI boot entry readback does not match",
       "uefi_boot_workspace_failed": "UEFI inspection workspace is unavailable",
-      "uefi_boot_cleanup_failed": "UEFI inspection mount cleanup failed"
+      "uefi_boot_cleanup_failed": "UEFI inspection mount cleanup failed",
+      "target_disk_too_small": "Target disk capacity is too small for layout"
     },
     "messages": {
       "Task queued by RootPXE": "Task queued",
@@ -1059,7 +1078,8 @@
       "finish: completed": "Task completed",
       "PXEOS 执行异常": "Operation failed; check task log",
       "checking UEFI boot entry": "checking UEFI boot entry",
-      "UEFI boot entry verified": "UEFI boot entry verified"
+      "UEFI boot entry verified": "UEFI boot entry verified",
+      "target disk fits original layout only; keeping remaining size": "Target disk fits original layout only; remaining keeps original size"
     }
   }
 }

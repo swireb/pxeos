@@ -165,8 +165,10 @@ beginUpload() {
                 debugPause
                 rootpxe_console_message INFO 'Saving disk size, partition table, and boot loader information.'
                 debugPause
-                echo -n "${disk_number}:" > ${imagePath}/d${disk_number}.size
-                blockdev --getsize64 $disk >> ${imagePath}/d${disk_number}.size
+                local disk_bytes=""
+                disk_bytes=$(blockdev --getsize64 "$disk" 2>/dev/null) || handleError "PXEOS_STAGE=capture CODE=CAPTURE_DISK_SIZE_FAILED REASON=unable_to_read_disk_size"
+                [[ $disk_bytes =~ ^[1-9][0-9]*$ ]] || handleError "PXEOS_STAGE=capture CODE=CAPTURE_DISK_SIZE_FAILED REASON=unable_to_read_disk_size"
+                printf '%s:%s\n' "$disk_number" "$disk_bytes" > "${imagePath}/d${disk_number}.size" || handleError "PXEOS_STAGE=capture CODE=CAPTURE_DISK_SIZE_FAILED REASON=unable_to_write_disk_size"
                 savePartitionTablesAndBootLoaders "$disk" "$disk_number" "$imagePath" "$osid" "$imgPartitionType"
                 runPartprobe "$disk"
                 getPartitions "$disk"

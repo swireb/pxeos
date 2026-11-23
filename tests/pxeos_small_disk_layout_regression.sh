@@ -148,3 +148,88 @@ jq '.partitions=[.partitions[1]]' "$tmp/schema" >"$tmp/next"; mv "$tmp/next" "$t
 schemaHash=$(rootpxe_canonical_json_hash "$tmp/schema"); jq --arg hash "$schemaHash" '.schemaHash=$hash | .partitions=[{number:2,mode:"original"}]' "$tmp/layout" >"$tmp/next"; mv "$tmp/next" "$tmp/layout"
 if resolve "$tmp/bad-template" >/dev/null 2>&1; then fail table-length-cannot-cover-number; fi
 printf 'PASS: malformed and undersized explicit GPT table-length rejected\n'
+
+# A GPT image whose first partition begins far into the source disk (e.g. 100MiB)
+# must cap custom tail alignment reservation at 1MiB instead of wasting 100MiB at
+# the tail, while real sfdisk writes and reads back cleanly on the smaller disk.
+jq -n '{version:1,partitionTable:"gpt",originalDiskBytes:2147483648,minDeployBytes:2147483648,logicalSectorBytes:512,physicalSectorBytes:512,partitions:[{number:1,startSectors:204800,originalSectors:2048,minSectors:2048,fs:"ext4",role:"data",resizable:true}]}' >"$tmp/schema"
+schemaHash=$(rootpxe_canonical_json_hash "$tmp/schema"); schemaRevision=1
+cat >"$tmp/template" <<'TABLE'
+label: gpt
+label-id: 11111111-2222-3333-4444-555555555555
+device: /dev/source
+unit: sectors
+sector-size: 512
+first-lba: 34
+last-lba: 4194270
+/dev/source1 : start=204800, size=2048, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE, name="data"
+TABLE
+fixture_target_bytes=$((120 * 1024 * 1024))
+for mode in fixed remaining; do
+    jq -n --arg hash "$schemaHash" --arg mode "$mode" '{version:1,schemaHash:$hash,partitions:[{number:1,mode:$mode} + (if $mode=="fixed" then {fixedBytes:10485760} else {} end)]}' >"$tmp/layout"
+    resolve "$tmp/template" || fail "large-front-gpt-$mode-small-disk"
+    truncate -s "$fixture_target_bytes" "$tmp/disk"
+    rootpxe_apply_deployment_layout /dev/mock "$tmp/template" || fail "large-front-gpt-$mode-apply"
+done
+# Out-of-order partition numbers (p3 physically before p2) must preserve source order.
+jq -n '{version:1,partitionTable:"gpt",originalDiskBytes:2147483648,minDeployBytes:2147483648,logicalSectorBytes:512,physicalSectorBytes:512,partitions:[{number:1,startSectors:2048,originalSectors:2048,minSectors:2048,fs:"ext4",role:"data",resizable:false},{number:2,startSectors:8192,originalSectors:2048,minSectors:2048,fs:"ext4",role:"data",resizable:false},{number:3,startSectors:4096,originalSectors:2048,minSectors:2048,fs:"ext4",role:"data",resizable:true}]}' >"$tmp/schema"
+schemaHash=$(rootpxe_canonical_json_hash "$tmp/schema")
+jq -n --arg hash "$schemaHash" '{version:1,schemaHash:$hash,partitions:[{number:1,mode:"original"},{number:2,mode:"original"},{number:3,mode:"remaining"}]}' >"$tmp/layout"
+cat >"$tmp/template" <<'TABLE'
+label: gpt
+label-id: 11111111-2222-3333-4444-555555555555
+device: /dev/source
+unit: sectors
+sector-size: 512
+first-lba: 34
+last-lba: 4194270
+/dev/source1 : start=2048, size=2048, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=AAAAAAAA-BBBB-CCCC-DDDD-111111111111, name="p1"
+/dev/source2 : start=8192, size=2048, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=AAAAAAAA-BBBB-CCCC-DDDD-222222222222, name="p2"
+/dev/source3 : start=4096, size=2048, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=AAAAAAAA-BBBB-CCCC-DDDD-333333333333, name="p3"
+TABLE
+fixture_target_bytes=$((20 * 1024 * 1024))
+resolve "$tmp/template" || fail out-of-order-gpt-remaining-resolve
+jq -e '([.[]|select(.number==1)][0].startSectors == 2048) and ([.[]|select(.number==3)][0].startSectors == 4096) and ([.[]|select(.number==3)][0].resolvedSectors > 2048) and ([.[]|select(.number==2)][0].startSectors > [.[]|select(.number==3)][0].startSectors)' "$rootpxe_resolved_layout_file" >/dev/null || fail out-of-order-gpt-physical-order
+printf 'PASS: capped GPT tail reservation and physical order preservation for out-of-order partitions\n'
+
+# Verify makeSwapSystem (MBR 0x82) and restoreUUIDInformation (POSIX awk).
+part_funcs="$root/Buildroot/board/PXEOS/PXEOS/rootfs_overlay/usr/share/pxeos/lib/partition-funcs.sh"
+for name in makeSwapSystem restoreUUIDInformation; do
+    eval "$(awk -v name="$name" '$0 ~ "^" name "\\(\\)" { found=1 } found {print} found && /^}/ {exit}' "$part_funcs")"
+done
+(
+    swap_trace="$tmp/swap.trace"; : >"$swap_trace"
+    printf '%s\n' '2 22222222-2222-2222-2222-222222222222' >"$tmp/swapuuids"
+    printf '%s\n' '/dev/mock2 : start=2048, size=1024, type=0x82' >"$tmp/mbr.sfdisk"
+    getDiskFromPartition(){ disk=/dev/mock; }
+    getPartitionNumber(){ part_number=${1##*mock}; }
+    hasGPT(){ hasgpt=0; }
+    flock(){ cat "$tmp/mbr.sfdisk"; }
+    dots(){ :; }; debugPause(){ :; }
+    mkswap(){ printf 'mkswap:%s\n' "$*" >>"$swap_trace"; }
+    makeSwapSystem "$tmp/swapuuids" /dev/mock2 || fail mbr-hex82-swap
+    grep -Fqx 'mkswap:-U 22222222-2222-2222-2222-222222222222 /dev/mock2' "$swap_trace" || fail mbr-hex82-swap-did-not-run
+)
+(
+    sgdisk_trace="$tmp/sgdisk.trace"; : >"$sgdisk_trace"
+    cat >"$tmp/gpt.sfdisk" <<'SF'
+label: gpt
+label-id: DDDDDDDD-1111-2222-3333-444444444444
+/dev/mock1 : start=2048, size=1024, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, uuid=11111111-AAAA-BBBB-CCCC-000000000001
+/dev/mock10 : start=4096, size=1024, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=11111111-AAAA-BBBB-CCCC-000000000010
+SF
+    hasGPT(){ hasgpt=1; }
+    getPartitions(){ parts='/dev/mock1 /dev/mock10'; }
+    partitionIsSwap(){ is_swap=0; }
+    getPartitionNumber(){ part_number=${1##*mock}; }
+    dots(){ :; }; debugPause(){ :; }; handleWarning(){ fail "unexpected-warning:$*"; }
+    sgdisk(){ printf 'sgdisk:%s\n' "$*" >>"$sgdisk_trace"; }
+    udevadm(){ printf 'udevadm:%s\n' "$*" >>"$sgdisk_trace"; }
+    restoreUUIDInformation /dev/mock "$tmp/gpt.sfdisk" 1 "$tmp" || fail posix-awk-restore-uuid
+    grep -Fqx 'sgdisk:-U dddddddd-1111-2222-3333-444444444444 /dev/mock' "$sgdisk_trace" || fail gpt-disk-uuid-missing
+    grep -Fqx 'sgdisk:-t 1:c12a7328-f81f-11d2-ba4b-00a0c93ec93b /dev/mock' "$sgdisk_trace" || fail gpt-p1-type-missing
+    grep -Fqx 'sgdisk:-u 1:11111111-aaaa-bbbb-cccc-000000000001 /dev/mock' "$sgdisk_trace" || fail gpt-p1-uuid-missing
+    grep -Fqx 'sgdisk:-u 10:11111111-aaaa-bbbb-cccc-000000000010 /dev/mock' "$sgdisk_trace" || fail gpt-p10-uuid-missing
+    grep -Fq 'udevadm:settle' "$sgdisk_trace" || fail gpt-restore-uuid-no-settle
+)
+printf 'PASS: MBR hex swap type 0x82 and POSIX awk restoreUUIDInformation\n'

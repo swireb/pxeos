@@ -49,7 +49,7 @@ rootpxe_deploy_poll() {
 rootpxe_deploy_mounts_to_clean() {
     awk '
         FILENAME == ARGV[1] { original[$1] = 1; next }
-        !($1 in original) && ($5 ~ /^\/(storage|ntfs|bcdstore|tmp\/btrfs)(\/|$)/ ||
+        !($1 in original) && ($5 ~ /^\/(storage|ntfs|bcdstore|linuxroot|tmp\/btrfs)(\/|$)/ ||
             $5 ~ /^\/tmp\/rootpxe-(uefi|cloud-mount|display-mount|display-windows|xfs-grow|xfs-restore)\.[[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]](\/|$)/ ||
             $5 == "/sys/firmware/efi/efivars") { print length($5), $1, $5 }
     ' "$1" "$2"

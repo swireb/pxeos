@@ -129,3 +129,63 @@ for scenario in unused active_unmounted_lv canonical_alias mounted_disk mounted_
 done
 printf 'Target use: %s cases, %s failures\n' "$checks" "$failures"
 [[ $failures -eq 0 ]]
+
+# Retries in rootpxe_require_unused_target_disks handle transient udev/FD races
+# without delaying or masking persistent mount/swap/parse rejections.
+for helper in rootpxe_target_use_reason_is_transient rootpxe_require_unused_target_disks; do
+    eval "$(sed -n "/^${helper}() {/,/^}/p" "$funcs")"
+done
+retry_failures=0
+for reason in writable_block_fd block_fd_stat_failed block_fd_flags_unavailable block_fd_recheck_failed device_graph_failed target_stat_failed target_path_unavailable; do
+    (
+        attempts=0 settles=0 errors=0
+        udevadm() { [[ ${1:-} == settle ]] && settles=$((settles + 1)); return 0; }
+        sleep() { :; }
+        handleError() { errors=$((errors + 1)); return 0; }
+        rootpxe_target_disk_use_preflight() {
+            attempts=$((attempts + 1))
+            if (( attempts < 3 )); then
+                rootpxe_target_use_code=TARGET_DISK_IN_USE
+                [[ $reason == writable_block_fd ]] || rootpxe_target_use_code=TARGET_DISK_STATE_UNAVAILABLE
+                rootpxe_target_use_reason="$reason"
+                return 1
+            fi
+            rootpxe_target_use_code=''
+            rootpxe_target_use_reason=''
+            return 0
+        }
+        ROOTPXE_TARGET_USE_MAX_ATTEMPTS=5 ROOTPXE_TARGET_USE_RETRY_DELAY=0 rootpxe_require_unused_target_disks /dev/mock0
+        [[ $attempts -eq 3 && $settles -eq 2 && $errors -eq 0 ]]
+    ) || { printf 'FAIL: transient retry failed for %s\n' "$reason" >&2; retry_failures=$((retry_failures + 1)); }
+done
+(
+    attempts=0 settles=0 errors=0 recorded=''
+    udevadm() { settles=$((settles + 1)); return 0; }
+    handleError() { errors=$((errors + 1)); recorded="$1"; }
+    rootpxe_target_disk_use_preflight() {
+        attempts=$((attempts + 1))
+        rootpxe_target_use_code=TARGET_DISK_IN_USE
+        rootpxe_target_use_reason=writable_block_fd
+        return 1
+    }
+    if ROOTPXE_TARGET_USE_MAX_ATTEMPTS=3 ROOTPXE_TARGET_USE_RETRY_DELAY=0 rootpxe_require_unused_target_disks /dev/mock0; then exit 1; fi
+    [[ $attempts -eq 3 && $settles -eq 2 && $errors -eq 1 && $recorded == *'REASON=writable_block_fd'* ]]
+) || { printf 'FAIL: exhausted transient retry did not fail properly\n' >&2; retry_failures=$((retry_failures + 1)); }
+for persistent in mounted active_swap device_graph_invalid; do
+    (
+        attempts=0 settles=0 errors=0 recorded=''
+        udevadm() { settles=$((settles + 1)); return 0; }
+        handleError() { errors=$((errors + 1)); recorded="$1"; }
+        rootpxe_target_disk_use_preflight() {
+            attempts=$((attempts + 1))
+            rootpxe_target_use_code=TARGET_DISK_IN_USE
+            [[ $persistent != device_graph_invalid ]] || rootpxe_target_use_code=TARGET_DISK_STATE_UNAVAILABLE
+            rootpxe_target_use_reason="$persistent"
+            return 1
+        }
+        if ROOTPXE_TARGET_USE_MAX_ATTEMPTS=5 ROOTPXE_TARGET_USE_RETRY_DELAY=0 rootpxe_require_unused_target_disks /dev/mock0; then exit 1; fi
+        [[ $attempts -eq 1 && $settles -eq 0 && $errors -eq 1 && $recorded == *"REASON=$persistent"* ]]
+    ) || { printf 'FAIL: persistent reason %s must fail immediately without retry\n' "$persistent" >&2; retry_failures=$((retry_failures + 1)); }
+done
+printf 'Target use retries: %s failures\n' "$retry_failures"
+[[ $retry_failures -eq 0 ]]

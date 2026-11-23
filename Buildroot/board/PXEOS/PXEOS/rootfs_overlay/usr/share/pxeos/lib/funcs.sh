@@ -1272,8 +1272,8 @@ rootpxe_capture_lvm_volumes_single() {
     jq -e '.version == 1 and .captureMode == "per_lv" and .resizePolicy == "grow_only" and (.pvs|length) == 1 and (.vgs|length) == 1' "$stage/d1.lvm.schema.json" >/dev/null || return 1
     rm -f -- "$stage/d1.lvm.capture.tsv" || return 1
     [[ ( -n $fragment_path || ! -e "$image_path/d1.lvm.schema.json" ) && ! -e "$image_path/$pv_artifact" && ! -e "$image_path/$vg_artifact" && ! -e "$image_path/d1p${rootpxe_lvm_pv_number}.img" && ! -e "$image_path/d1p${rootpxe_lvm_pv_number}.img.000" ]] || return 1
-    while IFS='|' read -r lv_name lv_uuid lv_path lv_size; do
-        fs=$(blkid -s TYPE -o value "$lv_path" 2>/dev/null | tr -d '\r\n')
+    while IFS='|' read -r lv_name lv_uuid lv_path lv_size fs extra; do
+        [[ -z ${extra:-} ]] || return 1
         [[ $fs == swap ]] && continue
         artifact="d1p${rootpxe_lvm_pv_number}.lvm.lv.${lv_name}.img"
         mv "$stage/$artifact" "$image_path/$artifact" || return 1
@@ -1907,7 +1907,13 @@ rootpxe_gpt_backup_sectors() {
 }
 
 rootpxe_validate_deployment_layout() {
-    local disk="$1" schema_file="$2" layout_file="$3" template="${4:-}" schema_logical target_bytes target_sectors source_hash layout_hash gpt_backup_sectors=0 template_first_lba=0
+    local disk="$1" schema_file="$2" layout_file="$3" template="${4:-}" schema_logical target_bytes target_sectors source_hash layout_hash gpt_backup_sectors=0 template_first_lba=0 plan_json_file plan_ok plan_reason plan_req plan_tgt plan_fail_basis
+    rootpxe_layout_validation_code=""
+    rootpxe_layout_validation_reason=""
+    rootpxe_layout_validation_extra=""
+    rootpxe_resolved_layout_basis=""
+    rootpxe_resolved_layout_min_target_bytes=""
+    export rootpxe_layout_validation_code rootpxe_layout_validation_reason rootpxe_layout_validation_extra rootpxe_resolved_layout_basis rootpxe_resolved_layout_min_target_bytes
     [[ -r $schema_file && -r $layout_file ]] || return 1
     [[ ${schemaHash:-} =~ ^[a-fA-F0-9]{64}$ ]] || return 1
     source_hash=$(rootpxe_canonical_json_hash "$schema_file") || return 1
@@ -1932,13 +1938,19 @@ rootpxe_validate_deployment_layout() {
         template_first_lba=$(awk '/^first-lba:/{print $2; count++} END{if(count != 1) exit 1}' "$template") || return 1
         [[ $template_first_lba =~ ^[1-9][0-9]*$ ]] || return 1
     fi
-    (( target_bytes % schema_logical == 0 )) || return 1
+    if (( target_bytes % schema_logical != 0 )); then
+        rootpxe_layout_validation_code=LOGICAL_SECTOR_MISMATCH
+        rootpxe_layout_validation_reason=sector_alignment_failed
+        return 1
+    fi
     target_sectors=$(( target_bytes / schema_logical ))
     [[ ${schemaRevision:-} =~ ^[1-9][0-9]*$ ]] || return 1
     layout_hash=$(jq -er '.schemaHash // empty' "$layout_file" 2>/dev/null) || return 1
     [[ $layout_hash == "$schemaHash" ]] || return 1
     rootpxe_resolved_layout_file=$(mktemp /tmp/rootpxe-resolved-layout.XXXXXX) || return 1
     chmod 600 "$rootpxe_resolved_layout_file" && rootpxe_register_derived_layout_file "$rootpxe_resolved_layout_file" || { rm -f -- "$rootpxe_resolved_layout_file"; unset rootpxe_resolved_layout_file; return 1; }
+    plan_json_file=$(mktemp /tmp/rootpxe-layout-plan.XXXXXX) || { rm -f -- "$rootpxe_resolved_layout_file"; unset rootpxe_resolved_layout_file; return 1; }
+    chmod 600 "$plan_json_file" || { rm -f -- "$plan_json_file" "$rootpxe_resolved_layout_file"; unset rootpxe_resolved_layout_file; return 1; }
     jq -n --slurpfile schema "$schema_file" --slurpfile layout "$layout_file" \
         --argjson target "$target_sectors" --argjson logical "$schema_logical" --argjson gptBackup "$gpt_backup_sectors" --argjson firstLBA "$template_first_lba" '
           def align_up($n;$a): ((($n + $a - 1) / $a)|floor) * $a;
@@ -1987,7 +1999,7 @@ rootpxe_validate_deployment_layout() {
              ([$sp[] | select(.kind == "primary" and .startSectors < ($extended.startSectors + $extended.originalSectors) and $extended.startSectors < (.startSectors + .originalSectors))] | length) as $primaryOverlaps |
              if $primaryOverlaps != 0 then error("primary overlaps extended container") else . end |
              $sp | map(select(.kind != "extended")) | sort_by([.startSectors, .number])
-           else $sp end) as $worksp |
+           else ($sp | sort_by([.startSectors, .number])) end) as $worksp |
           (if $mbrExtended then
              ([$sp[] | select(.kind == "extended")][0]) as $extended |
              ([$sp[] | select(.kind == "logical" and .parentNumber == $extended.number)] | length) * $extended.ebrReservedSectors
@@ -1996,7 +2008,8 @@ rootpxe_validate_deployment_layout() {
           (if $s.partitionTable == "gpt" then
              (if $gptBackup > 0 then $gptBackup else (((([128] + [$sp[].number]) | max) * 128 / $logical | ceil) + 1) end)
            else 0 end) as $backup |
-          ([$front * (if $s.partitionTable == "gpt" then 1 else 0 end), $backup] | max) as $back |
+          (1048576 / $logical | floor | if . < 1 then 1 else . end) as $maxTailAlign |
+          ([(if $s.partitionTable == "gpt" then ([$front, $maxTailAlign] | min) else 0 end), $backup] | max) as $back |
           ($target - $front - $back - $ebrReservedTotal) as $available |
           (262144 / $logical | floor | if . < 1 then 1 else . end) as $alignment |
           [ $worksp[] as $p | ($lp[]|select(.number == $p.number)) as $o |
@@ -2010,77 +2023,171 @@ rootpxe_validate_deployment_layout() {
             {p:$p,o:$o,mode:$mode} ] as $items |
           ([ $items[]|select(.mode == "remaining") ]|length) as $remainingCount |
           if $remainingCount > 1 then error("multiple remaining") else . end |
-          # Preserve captured positions and sizes for the original layout;
-          # only the GPT backup metadata moves to the actual target end.
-          (if all($items[]; .mode == "original") then
-            if any($sp[]; .startSectors < 0 or .originalSectors <= 0 or (.startSectors + .originalSectors) > ($target - $backup)) then error("source geometry exceeds target")
-            else $sp | map(. + {resolvedSectors:.originalSectors}) end
+          def lv_min_sum($vg; $lvmItem):
+            if ($lvmItem == null) then 0 else
+              [ $vg.lvs[] as $lv |
+                ([$lvmItem.volumes[]? | select(.uuid == $lv.uuid)] | .[0] // null) as $lvPlan |
+                if ($lvPlan != null and $lvPlan.mode == "fixed") then ($lvPlan.fixedBytes // $lv.originalBytes)
+                elif ($lvPlan != null and $lvPlan.mode == "remaining") then $lv.minBytes
+                else $lv.originalBytes end
+              ] | add // 0
+            end;
+          def lvm_pv_min_sectors($p):
+            if ($s.version == 2 and $s.lvm != null and $p.role == "lvm_pv") then
+              ([$s.lvm.pvs[]? | select(.partitionNumber == $p.number)] | .[0] // null) as $pv |
+              (if $pv != null then ([$s.lvm.vgs[]? | select(.uuid == $pv.vgUuid)] | .[0] // null) else null end) as $vg |
+              (if $pv != null then ([($l.lvm // [])[]? | select(.pvPartitionNumber == $p.number)] | .[0] // null) else null end) as $lvmItem |
+              if ($pv != null and $vg != null and $lvmItem != null) then
+                (if $lvmItem.freeSpacePolicy == "preserveOriginal" then $vg.originalFreeBytes else 0 end) as $reservedFree |
+                ($pv.peStartBytes + $reservedFree + lv_min_sum($vg; $lvmItem)) as $pvReq |
+                ([($p.originalSectors * $logical), $pv.originalBytes, $pv.minBytes, $pvReq] | max) as $minB |
+                align_up((($minB / $logical) | ceil); $alignment)
+              else align_up($p.originalSectors; $alignment) end
+            else align_up($p.originalSectors; $alignment) end;
+          def item_min_sectors($it):
+            if $it.mode == "original" then $it.p.originalSectors
+            elif $it.mode == "fixed" then align_up((($it.o.fixedBytes // 0) / $logical | ceil); $alignment)
+            else lvm_pv_min_sectors($it.p) end;
+          (all($items[]; .mode == "original") and all(($l.lvm // [])[]; (.freeSpacePolicy // "preserveOriginal") == "preserveOriginal" and all((.volumes // [])[]; (.mode // "original") == "original"))) as $allOriginal |
+          (any($items[]; .mode == "fixed" and ((.o.fixedBytes // 0) > (.p.originalSectors * $logical))) or
+           (if ($s.version == 2 and $s.lvm != null) then
+              any(($s.lvm.vgs // [])[]; . as $vg |
+                ([($l.lvm // [])[]? | select(.pvPartitionNumber == $vg.pvPartitionNumbers[0])] | .[0] // null) as $item |
+                if $item == null then false else
+                  any($vg.lvs[]; . as $lv |
+                    ([$item.volumes[]? | select(.uuid == $lv.uuid)] | .[0] // null) as $lvPlan |
+                    ($lvPlan != null and $lvPlan.mode == "fixed" and (($lvPlan.fixedBytes // 0) > $lv.originalBytes)))
+                end)
+            else false end)) as $hasFixedGreater |
+          (($allOriginal|not) and ($hasFixedGreater|not)) as $canFallback |
+          ($sp | map(.startSectors + .originalSectors) | max) as $origMaxEnd |
+          ($origMaxEnd + $backup) as $rOrigSectors |
+          ($rOrigSectors * $logical) as $rOrigBytes |
+          (if $mbrExtended then ([$sp[] | select(.kind == "extended")][0]) else null end) as $extended |
+          (if $mbrExtended then ([$items[] | select(.p.kind == "logical")] | sort_by([.p.startSectors, .p.number])) else [] end) as $logicalItems |
+          (if $mbrExtended then $logicalItems[-1].p.number else null end) as $lastLogicalNumber |
+          def pack_with_sizes($sizes):
+            ([range(0;($items|length)) as $i | if $items[$i].p.kind == "logical" then $sizes[$i] else empty end] | add // 0) as $logicalPayloadSectors |
+            (if $mbrExtended then (($logicalItems|length) * $extended.ebrReservedSectors + $logicalPayloadSectors) else 0 end) as $logicalFootprint |
+            (if $mbrExtended and $extended.minSectors > $logicalFootprint then $extended.minSectors - $logicalFootprint else 0 end) as $extendedTailSectors |
+            reduce range(0;($items|length)) as $i ({cursor:$front, logicalStart:null, logicalEnd:null, out:[]};
+              ($items[$i]) as $item | ($sizes[$i]) as $size |
+              if $size < $item.p.originalSectors then error("original size violated") else . end |
+              .cursor = align_up(.cursor;$alignment) |
+              if $mbrExtended and $item.p.kind == "logical" then .cursor = align_up(.cursor + $extended.ebrReservedSectors;$alignment) else . end |
+              (if $mbrExtended and $item.p.kind == "logical" then
+                (if .logicalStart == null or .cursor < .logicalStart then .cursor else .logicalStart end)
+               else .logicalStart end) as $lStart |
+              (if $mbrExtended and $item.p.kind == "logical" then
+                (if .logicalEnd == null or (.cursor + $size) > .logicalEnd then (.cursor + $size) else .logicalEnd end)
+               else .logicalEnd end) as $lEnd |
+              .logicalStart = $lStart |
+              .logicalEnd = $lEnd |
+              .out += [$item.p + {startSectors:.cursor,resolvedSectors:$size}] |
+              .cursor += $size |
+              if $mbrExtended and $item.p.kind == "logical" and $item.p.number == $lastLogicalNumber then .cursor += $extendedTailSectors else . end) |
+            (if $mbrExtended then
+              (.logicalStart - $extended.ebrReservedSectors) as $extStart |
+              (if .logicalEnd > ($extStart + $extended.minSectors) then .logicalEnd else ($extStart + $extended.minSectors) end) as $extEnd |
+              {cursor: .cursor, extendedStart: $extStart, extendedEnd: $extEnd, maxEnd: ([.cursor, $extEnd] | max), out: .out}
+             else {cursor: .cursor, maxEnd: .cursor, out: .out} end);
+          ([$items[] | item_min_sectors(.)]) as $minSizes |
+          (if $allOriginal then $rOrigSectors else (pack_with_sizes($minSizes).maxEnd + $back) end) as $rAdjSectors |
+          ($rAdjSectors * $logical) as $rAdjBytes |
+          (if $allOriginal then "original"
+           elif ($canFallback and $rOrigSectors < $rAdjSectors) then "original_fallback"
+           else "layout" end) as $staticBasis |
+          (if $staticBasis == "original" or $staticBasis == "original_fallback" then $rOrigBytes else $rAdjBytes end) as $minTargetBytes |
+          if any($sp[]; .startSectors < 0 or .originalSectors <= 0) then error("source geometry invalid")
+          elif $allOriginal then
+            if $rOrigSectors > $target then
+              {ok:false, reason:"TARGET_DISK_TOO_SMALL", required:$rOrigBytes, target:($target * $logical), basis:"original", originalLayoutBytes:$rOrigBytes, layoutBytes:$rOrigBytes, minTargetBytes:$rOrigBytes}
+            else
+              ($sp | map(. + {resolvedSectors:.originalSectors})) as $resolved |
+              if any($resolved[]; .startSectors < $firstLBA) then error("layout precedes gpt first usable lba")
+              else {ok:true, basis:"original", originalLayoutBytes:$rOrigBytes, layoutBytes:$rOrigBytes, minTargetBytes:$rOrigBytes, partitions:$resolved} end
+            end
+          elif $rAdjSectors <= $target then
+            ($items | map(if .mode == "original" then .p.originalSectors elif .mode == "fixed" then align_up(((.o.fixedBytes // 0) / $logical|ceil);$alignment) else 0 end)) as $pre |
+            ($pre|add) as $used |
+            (if $remainingCount == 1 then align_down(($available-$used);$alignment) else 0 end) as $remaining |
+            def remaining_that_fits($low; $high):
+              if $low >= $high then $low
+              else (($low + $high + 1) / 2 | floor) as $middle |
+                ([$items[] | if .mode == "remaining" then ($middle * $alignment) elif .mode == "fixed" then align_up(((.o.fixedBytes // 0) / $logical|ceil);$alignment) else .p.originalSectors end]) as $candSizes |
+                if (pack_with_sizes($candSizes).maxEnd <= ($target - $back))
+                then remaining_that_fits($middle; $high)
+                else remaining_that_fits($low; $middle - 1)
+                end
+              end;
+            (if $remainingCount == 1 then
+               ([range(0;($items|length)) as $i | select($items[$i].mode == "remaining") | $minSizes[$i]] | first) as $minimumRemaining |
+               if $remaining < $minimumRemaining then $remaining else (remaining_that_fits($minimumRemaining / $alignment; $remaining / $alignment) * $alignment) end
+             else 0 end) as $resolvedRemaining |
+            ([$items[] | if .mode == "remaining" then $resolvedRemaining elif .mode == "fixed" then align_up(((.o.fixedBytes // 0) / $logical|ceil);$alignment) else .p.originalSectors end]) as $finalSizes |
+            (pack_with_sizes($finalSizes)) as $packed |
+            if $packed.maxEnd > ($target - $back) then error("layout exceeds target") else . end |
+            ($packed.out) as $leaves |
+            (if $mbrExtended then
+               ($leaves + [$extended + {startSectors:$packed.extendedStart,resolvedSectors:($packed.extendedEnd - $packed.extendedStart)}] | sort_by(.number))
+             else $leaves end) as $resolved |
+            if any($resolved[]; .startSectors < $firstLBA) then error("layout precedes gpt first usable lba")
+            else {ok:true, basis:"layout", originalLayoutBytes:$rOrigBytes, layoutBytes:$rAdjBytes, minTargetBytes:$minTargetBytes, partitions:$resolved} end
+          elif ($canFallback and $rOrigSectors <= $target) then
+            ($sp | map(. + {resolvedSectors:.originalSectors})) as $resolved |
+            if any($resolved[]; .startSectors < $firstLBA) then error("layout precedes gpt first usable lba")
+            else {ok:true, basis:"original_fallback", originalLayoutBytes:$rOrigBytes, layoutBytes:$rAdjBytes, minTargetBytes:$minTargetBytes, partitions:$resolved} end
           else
-          if $available <= 0 then error("target too small") else . end |
-          ($items | map(if .mode == "original" then .p.originalSectors elif .mode == "fixed" then align_up(((.o.fixedBytes // 0) / $logical|ceil);$alignment) else 0 end)) as $pre |
-          ($pre|add) as $used |
-          if $used > $available then error("target too small") else . end |
-          (if $remainingCount == 1 then align_down(($available-$used);$alignment) else 0 end) as $remaining |
-           # A numbered MBR table is not necessarily in physical order:
-           # Windows may place a primary recovery partition after an extended
-           # container while its logical members are p5+.  Allocate all leaves
-           # by source geometry.  EBRs and the mandatory container tail are
-           # inserted before the later primary leaf is allocated.
-           (if $mbrExtended then ([$sp[] | select(.kind == "extended")][0]) else null end) as $extended |
-           (if $mbrExtended then ([$items[] | select(.p.kind == "logical")] | sort_by([.p.startSectors, .p.number])) else [] end) as $logicalItems |
-           (if $mbrExtended then $logicalItems[-1].p.number else null end) as $lastLogicalNumber |
-           def resolve_leaves($remainingSectors):
-             ([range(0;($items|length)) as $i |
-               if $items[$i].p.kind == "logical" then
-                 (if $items[$i].mode == "remaining" then $remainingSectors else $pre[$i] end)
-               else empty end] | add // 0) as $logicalPayloadSectors |
-             (if $mbrExtended then (($logicalItems|length) * $extended.ebrReservedSectors + $logicalPayloadSectors) else 0 end) as $logicalFootprint |
-             (if $mbrExtended and $extended.minSectors > $logicalFootprint then $extended.minSectors - $logicalFootprint else 0 end) as $extendedTailSectors |
-             reduce range(0;($items|length)) as $i ({cursor:$front,out:[]};
-               ($items[$i]) as $item | ($pre[$i]) as $base |
-               (if $item.mode == "remaining" then $remainingSectors else $base end) as $size |
-               if $size < $item.p.originalSectors then error("original size violated") else . end |
-               .cursor = align_up(.cursor;$alignment) |
-               if $mbrExtended and $item.p.kind == "logical" then .cursor = align_up(.cursor + $extended.ebrReservedSectors;$alignment) else . end |
-               .out += [$item.p + {startSectors:.cursor,resolvedSectors:$size}] |
-               .cursor += $size |
-               if $mbrExtended and $item.p.kind == "logical" and $item.p.number == $lastLogicalNumber then .cursor += $extendedTailSectors else . end);
-           def remaining_that_fits($low; $high):
-             if $low >= $high then $low
-             else (($low + $high + 1) / 2 | floor) as $middle |
-               if (resolve_leaves($middle * $alignment).cursor <= ($target - $back))
-               then remaining_that_fits($middle; $high)
-               else remaining_that_fits($low; $middle - 1)
-               end
-             end;
-           (if $remainingCount == 1 then
-              ([ $items[] | select(.mode == "remaining") | .p.originalSectors ] | first | align_up(.;$alignment)) as $minimumRemaining |
-              if $remaining < $minimumRemaining then $remaining else (remaining_that_fits($minimumRemaining / $alignment; $remaining / $alignment) * $alignment) end
-            else 0 end) as $resolvedRemaining |
-           (resolve_leaves($resolvedRemaining)) as $leafResolved |
-           if $leafResolved.cursor > ($target-$back) then error("layout exceeds target") else . end |
-           ($leafResolved.out) as $leaves |
-           (if $mbrExtended then
-              ([$leaves[] | select(.kind == "logical")]) as $logicals |
-              (($logicals | map(.startSectors) | min) - $extended.ebrReservedSectors) as $extendedStart |
-              ($logicals | map(.startSectors + .resolvedSectors) | max) as $logicalEnd |
-              (if $logicalEnd > ($extendedStart + $extended.minSectors) then $logicalEnd else ($extendedStart + $extended.minSectors) end) as $extendedEnd |
-              if $extendedEnd > ($target-$back) then error("layout exceeds target")
-              else ($leaves + [$extended + {startSectors:$extendedStart,resolvedSectors:($extendedEnd-$extendedStart)}] | sort_by(.number)) end
-            else $leaves end) as $resolved |
-           $resolved end) |
-           if any(.[]; .startSectors < $firstLBA) then error("layout precedes gpt first usable lba") else . end' >"$rootpxe_resolved_layout_file" || { rm -f "$rootpxe_resolved_layout_file"; return 1; }
-    export rootpxe_resolved_layout_file
+            {ok:false, reason:"TARGET_DISK_TOO_SMALL", required:$minTargetBytes, target:($target * $logical), basis:$staticBasis, originalLayoutBytes:$rOrigBytes, layoutBytes:$rAdjBytes, minTargetBytes:$minTargetBytes}
+          end' >"$plan_json_file" || { rm -f -- "$plan_json_file" "$rootpxe_resolved_layout_file"; unset rootpxe_resolved_layout_file; return 1; }
+    plan_ok=$(jq -r '.ok' "$plan_json_file" 2>/dev/null) || { rm -f -- "$plan_json_file" "$rootpxe_resolved_layout_file"; unset rootpxe_resolved_layout_file; return 1; }
+    if [[ $plan_ok != true && $plan_ok != false ]]; then
+        rm -f -- "$plan_json_file" "$rootpxe_resolved_layout_file"
+        unset rootpxe_resolved_layout_file
+        return 1
+    fi
+    if [[ $plan_ok != true ]]; then
+        plan_reason=$(jq -er '.reason // empty' "$plan_json_file" 2>/dev/null || true)
+        if [[ $plan_reason == TARGET_DISK_TOO_SMALL ]]; then
+            plan_req=$(jq -er '.required // empty' "$plan_json_file" 2>/dev/null || true)
+            plan_tgt=$(jq -er '.target // empty' "$plan_json_file" 2>/dev/null || true)
+            plan_fail_basis=$(jq -er '.basis // empty' "$plan_json_file" 2>/dev/null || true)
+            rootpxe_layout_validation_code=INVALID_DEPLOYMENT_LAYOUT
+            rootpxe_layout_validation_reason=TARGET_DISK_TOO_SMALL
+            if [[ $plan_req =~ ^[1-9][0-9]*$ && $plan_tgt =~ ^[1-9][0-9]*$ && -n $plan_fail_basis ]]; then
+                rootpxe_layout_validation_extra="required=$plan_req target=$plan_tgt basis=$plan_fail_basis"
+            fi
+        fi
+        rm -f -- "$plan_json_file" "$rootpxe_resolved_layout_file"
+        unset rootpxe_resolved_layout_file
+        return 1
+    fi
+    jq -e '.partitions' "$plan_json_file" >"$rootpxe_resolved_layout_file" || { rm -f -- "$plan_json_file" "$rootpxe_resolved_layout_file"; unset rootpxe_resolved_layout_file; return 1; }
+    rootpxe_resolved_layout_basis=$(jq -er '.basis' "$plan_json_file" 2>/dev/null) || { rm -f -- "$plan_json_file" "$rootpxe_resolved_layout_file"; unset rootpxe_resolved_layout_file; return 1; }
+    rootpxe_resolved_layout_min_target_bytes=$(jq -er '.minTargetBytes' "$plan_json_file" 2>/dev/null) || { rm -f -- "$plan_json_file" "$rootpxe_resolved_layout_file"; unset rootpxe_resolved_layout_file; return 1; }
+    rm -f -- "$plan_json_file"
+    export rootpxe_resolved_layout_file rootpxe_resolved_layout_basis rootpxe_resolved_layout_min_target_bytes
     rootpxe_validate_lvm_deployment_layout "$schema_file" "$layout_file" "$rootpxe_resolved_layout_file" || return 1
-    # A layout that preserves every captured partition is not an adjusted
-    # layout.  Keep d1.partitions as its only partition-table source; the
-    # resolved JSON remains private runtime metadata for LVM restoration.
-    if jq -e '((.partitions // []) | all(.mode == "original" or .mode == "derived")) and ((.lvm // []) | all((.freeSpacePolicy // "preserveOriginal") == "preserveOriginal" and ((.volumes // []) | all(.mode == "original"))))' "$layout_file" >/dev/null 2>&1; then
+    # A layout that preserves every captured partition — including an automatic
+    # original-geometry fallback — must keep d1.partitions as its only
+    # partition-table source; the resolved JSON stays private runtime metadata.
+    if [[ $rootpxe_resolved_layout_basis == original || $rootpxe_resolved_layout_basis == original_fallback ]] || jq -e '((.partitions // []) | all(.mode == "original" or .mode == "derived")) and ((.lvm // []) | all((.freeSpacePolicy // "preserveOriginal") == "preserveOriginal" and ((.volumes // []) | all(.mode == "original"))))' "$layout_file" >/dev/null 2>&1; then
         rootpxe_deployment_layout_changed=no
     else
         rootpxe_deployment_layout_changed=yes
     fi
     export rootpxe_deployment_layout_changed
+    if [[ $rootpxe_resolved_layout_basis == original_fallback ]]; then
+        if declare -F rootpxe_console_message >/dev/null 2>&1; then
+            rootpxe_console_message INFO 'Target disk fits original layout only; remaining keeps original size'
+        fi
+        if declare -F rootpxe_task_log_append >/dev/null 2>&1; then
+            rootpxe_task_log_append 'INFO: 目标磁盘仅能容纳原始布局，剩余空间分区保持原始大小'
+        fi
+        if declare -F rootpxe_stage >/dev/null 2>&1 && [[ -n ${taskid:-} && -n ${task_token:-} && -n ${pxeapi:-} ]]; then
+            rootpxe_stage layout_validation 'target disk fits original layout only; keeping remaining size'
+        fi
+    fi
 }
 
 # Resolve only the LVM extension after the physical partition layout has been
@@ -2098,7 +2205,7 @@ rootpxe_validate_lvm_deployment_layout_single() {
     fi
     rootpxe_resolved_lvm_layout_file=$(mktemp /tmp/rootpxe-resolved-lvm.XXXXXX) || return 1
     chmod 600 "$rootpxe_resolved_lvm_layout_file" && rootpxe_register_derived_layout_file "$rootpxe_resolved_lvm_layout_file" || { rm -f -- "$rootpxe_resolved_lvm_layout_file"; unset rootpxe_resolved_lvm_layout_file; return 1; }
-    jq -n --slurpfile schema "$schema_file" --slurpfile layout "$layout_file" --slurpfile partitions "$partition_plan" '
+    rootpxe_lvm_json_jq -n --arg basis "${rootpxe_resolved_layout_basis:-}" --slurpfile schema "$schema_file" --slurpfile layout "$layout_file" --slurpfile partitions "$partition_plan" '
       def bynum($n): (.[] | select(.number == $n));
       def safe_nonnegative: type == "number" and floor == . and . >= 0 and . <= 9007199254740991;
       def modebytes($v;$capacity;$extent):
@@ -2154,12 +2261,21 @@ rootpxe_validate_lvm_deployment_layout_single() {
       else . end |
       ($items | map(. + {bytes:modebytes((.schema + .layout);$capacity;$vg.extentBytes)})) as $pre |
       ($pre|map(.bytes)|add) as $used |
-      if $used > $capacity then error("lvm capacity exceeded") else . end |
-      (reduce $pre[] as $item ({out:[]};
-        ($item.schema + {resolvedBytes:(if $item.layout.mode == "remaining" then ((($capacity-$used)/$vg.extentBytes|floor)*$vg.extentBytes) else $item.bytes end)}) as $entry |
-        if $entry.resolvedBytes < $entry.minBytes then error("lvm minimum") else .out += [$entry] end
-       ) | .out) as $volumes |
-      if ([$volumes[]|.resolvedBytes]|add) > $capacity then error("lvm resolved capacity") else {pv:$pv,vg:$vg,pvBytes:$pvBytes,freeSpacePolicy:$plan.freeSpacePolicy,volumes:$volumes} end' >"$rootpxe_resolved_lvm_layout_file" || { rm -f "$rootpxe_resolved_lvm_layout_file"; unset rootpxe_resolved_lvm_layout_file; return 1; }
+      if $basis == "original_fallback" then
+        ([ $items[] | .schema.originalBytes ] | add) as $origLVBytes |
+        if $pvBytes != $pv.originalBytes or $origLVBytes > ($pvBytes - $pv.peStartBytes - $vg.originalFreeBytes) then error("lvm original fallback exceeded")
+        else
+          ($items | map(.schema + {resolvedBytes:.schema.originalBytes})) as $volumes |
+          {pv:$pv,vg:$vg,pvBytes:$pvBytes,freeSpacePolicy:"preserveOriginal",basis:"original_fallback",volumes:$volumes}
+        end
+      else
+        if $used > $capacity then error("lvm capacity exceeded") else . end |
+        (reduce $pre[] as $item ({out:[]};
+          ($item.schema + {resolvedBytes:(if $item.layout.mode == "remaining" then ((($capacity-$used)/$vg.extentBytes|floor)*$vg.extentBytes) else $item.bytes end)}) as $entry |
+          if $entry.resolvedBytes < $entry.minBytes then error("lvm minimum") else .out += [$entry] end
+         ) | .out) as $volumes |
+        if ([$volumes[]|.resolvedBytes]|add) > $capacity then error("lvm resolved capacity") else {pv:$pv,vg:$vg,pvBytes:$pvBytes,freeSpacePolicy:$plan.freeSpacePolicy,volumes:$volumes} end
+      end' >"$rootpxe_resolved_lvm_layout_file" || { rm -f "$rootpxe_resolved_lvm_layout_file"; unset rootpxe_resolved_lvm_layout_file; return 1; }
     export rootpxe_resolved_lvm_layout_file
 }
 
@@ -2605,29 +2721,126 @@ rootpxe_lvm_preflight_restore_groups() {
       (.report[0] | type == "object" and (.pv | type == "array") and
        all(.pv[]; type == "object" and (.pv_name | type == "string" and length > 0) and
                       (.pv_uuid | type == "string" and length > 0) and
-                      (.vg_name | type == "string") and (.vg_uuid | type == "string")))' <<<"$pvs_json" >/dev/null || return 1
+                      (.vg_name | type == "string") and (.vg_uuid | type == "string")) and
+       ([.pv[].pv_name] | unique | length) == (.pv | length) and
+       ([.pv[].pv_uuid] | unique | length) == (.pv | length))' <<<"$pvs_json" >/dev/null || return 1
     rootpxe_lvm_json_jq -e 'type == "object" and (.report | type == "array" and length == 1) and
       (.report[0] | type == "object" and (.vg | type == "array") and
        all(.vg[]; type == "object" and (.vg_name | type == "string" and length > 0) and
-                      (.vg_uuid | type == "string" and length > 0)))' <<<"$vgs_json" >/dev/null || return 1
+                      (.vg_uuid | type == "string" and length > 0)) and
+       ([.vg[].vg_uuid] | unique | length) == (.vg | length))' <<<"$vgs_json" >/dev/null || return 1
     for ((index=1; index<=group_count; index++)); do
         pv=$(rootpxe_lvm_json_jq -er '.pv.uuid' "$work/g${index}.json") || return 1
         vg_uuid=$(rootpxe_lvm_json_jq -er '.vg.uuid' "$work/g${index}.json") || return 1
         vg_name=$(rootpxe_lvm_json_jq -er '.vg.name' "$work/g${index}.json") || return 1
         pv_part=$(rootpxe_lvm_json_jq -er '.pv.partitionNumber' "$work/g${index}.json") || return 1
         pv_path=$(rootpxe_lvm_partition_path "$target_disk" "$pv_part") || return 1
-        rootpxe_lvm_json_jq -e --arg path "$pv_path" --arg pv "$pv" --arg vg_uuid "$vg_uuid" --arg vg_name "$vg_name" '
-          [.report[0].pv[] | select(.pv_uuid == $pv or .vg_uuid == $vg_uuid or .vg_name == $vg_name)] as $matches |
-          ($matches | length <= 1) and
-          all($matches[]; .pv_name == $path and .pv_uuid == $pv and .vg_uuid == $vg_uuid and .vg_name == $vg_name)
-        ' <<<"$pvs_json" >/dev/null || return 1
-        rootpxe_lvm_json_jq -e --arg vg_uuid "$vg_uuid" --arg vg_name "$vg_name" '
-          [.report[0].vg[] | select(.vg_uuid == $vg_uuid or .vg_name == $vg_name)] as $matches |
-          ($matches | length <= 1) and
-          all($matches[]; .vg_uuid == $vg_uuid and .vg_name == $vg_name)
-        ' <<<"$vgs_json" >/dev/null || return 1
+        printf '%s\n%s\n' "$pvs_json" "$vgs_json" | rootpxe_lvm_json_jq -es \
+          --arg target_disk "$target_disk" --arg path "$pv_path" --arg pv "$pv" --arg vg_uuid "$vg_uuid" --arg vg_name "$vg_name" '
+          def on_target_disk($d):
+            . == $d or
+            (if ($d | test("[0-9]$"))
+             then startswith($d + "p") and (.[($d|length)+1:] | test("^[1-9][0-9]*$"))
+             else startswith($d) and (.[($d|length):] | test("^[1-9][0-9]*$"))
+             end);
+          (.[0].report[0].pv) as $pvs |
+          (.[1].report[0].vg) as $vgs |
+          ([$pvs[] | select(.pv_uuid == $pv or .vg_uuid == $vg_uuid or .vg_name == $vg_name)] as $pv_matches |
+           all($pv_matches[]; . as $m |
+             ($m.pv_name | on_target_disk($target_disk)) and
+             all($pvs[] | select((($m.vg_uuid != "" and .vg_uuid == $m.vg_uuid) or ($m.vg_name != "" and .vg_name == $m.vg_name)));
+               (.pv_name | on_target_disk($target_disk))))) and
+          ([$vgs[] | select(.vg_uuid == $vg_uuid or .vg_name == $vg_name)] as $vg_matches |
+           all($vg_matches[]; . as $g |
+             ([$pvs[] | select(.vg_uuid == $g.vg_uuid or .vg_name == $g.vg_name)] as $members |
+              ($members | length) > 0 and all($members[]; .pv_name | on_target_disk($target_disk)))))
+        ' >/dev/null || return 1
     done
     )
+}
+
+rootpxe_lvm_deactivate_target_disk_vgs() {
+    local disk="$1" pvs_json vgs_tsv vg_uuid vg_name deactivated=0
+    [[ -n $disk ]] || return 1
+    command -v pvs >/dev/null 2>&1 && command -v vgchange >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 0
+    pvs_json=$(LC_ALL=C rootpxe_lvm_native pvs --reportformat json -o pv_name,vg_name,vg_uuid 2>/dev/null) || return 0
+    vgs_tsv=$(rootpxe_lvm_json_jq -r --arg disk "$disk" '
+      def on_target_disk($d):
+        . == $d or
+        (if ($d | test("[0-9]$"))
+         then startswith($d + "p") and (.[($d|length)+1:] | test("^[1-9][0-9]*$"))
+         else startswith($d) and (.[($d|length):] | test("^[1-9][0-9]*$"))
+         end);
+      (.report[0].pv? // []) as $pvs |
+      [ $pvs[] | select((.vg_name // "") != "" and (.vg_uuid // "") != "") | {vg_uuid, vg_name} ] | unique_by(.vg_uuid + "\u0000" + .vg_name)[] |
+      . as $g |
+      select(([ $pvs[] | select(.vg_uuid == $g.vg_uuid or .vg_name == $g.vg_name) ] | length > 0) and
+             ([ $pvs[] | select(.vg_uuid == $g.vg_uuid or .vg_name == $g.vg_name) ] | all(.pv_name | on_target_disk($disk)))) |
+      [.vg_uuid, .vg_name] | @tsv
+    ' <<<"$pvs_json" 2>/dev/null) || return 0
+    while IFS=$'\t' read -r vg_uuid vg_name; do
+        vg_uuid=${vg_uuid%$'\r'}; vg_name=${vg_name%$'\r'}
+        [[ -n $vg_uuid && -n $vg_name ]] || continue
+        rootpxe_lvm_safe_identifier "$vg_uuid" && rootpxe_lvm_validate_vg_name "$vg_name" || return 1
+        rootpxe_run_logged_mutation vgchange "$vg_name" vgchange -an --select "vg_uuid=$vg_uuid" "$vg_name" || return 1
+        deactivated=1
+    done <<<"$vgs_tsv"
+    if [[ $deactivated -eq 1 ]] && command -v udevadm >/dev/null 2>&1; then
+        udevadm settle --timeout=5 >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+rootpxe_lvm_wipe_target_pvs() {
+    local disk="$1" plan_file="${2:-}" pvs_json="" pv_paths="" pv_part pv_path fstype listed_in_pvs
+    [[ -n $disk ]] || return 1
+    rootpxe_lvm_deactivate_target_disk_vgs "$disk" || return 1
+    if command -v pvs >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+        pvs_json=$(LC_ALL=C rootpxe_lvm_native pvs --reportformat json -o pv_name,vg_name,vg_uuid 2>/dev/null) || pvs_json=""
+    fi
+    if [[ -n $plan_file && -r $plan_file ]] && command -v jq >/dev/null 2>&1; then
+        while IFS= read -r pv_part; do
+            pv_part=${pv_part%$'\r'}
+            [[ $pv_part =~ ^[1-9][0-9]*$ ]] || continue
+            pv_path=$(rootpxe_lvm_partition_path "$disk" "$pv_part") || continue
+            pv_paths+="${pv_paths:+$'\n'}$pv_path"
+        done < <(rootpxe_lvm_json_jq -r '(if (.groups? | type) == "array" then .groups[] else . end) | .pv.partitionNumber' "$plan_file" 2>/dev/null || true)
+    elif [[ -n $pvs_json ]]; then
+        pv_paths=$(rootpxe_lvm_json_jq -r --arg disk "$disk" '
+          def on_target_disk($d):
+            . == $d or
+            (if ($d | test("[0-9]$"))
+             then startswith($d + "p") and (.[($d|length)+1:] | test("^[1-9][0-9]*$"))
+             else startswith($d) and (.[($d|length):] | test("^[1-9][0-9]*$"))
+             end);
+          (.report[0].pv? // []) as $pvs |
+          $pvs[] | select(.pv_name | on_target_disk($disk)) | . as $pv |
+          select((($pv.vg_name // "") == "" and ($pv.vg_uuid // "") == "") or
+                 ([ $pvs[] | select((($pv.vg_uuid // "") != "" and .vg_uuid == $pv.vg_uuid) or
+                                    (($pv.vg_name // "") != "" and .vg_name == $pv.vg_name)) ] |
+                  all(.pv_name | on_target_disk($disk)))) |
+          .pv_name
+        ' <<<"$pvs_json" 2>/dev/null || true)
+    fi
+    while IFS= read -r pv_path; do
+        pv_path=${pv_path%$'\r'}
+        [[ -n $pv_path && -b $pv_path ]] || continue
+        fstype=$(blkid -s TYPE -o value "$pv_path" 2>/dev/null | tr -d '\r\n' || true)
+        listed_in_pvs=no
+        if [[ -n $pvs_json ]] && rootpxe_lvm_json_jq -e --arg path "$pv_path" 'any((.report[0].pv? // [])[]; .pv_name == $path)' <<<"$pvs_json" >/dev/null 2>&1; then
+            listed_in_pvs=yes
+        fi
+        [[ $fstype == LVM2_member || $listed_in_pvs == yes ]] || continue
+        if command -v wipefs >/dev/null 2>&1; then
+            wipefs -a "$pv_path" >/dev/null 2>&1 || return 1
+        else
+            dd if=/dev/zero of="$pv_path" bs=1M count=2 conv=notrunc >/dev/null 2>&1 || return 1
+        fi
+    done <<<"$pv_paths"
+    if [[ -n $pv_paths ]] && command -v udevadm >/dev/null 2>&1; then
+        udevadm settle --timeout=5 >/dev/null 2>&1 || true
+    fi
+    return 0
 }
 
 rootpxe_restore_lvm_volumes() {
@@ -3740,14 +3953,39 @@ rootpxe_target_disk_use_preflight() {
     return 0
 }
 
+rootpxe_target_use_reason_is_transient() {
+    case "${1:-}" in
+        writable_block_fd|block_fd_stat_failed|block_fd_flags_unavailable|block_fd_recheck_failed|device_graph_failed|target_stat_failed|target_path_unavailable)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 rootpxe_require_unused_target_disks() {
-    local target
+    local target attempt max_attempts retry_delay
+    max_attempts=${ROOTPXE_TARGET_USE_MAX_ATTEMPTS:-5}
+    [[ $max_attempts =~ ^[1-9][0-9]*$ ]] || max_attempts=5
+    retry_delay=${ROOTPXE_TARGET_USE_RETRY_DELAY:-1}
+    [[ $retry_delay =~ ^[0-9]+$ ]] || retry_delay=1
     (( $# > 0 )) || { handleError "PXEOS_STAGE=target_use CODE=TARGET_DISK_STATE_UNAVAILABLE REASON=target_set_empty"; return 1; }
     for target in "$@"; do
-        rootpxe_target_disk_use_preflight "$target" || {
+        for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+            if rootpxe_target_disk_use_preflight "$target"; then
+                break
+            fi
+            if (( attempt < max_attempts )) && rootpxe_target_use_reason_is_transient "${rootpxe_target_use_reason:-}"; then
+                if command -v udevadm >/dev/null 2>&1; then
+                    udevadm settle --timeout=5 >/dev/null 2>&1 || true
+                fi
+                (( retry_delay > 0 )) && sleep "$retry_delay"
+                continue
+            fi
             handleError "PXEOS_STAGE=target_use CODE=$rootpxe_target_use_code TARGET=$target REASON=$rootpxe_target_use_reason"
             return 1
-        }
+        done
     done
 }
 
@@ -4336,34 +4574,60 @@ expandPartition() {
             fs_raw1=$rootpxe_log_raw_path
             # Based on community discussion from @mstabrin
             dots "Resizing $fstype volume ($part)"
-            if [[ ! -d /tmp/btrfs ]]; then
-                rootpxe_diagnostic_call btrfs.log "$fs_raw1" append mkdir /tmp/btrfs
-                if [[ $? -gt 0 ]]; then
+            (
+                btrfs_mounted=no
+                rootpxe_btrfs_grow_cleanup() {
+                    trap - EXIT HUP INT TERM
+                    if [[ $btrfs_mounted == yes ]]; then
+                        if umount /tmp/btrfs >/dev/null 2>&1; then
+                            btrfs_mounted=no
+                        fi
+                    fi
+                }
+                trap rootpxe_btrfs_grow_cleanup EXIT
+                trap 'exit 143' TERM
+                trap 'exit 130' INT
+                trap 'exit 129' HUP
+                if [[ ! -d /tmp/btrfs ]]; then
+                    rootpxe_diagnostic_call btrfs.log "$fs_raw1" append mkdir -p /tmp/btrfs || exit 10
+                fi
+                rootpxe_diagnostic_call btrfs.log "$fs_raw1" append mount -t btrfs "$part" /tmp/btrfs || exit 11
+                btrfs_mounted=yes
+                if ! rootpxe_diagnostic_call btrfs.log "$fs_raw1" append btrfs filesystem resize max /tmp/btrfs; then
+                    rootpxe_diagnostic_call btrfs.log "$fs_raw1" append umount /tmp/btrfs || true
+                    btrfs_mounted=no
+                    exit 12
+                fi
+                if ! rootpxe_diagnostic_call btrfs.log "$fs_raw1" append umount /tmp/btrfs; then
+                    btrfs_mounted=no
+                    exit 13
+                fi
+                btrfs_mounted=no
+                exit 0
+            )
+            case $? in
+                0) echo "Done" ;;
+                10)
                     echo "Failed"
                     debugPause
                     handleError "Could not create /tmp/btrfs (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
-                fi
-            fi
-            rootpxe_diagnostic_call btrfs.log "$fs_raw1" append mount -t btrfs $part /tmp/btrfs
-            if [[ $? -gt 0 ]]; then
-                echo "Failed"
-                debugPause
-                handleError "Could not mount $part to /tmp/btrfs (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
-            fi
-            rootpxe_diagnostic_call btrfs.log "$fs_raw1" append btrfs filesystem resize max /tmp/btrfs
-            if [[ $? -gt 0 ]]; then
-                rootpxe_diagnostic_call btrfs.log "$fs_raw1" append umount /tmp/btrfs || true
-                echo "Failed"
-                debugPause
-                handleError "Could not resize btrfs partition (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
-            fi
-            rootpxe_diagnostic_call btrfs.log "$fs_raw1" append umount /tmp/btrfs
-            if [[ $? -gt 0 ]]; then
-                echo "Failed"
-                debugPause
-                handleError "Could not unmount $part from /tmp/btrfs (${FUNCNAME[0]}\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*)"
-            fi
-            echo "Done"
+                    ;;
+                11)
+                    echo "Failed"
+                    debugPause
+                    handleError "Could not mount $part to /tmp/btrfs (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
+                    ;;
+                12)
+                    echo "Failed"
+                    debugPause
+                    handleError "Could not resize btrfs partition (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
+                    ;;
+                *)
+                    echo "Failed"
+                    debugPause
+                    handleError "Could not unmount $part from /tmp/btrfs (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
+                    ;;
+            esac
             ;;
         f2fs)
             if [[ $type == "down" ]]; then
@@ -4402,41 +4666,67 @@ expandPartition() {
             if [[ $type == "down" ]]; then
                 rootpxe_diagnostic_begin xfs-grow.log || { handleError "Could not collect raw filesystem diagnostic"; return 1; }
                 fs_raw1=$rootpxe_log_raw_path
-                local xfs_mount=""
                 dots "Attempting to resize $fstype volume ($part)"
 
                 # The resolved deployment layout already owns partition
                 # geometry.  Do not overwrite it with a later 100% end or
                 # infer free space from a second partition-table scan.
-                    xfs_mount=$(mktemp -d /tmp/rootpxe-xfs-grow.XXXXXX) || {
+                (
+                    xfs_mount=""
+                    xfs_mounted=no
+                    rootpxe_xfs_grow_cleanup() {
+                        trap - EXIT HUP INT TERM
+                        if [[ $xfs_mounted == yes && -n $xfs_mount ]]; then
+                            if umount "$xfs_mount" >/dev/null 2>&1; then
+                                xfs_mounted=no
+                            fi
+                        fi
+                        if [[ -n $xfs_mount && -d $xfs_mount && $xfs_mounted == no ]]; then
+                            rmdir "$xfs_mount" >/dev/null 2>&1 || true
+                        fi
+                    }
+                    trap rootpxe_xfs_grow_cleanup EXIT
+                    trap 'exit 143' TERM
+                    trap 'exit 130' INT
+                    trap 'exit 129' HUP
+                    xfs_mount=$(mktemp -d /tmp/rootpxe-xfs-grow.XXXXXX) || exit 10
+                    rootpxe_diagnostic_call xfs-grow.log "$fs_raw1" append mount -t xfs -o rw,nouuid "$part" "$xfs_mount" || exit 11
+                    xfs_mounted=yes
+                    rootpxe_diagnostic_call xfs-grow.log "$fs_raw1" append xfs_growfs "$xfs_mount" || exit 12
+                    rootpxe_diagnostic_call xfs-grow.log "$fs_raw1" append umount "$xfs_mount" || exit 13
+                    xfs_mounted=no
+                    rmdir "$xfs_mount" >/dev/null 2>&1 || exit 14
+                    xfs_mount=""
+                    exit 0
+                )
+                case $? in
+                    0) echo "Done" ;;
+                    10)
                         echo "Failed"
                         debugPause
                         handleError "Could not create XFS grow mountpoint (${FUNCNAME[0]})\n   Args Passed: $*"
-                    }
-                    rootpxe_diagnostic_call xfs-grow.log "$fs_raw1" append mount -t xfs -o rw,nouuid "$part" "$xfs_mount"
-                    if [[ $? -gt 0 ]]; then
-                        rmdir "$xfs_mount" >/dev/null 2>&1 || true
+                        ;;
+                    11)
                         echo "Failed"
                         debugPause
                         handleError "Could not mount $part for XFS growth (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
-                    fi
-                    rootpxe_diagnostic_call xfs-grow.log "$fs_raw1" append xfs_growfs "$xfs_mount"
-                    if [[ $? -gt 0 ]]; then
-                        rootpxe_diagnostic_call xfs-grow.log "$fs_raw1" append umount "$xfs_mount" || true
-                        rmdir "$xfs_mount" >/dev/null 2>&1 || true
+                        ;;
+                    12)
                         echo "Failed"
                         debugPause
                         handleError "Could not grow XFS partition $part (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
-                    fi
-                    rootpxe_diagnostic_call xfs-grow.log "$fs_raw1" append umount "$xfs_mount"
-                    if [[ $? -gt 0 ]]; then
-                        rootpxe_diagnostic_call xfs-grow.log "$fs_raw1" append umount "$xfs_mount" || true
+                        ;;
+                    13)
                         echo Failed
                         debugPause
-                        handleError "Could not unmount $part from $xfs_mount (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
-                    fi
-                    rmdir "$xfs_mount" >/dev/null 2>&1 || { echo Failed; debugPause; handleError "Could not clean XFS grow mountpoint (${FUNCNAME[0]})\n   Args Passed: $*"; }
-                    echo "Done"
+                        handleError "Could not unmount $part from XFS grow mountpoint (${FUNCNAME[0]})\n   Info: $(cat "$fs_raw1")\n   Args Passed: $*"
+                        ;;
+                    *)
+                        echo Failed
+                        debugPause
+                        handleError "Could not clean XFS grow mountpoint (${FUNCNAME[0]})\n   Args Passed: $*"
+                        ;;
+                esac
             fi
             ;;
         *)
@@ -7438,9 +7728,11 @@ performRestore() {
             fi
         done
         restoreparts=""
-        rootpxe_console_message INFO "Resetting UUIDs for $disk."
-        debugPause
-        restoreUUIDInformation "$disk" "$sfdiskoriginalpartitionfilename" "$disk_number" "$imagePath"
+        if [[ ! $imgType =~ [Nn] || -z ${rootpxe_resolved_layout_file:-} ]]; then
+            rootpxe_console_message INFO "Resetting UUIDs for $disk."
+            debugPause
+            restoreUUIDInformation "$disk" "$sfdiskoriginalpartitionfilename" "$disk_number" "$imagePath"
+        fi
         rootpxe_console_message INFO 'Resetting swap systems.'
         debugPause
         makeAllSwapSystems "$disk" "$disk_number" "$imagePath" "$imgPartitionType"

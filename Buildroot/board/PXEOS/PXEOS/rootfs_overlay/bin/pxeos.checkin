@@ -138,7 +138,7 @@ rootpxe_write_checkin_json_payload() {
         --argjson versions "$identity_versions" \
         --argjson capabilities "$capabilities" \
         --argjson storageCapabilities "$storage_capabilities" --arg storageBootId "$storage_boot" \
-		'{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",cloudInitCapability:"linux-nocloud-v5",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities,captureProtocol:"mac-direct-v1",captureCheckinId:$captureCheckinId,storageProtocolVersions:[1],storageCapabilities:$storageCapabilities,storageBootId:$storageBootId}' >"$output_file"
+		'{taskId:$taskId,token:$token,mac:$mac,sysuuid:$sysuuid,format:"json",cloudInitCapability:"linux-nocloud-v5",deploymentIdentityProtocolVersions:$versions,deploymentIdentityCapabilities:$capabilities,layoutCapabilities:["layout-original-fallback"],captureProtocol:"mac-direct-v1",captureCheckinId:$captureCheckinId,storageProtocolVersions:[1],storageCapabilities:$storageCapabilities,storageBootId:$storageBootId}' >"$output_file"
 	result=$?
 	: >"$token_file"
 	rm -f -- "$token_file"

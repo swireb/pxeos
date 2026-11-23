@@ -174,7 +174,12 @@ else
 fi
 if [[ ${imgType:-} == [Nn] ]]; then
     rootpxe_require_single_disk_layout_metadata "$sector_metadata" "${originalSchemaFile:-}" "${deploymentLayoutFile:-}" || handleError "PXEOS_STAGE=layout_validation CODE=N_LAYOUT_METADATA_MISSING REASON=${rootpxe_layout_metadata_reason:-unknown}"
-rootpxe_validate_deployment_layout "$hd" "$originalSchemaFile" "$deploymentLayoutFile" "$sector_metadata" || handleError "PXEOS_STAGE=layout_validation CODE=INVALID_DEPLOYMENT_LAYOUT REASON=pre_permit_validation_failed"
+    if ! rootpxe_validate_deployment_layout "$hd" "$originalSchemaFile" "$deploymentLayoutFile" "$sector_metadata"; then
+        if [[ -n ${rootpxe_layout_validation_code:-} && -n ${rootpxe_layout_validation_reason:-} ]]; then
+            handleError "PXEOS_STAGE=layout_validation CODE=${rootpxe_layout_validation_code} REASON=${rootpxe_layout_validation_reason}${rootpxe_layout_validation_extra:+ ${rootpxe_layout_validation_extra}}"
+        fi
+        handleError "PXEOS_STAGE=layout_validation CODE=INVALID_DEPLOYMENT_LAYOUT REASON=pre_permit_validation_failed"
+    fi
 rootpxe_validate_growth_capability "$originalSchemaFile" "$rootpxe_resolved_layout_file" "$imagePath" || handleError "PXEOS_STAGE=layout_validation CODE=UNSUPPORTED_FILESYSTEM_GROWTH REASON=validated_layout_requires_unsupported_growth"
 fi
 rootpxe_validate_restore_artifacts "$imagePath" "$imgType" "$imgPartitionType" "${originalSchemaFile:-}" || handleError "PXEOS_STAGE=restore_preflight CODE=REQUIRED_ARTIFACT_MISSING REASON=target_write_not_started"
@@ -228,8 +233,18 @@ if rootpxe_deployment_identity_policy_enabled; then
 fi
 if [[ ${imgType:-} == mpa ]]; then
     rootpxe_require_unused_target_disks $disks || exit 1
+    if declare -F rootpxe_lvm_deactivate_target_disk_vgs >/dev/null 2>&1; then
+        for disk in $disks; do
+            rootpxe_lvm_deactivate_target_disk_vgs "$disk" || handleError "PXEOS_STAGE=prepare_partitions CODE=LVM_TARGET_DEACTIVATE_FAILED REASON=unable_to_deactivate_target_vgs"
+        done
+    fi
 else
     rootpxe_require_unused_target_disks "$hd" || exit 1
+    if [[ ${imgType:-} == [Nn] && -n ${rootpxe_resolved_lvm_layout_file:-} ]] && declare -F rootpxe_lvm_wipe_target_pvs >/dev/null 2>&1; then
+        rootpxe_lvm_wipe_target_pvs "$hd" || handleError "PXEOS_STAGE=prepare_partitions CODE=LVM_TARGET_WIPE_FAILED REASON=unable_to_wipe_target_pvs"
+    elif declare -F rootpxe_lvm_deactivate_target_disk_vgs >/dev/null 2>&1; then
+        rootpxe_lvm_deactivate_target_disk_vgs "$hd" || handleError "PXEOS_STAGE=prepare_partitions CODE=LVM_TARGET_DEACTIVATE_FAILED REASON=unable_to_deactivate_target_vgs"
+    fi
 fi
 case ${imgType:-} in
     [Nn]|mps|dd) enableWriteCache "$hd" ;;
@@ -245,7 +260,12 @@ if [[ ${imgType:-} == [Nn] ]]; then
     fi
     # NVMe reformat may have changed logical geometry; resolve once more before
     # the final sfdisk write and verify the table after applying it.
-    rootpxe_validate_deployment_layout "$hd" "$originalSchemaFile" "$deploymentLayoutFile" "$sector_metadata" || handleError "PXEOS_STAGE=layout_validation CODE=INVALID_DEPLOYMENT_LAYOUT REASON=post_format_validation_failed"
+    if ! rootpxe_validate_deployment_layout "$hd" "$originalSchemaFile" "$deploymentLayoutFile" "$sector_metadata"; then
+        if [[ -n ${rootpxe_layout_validation_code:-} && -n ${rootpxe_layout_validation_reason:-} ]]; then
+            handleError "PXEOS_STAGE=layout_validation CODE=${rootpxe_layout_validation_code} REASON=${rootpxe_layout_validation_reason}${rootpxe_layout_validation_extra:+ ${rootpxe_layout_validation_extra}}"
+        fi
+        handleError "PXEOS_STAGE=layout_validation CODE=INVALID_DEPLOYMENT_LAYOUT REASON=post_format_validation_failed"
+    fi
     rootpxe_stage partitioning "partition layout preparing"
     if ! rootpxe_apply_deployment_layout "$hd" "$sector_metadata"; then
         handleError "PXEOS_STAGE=layout_apply CODE=${rootpxe_layout_apply_code:-LAYOUT_APPLY_FAILED} REASON=${rootpxe_layout_apply_reason:-unknown}${rootpxe_layout_diagnostics_file:+ DIAGNOSTICS=${rootpxe_layout_diagnostics_file}}"
@@ -269,9 +289,12 @@ if [[ $imgPartitionType != mbr ]]; then
     if [[ -z ${rootpxe_resolved_lvm_layout_file:-} ]] || jq -e '.partitions[] | select(.role != "lvm_pv" and .artifact != "")' "$originalSchemaFile" >/dev/null 2>&1; then
         putDataBack
     elif jq -e '.partitions[] | select(.role == "swap" or .fs == "swap")' "$originalSchemaFile" >/dev/null 2>&1; then
-        makeAllSwapSystems "$hd" "$imagePath"
+        makeAllSwapSystems "$hd" 1 "$imagePath" "$imgPartitionType"
     fi
     if [[ -n ${rootpxe_resolved_lvm_layout_file:-} ]]; then
+        if declare -F rootpxe_lvm_wipe_target_pvs >/dev/null 2>&1; then
+            rootpxe_lvm_wipe_target_pvs "$hd" "$rootpxe_resolved_lvm_layout_file" || handleError "PXEOS_STAGE=restore_lvm CODE=LVM_RESTORE_PREFLIGHT_FAILED REASON=target_pv_wipe_failed"
+        fi
         rootpxe_restore_lvm_volumes "$imagePath" "$hd" || handleError "PXEOS_STAGE=restore_lvm CODE=${rootpxe_restore_lvm_error_code:-LVM_RESTORE_FAILED} REASON=${rootpxe_restore_lvm_error_reason:-unknown}"
     fi
 else

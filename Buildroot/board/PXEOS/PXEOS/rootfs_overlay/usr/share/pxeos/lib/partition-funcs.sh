@@ -36,6 +36,7 @@ restoreUUIDInformation() {
     local is_swap=0
     local part_number=""
     local hasgpt=0
+    local sgdisk_ran=0 sgdisk_rc=0
     hasGPT "$disk"
     [[ $hasgpt -eq 0 ]] && return
     diskuuid=$(awk '/^label-id: / {print tolower($2)}' $file)
@@ -44,7 +45,9 @@ restoreUUIDInformation() {
     debugPause
     if [[ -n $diskuuid ]]; then
         sgdisk -U $diskuuid $disk >/dev/null 2>&1
-        [[ ! $? -eq 0 ]] && handleWarning "Failed to set disk GUID (sgdisk -U) (${FUNCNAME[0]})\n   Args Passed: $*"
+        sgdisk_rc=$?
+        sgdisk_ran=1
+        [[ ! $sgdisk_rc -eq 0 ]] && handleWarning "Failed to set disk GUID (sgdisk -U) (${FUNCNAME[0]})\n   Args Passed: $*"
     fi
     getPartitions "$disk"
     for part in $parts; do
@@ -52,27 +55,50 @@ restoreUUIDInformation() {
         getPartitionNumber "$part"
         [[ $is_swap -gt 0 ]] && continue
         # Do not let partition 1 match the prefix of partition 10, 11, ... .
-        partuuid=$(awk -F[,\ ] "match(\$0, /[^0-9]${part_number} : start=.*uuid=([A-Za-z0-9-]+)[,]?.*$/, type){printf(\"%s:%s\", $part_number, tolower(type[1]))}" "$file")
-        parttype=$(awk -F[,\ ] "match(\$0, /[^0-9]${part_number} : start=.*type=([A-Za-z0-9-]+)[,]?.*$/, type){printf(\"%s:%s\", $part_number, tolower(type[1]))}" "$file")
+        partuuid=$(awk -v number="$part_number" '
+          /^\/dev\/[^[:space:]]+[[:space:]]*:/ {
+            dev=$1; sub(/:.*/, "", dev); n=dev; sub(/^.*[^0-9]/, "", n)
+            if (n != number) next
+            if (match($0, /uuid=[[:space:]]*[A-Za-z0-9-]+/)) {
+              val=substr($0, RSTART, RLENGTH); sub(/^uuid=[[:space:]]*/, "", val)
+              printf "%s:%s", number, tolower(val); exit
+            }
+          }' "$file")
+        parttype=$(awk -v number="$part_number" '
+          /^\/dev\/[^[:space:]]+[[:space:]]*:/ {
+            dev=$1; sub(/:.*/, "", dev); n=dev; sub(/^.*[^0-9]/, "", n)
+            if (n != number) next
+            if (match($0, /type=[[:space:]]*[A-Za-z0-9-]+/)) {
+              val=substr($0, RSTART, RLENGTH); sub(/^type=[[:space:]]*/, "", val)
+              printf "%s:%s", number, tolower(val); exit
+            }
+          }' "$file")
         dots "Setting partition type"
         echo $parttype
         debugPause
         if [[ -n $parttype ]]; then
-            sgdisk -t $parttype $disk >/dev/null 2>&1 
-        else 
-            true
+            sgdisk -t $parttype $disk >/dev/null 2>&1
+            sgdisk_rc=$?
+            sgdisk_ran=1
+        else
+            sgdisk_rc=0
         fi
-        [[ ! $? -eq 0 ]] && handleWarning " Failed to set partition type (sgdisk -t) (${FUNCNAME[0]})\n   Args Passed: $*"
+        [[ ! $sgdisk_rc -eq 0 ]] && handleWarning " Failed to set partition type (sgdisk -t) (${FUNCNAME[0]})\n   Args Passed: $*"
         dots "Setting partition UUID"
         echo $partuuid
         debugPause
         if [[ -n $partuuid ]]; then
-            sgdisk -u $partuuid $disk >/dev/null 2>&1 
-        else 
-            true
+            sgdisk -u $partuuid $disk >/dev/null 2>&1
+            sgdisk_rc=$?
+            sgdisk_ran=1
+        else
+            sgdisk_rc=0
         fi
-        [[ ! $? -eq 0 ]] && handleWarning "Failed to set partition GUID (sgdisk -u) (${FUNCNAME[0]})\n   Args Passed: $*"
+        [[ ! $sgdisk_rc -eq 0 ]] && handleWarning "Failed to set partition GUID (sgdisk -u) (${FUNCNAME[0]})\n   Args Passed: $*"
     done
+    if [[ $sgdisk_ran -eq 1 ]] && command -v udevadm >/dev/null 2>&1; then
+        udevadm settle --timeout=5 >/dev/null 2>&1 || true
+    fi
 }
 # $1 is the name of the disk drive
 # $2 is name of file to load from.
@@ -243,7 +269,8 @@ saveSwapUUID() {
     local part_number=""
     partitionIsSwap "$part"
     [[ $is_swap -eq 0 ]] && return
-    local uuid=$(blkid -s UUID $2 | cut -d\" -f2)
+    local uuid
+    uuid=$(blkid -s UUID -o value "$part" 2>/dev/null | tr -d '\r\n')
     [[ -z $uuid ]] && return
     getPartitionNumber "$part"
     rootpxe_console_message INFO "Saving UUID $uuid for $part."
@@ -325,10 +352,11 @@ makeSwapSystem() {
     local option=""
     local disk=""
     getDiskFromPartition "$part"
-    local parttype=0
+    local parttype=""
     local part_number=""
     getPartitionNumber "$part"
-    local uuid=$(awk "/([a-z]${part_number}|^${part_number}) /{print \$2}" $file)
+    local uuid
+    uuid=$(awk -v number="$part_number" '$1 == number || $1 == "a" number { print $2; exit }' "$file")
     local hasgpt=0
     hasGPT "$disk"
     case $hasgpt in
@@ -336,10 +364,17 @@ makeSwapSystem() {
             [[ -n $uuid ]] && parttype=82
             ;;
         0)
-            parttype=$(flock $disk sfdisk -d $disk 2>/dev/null | awk -F[,=] "/[a-z]${part_number} : /{print \$6}")
+            parttype=$(flock "$disk" sfdisk -d "$disk" 2>/dev/null | awk -v target="$part" '
+              $1 == target {
+                if (match($0, /(type|Id)=[[:space:]]*[^,[:space:]]+/)) {
+                  val=substr($0, RSTART, RLENGTH); sub(/^(type|Id)=[[:space:]]*/, "", val)
+                  val=tolower(val); sub(/^0x/, "", val); sub(/^0+/, "", val)
+                  print val; exit
+                }
+              }')
             ;;
     esac
-    [[ ! $parttype -eq 82 ]] && return
+    [[ ${parttype,,} != 82 ]] && return
     [[ -n $uuid ]] && option="-U $uuid"
     dots "Restoring swap partition"
     mkswap $option $part >/dev/null 2>&1

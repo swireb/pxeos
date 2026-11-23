@@ -27,6 +27,20 @@ rootpxe_format_message() {
           . as $raw | ($raw|ascii_downcase) as $displayRaw | $catalogs[0] as $root | (if $locale == "console" then $root.console else $root end) as $c |
           (if $locale == "console" then ": " else "：" end) as $separator |
           if ($root.version != 1 or ($c.stages|type) != "object" or ($c.codes|type) != "object" or ($c.reasons|type) != "object" or ($c.messages|type) != "object" or ($root.contextReasons|type) != "array" or ($root.legacyPrefixes|type) != "object") then error("catalog") else . end |
+          def pxe_single_uint($name):
+            [$displayRaw | match("(^|\\s)" + $name + "(?=$|[^A-Za-z0-9_])"; "g")] as $keys |
+            [$displayRaw | match("(^|\\s)" + $name + "=([1-9][0-9]*)(?=$|\\s)"; "g")] as $vals |
+            if ($keys | length) == 1 and ($vals | length) == 1 then
+              ($vals[0].captures[1].string | tonumber) as $n |
+              if $n > 0 and $n <= 9007199254740991 then $n else null end
+            else null end;
+          def fmt_gib($b):
+            (($b / 1073741824) | floor) as $w |
+            ($b - ($w * 1073741824)) as $r |
+            (($w * 100) + (((($r * 100) + 536870912) / 1073741824) | floor)) as $c |
+            (($c / 100) | floor) as $hi |
+            ($c - ($hi * 100)) as $lo |
+            "\($hi)." + (if $lo < 10 then "0\($lo)" else "\($lo)" end);
           [$displayRaw | match("(^|\\s)(pxeos_stage|code|reason)=([^\\s]*)"; "g") | {key:(.captures[1].string|ascii_upcase), value:.captures[2].string}] as $markers |
           [$displayRaw | match("(^|\\s)(pxeos_stage|code|reason)(?=$|[^A-Za-z0-9_])"; "g")] as $markerKeys |
           [$markers[] | select(.key == "PXEOS_STAGE") | .value|ascii_downcase] as $stages |
@@ -48,7 +62,16 @@ rootpxe_format_message() {
           if ($markerKeys|length) != ($markers|length) or ($outerCode != "" and ($outerCode|test("^[A-Za-z][A-Za-z0-9_]{0,127}$")|not)) or any($markers[]; (if .key == "REASON" then (.value|test("^[A-Za-z0-9][A-Za-z0-9_.:+-]{0,255}$")) else (.value|test("^[A-Za-z][A-Za-z0-9_]{0,127}$")) end)|not) or ($stages|length) > 1 or ($codes|length) > 1 or ($reasons|length) > 1 then $fallback
           elif ($codes|length) == 1 and $outerCode != "" and $outerCode != "PXEOS_ERROR" and $outerCode != "PXEOS_FAILED" and $outerCode != $codes[0] then $fallback
           elif ($c.codes[$effectiveCode] // "") != "" then
-            if ($reasons|length) == 1 and ($c.reasons[$reasons[0]] // "") != "" and (any($root.contextReasons[]; . == $reasons[0])|not) then $c.reasons[$reasons[0]] else $c.codes[$effectiveCode] end
+            if ($reasons|length) == 1 and ($c.reasons[$reasons[0]] // "") != "" and (any($root.contextReasons[]; . == $reasons[0])|not) then
+              if $effectiveCode == "INVALID_DEPLOYMENT_LAYOUT" and $reasons[0] == "target_disk_too_small" then
+                (pxe_single_uint("required")) as $reqBytes |
+                (pxe_single_uint("target")) as $tgtBytes |
+                if $reqBytes != null and $tgtBytes != null then
+                  if $locale == "console" then "Target disk \(fmt_gib($tgtBytes)) GiB is smaller than required \(fmt_gib($reqBytes)) GiB"
+                  else "目标磁盘容量 \(fmt_gib($tgtBytes)) GiB，低于该布局所需的 \(fmt_gib($reqBytes)) GiB" end
+                else $c.reasons[$reasons[0]] end
+              else $c.reasons[$reasons[0]] end
+            else $c.codes[$effectiveCode] end
           elif ($codes|length) != 0 or ($reasons|length) != 0 or ($outerCode != "" and $outerCode != "PXEOS_ERROR" and $outerCode != "PXEOS_FAILED") then $fallback
           elif ($c.codes[$legacyCode] // "") != "" then $c.codes[$legacyCode]
           elif ($c.messages[$raw] // "") != "" then $c.messages[$raw]

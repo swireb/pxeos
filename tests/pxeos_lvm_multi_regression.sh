@@ -599,4 +599,60 @@ done
 unset MATRIX_GROUP_COUNT
 fi
 
+grep -Fq 'makeAllSwapSystems "$hd" 1 "$imagePath" "$imgPartitionType"' "$download" || fail lvm-only-physical-swap-must-pass-four-args
+
+# Redeploying over a target disk that already holds an unrelated old VG with the
+# same VG name (e.g. rl/centos/ubuntu-vg) must pass early preflight, whereas a
+# foreign or cross-disk VG with that name must still reject before permit.
+if [[ ${PXEOS_MULTI_LEAF_ONLY:-no} != yes && ${PXEOS_MULTI_MATRIX_ONLY:-no} != yes && ${PXEOS_MULTI_BASELINE_ONLY:-no} != yes ]]; then
+(
+  cat >"$tmp/redeploy-restore-plan.json" <<'EOF'
+{"groups":[{"pv":{"uuid":"pv-1","partitionNumber":1,"originalBytes":268435456,"artifact":"d1p1.lvm.pv.meta","vgConfigArtifact":"d1p1.lvm.vg.cfg"},"vg":{"uuid":"vg-1","name":"vg0","extentBytes":4194304},"pvBytes":268435456,"volumes":[{"name":"root","uuid":"lv-root","fs":"ext4","artifact":"d1p1.lvm.lv.root.img","resolvedBytes":67108864},{"name":"swap","uuid":"lv-swap","fs":"swap","artifact":"","swapUuid":"swap-uuid","resolvedBytes":33554432}]},{"pv":{"uuid":"pv-2","partitionNumber":2,"originalBytes":268435456,"artifact":"d1p2.lvm.pv.meta","vgConfigArtifact":"d1p2.lvm.vg.cfg"},"vg":{"uuid":"vg-2","name":"vg1","extentBytes":4194304},"pvBytes":268435456,"volumes":[{"name":"root","uuid":"lv-root-2","fs":"ext4","artifact":"d1p2.lvm.lv.root.img","resolvedBytes":67108864}]}]}
+EOF
+  rootpxe_resolved_lvm_layout_file="$tmp/redeploy-restore-plan.json"
+  pvs() {
+    case ${REDEPLOY_OLD_VG_MODE:-target_only} in
+      target_only)
+        printf '%s\n' '{"report":[{"pv":[{"pv_name":"/dev/mock3","pv_uuid":"pv-old","vg_name":"vg0","vg_uuid":"vg-old-uuid"}]}]}'
+        ;;
+      cross_disk)
+        printf '%s\n' '{"report":[{"pv":[{"pv_name":"/dev/mock3","pv_uuid":"pv-old","vg_name":"vg0","vg_uuid":"vg-old-uuid"},{"pv_name":"/dev/foreign1","pv_uuid":"pv-foreign","vg_name":"vg0","vg_uuid":"vg-old-uuid"}]}]}'
+        ;;
+      foreign_same_name)
+        printf '%s\n' '{"report":[{"pv":[{"pv_name":"/dev/mock3","pv_uuid":"pv-old","vg_name":"vg0","vg_uuid":"vg-old-uuid"},{"pv_name":"/dev/source1","pv_uuid":"pv-foreign","vg_name":"vg0","vg_uuid":"vg-foreign-uuid"}]}]}'
+        ;;
+      deactivate_filter)
+        printf '%s\n' '{"report":[{"pv":[{"pv_name":"/dev/mock3","pv_uuid":"pv-old","vg_name":"vg0","vg_uuid":"vg-old-uuid"},{"pv_name":"/dev/sdb1","pv_uuid":"pv-host","vg_name":"vg-host","vg_uuid":"vg-host-uuid"},{"pv_name":"/dev/mock4","pv_uuid":"pv-span1","vg_name":"vg-span","vg_uuid":"vg-span-uuid"},{"pv_name":"/dev/sdb2","pv_uuid":"pv-span2","vg_name":"vg-span","vg_uuid":"vg-span-uuid"}]}]}'
+        ;;
+    esac
+  }
+  vgs() {
+    case ${REDEPLOY_OLD_VG_MODE:-target_only} in
+      target_only)
+        printf '%s\n' '{"report":[{"vg":[{"vg_name":"vg0","vg_uuid":"vg-old-uuid"}]}]}'
+        ;;
+      cross_disk)
+        printf '%s\n' '{"report":[{"vg":[{"vg_name":"vg0","vg_uuid":"vg-old-uuid"}]}]}'
+        ;;
+      foreign_same_name)
+        printf '%s\n' '{"report":[{"vg":[{"vg_name":"vg0","vg_uuid":"vg-old-uuid"},{"vg_name":"vg0","vg_uuid":"vg-foreign-uuid"}]}]}'
+        ;;
+    esac
+  }
+  REDEPLOY_OLD_VG_MODE=target_only rootpxe_lvm_preflight_restore_groups "$tmp/real-image" /dev/mock || fail redeploy-target-only-old-vg-must-accept
+  REDEPLOY_OLD_VG_MODE=cross_disk rootpxe_lvm_preflight_restore_groups "$tmp/real-image" /dev/mock && fail redeploy-cross-disk-old-vg-must-reject
+  REDEPLOY_OLD_VG_MODE=foreign_same_name rootpxe_lvm_preflight_restore_groups "$tmp/real-image" /dev/mock && fail redeploy-foreign-same-name-vg-must-reject
+
+  deactivate_trace="$tmp/deactivate.trace"; : >"$deactivate_trace"
+  vgchange() { printf 'vgchange:%s\n' "$*" >>"$deactivate_trace"; }
+  udevadm() { printf 'udevadm:%s\n' "$*" >>"$deactivate_trace"; }
+  rootpxe_run_logged_mutation() { local _label="$1" _target="$2"; shift 2; "$@"; }
+  REDEPLOY_OLD_VG_MODE=deactivate_filter rootpxe_lvm_deactivate_target_disk_vgs /dev/mock || fail deactivate-target-only-vgs
+  grep -Fqx 'vgchange:-an --select vg_uuid=vg-old-uuid vg0' "$deactivate_trace" || fail target-only-vg-not-deactivated
+  ! grep -Fq 'vg-host' "$deactivate_trace" || fail foreign-vg-was-deactivated
+  ! grep -Fq 'vg-span' "$deactivate_trace" || fail cross-disk-vg-was-deactivated
+  grep -Fq 'udevadm:settle' "$deactivate_trace" || fail deactivate-did-not-settle
+) || fail redeploy-old-vg-contract
+fi
+
 echo 'PASS: PXEOS multi-LVM regression'
