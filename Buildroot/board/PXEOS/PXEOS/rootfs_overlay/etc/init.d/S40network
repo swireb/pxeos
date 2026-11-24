@@ -110,8 +110,8 @@ echo -e "auto lo\niface lo inet loopback\n\n" > /etc/network/interfaces
 sleep 10
 
 # Generated a sorted list with primary interfaces first
-read p_ifaces <<< $(/sbin/ip -0 addr show | awk 'ORS=NR%2?FS:RS' | awk -F'[: ]+' 'tolower($0) ~ /link[/]?ether/ && tolower($0) ~ /'$mac'/ {print $2}' | tr '\n' ' ')
-read o_ifaces <<< $(/sbin/ip -0 addr show | awk 'ORS=NR%2?FS:RS' | awk -F'[: ]+' 'tolower($0) ~ /link[/]?ether/ && tolower($0) !~ /'$mac'/ {print $2}' | tr '\n' ' ')
+read p_ifaces <<< $(/sbin/ip -0 addr show | awk 'ORS=NR%2?FS:RS' | awk -F'[: ]+' -v target="${mac,,}" 'tolower($0) ~ /link[/]?ether/ && target != "" && index(tolower($0), target) > 0 {print $2}' | tr '\n' ' ')
+read o_ifaces <<< $(/sbin/ip -0 addr show | awk 'ORS=NR%2?FS:RS' | awk -F'[: ]+' -v target="${mac,,}" 'tolower($0) ~ /link[/]?ether/ && (target == "" || index(tolower($0), target) == 0) {print $2}' | tr '\n' ' ')
 ifaces="$p_ifaces $o_ifaces"
 for iface in $ifaces; do
     pxeos_network_status_begin "Starting interface $iface and waiting for link"

@@ -375,9 +375,10 @@ makeSwapSystem() {
             ;;
     esac
     [[ ${parttype,,} != 82 ]] && return
-    [[ -n $uuid ]] && option="-U $uuid"
+    local -a swap_opts=()
+    [[ -n $uuid ]] && swap_opts=(-U "$uuid")
     dots "Restoring swap partition"
-    mkswap $option $part >/dev/null 2>&1
+    mkswap "${swap_opts[@]}" "$part" >/dev/null 2>&1
     case $? in
         0)
             echo "Done"

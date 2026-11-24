@@ -72,9 +72,9 @@ rootpxe_display_metadata_fstab_identity() {
     local spec="$1" identities="$2" identity device value actual count=0 result="" IFS=$' \t\n'
     case "$spec" in
         UUID=*) value=${spec#UUID=}; for identity in $identities; do device=${identity#*|}; actual=$(blkid -s UUID -o value "$device" 2>/dev/null | tr -d '\r\n'); [[ $actual == "$value" ]] && { result=${identity%%|*}; count=$((count + 1)); }; done ;;
-        PARTUUID=*) value=${spec#PARTUUID=}; for identity in $identities; do device=${identity#*|}; actual=$(blkid -s PARTUUID -o value "$device" 2>/dev/null | tr -d '\r\n'); [[ ${actual,,} == ${value,,} ]] && { result=${identity%%|*}; count=$((count + 1)); }; done ;;
+        PARTUUID=*) value=${spec#PARTUUID=}; for identity in $identities; do device=${identity#*|}; actual=$(blkid -s PARTUUID -o value "$device" 2>/dev/null | tr -d '\r\n'); [[ ${actual,,} == "${value,,}" ]] && { result=${identity%%|*}; count=$((count + 1)); }; done ;;
         LABEL=*) value=${spec#LABEL=}; for identity in $identities; do device=${identity#*|}; actual=$(blkid -s LABEL -o value "$device" 2>/dev/null | tr -d '\r\n'); [[ $actual == "$value" ]] && { result=${identity%%|*}; count=$((count + 1)); }; done ;;
-        /dev/*) for identity in $identities; do device=${identity#*|}; { [[ $(readlink -f "$device" 2>/dev/null) == $(readlink -f "$spec" 2>/dev/null) ]] || rootpxe_display_metadata_same_block_device "$device" "$spec"; } && { result=${identity%%|*}; count=$((count + 1)); }; done ;;
+        /dev/*) for identity in $identities; do device=${identity#*|}; { [[ $(readlink -f "$device" 2>/dev/null) == "$(readlink -f "$spec" 2>/dev/null)" ]] || rootpxe_display_metadata_same_block_device "$device" "$spec"; } && { result=${identity%%|*}; count=$((count + 1)); }; done ;;
         *) return 1 ;;
     esac
     [[ $count -eq 1 ]] && printf '%s\n' "$result"

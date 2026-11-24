@@ -55,6 +55,8 @@ function validate_mbr_ebr_layout(partition_names, partitions, pName, p_number, p
                 printf("ERROR: extended partition must use a primary number.\n") > "/dev/stderr";
                 return 1;
             }
+            ext_start = int(partitions[pName, "start"]);
+            ext_end = ext_start + int(partitions[pName, "size"]);
         }
     }
     if (ext_count > 1) {

@@ -6,38 +6,38 @@ displayBanner
 disks=""
 disk=""
 hd=""
-[[ -z $seconds ]] && seconds=60
+[[ -z ${seconds:-} || ! $seconds =~ ^[0-9]+$ ]] && seconds=60
 getHardDisk || exit $?
 rootpxe_console_message WARN 'The following hard disk will be erased.'
 rootpxe_console_message WARN "Target disk: $hd"
 rootpxe_console_message WARN "Power off this computer within $seconds seconds to cancel."
 usleep $((seconds * 1000000))
 
-[[ $hd == *[Nn][Vv][Mm][Ee]* ]] && wipemode="nvme"
+[[ $hd == *[Nn][Vv][Mm][Ee]* && -z ${wipemode:-} ]] && wipemode="nvme"
 
-case $wipemode in
+case ${wipemode:-} in
     nvme)
         rootpxe_console_message INFO "Starting NVMe format wipe for $hd."
         usleep 10000000
         pxeos-storage-probe check || exit 75
-        nvme format $hd --force
+        nvme format "$hd" --force || handleError "NVMe format wipe failed on $hd ($0)"
         ;;
     full)
         rootpxe_console_message INFO "Starting full shred wipe for $hd."
         usleep 10000000
         pxeos-storage-probe check || exit 75
-        shred -f -v -z -n 3 "$hd"
+        shred -f -v -z -n 3 "$hd" || handleError "Full shred wipe failed on $hd ($0)"
         ;;
     normal)
         rootpxe_console_message INFO "Starting normal shred wipe for $hd."
         usleep 10000000
         pxeos-storage-probe check || exit 75
-        shred -f -v -n 1 "$hd"
+        shred -f -v -n 1 "$hd" || handleError "Normal shred wipe failed on $hd ($0)"
         ;;
     fast|fastwipe)
         rootpxe_console_message INFO "Writing zeros to the start of $hd."
         pxeos-storage-probe check || exit 75
-        dd if=/dev/zero of="$hd" bs=512 count=100000
+        dd if=/dev/zero of="$hd" bs=512 count=100000 || handleError "Fast wipe failed on $hd ($0)"
         ;;
     *)
         handleError "Unsupported wipe mode: ${wipemode:-<empty>} ($0)"

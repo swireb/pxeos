@@ -5901,38 +5901,63 @@ rootpxe_apply_windows_hostname() {
     if mountpoint -q /ntfs 2>/dev/null; then
         umount /ntfs >/dev/null 2>&1 || return 1
     fi
-    local ntfs_mounted=no
+    local ntfs_mounted=no prev_trap_hup prev_trap_int prev_trap_term
+    prev_trap_hup=$(trap -p HUP)
+    prev_trap_int=$(trap -p INT)
+    prev_trap_term=$(trap -p TERM)
     rootpxe_windows_init_cleanup_signal() {
         [[ -z ${xml_tmp:-} ]] || rm -f -- "$xml_tmp"
         [[ $ntfs_mounted != yes ]] || umount /ntfs >/dev/null 2>&1 || true
         exit 143
     }
+    rootpxe_windows_init_restore_one_trap() {
+        local sig="$1" entry="$2" sq="'" esc="'\\''" action
+        if [[ -z $entry ]]; then
+            trap - "$sig"
+        elif [[ $entry == "trap -- ${sq}"*"${sq} "* ]]; then
+            action=${entry#"trap -- ${sq}"}
+            action=${action%"${sq} "*}
+            action=${action//"$esc"/"$sq"}
+            trap -- "$action" "$sig"
+        elif [[ $entry == "trap -- "* ]]; then
+            action=${entry#"trap -- "}
+            action=${action% *}
+            trap -- "$action" "$sig"
+        else
+            trap - "$sig"
+        fi
+    }
+    rootpxe_windows_init_restore_traps() {
+        rootpxe_windows_init_restore_one_trap HUP "$prev_trap_hup"
+        rootpxe_windows_init_restore_one_trap INT "$prev_trap_int"
+        rootpxe_windows_init_restore_one_trap TERM "$prev_trap_term"
+    }
     trap rootpxe_windows_init_cleanup_signal HUP INT TERM
-    rootpxe_run_logged_typed_native ntfs-mount.log "$part" ntfs-3g -o remove_hiberfile,rw "$part" /ntfs || { trap - HUP INT TERM; return 1; }
+    rootpxe_run_logged_typed_native ntfs-mount.log "$part" ntfs-3g -o remove_hiberfile,rw "$part" /ntfs || { rootpxe_windows_init_restore_traps; return 1; }
     ntfs_mounted=yes
     if [[ ${changeHostname:-false} == true && $sysprep -eq 0 ]]; then
-        rootpxe_change_hostname_registry "$part" || { umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
+        rootpxe_change_hostname_registry "$part" || { umount /ntfs >/dev/null 2>&1 || true; rootpxe_windows_init_restore_traps; return 1; }
         rootpxe_deployment_identity_hostname_result=true
     fi
     if [[ $sysprep -eq 1 ]]; then
         rootpxe_initialization_failure_reason=windows_sysprep_path_unsafe_or_ambiguous
-        xml_path=$(rootpxe_resolve_windows_sysprep_unattend_path /ntfs) || { umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
+        xml_path=$(rootpxe_resolve_windows_sysprep_unattend_path /ntfs) || { umount /ntfs >/dev/null 2>&1 || true; rootpxe_windows_init_restore_traps; return 1; }
         rootpxe_initialization_failure_reason=windows_sysprep_xml_write_or_verify_failed
-        [[ -d ${xml_path%/*} && ! -L ${xml_path%/*} && ( ! -e $xml_path || ( -f $xml_path && ! -L $xml_path ) ) ]] || { umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
-        xml_tmp=$(mktemp "${xml_path%/*}/.unattend.rootpxe.XXXXXX") || { umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
-        chmod 0600 "$xml_tmp" && jq -j '.unattendXml' "$source_xml" >"$xml_tmp" || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
-        command -v xml >/dev/null 2>&1 && xml val -w "$xml_tmp" >/dev/null 2>&1 || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
-        expected_hash=$(sha256sum "$xml_tmp" 2>/dev/null | awk '{print $1}') || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
-        [[ $expected_hash =~ ^[0-9a-fA-F]{64}$ ]] || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
-        mv -f -- "$xml_tmp" "$xml_path" || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
+        [[ -d ${xml_path%/*} && ! -L ${xml_path%/*} && ( ! -e $xml_path || ( -f $xml_path && ! -L $xml_path ) ) ]] || { umount /ntfs >/dev/null 2>&1 || true; rootpxe_windows_init_restore_traps; return 1; }
+        xml_tmp=$(mktemp "${xml_path%/*}/.unattend.rootpxe.XXXXXX") || { umount /ntfs >/dev/null 2>&1 || true; rootpxe_windows_init_restore_traps; return 1; }
+        chmod 0600 "$xml_tmp" && jq -j '.unattendXml' "$source_xml" >"$xml_tmp" || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; rootpxe_windows_init_restore_traps; return 1; }
+        command -v xml >/dev/null 2>&1 && xml val -w "$xml_tmp" >/dev/null 2>&1 || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; rootpxe_windows_init_restore_traps; return 1; }
+        expected_hash=$(sha256sum "$xml_tmp" 2>/dev/null | awk '{print $1}') || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; rootpxe_windows_init_restore_traps; return 1; }
+        [[ $expected_hash =~ ^[0-9a-fA-F]{64}$ ]] || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; rootpxe_windows_init_restore_traps; return 1; }
+        mv -f -- "$xml_tmp" "$xml_path" || { rm -f -- "$xml_tmp"; umount /ntfs >/dev/null 2>&1 || true; rootpxe_windows_init_restore_traps; return 1; }
         xml_tmp=""
-        actual_hash=$(sha256sum "$xml_path" 2>/dev/null | awk '{print $1}') || { umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
-        [[ $actual_hash == "$expected_hash" ]] || { umount /ntfs >/dev/null 2>&1 || true; trap - HUP INT TERM; return 1; }
+        actual_hash=$(sha256sum "$xml_path" 2>/dev/null | awk '{print $1}') || { umount /ntfs >/dev/null 2>&1 || true; rootpxe_windows_init_restore_traps; return 1; }
+        [[ $actual_hash == "$expected_hash" ]] || { umount /ntfs >/dev/null 2>&1 || true; rootpxe_windows_init_restore_traps; return 1; }
     fi
     rootpxe_initialization_failure_reason=windows_system_unmount_failed
-    umount /ntfs >/dev/null 2>&1 || { trap - HUP INT TERM; return 1; }
+    umount /ntfs >/dev/null 2>&1 || { rootpxe_windows_init_restore_traps; return 1; }
     ntfs_mounted=no
-    trap - HUP INT TERM
+    rootpxe_windows_init_restore_traps
     [[ $sysprep -ne 1 ]] || rootpxe_deployment_identity_sysprep_result=true
     unset rootpxe_initialization_failure_reason
     rootpxe_stage customizing_hostname "code=WINDOWS_INITIALIZATION_COMPLETE"
